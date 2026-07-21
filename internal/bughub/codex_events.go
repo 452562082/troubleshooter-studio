@@ -125,7 +125,7 @@ var investigationPhaseSteps = []struct {
 	Key   string
 	Label string
 }{
-	{Key: "evidence_handoff", Label: "接收复现证据与上下文"},
+	{Key: "evidence_handoff", Label: "接收验证证据"},
 	{Key: "timeline", Label: "时间轴与最近变更"},
 	{Key: "runtime_scope", Label: "横向运行时检查"},
 	{Key: "dependency_chain", Label: "依赖与调用链"},

@@ -220,7 +220,7 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 		} else {
 			repairPrompt, repairAttachments, cleanupRepairEvidence, evidenceErr := browserRepairEvidence(plan, primary, primaryFrozen)
 			if evidenceErr != nil {
-				return browserCoordinatorFailure(result, "browser_artifact_invalid"), nil
+				return browserCoordinatorFailure(result, "browser_artifact_repair_evidence_invalid"), nil
 			}
 			var repairing PhaseExecutionResult
 			var repairErr error
@@ -235,7 +235,7 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 			}
 			cleanupErr := cleanupRepairEvidence()
 			if cleanupErr != nil {
-				return browserCoordinatorFailure(result, "browser_artifact_invalid"), nil
+				return browserCoordinatorFailure(result, "browser_artifact_repair_cleanup_failed"), nil
 			}
 			if repairErr != nil && len(repairAttachments) != 0 && browserAgentAttachmentFallbackAllowed(ctx, repairErr) {
 				if request.Emit != nil {
@@ -292,7 +292,7 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 
 	evaluatorPrompt, evaluatorAttachments, cleanupEvaluatorEvidence, err := browserEvaluatorPrompt(request, result.BrowserResult, result.BrowserArtifacts, frozenArtifacts)
 	if err != nil {
-		return browserCoordinatorFailure(result, "browser_artifact_invalid"), nil
+		return browserCoordinatorFailure(result, "browser_artifact_evaluator_evidence_invalid"), nil
 	}
 	cleanedEvaluatorEvidence := false
 	defer func() {
@@ -311,7 +311,7 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 	cleanupErr := cleanupEvaluatorEvidence()
 	cleanedEvaluatorEvidence = true
 	if cleanupErr != nil {
-		return browserCoordinatorFailure(result, "browser_artifact_invalid"), nil
+		return browserCoordinatorFailure(result, "browser_artifact_evaluator_cleanup_failed"), nil
 	}
 	if err != nil && len(evaluatorAttachments) != 0 && !errors.Is(err, errPhaseAttachmentPathEcho) && browserAgentAttachmentFallbackAllowed(ctx, err) {
 		if _, ok := c.Executor.(PhaseAttachmentExecutor); ok {
@@ -350,7 +350,7 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 		return browserCoordinatorFailure(result, "browser_evaluator_result_invalid"), nil
 	}
 	if err := enforceBrowserResponseAssertionOutcome(request.Attempt, result.BrowserResult, frozenArtifacts, &validation); err != nil {
-		return browserCoordinatorFailure(result, "browser_artifact_invalid"), nil
+		return browserCoordinatorFailure(result, "browser_artifact_response_assertion_invalid"), nil
 	}
 	validation.Evidence = browserArtifactReferences(result.BrowserArtifacts)
 	if err := validateValidationResult(validation); err != nil {
@@ -552,10 +552,10 @@ func (c BrowserCoordinator) executeBrowser(ctx context.Context, request BrowserC
 	}
 	frozen, err := request.FreezeArtifacts(ctx, append([]BrowserArtifactReference(nil), rebased.Artifacts...))
 	if err != nil {
-		return BrowserVerificationResult{}, nil, fmt.Errorf("browser_artifact_invalid: freeze verified browser artifacts: %w", err)
+		return BrowserVerificationResult{}, nil, fmt.Errorf("browser_artifact_freeze_failed: freeze verified browser artifacts: %w", err)
 	}
 	if err := validateFrozenBrowserArtifacts(rebased.Artifacts, frozen); err != nil {
-		return BrowserVerificationResult{}, nil, fmt.Errorf("browser_artifact_invalid: validate frozen browser artifacts: %w", err)
+		return BrowserVerificationResult{}, nil, fmt.Errorf("browser_artifact_frozen_invalid: validate frozen browser artifacts: %w", err)
 	}
 	return rebased, frozen, nil
 }
@@ -661,6 +661,30 @@ func browserPublicErrorMessage(code string) string {
 		return "验证浏览器执行器不可用"
 	case "browser_artifact_freezer_unavailable":
 		return "验证浏览器证据冻结器不可用"
+	case "browser_artifact_staging_invalid":
+		return "验证证据暂存目录不可用"
+	case "browser_artifact_identity_changed":
+		return "验证证据目录在执行期间发生变化"
+	case "browser_artifact_manifest_invalid":
+		return "验证证据清单或文件格式无效"
+	case "browser_artifact_digest_changed":
+		return "验证证据在完成后发生变化"
+	case "browser_artifact_sensitive":
+		return "验证证据包含未脱敏的凭据信息"
+	case "browser_artifact_freeze_failed":
+		return "验证证据发布失败"
+	case "browser_artifact_frozen_invalid":
+		return "已发布的验证证据未通过完整性校验"
+	case "browser_artifact_repair_evidence_invalid":
+		return "页面定位修复证据无法读取"
+	case "browser_artifact_repair_cleanup_failed":
+		return "页面定位修复证据清理失败"
+	case "browser_artifact_evaluator_evidence_invalid":
+		return "验证判定证据无法读取"
+	case "browser_artifact_evaluator_cleanup_failed":
+		return "验证判定证据清理失败"
+	case "browser_artifact_response_assertion_invalid":
+		return "接口响应断言证据不完整或不一致"
 	default:
 		return "浏览器验证失败"
 	}
@@ -749,19 +773,31 @@ func browserVerifierErrorCode(err error) string {
 }
 
 var browserSystemErrorCodes = map[string]struct{}{
-	"browser_artifact_invalid":         {},
-	"browser_journal_unsafe":           {},
-	"browser_reservation_write_failed": {},
-	"browser_result_write_failed":      {},
-	"browser_session_unavailable":      {},
-	"browser_session_cleanup_failed":   {},
-	"browser_session_temp_failed":      {},
-	"browser_session_invalid":          {},
-	"browser_session_store_missing":    {},
-	"browser_session_save_failed":      {},
-	"browser_worker_output_too_large":  {},
-	"browser_worker_failed":            {},
-	"browser_worker_protocol_invalid":  {},
+	"browser_artifact_invalid":                    {},
+	"browser_artifact_staging_invalid":            {},
+	"browser_artifact_identity_changed":           {},
+	"browser_artifact_manifest_invalid":           {},
+	"browser_artifact_digest_changed":             {},
+	"browser_artifact_sensitive":                  {},
+	"browser_artifact_freeze_failed":              {},
+	"browser_artifact_frozen_invalid":             {},
+	"browser_artifact_repair_evidence_invalid":    {},
+	"browser_artifact_repair_cleanup_failed":      {},
+	"browser_artifact_evaluator_evidence_invalid": {},
+	"browser_artifact_evaluator_cleanup_failed":   {},
+	"browser_artifact_response_assertion_invalid": {},
+	"browser_journal_unsafe":                      {},
+	"browser_reservation_write_failed":            {},
+	"browser_result_write_failed":                 {},
+	"browser_session_unavailable":                 {},
+	"browser_session_cleanup_failed":              {},
+	"browser_session_temp_failed":                 {},
+	"browser_session_invalid":                     {},
+	"browser_session_store_missing":               {},
+	"browser_session_save_failed":                 {},
+	"browser_worker_output_too_large":             {},
+	"browser_worker_failed":                       {},
+	"browser_worker_protocol_invalid":             {},
 }
 
 func addAgentUsage(total *AgentUsage, addition AgentUsage) {

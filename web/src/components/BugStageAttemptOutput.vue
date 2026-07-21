@@ -5,6 +5,13 @@ import { presentStageAttempt } from '../lib/incidentStageOutput'
 
 const props = defineProps<{ attempt: PhaseAttempt; latest: boolean }>()
 const view = computed(() => presentStageAttempt(props.attempt))
+const showAttemptError = computed(() => {
+  if (!props.attempt.error_message) return false
+  const recoveredLegacyGapFailure = props.attempt.phase === 'investigation' && props.attempt.status === 'failed' &&
+    props.attempt.error_code === 'invalid_phase_result' && props.attempt.output_json?.investigation_status === 'insufficient_info' &&
+    props.attempt.error_message.trim() === 'root_cause_ready must not contain blocking gaps'
+  return !recoveredLegacyGapFailure
+})
 
 const evidenceTypeLabels: Record<string, string> = {
   screenshot: '截图', network: 'Network', console: 'Console', browser_actions: '浏览器操作轨迹',
@@ -27,7 +34,7 @@ function groupTypeLabel(group: { label: string; value: string }[]): string {
     </summary>
     <div class="stage-result-body">
       <p v-if="view.environment" class="stage-environment">环境 <strong>{{ view.environment }}</strong></p>
-      <p v-if="attempt.error_message" data-attempt-error class="stage-error" role="alert">{{ attempt.error_message }}</p>
+      <p v-if="showAttemptError" data-attempt-error class="stage-error" role="alert">{{ attempt.error_message }}</p>
       <p v-if="view.sections.length === 0" class="stage-empty">本次暂无可展示的阶段结果</p>
       <section v-for="(section, sectionIndex) in view.sections" :key="`${sectionIndex}-${section.title}`" class="stage-section" :class="section.tone ? `tone-${section.tone}` : ''">
         <h4>{{ section.title }}</h4>

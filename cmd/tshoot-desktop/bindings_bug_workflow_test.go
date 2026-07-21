@@ -217,6 +217,41 @@ func TestIncidentPhaseEventsForDetailRestoresOnlySafeCurrentAttemptProgress(t *t
 	}
 }
 
+func TestIncidentPhaseAttemptsRecoversSafeLegacyInvestigationGaps(t *testing.T) {
+	root := t.TempDir()
+	legacy := bughub.NewInvestigationStore(root)
+	if err := legacy.Upsert(bughub.InvestigationRun{
+		ID: "attempt-investigation", BugID: "bug-1", Status: bughub.InvestigationFailed,
+		FinalMessage: `investigation_status: root_cause_ready
+environment: test
+root_cause: frontend renders the same name twice
+confidence: medium
+call_chain: []
+evidence: []
+gaps: [missing response body]`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := incidentPhaseAttempts([]bughub.PhaseAttempt{{
+		ID: "attempt-investigation", CaseID: "case-1", Phase: bughub.PhaseInvestigation,
+		Status: bughub.AttemptStatusFailed, InputJSON: json.RawMessage(`{}`), OutputJSON: json.RawMessage(`{}`),
+		ErrorCode: "invalid_phase_result", ErrorMessage: "root_cause_ready must not contain blocking gaps",
+	}}, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].OutputJSON["investigation_status"] != "insufficient_info" {
+		t.Fatalf("attempts = %+v", attempts)
+	}
+	gaps, ok := attempts[0].OutputJSON["gaps"].([]any)
+	if !ok || len(gaps) != 1 || gaps[0] != "missing response body" {
+		t.Fatalf("recovered gaps = %#v", attempts[0].OutputJSON["gaps"])
+	}
+	if attempts[0].ErrorCode != "invalid_phase_result" || attempts[0].ErrorMessage == "" {
+		t.Fatalf("durable audit error was modified: %+v", attempts[0])
+	}
+}
+
 func TestReconcileIncidentBugResolutionsRecoversAndIsIdempotent(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)

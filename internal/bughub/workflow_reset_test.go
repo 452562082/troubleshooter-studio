@@ -515,6 +515,7 @@ func TestResetCaseValidatesCommand(t *testing.T) {
 		edit func(*ResetCaseCommand)
 	}{
 		{name: "new Case ID", edit: func(cmd *ResetCaseCommand) { cmd.NewCaseID = "" }},
+		{name: "bounded new Case ID", edit: func(cmd *ResetCaseCommand) { cmd.NewCaseID = strings.Repeat("x", maxNewWorkflowCaseIDBytes+1) }},
 		{name: "different Case IDs", edit: func(cmd *ResetCaseCommand) { cmd.NewCaseID = cmd.CaseID }},
 		{name: "Bug", edit: func(cmd *ResetCaseCommand) { cmd.Bug.ID = "" }},
 		{name: "matching Bug", edit: func(cmd *ResetCaseCommand) { cmd.Bug.ID = "different-bug" }},

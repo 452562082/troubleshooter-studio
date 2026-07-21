@@ -9,11 +9,43 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+func TestRegisterArtifactUsesBoundedStorageDirectoryForLongCaseID(t *testing.T) {
+	ctx := context.Background()
+	store := openTestCaseStore(t)
+	caseID := "case-reset-" + strings.Repeat("nested-reset-", 28)
+	attemptID := "attempt-long-case-artifact"
+	createTestCase(t, store, caseID)
+	if err := store.CreateAttempt(ctx, validRunningAttempt(attemptID, caseID)); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(resolvedTempDir(t), "long-case-artifacts")
+	content := []byte("safe browser evidence for a legacy long Case ID")
+	artifact, err := RegisterArtifactBytes(ctx, store, ArtifactInput{
+		ArtifactsRoot: root, CaseID: caseID, AttemptID: attemptID,
+		Kind: "screenshot", RedactionStatus: RedactionStatusNotRequired,
+	}, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storageComponent := filepath.Base(filepath.Dir(artifact.PathOrReference))
+	if storageComponent == caseID || len([]byte(storageComponent)) > 255 {
+		t.Fatalf("storage component=%q bytes=%d", storageComponent, len([]byte(storageComponent)))
+	}
+	read, err := ReadEvidenceArtifactFromRoot(ctx, store, root, caseID, artifact.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(read.Content) != string(content) {
+		t.Fatalf("content=%q", read.Content)
+	}
+}
 
 func TestRegisterArtifactRejectsOversizedSourceBeforeReading(t *testing.T) {
 	ctx, store, input := secureArtifactFixture(t, "oversized")

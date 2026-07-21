@@ -337,15 +337,16 @@ type CancelAttemptCommand struct {
 type PhaseOutcome string
 
 const (
-	PhaseOutcomeReproduced      PhaseOutcome = "reproduced"
-	PhaseOutcomeNotReproduced   PhaseOutcome = "not_reproduced"
-	PhaseOutcomeNeedsEvidence   PhaseOutcome = "needs_evidence"
-	PhaseOutcomeSystemFailed    PhaseOutcome = "system_failed"
-	PhaseOutcomeRootCauseReady  PhaseOutcome = "root_cause_ready"
-	PhaseOutcomeFixPushed       PhaseOutcome = "fix_pushed"
-	PhaseOutcomeFixFailed       PhaseOutcome = "fix_failed"
-	PhaseOutcomeFixedVerified   PhaseOutcome = "fixed_verified"
-	PhaseOutcomeStillReproduces PhaseOutcome = "still_reproduces"
+	PhaseOutcomeReproduced                 PhaseOutcome = "reproduced"
+	PhaseOutcomeNotReproduced              PhaseOutcome = "not_reproduced"
+	PhaseOutcomeNeedsEvidence              PhaseOutcome = "needs_evidence"
+	PhaseOutcomeValidationEvidenceRequired PhaseOutcome = "validation_evidence_required"
+	PhaseOutcomeSystemFailed               PhaseOutcome = "system_failed"
+	PhaseOutcomeRootCauseReady             PhaseOutcome = "root_cause_ready"
+	PhaseOutcomeFixPushed                  PhaseOutcome = "fix_pushed"
+	PhaseOutcomeFixFailed                  PhaseOutcome = "fix_failed"
+	PhaseOutcomeFixedVerified              PhaseOutcome = "fixed_verified"
+	PhaseOutcomeStillReproduces            PhaseOutcome = "still_reproduces"
 )
 
 type CompleteAttemptCommand struct {
@@ -488,8 +489,8 @@ func (o *CaseOrchestrator) ResetCaseWithOutcome(ctx context.Context, cmd ResetCa
 	if err := validateCommand(cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey, cmd.ActorID); err != nil {
 		return ResetCaseOutcome{}, err
 	}
-	if strings.TrimSpace(cmd.NewCaseID) == "" {
-		return ResetCaseOutcome{}, errors.New("replacement Case ID is required")
+	if err := validateNewWorkflowCaseID(cmd.NewCaseID); err != nil {
+		return ResetCaseOutcome{}, fmt.Errorf("replacement Case ID: %w", err)
 	}
 	if cmd.CaseID == cmd.NewCaseID {
 		return ResetCaseOutcome{}, errors.New("replacement Case ID must differ from archived Case ID")
@@ -667,6 +668,9 @@ func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAnd
 	}
 	if strings.TrimSpace(cmd.CaseID) == "" || strings.TrimSpace(cmd.IdempotencyKey) == "" || strings.TrimSpace(cmd.ActorID) == "" {
 		return IncidentCase{}, errors.New("case ID, idempotency key, and actor ID are required")
+	}
+	if err := validateNewWorkflowCaseID(cmd.CaseID); err != nil {
+		return IncidentCase{}, fmt.Errorf("case ID: %w", err)
 	}
 	if cmd.ExpectedVersion < 0 {
 		return IncidentCase{}, errors.New("expected version must not be negative")
@@ -1943,15 +1947,16 @@ func (o *CaseOrchestrator) rebuildCommittedCompletion(ctx context.Context, repla
 		return CompleteAttemptCommand{}, ErrIdempotencyConflict
 	}
 	outcomes := map[string]PhaseOutcome{
-		"validation_reproduced":     PhaseOutcomeReproduced,
-		"validation_not_reproduced": PhaseOutcomeNotReproduced,
-		"evidence_required":         PhaseOutcomeNeedsEvidence,
-		"phase_system_failed":       PhaseOutcomeSystemFailed,
-		"root_cause_ready":          PhaseOutcomeRootCauseReady,
-		"fix_pushed":                PhaseOutcomeFixPushed,
-		"fix_failed":                PhaseOutcomeFixFailed,
-		"regression_fixed":          PhaseOutcomeFixedVerified,
-		"regression_failed":         PhaseOutcomeStillReproduces,
+		"validation_reproduced":               PhaseOutcomeReproduced,
+		"validation_not_reproduced":           PhaseOutcomeNotReproduced,
+		"evidence_required":                   PhaseOutcomeNeedsEvidence,
+		"validation_evidence_refresh_started": PhaseOutcomeValidationEvidenceRequired,
+		"phase_system_failed":                 PhaseOutcomeSystemFailed,
+		"root_cause_ready":                    PhaseOutcomeRootCauseReady,
+		"fix_pushed":                          PhaseOutcomeFixPushed,
+		"fix_failed":                          PhaseOutcomeFixFailed,
+		"regression_fixed":                    PhaseOutcomeFixedVerified,
+		"regression_failed":                   PhaseOutcomeStillReproduces,
 	}
 	outcome, ok := outcomes[replay.Event.EventType]
 	if !ok || !jsonValuesEqual(replay.Event.PayloadJSON, attempt.OutputJSON) {
@@ -2028,6 +2033,18 @@ func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCa
 		add(CaseNotReproduced, "validation_not_reproduced", "agent", actor, cmd.OutputJSON)
 	case PhaseOutcomeNeedsEvidence:
 		add(CaseWaitingEvidence, "evidence_required", "agent", actor, cmd.OutputJSON)
+	case PhaseOutcomeValidationEvidenceRequired:
+		result, err := ParseInvestigationResult(cmd.OutputJSON)
+		if err != nil || result.InvestigationStatus != "insufficient_info" || len(result.ValidationGaps) == 0 || len(result.Gaps) != 0 {
+			return IncidentCase{}, errors.Join(errors.New("validation evidence refresh requires only validation-owned gaps"), err)
+		}
+		created, err := o.buildValidationEvidenceRefreshAttempt(ctx, incident, attempt, result.ValidationGaps, cmd.IdempotencyKey+":validation-refresh")
+		if err != nil {
+			return IncidentCase{}, err
+		}
+		add(CaseValidating, "validation_evidence_refresh_started", "studio", "orchestrator", cmd.OutputJSON)
+		next = &created
+		update.CurrentAttemptID = workflowStringPtr(created.ID)
 	case PhaseOutcomeSystemFailed:
 		add(CaseWaitingEvidence, "phase_system_failed", "studio", "orchestrator", cmd.OutputJSON)
 	case PhaseOutcomeRootCauseReady:

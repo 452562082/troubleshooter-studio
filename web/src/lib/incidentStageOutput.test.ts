@@ -14,7 +14,7 @@ describe('presentStageAttempt', () => {
       gaps: ['缺少测试账号', '缺少 Network 导出'], evidence: [], scenario_hash: 'internal-only',
     }, 'failed'))
 
-    expect(view).toMatchObject({ phaseLabel: '验证', attemptStatusLabel: '失败', resultLabel: '信息不足', tone: 'warning', environment: 'test' })
+    expect(view).toMatchObject({ phaseLabel: '验证', attemptStatusLabel: '需补证', resultLabel: '信息不足', tone: 'warning', environment: 'test' })
     expect(view.sections.map(section => section.title)).toEqual(['预期表现', '实际观察', '还需补充', '验证证据'])
     expect(view.sections[2].items).toEqual(['缺少测试账号', '缺少 Network 导出'])
     expect(view.sections[3].emptyText).toBe('尚无有效证据')
@@ -90,6 +90,28 @@ describe('presentStageAttempt', () => {
     expect(view).toMatchObject({ phaseLabel: '排障', resultLabel: '根因已确认', tone: 'success', environment: 'test' })
     expect(view.sections[0]).toMatchObject({ title: '根因结论', text: '昵称搜索只取首条精确匹配' })
     expect(view.sections[1]).toMatchObject({ title: '置信度', text: '高' })
+  })
+
+  it('presents a recovered legacy investigation failure as evidence required', () => {
+    const view = presentStageAttempt(attempt('investigation', {
+      investigation_status: 'insufficient_info', environment: 'test', root_cause: '前端可能重复渲染昵称', confidence: 'medium',
+      gaps: ['缺少响应体', '缺少部署版本'], evidence: [],
+    }, 'failed'))
+
+    expect(view).toMatchObject({ phaseLabel: '排障', attemptStatusLabel: '需补证', resultLabel: '信息不足', tone: 'warning' })
+    expect(view.sections.find(section => section.title === '需要你补充')?.items).toEqual(['缺少响应体', '缺少部署版本'])
+  })
+
+  it('separates automatic validation refresh, user blockers, and non-blocking scopes', () => {
+    const view = presentStageAttempt(attempt('investigation', {
+      investigation_status: 'insufficient_info', environment: 'test', confidence: 'medium',
+      validation_gaps: ['Network 缺少响应体'], gaps: ['需要后台登录权限'], unchecked_scopes: ['未查询非关键指标'], evidence: [],
+    }, 'failed'))
+
+    expect(view.sections.find(section => section.title === '验证将自动补采')?.items).toEqual(['Network 缺少响应体'])
+    expect(view.sections.find(section => section.title === '需要你补充')?.items).toEqual(['需要后台登录权限'])
+    expect(view.sections.find(section => section.title === '非阻塞未覆盖')?.items).toEqual(['未查询非关键指标'])
+    expect(view.sections.some(section => section.title === '还需补充')).toBe(false)
   })
 
   it('presents a successful regression result directly', () => {

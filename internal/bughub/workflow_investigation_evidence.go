@@ -96,6 +96,31 @@ func (o *CaseOrchestrator) buildInitialInvestigationInput(ctx context.Context, a
 	})
 }
 
+func (o *CaseOrchestrator) buildValidationEvidenceRefreshAttempt(ctx context.Context, incident IncidentCase, investigation PhaseAttempt, gaps []string, key string) (PhaseAttempt, error) {
+	var handoff InitialInvestigationInput
+	if err := json.Unmarshal(investigation.InputJSON, &handoff); err != nil || strings.TrimSpace(handoff.ValidationAttemptID) == "" {
+		return PhaseAttempt{}, errors.Join(errors.New("validation evidence refresh requires an initial validation handoff"), err)
+	}
+	validation, err := o.store.GetAttempt(ctx, handoff.ValidationAttemptID)
+	if err != nil {
+		return PhaseAttempt{}, err
+	}
+	if validation.CaseID != incident.ID || validation.CycleNumber != incident.CycleNumber || validation.Phase != PhaseValidation || validation.Mode != AttemptReproduce || validation.BotKey != investigation.BotKey || validation.AgentTarget != investigation.AgentTarget {
+		return PhaseAttempt{}, errors.New("validation evidence refresh source does not match the investigation Case")
+	}
+	var input map[string]any
+	if err := json.Unmarshal(validation.InputJSON, &input); err != nil || input == nil {
+		return PhaseAttempt{}, errors.Join(errors.New("validation evidence refresh source input must be an object"), err)
+	}
+	input["source_investigation_attempt_id"] = investigation.ID
+	input["evidence_refresh_gaps"] = append([]string(nil), gaps...)
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return PhaseAttempt{}, err
+	}
+	return newAttempt(incident, PhaseValidation, AttemptReproduce, key, BotRef{Key: investigation.BotKey, Target: investigation.AgentTarget}, encoded, validation.ID), nil
+}
+
 func (r *AgentPhaseRunner) materializeInvestigationEvidence(ctx context.Context, attempt PhaseAttempt, staging attemptEvidenceStaging) (string, error) {
 	if attempt.Phase != PhaseInvestigation || len(attempt.InputJSON) == 0 || string(attempt.InputJSON) == "{}" {
 		return "", nil
@@ -166,7 +191,7 @@ func (r *AgentPhaseRunner) materializeInvestigationEvidence(ctx context.Context,
 	if err := writeImmutableInvestigationInput(manifestPath, append(encoded, '\n')); err != nil {
 		return "", err
 	}
-	return "\n## Frozen reproduction evidence (mandatory input)\n\nValidation or regression reproduction is already complete. Read `STUDIO_EVIDENCE_STAGING_DIR/" + investigationEvidenceManifestName + "` before querying runtime systems or source code. The files listed by its `files[].path` are relative to STUDIO_EVIDENCE_STAGING_DIR and are immutable evidence from the completed reproduction. Reuse their action/network/console/request/trace facts. Do not invoke validator-only skills (`bug-verifier`, `api-verifier`, `attachment-evidence-verifier`) and do not rerun the browser. If an immutable file is missing or insufficient, report the exact gap instead of starting validation again. Distinguish runtime facts from static inference.\n", nil
+	return "\n## Frozen validation evidence (mandatory input)\n\nValidation or regression reproduction is already complete. Read `STUDIO_EVIDENCE_STAGING_DIR/" + investigationEvidenceManifestName + "` before querying runtime systems or source code. The files listed by its `files[].path` are relative to STUDIO_EVIDENCE_STAGING_DIR and are immutable evidence from the completed validation. Reuse their action/network/console/request/trace facts. Do not invoke validator-only skills (`bug-verifier`, `api-verifier`, `attachment-evidence-verifier`) and do not rerun the browser. If an immutable validation file is missing or insufficient, put the exact collection gap in validation_gaps; Studio, not the investigation Agent, schedules the validation refresh. Distinguish runtime facts from static inference.\n", nil
 }
 
 func safeEvidenceFilenamePart(value string) string {

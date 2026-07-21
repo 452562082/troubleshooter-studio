@@ -143,6 +143,14 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 				logf("[ok] %s 已删除", bak)
 			}
 		}
+		if t == TargetCodex {
+			profile := filepath.Join(root, codexAgentRuntimeProfileName(name)+".config.toml")
+			if err := os.Remove(profile); err == nil {
+				logf("[ok] %s 已删除", profile)
+			} else if !os.IsNotExist(err) {
+				logf("[warn] 删 %s 失败:%v", profile, err)
+			}
+		}
 	}
 
 	// 2b) codex 老版本残留清理:troubleshooter-studio 早期版本会另外往 ~/.codex/mcp.json

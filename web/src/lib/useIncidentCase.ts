@@ -19,7 +19,7 @@ const maxBrowserProgressStep = 100
 const maxAgentProgressMessageLength = 2000
 const investigationStepKeys = ['evidence_handoff', 'timeline', 'runtime_scope', 'dependency_chain', 'evidence_correlation', 'root_cause', 'knowledge_sink'] as const
 const investigationStepLabels: Record<(typeof investigationStepKeys)[number], string> = {
-  evidence_handoff: '接收复现证据与上下文',
+  evidence_handoff: '接收验证证据',
   timeline: '时间轴与最近变更',
   runtime_scope: '横向运行时检查',
   dependency_chain: '依赖与调用链',

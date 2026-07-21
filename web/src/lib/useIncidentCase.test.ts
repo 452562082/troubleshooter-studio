@@ -203,7 +203,7 @@ describe('incident Case controller', () => {
     controller.applySnapshot(snapshot)
 
     expect(controller.phaseEvents.value['investigation-1']).toHaveLength(2)
-    expect(controller.phaseEvents.value['investigation-1'].map(item => item.message)).toEqual(['接收复现证据与上下文', '时间轴与最近变更'])
+    expect(controller.phaseEvents.value['investigation-1'].map(item => item.message)).toEqual(['接收验证证据', '时间轴与最近变更'])
     expect(JSON.stringify(controller.phaseEvents.value)).not.toMatch(/forged|secret|token/)
   })
 

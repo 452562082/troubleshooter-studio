@@ -82,7 +82,7 @@ func validatedRootCauseResult(ctx context.Context, store *CaseStore, incident In
 		return InvestigationResult{}, ErrApprovalScope
 	}
 	result, err := ParseInvestigationResult(latest.OutputJSON)
-	if err != nil || result.InvestigationStatus != "root_cause_ready" || result.Confidence != "high" || len(result.Gaps) != 0 || result.Environment != incident.Environment {
+	if err != nil || result.InvestigationStatus != "root_cause_ready" || result.Confidence != "high" || len(result.ValidationGaps) != 0 || len(result.Gaps) != 0 || result.Environment != incident.Environment {
 		return InvestigationResult{}, ErrApprovalScope
 	}
 	return result, nil
@@ -257,6 +257,9 @@ func validateFixCompletionPayload(command CompleteAttemptCommand) error {
 }
 
 func validateCompletionAttemptPhase(phase Phase, command CompleteAttemptCommand) error {
+	if command.Outcome == PhaseOutcomeValidationEvidenceRequired && phase != PhaseInvestigation {
+		return errors.New("validation-evidence-required completion requires an investigation attempt")
+	}
 	if command.Outcome == PhaseOutcomeFixPushed && phase != PhaseFix {
 		return errors.New("fix-pushed completion requires a fix phase attempt")
 	}

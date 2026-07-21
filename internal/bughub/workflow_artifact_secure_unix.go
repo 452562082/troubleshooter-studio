@@ -54,7 +54,8 @@ func captureArtifactSource(path string) (capturedArtifactSource, error) {
 }
 
 func captureRegisteredArtifact(path, artifactsRoot, caseID, digest string) (capturedArtifactSource, error) {
-	if !filepath.IsAbs(path) || caseID == "" || digest == "" || filepath.Base(path) != digest || filepath.Base(filepath.Dir(path)) != caseID {
+	caseComponent := artifactStorageCaseComponent(caseID)
+	if !filepath.IsAbs(path) || caseID == "" || digest == "" || filepath.Base(path) != digest || filepath.Base(filepath.Dir(path)) != caseComponent {
 		return capturedArtifactSource{}, errors.New("registered artifact path ownership is invalid")
 	}
 	registeredRoot := filepath.Dir(filepath.Dir(filepath.Clean(path)))
@@ -73,7 +74,7 @@ func captureRegisteredArtifact(path, artifactsRoot, caseID, digest string) (capt
 		return capturedArtifactSource{}, err
 	}
 	defer unix.Close(rootFD)
-	caseFD, err := unix.Openat(rootFD, caseID, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	caseFD, err := unix.Openat(rootFD, caseComponent, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return capturedArtifactSource{}, fmt.Errorf("open registered artifact case directory without following links: %w", err)
 	}
@@ -146,7 +147,8 @@ func publishArtifact(rootPath, caseID, digest string, content []byte) (artifactP
 	if err != nil {
 		return nil, err
 	}
-	publication := &unixArtifactPublication{rootPath: absRoot, caseID: caseID, digest: digest, rootFD: rootFD, caseFD: -1}
+	caseComponent := artifactStorageCaseComponent(caseID)
+	publication := &unixArtifactPublication{rootPath: absRoot, caseID: caseComponent, digest: digest, rootFD: rootFD, caseFD: -1}
 	fail := func(err error) (artifactPublication, error) {
 		_ = publication.Close()
 		return nil, err
@@ -158,7 +160,7 @@ func publishArtifact(rootPath, caseID, digest string, content []byte) (artifactP
 	if err != nil {
 		return fail(err)
 	}
-	caseFD, err := openOrCreateDirectoryAt(rootFD, caseID)
+	caseFD, err := openOrCreateDirectoryAt(rootFD, caseComponent)
 	if err != nil {
 		return fail(err)
 	}
@@ -166,11 +168,11 @@ func publishArtifact(rootPath, caseID, digest string, content []byte) (artifactP
 	if err := unix.Fchmod(caseFD, 0o700); err != nil {
 		return fail(fmt.Errorf("secure artifact case directory: %w", err))
 	}
-	publication.caseInfo, err = fileInfoFromFD(caseFD, caseID)
+	publication.caseInfo, err = fileInfoFromFD(caseFD, caseComponent)
 	if err != nil {
 		return fail(err)
 	}
-	publication.path = filepath.Join(absRoot, caseID, digest)
+	publication.path = filepath.Join(absRoot, caseComponent, digest)
 
 	if existingFD, openErr := unix.Openat(caseFD, digest, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0); openErr == nil {
 		defer unix.Close(existingFD)

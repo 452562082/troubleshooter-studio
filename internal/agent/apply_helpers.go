@@ -33,7 +33,7 @@ func resolveApplySource(baseOut, target string) (src, hint string) {
 		hint = "Cursor 下次打开 AI 侧栏时会重新扫 ~/.cursor/agents/<name>.md;新建对话即可选到更新后的 Custom Agent。"
 	case "codex":
 		src = baseOut + "-codex"
-		hint = "Codex CLI 下次启动会重读 ~/.codex/agents/<name>.toml 和共享 tshoot-router；正在开的 session 需要 `/clear` 或重启才能吃到新版项目路由与 Agent 门禁。"
+		hint = "Codex CLI 下次启动会重读 ~/.codex/agents/<name>.toml、专属 tshoot-<name>.config.toml MCP profile 和共享 tshoot-router；正在开的 session 需要 `/clear` 或重启才能吃到新版项目路由与 Agent 门禁。"
 	}
 	return
 }

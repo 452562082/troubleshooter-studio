@@ -199,7 +199,7 @@ func usage() {
              - openclaw:   ~/.openclaw/workspace/<name>/ + 注入 openclaw.json
              - claude-code: ~/.claude/agents/<name>.md  + skills/scripts namespace 子目录
              - cursor:     ~/.cursor/agents/<name>.md   + skills/scripts namespace 子目录
-             - codex:      ~/.codex/agents/<name>.toml(内嵌 [mcp_servers.*]) + ~/.codex/skills/<name>/
+             - codex:      ~/.codex/agents/<name>.toml + tshoot-<name>.config.toml(MCP profile) + ~/.codex/skills/<name>/
   self-test  openclaw 部署后自检(workspace / openclaw.json / mcp.servers / TCP+HTTP 探活)
   uninstall  卸载 openclaw agent(workspace 移到 ~/.Trash + 摘 openclaw.json + 清 creds.json)`)
 }

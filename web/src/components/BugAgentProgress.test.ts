@@ -58,6 +58,8 @@ describe('BugAgentProgress', () => {
     const wrapper = mount(BugAgentProgress, { props: { attempt: attempt(), events } })
 
     expect(wrapper.get('.investigation-step-progress').text()).toContain('第 3/7 步 · 运行时')
+    expect(wrapper.get('.investigation-step-progress').text()).toContain('验证证据')
+    expect(wrapper.get('.investigation-step-progress').text()).not.toContain('复现证据')
     expect(wrapper.get('[aria-current="step"]').text()).toContain('运行时')
     expect(wrapper.findAll('.investigation-step-progress li.is-complete')).toHaveLength(2)
     expect(wrapper.text()).toContain('kubectl get pods')

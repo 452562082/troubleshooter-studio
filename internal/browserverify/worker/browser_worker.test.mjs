@@ -1603,6 +1603,322 @@ test('executeAction falls back to the observed control and reports automatic rec
   assert.equal(recovered, 1);
 });
 
+test('DOM obstruction guard dismisses one unambiguous advertisement overlay', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let visible = true;
+  let clicks = 0;
+  const close = {
+    isVisible: async () => visible,
+    getAttribute: async (name) => ({
+      type: '',
+      role: 'button',
+      'aria-label': '关闭广告',
+      title: '',
+      id: 'ad-close',
+      class: 'advert-close',
+      'data-testid': '',
+    })[name] ?? '',
+    textContent: async () => '×',
+    isDisabled: async () => false,
+    boundingBox: async () => ({ x: 618, y: 650, width: 44, height: 44 }),
+    click: async () => { clicks += 1; visible = false; },
+    waitFor: async () => {},
+  };
+  const controls = { count: async () => 1, nth: () => close };
+  const overlay = {
+    isVisible: async () => true,
+    boundingBox: async () => ({ x: 0, y: 0, width: 1280, height: 720 }),
+    getAttribute: async (name) => name === 'class' ? 'advert-overlay' : '',
+    textContent: async () => '广告',
+  };
+  const overlays = { count: async () => 1, nth: () => overlay };
+  const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const page = {
+    locator: (selector) => selector.includes('[role="dialog"]') ? overlays : (selector.includes('[class*="close" i]') ? controls : empty),
+    getByText: () => empty,
+    waitForTimeout: async () => {},
+    viewportSize: () => ({ width: 1280, height: 720 }),
+  };
+
+  assert.equal(await worker.dismissSafeDOMObstructions(page), 1);
+  assert.equal(clicks, 1);
+});
+
+test('DOM obstruction guard finds an exact accessible close label beyond the generic scan bound', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let visible = true;
+  let clicks = 0;
+  const close = {
+    isVisible: async () => visible,
+    getAttribute: async (name) => ({
+      role: 'button',
+      'aria-label': '关闭弹窗广告',
+      class: 'rounded-full',
+    })[name] ?? '',
+    textContent: async () => '',
+    isDisabled: async () => false,
+    boundingBox: async () => ({ x: 620, y: 650, width: 40, height: 40 }),
+    click: async () => { clicks += 1; visible = false; },
+    waitFor: async () => {},
+  };
+  const irrelevant = {
+    isVisible: async () => true,
+    getAttribute: async () => '',
+    textContent: async () => '普通页面操作',
+    isDisabled: async () => false,
+    boundingBox: async () => ({ x: 20, y: 20, width: 100, height: 40 }),
+  };
+  const overlay = {
+    isVisible: async () => true,
+    boundingBox: async () => ({ x: 0, y: 0, width: 1280, height: 720 }),
+    getAttribute: async (name) => name === 'data-slot' ? 'dialog-overlay' : '',
+    textContent: async () => '弹窗广告',
+  };
+  const overlays = { count: async () => 1, nth: () => overlay };
+  const generic = { count: async () => 500, nth: () => irrelevant };
+  const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const page = {
+    locator: (selector) => selector.includes('[role="dialog"]') ? overlays : generic,
+    getByLabel: (name, options) => {
+      assert.deepEqual(options, { exact: true });
+      return name === '关闭弹窗广告' ? { count: async () => 1, nth: () => close } : empty;
+    },
+    getByText: () => empty,
+    waitForTimeout: async () => {},
+    viewportSize: () => ({ width: 1280, height: 720 }),
+  };
+
+  assert.equal(await worker.dismissSafeDOMObstructions(page), 1);
+  assert.equal(clicks, 1);
+});
+
+test('DOM obstruction guard refuses business consent and destructive controls', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let clicks = 0;
+  const consent = {
+    isVisible: async () => true,
+    getAttribute: async (name) => ({
+      type: '',
+      role: 'button',
+      'aria-label': '同意并继续',
+      title: '',
+      id: '',
+      class: '',
+      'data-testid': '',
+    })[name] ?? '',
+    textContent: async () => '同意并继续',
+    isDisabled: async () => false,
+    boundingBox: async () => ({ x: 550, y: 620, width: 180, height: 48 }),
+    click: async () => { clicks += 1; },
+  };
+  const controls = { count: async () => 1, nth: () => consent };
+  const overlay = {
+    isVisible: async () => true,
+    boundingBox: async () => ({ x: 128, y: 72, width: 1024, height: 576 }),
+    getAttribute: async (name) => ({ role: 'dialog', 'aria-modal': 'true', class: 'privacy-modal' })[name] ?? '',
+    textContent: async () => '隐私协议',
+  };
+  const overlays = { count: async () => 1, nth: () => overlay };
+  const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const page = {
+    locator: (selector) => selector.includes('[role="dialog"]') ? overlays : (selector.startsWith('button') ? controls : empty),
+    getByText: () => empty,
+    waitForTimeout: async () => {},
+    viewportSize: () => ({ width: 1280, height: 720 }),
+  };
+
+  assert.equal(await worker.dismissSafeDOMObstructions(page), 0);
+  assert.equal(clicks, 0);
+});
+
+test('DOM obstruction guard can use a unique exact × text inside a full-screen overlay', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let visible = true;
+  let clicks = 0;
+  const close = {
+    isVisible: async () => visible,
+    getAttribute: async () => '',
+    textContent: async () => '×',
+    isDisabled: async () => false,
+    boundingBox: async () => ({ x: 616, y: 650, width: 48, height: 48 }),
+    click: async () => { clicks += 1; visible = false; },
+    waitFor: async () => {},
+  };
+  const overlay = {
+    isVisible: async () => true,
+    boundingBox: async () => ({ x: 0, y: 0, width: 1280, height: 720 }),
+    getAttribute: async (name) => name === 'class' ? 'interstitial-mask' : '',
+    textContent: async () => '广告',
+  };
+  const overlays = { count: async () => 1, nth: () => overlay };
+  const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const page = {
+    locator: (selector) => selector.includes('[role="dialog"]') ? overlays : empty,
+    getByText: (text, options) => {
+      assert.deepEqual(options, { exact: true });
+      return text === '×' ? { count: async () => 1, nth: () => close } : empty;
+    },
+    waitForTimeout: async () => {},
+    viewportSize: () => ({ width: 1280, height: 720 }),
+  };
+
+  assert.equal(await worker.dismissSafeDOMObstructions(page), 1);
+  assert.equal(clicks, 1);
+});
+
+test('executeAction dismisses the real popup-ad accessible label before filling the business control', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let overlayVisible = true;
+  let closeClicks = 0;
+  let filled = '';
+  let reported = 0;
+  const close = {
+    isVisible: async () => overlayVisible,
+    getAttribute: async (name) => ({ role: 'button', 'aria-label': '关闭弹窗广告', class: 'rounded-full' })[name] ?? '',
+    textContent: async () => '',
+    isDisabled: async () => false,
+    boundingBox: async () => ({ x: 622, y: 650, width: 36, height: 36 }),
+    click: async () => { closeClicks += 1; overlayVisible = false; },
+    waitFor: async () => {},
+  };
+  const overlay = {
+    isVisible: async () => overlayVisible,
+    boundingBox: async () => ({ x: 0, y: 0, width: 1280, height: 720 }),
+    getAttribute: async (name) => name === 'class' ? 'fixed inset-0 dialog-overlay' : '',
+    textContent: async () => '弹窗广告',
+  };
+  const input = {
+    count: async () => 1,
+    nth: () => input,
+    isVisible: async () => true,
+    getAttribute: async (name) => name === 'type' ? 'search' : '',
+    fill: async (value) => {
+      assert.equal(overlayVisible, false, 'business action must run after the obstruction is gone');
+      filled = value;
+    },
+    inputValue: async () => filled,
+  };
+  const page = {
+    locator: (selector) => selector.includes('[role="dialog"]')
+      ? { count: async () => 1, nth: () => overlay }
+      : { count: async () => 1, nth: () => close },
+    getByTestId: () => input,
+    getByText: () => ({ count: async () => 0, nth: () => assert.fail('empty locator') }),
+    waitForTimeout: async () => {},
+    viewportSize: () => ({ width: 1280, height: 720 }),
+  };
+
+  await worker.executeAction(
+    page,
+    { id: 'search', action: 'fill', locator: { kind: 'test_id', value: 'search' }, value: 'chengzi' },
+    baseRequest(),
+    0,
+    async () => ({ loginRequired: false, path: '' }),
+    null,
+    null,
+    undefined,
+    null,
+    (count) => { reported += count; },
+  );
+  assert.equal(closeClicks, 1);
+  assert.equal(reported, 1);
+  assert.equal(filled, 'chengzi');
+});
+
+test('executeAction never auto-dismisses DOM controls in production', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let closeClicks = 0;
+  const close = {
+    isVisible: async () => true,
+    getAttribute: async (name) => name === 'aria-label' ? '关闭广告' : '',
+    textContent: async () => '',
+    isDisabled: async () => false,
+    boundingBox: async () => ({ x: 620, y: 650, width: 40, height: 40 }),
+    click: async () => { closeClicks += 1; },
+  };
+  const input = {
+    count: async () => 1,
+    nth: () => input,
+    isVisible: async () => true,
+    getAttribute: async () => 'search',
+    fill: async () => {},
+    inputValue: async () => 'chengzi',
+  };
+  const request = baseRequest();
+  request.policy.is_prod = true;
+  await worker.executeAction(
+    {
+      locator: () => ({ count: async () => 1, nth: () => close }),
+      getByTestId: () => input,
+    },
+    { id: 'search', action: 'fill', locator: { kind: 'test_id', value: 'search' }, value: 'chengzi' },
+    request,
+    0,
+    async () => ({ loginRequired: false, path: '' }),
+    null,
+  );
+  assert.equal(closeClicks, 0);
+});
+
+test('executeAction retries once when a delayed overlay explicitly intercepts pointer events', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let overlayVisible = false;
+  let targetClicks = 0;
+  let closeClicks = 0;
+  let reported = 0;
+  const close = {
+    isVisible: async () => overlayVisible,
+    getAttribute: async (name) => name === 'aria-label' ? '关闭弹窗广告' : '',
+    textContent: async () => '',
+    isDisabled: async () => false,
+    boundingBox: async () => ({ x: 620, y: 650, width: 40, height: 40 }),
+    click: async () => { closeClicks += 1; overlayVisible = false; },
+    waitFor: async () => {},
+  };
+  const overlay = {
+    isVisible: async () => overlayVisible,
+    boundingBox: async () => ({ x: 0, y: 0, width: 1280, height: 720 }),
+    getAttribute: async (name) => name === 'class' ? 'fixed inset-0 dialog-overlay' : '',
+    textContent: async () => '弹窗广告',
+  };
+  const target = {
+    count: async () => 1,
+    nth: () => target,
+    isVisible: async () => true,
+    click: async () => {
+      targetClicks += 1;
+      if (targetClicks === 1) {
+        overlayVisible = true;
+        throw new Error('another element intercepts pointer events');
+      }
+    },
+  };
+  const page = {
+    locator: (selector) => selector.includes('[role="dialog"]')
+      ? { count: async () => 1, nth: () => overlay }
+      : { count: async () => 1, nth: () => close },
+    getByTestId: () => target,
+    getByText: () => ({ count: async () => 0, nth: () => assert.fail('empty locator') }),
+    waitForTimeout: async () => {},
+    viewportSize: () => ({ width: 1280, height: 720 }),
+  };
+  await worker.executeAction(
+    page,
+    { id: 'search-tab', action: 'click', locator: { kind: 'test_id', value: 'search-tab' } },
+    baseRequest(),
+    0,
+    async () => ({ loginRequired: false, path: '' }),
+    null,
+    null,
+    undefined,
+    null,
+    (count) => { reported += count; },
+  );
+  assert.equal(targetClicks, 2);
+  assert.equal(closeClicks, 1);
+  assert.equal(reported, 1);
+});
+
 test('executeAction rejects a fill whose value was not applied to the resolved input', async () => {
   const worker = await import('./browser_worker.mjs');
   const locator = {

@@ -41,6 +41,9 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
     }
     if (browserGapLabels[code]) return { kind: 'supply_evidence', label: browserGapLabels[code] }
     if (code === 'validator_not_installed' || code.startsWith('browser_')) return undefined
+    if (attempt?.phase === 'investigation' && attempt.output_json?.investigation_status === 'insufficient_info') {
+      return { kind: 'supply_evidence', label: '补充权限或外部资料并继续' }
+    }
   }
   return actions[incident.status]
 }
@@ -97,6 +100,7 @@ watch(() => props.detail?.events.length ?? 0, count => {
 })
 const action = computed(() => props.detail ? primaryActionFor(props.detail) : undefined)
 const currentAttempt = computed(() => props.detail?.attempts.find(item => item.id === props.detail?.case.current_attempt_id) || null)
+const validationEvidenceRefresh = computed(() => currentAttempt.value?.phase === 'validation' && typeof currentAttempt.value.input_json?.source_investigation_attempt_id === 'string')
 const expectedDeploymentCommits = computed(() => {
   const currentAttemptID = props.detail?.case.current_attempt_id || ''
   const changes = (props.detail?.code_changes || []).filter(change => change.attempt_id === currentAttemptID && change.push_status === 'pushed')
@@ -166,6 +170,13 @@ const statusPosition: Record<CaseStatus, number> = {
 }
 
 function statusStagePosition(status: CaseStatus): number {
+  if (status === 'waiting_evidence') {
+    const phase = currentAttempt.value?.phase
+    if (phase === 'investigation') return 1
+    if (phase === 'fix') return 2
+    if (phase === 'regression') return stages.value.length - 1
+    return 0
+  }
   if (!usesNonCodeRemediation.value) return statusPosition[status]
   const positions: Partial<Record<CaseStatus, number>> = {
     pending_validation: 0, validating: 0, waiting_evidence: 0, not_reproduced: 0,
@@ -191,6 +202,7 @@ function stageState(index: number): 'complete' | 'current' | 'blocked' | 'pendin
 }
 
 function stageStateLabel(index: number): string {
+  if (validationEvidenceRefresh.value && index === 1) return '补采后继续'
   return { complete: '已完成', current: activeStatuses.has(currentCase.value?.status as CaseStatus) ? '进行中' : '等待操作', blocked: '需处理', pending: '未开始', archived: '历史' }[stageState(index)]
 }
 
@@ -203,6 +215,7 @@ function statusLabel(status: CaseStatus): string {
     waiting_deployment: '等待人工部署', deployment_unverified: '检测到版本不一致', deployment_verified: '部署已确认', regression_validating: '回归中',
     fixed_verified: '修复已验证', still_reproduces: '回归仍复现', legacy_archived: '历史归档', reset_archived: '已重置归档',
   }
+  if (status === 'validating' && validationEvidenceRefresh.value) return '验证补采中'
   return labels[status] || status
 }
 
@@ -401,7 +414,7 @@ function dialogTitle(): string {
         <ol class="stage-progress" :class="{ 'is-remediation': usesNonCodeRemediation }" aria-label="故障处理阶段">
           <li v-for="(stage, index) in stages" :key="stage.key" class="lifecycle-stage" :data-state="stageState(index)">
             <span class="stage-marker" aria-hidden="true">{{ index + 1 }}</span>
-            <span><strong>{{ stage.label }}</strong><small>{{ stageStateLabel(index) }}</small></span>
+            <span><strong>{{ validationEvidenceRefresh && index === 0 ? '验证补采' : stage.label }}</strong><small>{{ stageStateLabel(index) }}</small></span>
           </li>
         </ol>
 

@@ -220,6 +220,42 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.get('[data-agent-phase="investigation"]').text()).toContain('rg -n layout web/src')
   })
 
+  it('keeps waiting evidence on the investigation stage that produced it', () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'investigation-blocked'
+    snapshot.attempts = [{
+      id: 'investigation-blocked', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'failed',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'insufficient_info', gaps: ['missing deployed revision'] },
+      parent_attempt_id: 'validation-1', started_at: '', error_code: '', error_message: '', usage: {},
+    }]
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+
+    expect(wrapper.findAll('.lifecycle-stage').map(stage => stage.attributes('data-state'))).toEqual([
+      'complete', 'blocked', 'pending', 'pending', 'pending', 'pending',
+    ])
+    expect(wrapper.findAll('.lifecycle-stage').map(stage => stage.text())).toEqual([
+      '1验证已完成', '2排障需处理', '3修复未开始', '4合并未开始', '5部署未开始', '6回归未开始',
+    ])
+    expect(wrapper.get('.primary-action').text()).toContain('补充权限或外部资料并继续')
+  })
+
+  it('labels an automatic validation evidence refresh instead of looking like an unexplained reset', () => {
+    const snapshot = detail('validating')
+    snapshot.case.current_attempt_id = 'validation-refresh'
+    snapshot.attempts = [{
+      id: 'validation-refresh', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'running',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: { source_investigation_attempt_id: 'investigation-1', evidence_refresh_gaps: ['Network 缺少响应体'] }, output_json: {},
+      parent_attempt_id: 'validation-1', started_at: '', error_code: '', error_message: '', usage: {},
+    }]
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+
+    expect(wrapper.get('.status-pill').text()).toBe('验证补采中')
+    expect(wrapper.get('.current-action-card').text()).toContain('验证补采中')
+    expect(wrapper.findAll('.lifecycle-stage').slice(0, 2).map(stage => stage.text())).toEqual([
+      '1验证补采进行中', '2排障补采后继续',
+    ])
+  })
+
   it('shows that only a successful regression resolves the source Bug ticket', () => {
     const snapshot = detail('fixed_verified')
     snapshot.bug_ticket_resolution = { state: 'resolved', source_status: 'resolved' }

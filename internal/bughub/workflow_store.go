@@ -693,6 +693,9 @@ func (s *CaseStore) CreateCase(ctx context.Context, incident IncidentCase) error
 
 func (s *CaseStore) CreateCaseWithIdentity(ctx context.Context, creation CaseCreation) (result CaseCreationResult, err error) {
 	creation.Case = creation.Case.Clone()
+	if err := validateNewWorkflowCaseID(creation.Case.ID); err != nil {
+		return result, fmt.Errorf("durable Case creation: %w", err)
+	}
 	if creation.Case.Status != CasePendingValidation || creation.Case.CurrentAttemptID != "" || creation.Case.ClosedAt != nil {
 		return result, errors.New("durable Case creation requires an open pending_validation Case without an attempt")
 	}
@@ -842,6 +845,9 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 	}
 	if reset.CaseID == reset.NewCaseID {
 		return result, errors.New("replacement Case ID must differ from archived Case ID")
+	}
+	if err := validateNewWorkflowCaseID(reset.NewCaseID); err != nil {
+		return result, fmt.Errorf("replacement Case ID: %w", err)
 	}
 	if len(reset.RequestJSON) == 0 || !json.Valid(reset.RequestJSON) {
 		return result, errors.New("Case reset request must be valid JSON")

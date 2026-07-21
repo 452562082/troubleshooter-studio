@@ -690,7 +690,7 @@ func (a *App) GetIncidentCase(caseID string) (IncidentCaseDetail, error) {
 	if err != nil {
 		return IncidentCaseDetail{}, err
 	}
-	if detail.Attempts, err = incidentPhaseAttempts(attempts); err != nil {
+	if detail.Attempts, err = incidentPhaseAttempts(attempts, bughub.NewInvestigationStore(a.workflowRoot)); err != nil {
 		return IncidentCaseDetail{}, err
 	}
 	detail.PhaseEvents = incidentPhaseEventsForDetail(a.workflowRoot, incident)
@@ -842,20 +842,38 @@ func incidentPublicJSONObject(value map[string]any) map[string]any {
 	return incidentPublicJSONValue(value).(map[string]any)
 }
 
-func incidentPhaseAttempts(items []bughub.PhaseAttempt) ([]IncidentPhaseAttempt, error) {
+func incidentPhaseAttempts(items []bughub.PhaseAttempt, legacy *bughub.InvestigationStore) ([]IncidentPhaseAttempt, error) {
 	out := make([]IncidentPhaseAttempt, 0, len(items))
 	for _, item := range items {
 		input, err := incidentJSONObject(item.InputJSON)
 		if err != nil {
 			return nil, err
 		}
-		output, err := incidentJSONObject(item.OutputJSON)
+		outputJSON := incidentLegacyInvestigationOutput(item, legacy)
+		output, err := incidentJSONObject(outputJSON)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, IncidentPhaseAttempt{ID: item.ID, CaseID: item.CaseID, CycleNumber: item.CycleNumber, Phase: item.Phase, Mode: item.Mode, Status: item.Status, AgentTarget: item.AgentTarget, BotKey: item.BotKey, InputJSON: input, OutputJSON: incidentPublicJSONObject(output), ParentAttemptID: item.ParentAttemptID, StartedAt: item.StartedAt, FinishedAt: item.FinishedAt, ErrorCode: item.ErrorCode, ErrorMessage: item.ErrorMessage, Usage: item.Usage})
 	}
 	return out, nil
+}
+
+func incidentLegacyInvestigationOutput(item bughub.PhaseAttempt, legacy *bughub.InvestigationStore) json.RawMessage {
+	if legacy == nil || item.Phase != bughub.PhaseInvestigation || item.Status != bughub.AttemptStatusFailed ||
+		strings.TrimSpace(item.ErrorCode) != "invalid_phase_result" ||
+		strings.TrimSpace(item.ErrorMessage) != "root_cause_ready must not contain blocking gaps" {
+		return item.OutputJSON
+	}
+	run, err := legacy.Get(item.ID)
+	if err != nil {
+		return item.OutputJSON
+	}
+	projection, ok := bughub.SafeLegacyInvestigationProjection([]byte(run.FinalMessage))
+	if !ok {
+		return item.OutputJSON
+	}
+	return projection
 }
 
 func incidentApprovals(items []bughub.Approval) ([]IncidentApproval, error) {

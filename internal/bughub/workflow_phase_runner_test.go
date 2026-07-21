@@ -452,6 +452,128 @@ gaps: []
 	}
 }
 
+func TestParsePhaseResultRoutesPrematureRootCauseToNeedsEvidence(t *testing.T) {
+	tests := []struct {
+		name       string
+		confidence string
+		gaps       string
+		wantGap    string
+	}{
+		{name: "medium confidence", confidence: "medium", gaps: "[]", wantGap: "confidence"},
+		{name: "blocking gaps", confidence: "high", gaps: "[missing deployed revision]", wantGap: "missing deployed revision"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parsed, err := ParsePhaseResult(PhaseAttempt{Phase: PhaseInvestigation}, []byte(fmt.Sprintf(`
+investigation_status: root_cause_ready
+environment: test
+root_cause: frontend renders the same name twice
+confidence: %s
+call_chain: []
+evidence: []
+gaps: %s
+`, test.confidence, test.gaps)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if parsed.Outcome != PhaseOutcomeNeedsEvidence {
+				t.Fatalf("outcome = %q", parsed.Outcome)
+			}
+			var result InvestigationResult
+			if err := json.Unmarshal(parsed.OutputJSON, &result); err != nil {
+				t.Fatal(err)
+			}
+			if result.InvestigationStatus != "insufficient_info" || !strings.Contains(strings.Join(result.Gaps, "\n"), test.wantGap) {
+				t.Fatalf("result = %+v", result)
+			}
+		})
+	}
+}
+
+func TestParsePhaseResultRoutesValidationEvidenceGapBackToValidation(t *testing.T) {
+	parsed, err := ParsePhaseResult(PhaseAttempt{Phase: PhaseInvestigation}, []byte(`
+investigation_status: insufficient_info
+environment: test
+confidence: medium
+call_chain: []
+evidence: []
+validation_gaps:
+  - frozen Network evidence is missing the response body
+gaps: []
+unchecked_scopes:
+  - Grafana metrics were not needed for this handoff
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Outcome != PhaseOutcomeValidationEvidenceRequired {
+		t.Fatalf("outcome = %q", parsed.Outcome)
+	}
+}
+
+func TestSafeLegacyInvestigationProjectionRecoversOnlyNonSensitiveBlockingGaps(t *testing.T) {
+	recovered, ok := SafeLegacyInvestigationProjection([]byte(`
+investigation_status: root_cause_ready
+environment: test
+root_cause: frontend renders the same name twice
+confidence: medium
+call_chain: []
+evidence: []
+gaps:
+  - missing deployed revision
+  - missing response body
+`))
+	if !ok {
+		t.Fatal("safe legacy result was not recovered")
+	}
+	var result InvestigationResult
+	if err := json.Unmarshal(recovered, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.InvestigationStatus != "insufficient_info" || strings.Join(result.Gaps, "|") != "missing deployed revision|missing response body" {
+		t.Fatalf("recovered result = %+v", result)
+	}
+
+	if projection, ok := SafeLegacyInvestigationProjection([]byte(`
+investigation_status: root_cause_ready
+environment: test
+root_cause: "Authorization: Bearer abcdefghijklmnopqrstuvwx"
+confidence: medium
+call_chain: []
+evidence: []
+gaps: [missing logs]
+`)); ok || projection != nil {
+		t.Fatalf("sensitive legacy result was exposed: %s", projection)
+	}
+}
+
+func TestStructuredInvestigationPromptExplainsRootCauseReadinessGate(t *testing.T) {
+	prompt := buildStructuredInvestigationPrompt(Bug{}, BotRef{})
+	for _, rule := range []string{
+		"只有 confidence: high 且 validation_gaps: [] 且 gaps: []",
+		"不得重新操作浏览器复现",
+		"validation_gaps",
+		"自动交回验证 Agent 补采",
+		"不得索要或持久化原始 response body",
+		"response_assertions",
+		"gaps 只允许记录必须由用户提供",
+		"unchecked_scopes",
+		"本 Studio 阶段契约优先于 incident-investigator",
+		"service-to-datastore-source 空映射不代表 MCP 不存在",
+		"未真实调用工具及其只读 fallback 前",
+		"最终 YAML 必须显式输出 validation_gaps、gaps、unchecked_scopes",
+		"deployment revision/image digest/rollout",
+		"investigation_status: insufficient_info",
+	} {
+		if !strings.Contains(prompt, rule) {
+			t.Fatalf("prompt does not contain %q", rule)
+		}
+	}
+	if strings.Contains(prompt, "不要回退到验证流程") {
+		t.Fatal("prompt still forbids automatic validation evidence refresh")
+	}
+}
+
 func TestParseInvestigationResultRejectsMisleadingCallChainPrecision(t *testing.T) {
 	_, err := ParseInvestigationResult([]byte(`
 investigation_status: insufficient_info
@@ -590,7 +712,7 @@ func TestAgentPhaseRunnerRejectsBrowserArtifactReplacementBeforeFreeze(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if command.ErrorCode != "browser_artifact_invalid" || executor.Calls != 1 || len(artifacts) != 0 {
+	if command.ErrorCode != "browser_artifact_freeze_failed" || executor.Calls != 1 || len(artifacts) != 0 {
 		t.Fatalf("agent=%d artifacts=%+v command=%+v", executor.Calls, artifacts, command)
 	}
 }
@@ -709,6 +831,48 @@ func TestAgentPhaseRunnerFreezesBrowserArtifactBeforeEvaluatorMutation(t *testin
 	}
 }
 
+func TestAgentPhaseRunnerFreezesNestedBrowserExecutionArtifacts(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-browser-nested-freeze", CaseValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	artifactsRoot := phaseArtifactsRoot(t)
+	staging, err := openAttemptEvidenceStaging(artifactsRoot, attempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer staging.Close()
+	defer staging.Cleanup()
+
+	files := []struct {
+		kind    string
+		path    string
+		content []byte
+	}{
+		{kind: "screenshot", path: "browser-executions/primary/browser/final.png", content: append([]byte("\x89PNG\r\n\x1a\n"), []byte("nested")...)},
+		{kind: "network", path: "browser-executions/primary/browser/network.json", content: []byte(`[{"status":200,"code":200,"key":"result"}]`)},
+	}
+	references := make([]BrowserArtifactReference, 0, len(files))
+	for _, file := range files {
+		path := filepath.Join(staging.Path(), filepath.FromSlash(file.path))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, file.content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		references = append(references, verifiedBrowserArtifact(file.kind, file.path, "test", file.content))
+	}
+
+	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, artifactsRoot, nil)
+	frozen, err := runner.freezeBrowserArtifacts(context.Background(), attempt, staging, references)
+	if err != nil {
+		t.Fatalf("freeze nested execution artifacts: %v", err)
+	}
+	if err := validateFrozenBrowserArtifacts(references, frozen); err != nil {
+		t.Fatalf("validate nested frozen artifacts: %v", err)
+	}
+}
+
 func TestAgentPhaseRunnerEvaluatesBrowserBusinessStopAndKeepsFailureScreenshot(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-browser-stop", CaseValidating)
@@ -790,7 +954,11 @@ func TestBrowserFailureOutcomeSeparatesSystemFailuresFromEvidenceGaps(t *testing
 	for _, code := range []string{
 		"browser_runtime_broken", "browser_policy_unavailable", "browser_policy_changed",
 		"browser_verifier_failed", "browser_execution_interrupted", "browser_validator_plan_invalid", "browser_locator_repair_plan_invalid",
-		"browser_worker_protocol_invalid", "browser_artifact_invalid", "browser_validator_failed",
+		"browser_worker_protocol_invalid", "browser_artifact_invalid", "browser_artifact_staging_invalid", "browser_artifact_identity_changed",
+		"browser_artifact_manifest_invalid", "browser_artifact_digest_changed", "browser_artifact_sensitive", "browser_artifact_freeze_failed",
+		"browser_artifact_frozen_invalid", "browser_artifact_repair_evidence_invalid", "browser_artifact_repair_cleanup_failed",
+		"browser_artifact_evaluator_evidence_invalid", "browser_artifact_evaluator_cleanup_failed", "browser_artifact_response_assertion_invalid",
+		"browser_validator_failed",
 		"browser_validator_attachment_failed", "browser_validator_no_output", "browser_validator_process_failed",
 	} {
 		if got := browserFailureOutcome(PhaseValidation, code); got != PhaseOutcomeSystemFailed {

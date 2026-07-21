@@ -10,7 +10,7 @@ const props = withDefaults(defineProps<{
 const visiblePhases = new Set(['investigation', 'fix'])
 const visibleTypes = new Set(['thread_started', 'turn_started', 'turn_completed', 'command_execution', 'mcp_tool_call', 'agent_message', 'retry', 'error', 'turn_failed', 'result'])
 const investigationSteps = [
-  { key: 'evidence_handoff', label: '复现证据' },
+  { key: 'evidence_handoff', label: '验证证据' },
   { key: 'timeline', label: '时间轴' },
   { key: 'runtime_scope', label: '运行时' },
   { key: 'dependency_chain', label: '调用链' },

@@ -1084,6 +1084,8 @@ func TestHostVerifierRejectsCredentialBearingTextArtifact(t *testing.T) {
 			request := validBrowserRequest(t)
 			if _, err := newTestHostVerifier(t, worker).Execute(context.Background(), request); err == nil {
 				t.Fatal("expected raw credential evidence rejection")
+			} else if !strings.HasPrefix(err.Error(), "browser_artifact_sensitive:") {
+				t.Fatalf("error = %v, want stable sensitive-artifact code", err)
 			}
 			if _, err := os.Stat(filepath.Join(request.StagingDir, "browser", "result.json")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("credential-bearing result was published: %v", err)
@@ -1120,6 +1122,36 @@ func TestHostVerifierDoesNotMistakeActionErrorCodeForCredential(t *testing.T) {
 	}
 	if _, err := newTestHostVerifier(t, worker).Execute(context.Background(), validBrowserRequest(t)); err != nil {
 		t.Fatalf("safe action trace was rejected: %v", err)
+	}
+}
+
+func TestHostVerifierDoesNotMistakeBusinessCodeOrKeyForCredential(t *testing.T) {
+	for name, evidence := range map[string]string{
+		"business response fields": `[{"method":"GET","url":"https://app.test/api/users","status":200,"response":{"code":200,"key":"user-result","message":"ok"}}]`,
+		"console json text":        `{"type":"log","text":"response={\"code\":200,\"key\":\"user-result\"}"}` + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			kind := "network"
+			path := "browser/network.json"
+			if name == "console json text" {
+				kind = "console"
+				path = "browser/console.jsonl"
+			}
+			worker := &fakeWorker{
+				Result: workerResult{
+					Status:              "completed",
+					FinalScreenshotPath: "browser/final.png",
+					Artifacts: []workerArtifact{
+						{Kind: "screenshot", Path: "browser/final.png"},
+						{Kind: kind, Path: path},
+					},
+				},
+				ArtifactBytes: map[string][]byte{path: []byte(evidence)},
+			}
+			if _, err := newTestHostVerifier(t, worker).Execute(context.Background(), validBrowserRequest(t)); err != nil {
+				t.Fatalf("benign business evidence was rejected: %v", err)
+			}
+		})
 	}
 }
 

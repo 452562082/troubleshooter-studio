@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 )
 
 type InvestigationEventSink func(run InvestigationRun, event InvestigationEvent)
@@ -403,10 +405,14 @@ func fixOutputContract() string {
 }
 
 func BuildCodexExecCommand(codexBin, workspace, prompt string) (*exec.Cmd, error) {
-	return buildCodexExecCommand(codexBin, workspace, prompt, nil)
+	return buildCodexExecCommandWithProfile(codexBin, workspace, prompt, nil, "")
 }
 
 func buildCodexExecCommand(codexBin, workspace, prompt string, imagePaths []string) (*exec.Cmd, error) {
+	return buildCodexExecCommandWithProfile(codexBin, workspace, prompt, imagePaths, "")
+}
+
+func buildCodexExecCommandWithProfile(codexBin, workspace, prompt string, imagePaths []string, profile string) (*exec.Cmd, error) {
 	codexBin = strings.TrimSpace(codexBin)
 	if codexBin == "" {
 		codexBin = "codex"
@@ -440,9 +446,11 @@ func buildCodexExecCommand(codexBin, workspace, prompt string, imagePaths []stri
 		"-c", `approval_policy="never"`,
 		"-c", `permission_profile="studio_agent"`,
 		"-c", filesystemConfig,
-		"--cd", workspace,
-		"--skip-git-repo-check",
 	}
+	if profile = strings.TrimSpace(profile); profile != "" {
+		args = append(args, "--profile", profile)
+	}
+	args = append(args, "--cd", workspace, "--skip-git-repo-check")
 	for _, path := range imagePaths {
 		args = append(args, "--image", path)
 	}
@@ -456,6 +464,89 @@ func buildCodexExecCommand(codexBin, workspace, prompt string, imagePaths []stri
 	cmd := exec.Command(codexBin, args...)
 	cmd.Dir = workspace
 	return cmd, nil
+}
+
+func buildCodexBotExecCommand(codexBin string, bot BotRef, prompt string, imagePaths []string) (*exec.Cmd, error) {
+	profile, codexHome, err := ensureCodexAgentRuntimeProfile(bot)
+	if err != nil {
+		return nil, err
+	}
+	cmd, err := buildCodexExecCommandWithProfile(codexBin, bot.Path, prompt, imagePaths, profile)
+	if err != nil {
+		return nil, err
+	}
+	if codexHome != "" {
+		cmd.Env = setProcessEnv(os.Environ(), "CODEX_HOME", codexHome)
+	}
+	return cmd, nil
+}
+
+func ensureCodexAgentRuntimeProfile(bot BotRef) (string, string, error) {
+	agentID := strings.TrimSpace(bot.AgentID)
+	if agentID == "" {
+		return "", "", nil
+	}
+	workspace := filepath.Clean(strings.TrimSpace(bot.Path))
+	skillsDir := filepath.Dir(workspace)
+	if filepath.Base(skillsDir) != "skills" || filepath.Base(workspace) != agentID {
+		// Tests and embedding callers may inject a standalone workspace rather
+		// than a native ~/.codex/skills/<agent> installation. There is no safe
+		// profile root to infer in that case, so preserve the legacy command.
+		return "", "", nil
+	}
+	if strings.ContainsAny(agentID, "/\\\x00") || agentID == "." || agentID == ".." {
+		return "", "", errors.New("Codex agent id is invalid")
+	}
+	codexHome := filepath.Dir(skillsDir)
+	profile := "tshoot-" + agentID
+	profilePath := filepath.Join(codexHome, profile+".config.toml")
+	if info, err := os.Lstat(profilePath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return "", "", fmt.Errorf("Codex runtime profile %s is not a regular file", profilePath)
+		}
+		return profile, codexHome, nil
+	} else if !os.IsNotExist(err) {
+		return "", "", err
+	}
+
+	// Backfill profiles for robots installed before Studio background phases
+	// learned to use `codex exec --profile`. The source agent TOML is already a
+	// trusted tshoot-managed 0600 file; copy only its managed MCP region.
+	agentPath := filepath.Join(codexHome, "agents", agentID+".toml")
+	raw, err := os.ReadFile(agentPath)
+	if err != nil {
+		return "", "", fmt.Errorf("Codex runtime profile is missing; re-apply agent %q: %w", agentID, err)
+	}
+	text := string(raw)
+	begin := strings.Index(text, generator.CodexMCPRegionBegin)
+	end := strings.Index(text, generator.CodexMCPRegionEnd)
+	if begin < 0 || end < begin {
+		return "", "", fmt.Errorf("Codex runtime profile is missing and agent %q has no managed MCP region; re-apply the robot", agentID)
+	}
+	bodyStart := begin + len(generator.CodexMCPRegionBegin)
+	body := strings.TrimSpace(text[bodyStart:end])
+	content := "# Managed by tshoot. Used by Studio background codex exec.\n" + body + "\n"
+	if err := os.WriteFile(profilePath, []byte(content), 0o600); err != nil {
+		if _, statErr := os.Stat(profilePath); statErr != nil {
+			return "", "", fmt.Errorf("create Codex runtime profile %s: %w", profilePath, err)
+		}
+	}
+	if err := os.Chmod(profilePath, 0o600); err != nil {
+		return "", "", fmt.Errorf("secure Codex runtime profile %s: %w", profilePath, err)
+	}
+	return profile, codexHome, nil
+}
+
+func setProcessEnv(values []string, key, value string) []string {
+	prefix := key + "="
+	result := make([]string, 0, len(values)+1)
+	for _, item := range values {
+		if strings.HasPrefix(item, prefix) {
+			continue
+		}
+		result = append(result, item)
+	}
+	return append(result, prefix+value)
 }
 
 func codexFilesystemPermissionConfig(workspace, prompt string, imagePaths []string) (string, error) {
@@ -905,7 +996,7 @@ func (i *CodexInvestigator) buildCommandLocked(target string, bot BotRef, prompt
 	}
 	switch target {
 	case "codex":
-		cmd, err := BuildCodexExecCommand(firstNonEmpty(i.binaries["codex"], i.codexBin, "codex"), bot.Path, prompt)
+		cmd, err := buildCodexBotExecCommand(firstNonEmpty(i.binaries["codex"], i.codexBin, "codex"), bot, prompt, nil)
 		return cmd, ParseCodexJSONLEvent, err
 	case "claude-code":
 		workspace := claudeWorkspace(bot.Path)
@@ -1434,7 +1525,7 @@ func (i *CodexInvestigator) ExecutePhaseWithAttachments(parent context.Context, 
 	i.mu.Unlock()
 	switch target {
 	case "codex":
-		cmd, err = buildCodexExecCommand(codexBin, bot.Path, prompt+phaseAttachmentPrompt(nil), paths)
+		cmd, err = buildCodexBotExecCommand(codexBin, bot, prompt+phaseAttachmentPrompt(nil), paths)
 		parser = ParseCodexJSONLEvent
 	case "claude-code":
 		directories := make([]string, 0, len(paths))

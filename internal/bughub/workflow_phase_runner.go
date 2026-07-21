@@ -55,7 +55,9 @@ type InvestigationResult struct {
 	Remediation         RemediationPlan     `yaml:"remediation,omitempty" json:"remediation,omitempty"`
 	CallChain           []CallChainHop      `yaml:"call_chain" json:"call_chain"`
 	Evidence            []ArtifactReference `yaml:"evidence" json:"evidence"`
+	ValidationGaps      []string            `yaml:"validation_gaps" json:"validation_gaps"`
 	Gaps                []string            `yaml:"gaps" json:"gaps"`
+	UncheckedScopes     []string            `yaml:"unchecked_scopes" json:"unchecked_scopes"`
 }
 
 type RootCauseType string
@@ -981,14 +983,19 @@ func (r *AgentPhaseRunner) validateRegressionInputBinding(ctx context.Context, a
 func buildStructuredInvestigationPrompt(bug Bug, bot BotRef) string {
 	var sb strings.Builder
 	sb.WriteString("请作为选定的 AI 排障机器人执行只读根因分析。先遵循 incident-investigator/SKILL.md 的取证流程。\n")
-	sb.WriteString("Studio 已由验证 Agent 完成复现并冻结证据；排障阶段只消费 Studio structured investigation input 与 validation-evidence-manifest.json，不得调用 bug-verifier、api-verifier、attachment-evidence-verifier，不得重新操作浏览器复现。若冻结证据损坏或关键字段不足，记录 gaps 并输出 insufficient_info，不要回退到验证流程。\n")
+	sb.WriteString("本 Studio 阶段契约优先于 incident-investigator 中面向普通交互式会话的 ASK_USER / missing_critical_evidence 兼容规则；不得把部署、配置、trace、日志、指标、数据库或 K8s 取证转为用户补证。\n")
+	sb.WriteString("Studio 已由验证 Agent 完成复现并冻结证据；第 1 步只是接收并校验 Studio structured investigation input 与 validation-evidence-manifest.json，不是再次复现。不得调用 bug-verifier、api-verifier、attachment-evidence-verifier，不得重新操作浏览器复现。\n")
+	sb.WriteString("证据责任必须分流：先读取 manifest 全部文件；已有 response_assertions 对字段关系是权威证据，不得再要 response body。冻结证据确实缺失、损坏，或缺少验证宿主可安全生成的动作后截图、因果 Network 元数据、response_assertions 时才写入 validation_gaps，Studio 会自动交回验证 Agent 补采；不得索要或持久化原始 response body。\n")
+	sb.WriteString("在最终输出前，必须根据环境和服务读 routing，并对本问题需要的部署版本、调用链、日志、指标、配置、数据库和 K8s 逐项调用已安装的目标环境 skill / MCP。对数据库，单集群时直接调 `<type>-<env>`；service-to-datastore-source 空映射不代表 MCP 不存在。未真实调用工具及其只读 fallback 前，不得声称“缺少映射后的只读工具”。工具实际失败且不阻塞现有结论时写 unchecked_scopes；gaps 只允许记录必须由用户提供的权限、登录态、测试账号或外部资料。\n")
+	sb.WriteString("最终 YAML 必须显式输出 validation_gaps、gaps、unchecked_scopes 三个数组，无内容时也必须写 []。任何要求用户提供 deployment revision/image digest/rollout、trace/日志/指标、配置、数据库查询结果、K8s 状态或原始 response body 的 gaps 都是无效阶段结果。\n")
+	sb.WriteString("只有 confidence: high 且 validation_gaps: [] 且 gaps: [] 时才能输出 investigation_status: root_cause_ready；confidence 为 medium/low、validation_gaps 非空或 gaps 非空时必须输出 investigation_status: insufficient_info。\n")
 	sb.WriteString("执行每一步前，必须单独发送且原样发送对应进度标记（标记不是最终结果）：\n")
 	for index, step := range investigationPhaseSteps {
 		fmt.Fprintf(&sb, "[[TSHOOT_STEP phase=investigation index=%d key=%s]]\n", index+1, step.Key)
 	}
 	sb.WriteString(GenerateContext(bug, bot))
 	sb.WriteString("\n最终只输出严格 YAML，不得添加字段或解释性段落：\n")
-	sb.WriteString("investigation_status: root_cause_ready | insufficient_info\nenvironment: <env>\nroot_cause: <直接和深层根因；信息不足时为空>\nconfidence: high | medium | low\nroot_cause_type: code | data | configuration | infrastructure | network | external_dependency | transient\nremediation:\n  mode: code_change | operator_action | external_recovery | observe_only\n  target: <需要改动或等待恢复的具体对象>\n  summary: <最小处置建议；排障阶段不得执行写操作>\n  rollback: <operator_action 必填；其它模式可空>\n  verification: <处置后如何用原场景回归>\ncall_chain:\n  - kind: <browser|frontend|gateway|service|queue|datastore|external>\n    name: <节点名称>\n    service: <可空>\n    repo: <可空>\n    revision: <可空；必须是实际部署版本>\n    protocol: <可空>\n    operation: <可空；HTTP method/path、RPC method、topic/queue 等>\n    file: <可空；仓库相对路径>\n    line: 0 # 未知时为 0\n    precision: runtime_verified | source_mapped | deployed_revision | static_candidate | unavailable\n    evidence: <可空；支持该跳的证据摘要>\n    request_id: <可空>\n    trace_id: <可空>\nevidence:\n  - kind: <trace|log|metric|code|config|data|command>\n    path: <Studio staging 目录内的相对路径>\n    captured_at: <RFC3339；仅兼容输出，Studio 以 fstat 为准>\n    environment: <env>\n    version: <可空>\n    request_id: <可空>\n    trace_id: <可空>\n    redaction_status: redacted | not_required # Studio 总会重新扫描\ngaps: []\n")
+	sb.WriteString("investigation_status: root_cause_ready | insufficient_info\nenvironment: <env>\nroot_cause: <直接和深层根因；信息不足时为空>\nconfidence: high | medium | low\nroot_cause_type: code | data | configuration | infrastructure | network | external_dependency | transient\nremediation:\n  mode: code_change | operator_action | external_recovery | observe_only\n  target: <需要改动或等待恢复的具体对象>\n  summary: <最小处置建议；排障阶段不得执行写操作>\n  rollback: <operator_action 必填；其它模式可空>\n  verification: <处置后如何用原场景回归>\ncall_chain:\n  - kind: <browser|frontend|gateway|service|queue|datastore|external>\n    name: <节点名称>\n    service: <可空>\n    repo: <可空>\n    revision: <可空；必须是实际部署版本>\n    protocol: <可空>\n    operation: <可空；HTTP method/path、RPC method、topic/queue 等>\n    file: <可空；仓库相对路径>\n    line: 0 # 未知时为 0\n    precision: runtime_verified | source_mapped | deployed_revision | static_candidate | unavailable\n    evidence: <可空；支持该跳的证据摘要>\n    request_id: <可空>\n    trace_id: <可空>\nevidence:\n  - kind: <trace|log|metric|code|config|data|command>\n    path: <Studio staging 目录内的相对路径>\n    captured_at: <RFC3339；仅兼容输出，Studio 以 fstat 为准>\n    environment: <env>\n    version: <可空>\n    request_id: <可空>\n    trace_id: <可空>\n    redaction_status: redacted | not_required # Studio 总会重新扫描\nvalidation_gaps: [] # 仅验证 Agent 应自动补采的冻结证据缺口\ngaps: [] # 仅必须由用户补充的阻塞项\nunchecked_scopes: [] # 非阻塞且未覆盖的范围\n")
 	return sb.String()
 }
 
@@ -1272,19 +1279,6 @@ func ParseInvestigationResult(data []byte) (InvestigationResult, error) {
 		if strings.TrimSpace(result.RootCause) == "" {
 			return InvestigationResult{}, errors.New("root_cause_ready requires root_cause")
 		}
-		if len(result.Gaps) != 0 {
-			return InvestigationResult{}, errors.New("root_cause_ready must not contain blocking gaps")
-		}
-		// Results produced before remediation routing existed were necessarily
-		// code-fix results. Preserve those already-durable Cases while requiring
-		// every new prompt to emit the explicit fields below.
-		if result.RootCauseType == "" && result.Remediation.Mode == "" {
-			result.RootCauseType = RootCauseCode
-			result.Remediation = RemediationPlan{Mode: RemediationCodeChange, Target: "legacy investigation result", Summary: result.RootCause, Verification: "run regression validation"}
-		}
-		if err := validateRemediationPlan(result.RootCauseType, result.Remediation); err != nil {
-			return InvestigationResult{}, err
-		}
 	case "insufficient_info":
 	default:
 		return InvestigationResult{}, fmt.Errorf("unsupported investigation status %q", result.InvestigationStatus)
@@ -1294,6 +1288,29 @@ func ParseInvestigationResult(data []byte) (InvestigationResult, error) {
 	}
 	if result.Confidence != "high" && result.Confidence != "medium" && result.Confidence != "low" {
 		return InvestigationResult{}, fmt.Errorf("unsupported investigation confidence %q", result.Confidence)
+	}
+	if result.InvestigationStatus == "root_cause_ready" {
+		if result.Confidence != "high" || len(result.ValidationGaps) != 0 || len(result.Gaps) != 0 {
+			// A tentative root cause is still useful evidence, but it must not cross
+			// the remediation gate until confidence is high and every blocking gap
+			// is closed. Normalize a premature terminal declaration into the
+			// recoverable evidence path instead of discarding its artifacts.
+			result.InvestigationStatus = "insufficient_info"
+			if len(result.ValidationGaps) == 0 && len(result.Gaps) == 0 {
+				result.Gaps = []string{fmt.Sprintf("root cause confidence is %s; additional evidence is required", result.Confidence)}
+			}
+		} else {
+			// Results produced before remediation routing existed were necessarily
+			// code-fix results. Preserve those already-durable Cases while requiring
+			// every new prompt to emit the explicit fields below.
+			if result.RootCauseType == "" && result.Remediation.Mode == "" {
+				result.RootCauseType = RootCauseCode
+				result.Remediation = RemediationPlan{Mode: RemediationCodeChange, Target: "legacy investigation result", Summary: result.RootCause, Verification: "run regression validation"}
+			}
+			if err := validateRemediationPlan(result.RootCauseType, result.Remediation); err != nil {
+				return InvestigationResult{}, err
+			}
+		}
 	}
 	if len(result.CallChain) > 64 {
 		return InvestigationResult{}, errors.New("investigation call_chain exceeds 64 hops")
@@ -1331,6 +1348,22 @@ func ParseInvestigationResult(data []byte) (InvestigationResult, error) {
 		}
 	}
 	return result, nil
+}
+
+// SafeLegacyInvestigationProjection recovers the useful, structured portion of
+// a runs.json result that an older parser rejected at the readiness gate. It is
+// display-only: callers must never use this projection to change durable Case
+// or attempt state.
+func SafeLegacyInvestigationProjection(data []byte) (json.RawMessage, bool) {
+	result, err := ParseInvestigationResult(data)
+	if err != nil || result.InvestigationStatus != "insufficient_info" {
+		return nil, false
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil || containsSensitiveData(encoded) {
+		return nil, false
+	}
+	return encoded, true
 }
 
 func validateRemediationPlan(rootCauseType RootCauseType, plan RemediationPlan) error {
@@ -1413,7 +1446,11 @@ func ParsePhaseResult(attempt PhaseAttempt, data []byte) (PhaseResult, error) {
 		}
 		outcome := PhaseOutcomeRootCauseReady
 		if result.InvestigationStatus == "insufficient_info" {
-			outcome = PhaseOutcomeNeedsEvidence
+			if len(result.ValidationGaps) != 0 && len(result.Gaps) == 0 {
+				outcome = PhaseOutcomeValidationEvidenceRequired
+			} else {
+				outcome = PhaseOutcomeNeedsEvidence
+			}
 		}
 		encoded, _ := json.Marshal(result)
 		return PhaseResult{Outcome: outcome, OutputJSON: encoded, ArtifactInputs: result.Evidence}, nil

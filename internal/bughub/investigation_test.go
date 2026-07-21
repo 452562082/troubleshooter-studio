@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 )
 
 func TestInvestigationStoreCreateAppendAndList(t *testing.T) {
@@ -269,6 +271,11 @@ func TestParseCodexJSONLEvent(t *testing.T) {
 }
 
 func TestParseCodexJSONLEventEmitsTrustedInvestigationStep(t *testing.T) {
+	handoff, _, _ := ParseCodexJSONLEvent([]byte(`{"type":"item.completed","item":{"type":"agent_message","text":"[[TSHOOT_STEP phase=investigation index=1 key=evidence_handoff]]"}}`))
+	if handoff.Type != "phase_step" || handoff.Message != "接收验证证据" {
+		t.Fatalf("handoff event=%+v", handoff)
+	}
+
 	event, final, failed := ParseCodexJSONLEvent([]byte(`{"type":"item.completed","item":{"type":"agent_message","text":"[[TSHOOT_STEP phase=investigation index=4 key=dependency_chain]]"}}`))
 	if event.Type != "phase_step" || event.Message != "依赖与调用链" || final != "" || failed != "" {
 		t.Fatalf("event=%+v final=%q failed=%q", event, final, failed)
@@ -421,6 +428,66 @@ func TestBuildCodexExecCommandUsesSafeWorkspace(t *testing.T) {
 	}
 	if cmd.Dir != workspace {
 		t.Fatalf("Dir = %q", cmd.Dir)
+	}
+}
+
+func TestBuildCodexBotExecCommandLoadsManagedAgentRuntimeProfile(t *testing.T) {
+	codexHome := t.TempDir()
+	agentID := "base-troubleshooter"
+	workspace := filepath.Join(codexHome, "skills", agentID)
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agentsDir := filepath.Join(codexHome, "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agentTOML := "name = \"base-troubleshooter\"\n" + generator.CodexMCPRegionBegin + "\n[mcp_servers.base-mongodb-test]\ncommand = \"npx\"\n" + generator.CodexMCPRegionEnd + "\ndeveloper_instructions = \"do not copy\"\n"
+	if err := os.WriteFile(filepath.Join(agentsDir, agentID+".toml"), []byte(agentTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd, err := buildCodexBotExecCommand("codex", BotRef{Target: "codex", AgentID: agentID, Path: workspace}, "investigate", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(cmd.Args, " ")
+	if !strings.Contains(joined, "--profile tshoot-base-troubleshooter") {
+		t.Fatalf("Codex command did not load the bot runtime profile: %s", joined)
+	}
+	foundHome := false
+	for _, item := range cmd.Env {
+		if item == "CODEX_HOME="+codexHome {
+			foundHome = true
+		}
+	}
+	if !foundHome {
+		t.Fatalf("Codex command did not bind CODEX_HOME to installed bot root")
+	}
+	profilePath := filepath.Join(codexHome, "tshoot-"+agentID+".config.toml")
+	profile, err := os.ReadFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(profile), "[mcp_servers.base-mongodb-test]") || strings.Contains(string(profile), "developer_instructions") {
+		t.Fatalf("runtime profile did not copy exactly the managed MCP region:\n%s", profile)
+	}
+	if info, err := os.Stat(profilePath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("runtime profile mode is not 0600: info=%v err=%v", info, err)
+	}
+}
+
+func TestBuildCodexBotExecCommandPreservesStandaloneWorkspaceCompatibility(t *testing.T) {
+	workspace := t.TempDir()
+	cmd, err := buildCodexBotExecCommand("codex", BotRef{Target: "codex", AgentID: "base-troubleshooter", Path: workspace}, "investigate", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if joined := strings.Join(cmd.Args, " "); strings.Contains(joined, "--profile") {
+		t.Fatalf("standalone workspace must not infer an unrelated CODEX_HOME profile: %s", joined)
+	}
+	if cmd.Dir != workspace {
+		t.Fatalf("Dir = %q, want %q", cmd.Dir, workspace)
 	}
 }
 

@@ -916,6 +916,9 @@ describe('IncidentWorkbenchPage', () => {
       bot_environment: 'prod',
       input_json: expect.objectContaining({ target_environment: 'prod' }),
     }))
+    const generatedReplacementID = vi.mocked(resetIncidentCaseWithWarnings).mock.calls[0][0].new_case_id
+    expect(generatedReplacementID.length).toBeLessThanOrEqual(64)
+    expect(generatedReplacementID).not.toContain(item.id)
     expect(startIncidentCase).not.toHaveBeenCalled()
     expect(continueIncidentCase).not.toHaveBeenCalled()
     expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe('case-reset-replacement')

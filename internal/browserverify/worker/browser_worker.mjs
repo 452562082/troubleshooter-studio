@@ -58,6 +58,55 @@ const EXECUTE_AUTH_MAX_PENDING_REQUESTS = 2_048;
 const INTERACTION_LOCATOR_TIMEOUT_MS = 15_000;
 const INTERACTION_LOCATOR_POLL_MS = 100;
 const INTERACTION_FALLBACK_MAX_CANDIDATES = 128;
+const DOM_OBSTRUCTION_MAX_CANDIDATES = 128;
+const DOM_OBSTRUCTION_MAX_DISMISSALS = 2;
+const DOM_OBSTRUCTION_SELECTOR = [
+  'button',
+  '[role="button"]',
+  'a',
+  '[aria-label]',
+  '[title]',
+  '[class*="close" i]',
+  '[id*="close" i]',
+  '[data-testid*="close" i]',
+  '[class*="dismiss" i]',
+  '[id*="dismiss" i]',
+  '[data-testid*="dismiss" i]',
+  '[class*="skip" i]',
+  '[id*="skip" i]',
+  '[data-testid*="skip" i]',
+].join(',');
+const DOM_OBSTRUCTION_MARKED_OVERLAY_SELECTOR = [
+  '[role="dialog"]',
+  '[role="alertdialog"]',
+  '[aria-modal="true"]',
+  'dialog[open]',
+  '[data-slot*="dialog" i]',
+  '[data-slot*="overlay" i]',
+  '[class*="modal" i]',
+  '[id*="modal" i]',
+  '[class*="popup" i]',
+  '[id*="popup" i]',
+  '[class*="overlay" i]',
+  '[id*="overlay" i]',
+  '[class*="advert" i]',
+  '[id*="advert" i]',
+  '[class*="interstitial" i]',
+  '[id*="interstitial" i]',
+  '[class*="mask" i]',
+  '[id*="mask" i]',
+].join(',');
+const DOM_OBSTRUCTION_POSITIONED_OVERLAY_SELECTOR = [
+  '[class~="fixed"]',
+  '[style*="position: fixed" i]',
+  '[style*="position:fixed" i]',
+].join(',');
+const DOM_OBSTRUCTION_SAFE_NAMES = Object.freeze([
+  '关闭广告', '跳过广告', '关闭弹窗广告', '关闭弹窗', '关闭', '跳过', '稍后', '暂不',
+  'close ad', 'skip ad', 'close dialog', 'close', 'dismiss', 'skip', 'not now',
+  '×', '✕', '✖', 'x',
+]);
+const DOM_OBSTRUCTION_RISKY_NAME = /(同意|接受|确认|继续|提交|登录|注册|支付|购买|删除|移除|授权|accept|agree|confirm|continue|submit|sign[ -]?in|log[ -]?in|register|pay|purchase|delete|remove|allow)/i;
 const RESPONSE_ASSERTION_BODY_MAX_BYTES = 256 << 10;
 const RESPONSE_ASSERTION_MAX_VISITED_NODES = 10_000;
 const AUTH_ATTRIBUTED_ACTIONS = new Set(['click', 'fill', 'press', 'select']);
@@ -1160,6 +1209,256 @@ async function interactionCandidateSnapshot(candidate, tagHint = '') {
   };
 }
 
+function normalizedObstructionName(value) {
+  return String(value ?? '')
+    .normalize('NFKC')
+    .replace(/[\s_.:;!?。，：；！？\-_/\\]+/g, ' ')
+    .trim()
+    .toLocaleLowerCase();
+}
+
+const NORMALIZED_DOM_OBSTRUCTION_SAFE_NAMES = new Set(
+  DOM_OBSTRUCTION_SAFE_NAMES.map(normalizedObstructionName),
+);
+
+function obstructionStructuralHint(snapshot) {
+  return [snapshot.id, snapshot.className, snapshot.testID, snapshot.ariaLabel, snapshot.title]
+    .some((value) => /(close|dismiss|skip)/i.test(String(value || '')));
+}
+
+function obstructionCandidateScore(snapshot) {
+  if (!snapshot?.overlayLike || snapshot.disabled) return -1;
+  const names = [snapshot.ariaLabel, snapshot.title, snapshot.text]
+    .map(normalizedObstructionName)
+    .filter(Boolean);
+  if (names.some((name) => DOM_OBSTRUCTION_RISKY_NAME.test(name))) return -1;
+
+  const exactSafeName = names.some((name) => NORMALIZED_DOM_OBSTRUCTION_SAFE_NAMES.has(name));
+  const structuralHint = obstructionStructuralHint(snapshot);
+  const compactControl = snapshot.width > 0 && snapshot.height > 0
+    && snapshot.width <= 128 && snapshot.height <= 128;
+  if (!exactSafeName && !(structuralHint && compactControl && snapshot.nearOverlayEdge)) return -1;
+
+  let score = exactSafeName ? 100 : 70;
+  if (structuralHint) score += 20;
+  if (snapshot.nearOverlayEdge) score += 10;
+  if (snapshot.modalSemantic) score += 5;
+  if (snapshot.coverage >= 0.5) score += 5;
+  if (/(广告|推广|advert|sponsor|interstitial)/i.test(String(snapshot.overlayText || ''))) score += 10;
+  return score;
+}
+
+async function visibleObstructionOverlays(page) {
+  const viewport = typeof page.viewportSize === 'function' ? page.viewportSize() : null;
+  const viewportWidth = Math.max(Number(viewport?.width) || 1280, 1);
+  const viewportHeight = Math.max(Number(viewport?.height) || 720, 1);
+  const viewportArea = viewportWidth * viewportHeight;
+  const visible = [];
+  // Scan semantic/marked overlays separately from generic fixed elements.
+  // Otherwise a UI with many sticky controls can consume the fixed bound
+  // before a portal-mounted dialog backdrop near the end of the DOM.
+  for (const selector of [
+    DOM_OBSTRUCTION_MARKED_OVERLAY_SELECTOR,
+    DOM_OBSTRUCTION_POSITIONED_OVERLAY_SELECTOR,
+  ]) {
+    const overlays = page.locator(selector);
+    const count = Math.min(await overlays.count().catch(() => 0), 64);
+    for (let index = 0; index < count; index += 1) {
+      const overlay = overlays.nth(index);
+      if (!await overlay.isVisible().catch(() => false)) continue;
+      const [box, role, ariaModal, className, id, text] = await Promise.all([
+        overlay.boundingBox().catch(() => null),
+        overlay.getAttribute('role').catch(() => ''),
+        overlay.getAttribute('aria-modal').catch(() => ''),
+        overlay.getAttribute('class').catch(() => ''),
+        overlay.getAttribute('id').catch(() => ''),
+        overlay.textContent().catch(() => ''),
+      ]);
+      if (!box || box.width <= 0 || box.height <= 0) continue;
+      const normalizedRole = String(role || '').toLowerCase();
+      const modalSemantic = String(ariaModal || '').toLowerCase() === 'true'
+        || normalizedRole === 'dialog'
+        || normalizedRole === 'alertdialog';
+      const coverage = Math.min(1, (box.width * box.height) / viewportArea);
+      if (!modalSemantic && coverage < 0.12) continue;
+      visible.push({
+        box,
+        coverage,
+        modalSemantic,
+        text: `${className || ''} ${id || ''} ${text || ''}`.slice(0, 512),
+      });
+    }
+  }
+  return visible;
+}
+
+function obstructionGeometry(candidateBox, overlays) {
+  if (!candidateBox) return {
+    overlayLike: false,
+    modalSemantic: false,
+    coverage: 0,
+    overlayText: '',
+    nearOverlayEdge: false,
+    width: 0,
+    height: 0,
+  };
+  const centerX = candidateBox.x + candidateBox.width / 2;
+  const centerY = candidateBox.y + candidateBox.height / 2;
+  const containing = overlays
+    .filter(({ box }) => centerX >= box.x && centerX <= box.x + box.width
+      && centerY >= box.y && centerY <= box.y + box.height)
+    .sort((left, right) => Number(right.modalSemantic) - Number(left.modalSemantic)
+      || left.coverage - right.coverage);
+  if (containing.length === 0) return {
+    overlayLike: false,
+    modalSemantic: false,
+    coverage: 0,
+    overlayText: '',
+    nearOverlayEdge: false,
+    width: candidateBox.width,
+    height: candidateBox.height,
+  };
+  const overlay = containing[0];
+  const horizontalEdge = Math.max(72, Math.min(160, overlay.box.width * 0.2));
+  const verticalEdge = Math.max(72, Math.min(160, overlay.box.height * 0.2));
+  return {
+    overlayLike: true,
+    modalSemantic: overlay.modalSemantic,
+    coverage: overlay.coverage,
+    overlayText: overlay.text,
+    nearOverlayEdge: centerX - overlay.box.x <= horizontalEdge
+      || overlay.box.x + overlay.box.width - centerX <= horizontalEdge
+      || centerY - overlay.box.y <= verticalEdge
+      || overlay.box.y + overlay.box.height - centerY <= verticalEdge,
+    width: candidateBox.width,
+    height: candidateBox.height,
+  };
+}
+
+async function obstructionCandidateSnapshot(candidate, overlays) {
+  const [role, ariaLabel, title, id, className, testID, text, disabled, box] = await Promise.all([
+    candidate.getAttribute('role').catch(() => ''),
+    candidate.getAttribute('aria-label').catch(() => ''),
+    candidate.getAttribute('title').catch(() => ''),
+    candidate.getAttribute('id').catch(() => ''),
+    candidate.getAttribute('class').catch(() => ''),
+    candidate.getAttribute('data-testid').catch(() => ''),
+    candidate.textContent().catch(() => ''),
+    candidate.isDisabled().catch(() => false),
+    candidate.boundingBox().catch(() => null),
+  ]);
+  return {
+    role: String(role || ''),
+    ariaLabel: String(ariaLabel || ''),
+    title: String(title || ''),
+    id: String(id || ''),
+    className: String(className || ''),
+    testID: String(testID || ''),
+    text: String(text || '').trim().slice(0, 256),
+    disabled: Boolean(disabled),
+    ...obstructionGeometry(box, overlays),
+  };
+}
+
+async function exactSafeLabelObstructionCandidate(page, overlays) {
+  if (typeof page.getByLabel !== 'function') return { candidate: null, matched: false };
+  const ranked = [];
+  let inspected = 0;
+  for (const safeName of DOM_OBSTRUCTION_SAFE_NAMES) {
+    if (inspected >= DOM_OBSTRUCTION_MAX_CANDIDATES) break;
+    const matches = page.getByLabel(safeName, { exact: true });
+    const count = Math.min(
+      await matches.count().catch(() => 0),
+      DOM_OBSTRUCTION_MAX_CANDIDATES - inspected,
+    );
+    inspected += count;
+    for (let index = 0; index < count; index += 1) {
+      const candidate = matches.nth(index);
+      if (!await candidate.isVisible().catch(() => false)) continue;
+      const snapshot = await obstructionCandidateSnapshot(candidate, overlays).catch(() => null);
+      const score = obstructionCandidateScore(snapshot);
+      if (score >= 0) ranked.push({ candidate, score });
+    }
+  }
+  ranked.sort((left, right) => right.score - left.score);
+  if (ranked.length === 0) return { candidate: null, matched: false };
+  if (ranked.length > 1 && ranked[0].score === ranked[1].score) {
+    return { candidate: null, matched: true };
+  }
+  return { candidate: ranked[0].candidate, matched: true };
+}
+
+async function uniqueSafeObstructionCandidate(page) {
+  const ranked = [];
+  const overlays = await visibleObstructionOverlays(page);
+  if (overlays.length === 0) return null;
+
+  // Accessible names are the strongest signal and must not be hidden behind
+  // the generic candidate bound. Large SPAs can contain hundreds of links
+  // before a portal-mounted ad close button in DOM order.
+  const exactLabel = await exactSafeLabelObstructionCandidate(page, overlays);
+  if (exactLabel.matched) return exactLabel.candidate;
+
+  const candidates = page.locator(DOM_OBSTRUCTION_SELECTOR);
+  const count = Math.min(await candidates.count().catch(() => 0), DOM_OBSTRUCTION_MAX_CANDIDATES);
+  for (let index = 0; index < count; index += 1) {
+    const candidate = candidates.nth(index);
+    if (!await candidate.isVisible().catch(() => false)) continue;
+    const snapshot = await obstructionCandidateSnapshot(candidate, overlays).catch(() => null);
+    const score = obstructionCandidateScore(snapshot);
+    if (score >= 0) ranked.push({ candidate, score });
+  }
+  ranked.sort((left, right) => right.score - left.score);
+  if (ranked.length > 0) {
+    if (ranked.length > 1 && ranked[0].score === ranked[1].score) return null;
+    return ranked[0].candidate;
+  }
+
+  // Non-semantic close icons are common in ad interstitials. Restrict this
+  // fallback to one exact visible safe glyph/name and apply the same overlay
+  // geometry checks; never use a fuzzy text match or first().
+  for (const safeName of DOM_OBSTRUCTION_SAFE_NAMES) {
+    if (typeof page.getByText !== 'function') break;
+    const matches = page.getByText(safeName, { exact: true });
+    const matchCount = Math.min(await matches.count().catch(() => 0), DOM_OBSTRUCTION_MAX_CANDIDATES);
+    const visible = [];
+    for (let index = 0; index < matchCount; index += 1) {
+      const candidate = matches.nth(index);
+      if (await candidate.isVisible().catch(() => false)) visible.push(candidate);
+    }
+    if (visible.length !== 1) continue;
+    const snapshot = await obstructionCandidateSnapshot(visible[0], overlays).catch(() => null);
+    if (obstructionCandidateScore(snapshot) >= 0) return visible[0];
+  }
+  return null;
+}
+
+// Page-owned ads and interstitials are DOM, not browser dialogs. Handle only
+// unambiguous dismiss controls in the trusted worker so a repair model never
+// has to invent an extra business action. Ambiguous overlays deliberately stay
+// visible and become ordinary evidence instead of being clicked speculatively.
+export async function dismissSafeDOMObstructions(page, {
+  maxDismissals = DOM_OBSTRUCTION_MAX_DISMISSALS,
+  settleMs = 150,
+} = {}) {
+  if (!page || typeof page.locator !== 'function') return 0;
+  let dismissed = 0;
+  while (dismissed < maxDismissals) {
+    const candidate = await uniqueSafeObstructionCandidate(page).catch(() => null);
+    if (!candidate) break;
+    try {
+      await candidate.click({ timeout: 2_000 });
+      await candidate.waitFor?.({ state: 'hidden', timeout: 2_000 }).catch(() => {});
+      await page.waitForTimeout?.(settleMs);
+      if (await candidate.isVisible().catch(() => false)) break;
+      dismissed += 1;
+    } catch {
+      break;
+    }
+  }
+  return dismissed;
+}
+
 // The model-provided locator is only a hint. When it resolves to nothing after
 // the bounded hydration wait, inspect the controls that actually exist in the
 // current document and recover only when one semantic candidate is strictly
@@ -1841,6 +2140,17 @@ function interactionBindingKey(locatorSpec) {
   ]);
 }
 
+function actionTargetsSafeDismissal(action) {
+  if (action?.action !== 'click') return false;
+  const hint = normalizedObstructionName(interactionLocatorHint(action.locator));
+  return Boolean(hint && NORMALIZED_DOM_OBSTRUCTION_SAFE_NAMES.has(hint));
+}
+
+function isDOMObstructionInteractionError(error) {
+  return /(intercepts pointer events|subtree intercepts pointer events|element is not receiving pointer events)/i
+    .test(String(error?.message || error || ''));
+}
+
 async function reusableInteractionBinding(binding, action, index) {
   if (!binding || binding.action !== 'fill' || action.action !== 'press') return null;
   if (binding.index + 1 !== index || binding.key !== interactionBindingKey(action.locator)) return null;
@@ -1855,7 +2165,7 @@ async function reusableInteractionBinding(binding, action, index) {
   return binding.locator;
 }
 
-export async function executeAction(page, action, request, index, captureScreenshot, authFailures, onLocatorRecovered = null, locatorOptions = undefined, interactionState = null) {
+export async function executeAction(page, action, request, index, captureScreenshot, authFailures, onLocatorRecovered = null, locatorOptions = undefined, interactionState = null, onObstructionDismissed = null) {
   const finishAuthScope = authFailures?.beginAction(page, action) ?? (() => {});
   // A locator is a live handle. Preserve only the immediately preceding
   // successful fill target so a following Enter is delivered to the exact
@@ -1877,6 +2187,13 @@ export async function executeAction(page, action, request, index, captureScreens
           await buildLocator(page, action.locator).first().waitFor({ state: 'visible' });
           return { loginRequired: false, path: '' };
         }
+        const dismissObstructions = async () => {
+          if (request.policy.is_prod || !AUTH_ATTRIBUTED_ACTIONS.has(action.action) || actionTargetsSafeDismissal(action)) return 0;
+          const count = await dismissSafeDOMObstructions(page);
+          if (count > 0 && typeof onObstructionDismissed === 'function') onObstructionDismissed(count, action);
+          return count;
+        };
+        await dismissObstructions();
         let locator = await reusableInteractionBinding(previousBinding, action, index);
         if (!locator) {
           try {
@@ -1890,29 +2207,40 @@ export async function executeAction(page, action, request, index, captureScreens
             if (typeof onLocatorRecovered === 'function') onLocatorRecovered(action);
           }
         }
-        if (action.action === 'click') await locator.click();
-        else if (action.action === 'fill') {
-          const type = String(await locator.getAttribute('type').catch(() => '') ?? '').toLowerCase();
-          if (type === 'password') throw new Error('password input is not allowed');
-          await locator.fill(action.value);
-          if (typeof locator.inputValue === 'function') {
-            const observed = await locator.inputValue().catch(() => null);
-            const stableTextTypes = new Set(['', 'text', 'search', 'email', 'url', 'tel']);
-            if (observed !== null && stableTextTypes.has(type) && observed !== action.value) {
-              throw new BrowserInteractionError('input_value_not_persisted', 'filled value did not persist on the resolved input');
+        const applyInteraction = async () => {
+          if (action.action === 'click') await locator.click();
+          else if (action.action === 'fill') {
+            const type = String(await locator.getAttribute('type').catch(() => '') ?? '').toLowerCase();
+            if (type === 'password') throw new Error('password input is not allowed');
+            await locator.fill(action.value);
+            if (typeof locator.inputValue === 'function') {
+              const observed = await locator.inputValue().catch(() => null);
+              const stableTextTypes = new Set(['', 'text', 'search', 'email', 'url', 'tel']);
+              if (observed !== null && stableTextTypes.has(type) && observed !== action.value) {
+                throw new BrowserInteractionError('input_value_not_persisted', 'filled value did not persist on the resolved input');
+              }
             }
-          }
-          if (interactionState) {
-            interactionState.last = {
-              action: 'fill',
-              index,
-              key: interactionBindingKey(action.locator),
-              locator,
-              value: action.value,
-            };
-          }
-        } else if (action.action === 'press') await locator.press(canonicalPressKey(action.key));
-        else if (action.action === 'select') await locator.selectOption(action.value);
+            if (interactionState) {
+              interactionState.last = {
+                action: 'fill',
+                index,
+                key: interactionBindingKey(action.locator),
+                locator,
+                value: action.value,
+              };
+            }
+          } else if (action.action === 'press') await locator.press(canonicalPressKey(action.key));
+          else if (action.action === 'select') await locator.selectOption(action.value);
+        };
+        try {
+          await applyInteraction();
+        } catch (error) {
+          // Pointer interception means Chromium did not deliver the business
+          // action, so one retry is safe after dismissing a newly appeared
+          // interstitial. Never retry navigation/timeouts or arbitrary errors.
+          if (!isDOMObstructionInteractionError(error) || await dismissObstructions() === 0) throw error;
+          await applyInteraction();
+        }
         return { loginRequired: false, path: '' };
       }
     }
@@ -2273,6 +2601,13 @@ async function executeWorker(request) {
           ),
           undefined,
           interactionState,
+          (count) => emitProgress(
+            'browser_obstruction_dismissed',
+            `Dismissed ${count} safe page obstruction${count === 1 ? '' : 's'} before browser action ${index + 1}/${request.plan.actions.length}`,
+            action.id,
+            index + 1,
+            request.plan.actions.length,
+          ),
         );
         await settleBrowserInteraction(page, action, 150, interactionState, index);
         if (captured.loginRequired) {

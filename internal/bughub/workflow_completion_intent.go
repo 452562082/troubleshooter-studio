@@ -71,7 +71,7 @@ func validateCompletionCommand(command CompleteAttemptCommand) error {
 		return errors.New("completion attempt ID is required")
 	}
 	switch command.Outcome {
-	case PhaseOutcomeReproduced, PhaseOutcomeNotReproduced, PhaseOutcomeNeedsEvidence, PhaseOutcomeSystemFailed,
+	case PhaseOutcomeReproduced, PhaseOutcomeNotReproduced, PhaseOutcomeNeedsEvidence, PhaseOutcomeValidationEvidenceRequired, PhaseOutcomeSystemFailed,
 		PhaseOutcomeRootCauseReady, PhaseOutcomeFixPushed, PhaseOutcomeFixFailed,
 		PhaseOutcomeFixedVerified, PhaseOutcomeStillReproduces:
 	default:

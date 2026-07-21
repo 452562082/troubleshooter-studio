@@ -80,8 +80,9 @@ function resultFor(value: string, attempt: PhaseAttempt): { label: string; tone:
 }
 
 function basePresentation(attempt: PhaseAttempt, result: { label: string; tone: StageTone }, environment: string): StageAttemptPresentation {
+  const attemptStatusLabel = result.label === '信息不足' && attempt.status === 'failed' ? '需补证' : attemptStatusLabels[attempt.status]
   return {
-    phaseLabel: phaseLabels[attempt.phase], attemptStatusLabel: attemptStatusLabels[attempt.status], resultLabel: result.label, tone: result.tone,
+    phaseLabel: phaseLabels[attempt.phase], attemptStatusLabel, resultLabel: result.label, tone: result.tone,
     environment, startedAt: attempt.started_at, finishedAt: attempt.finished_at || '', sections: [],
   }
 }
@@ -119,7 +120,9 @@ function presentInvestigation(attempt: PhaseAttempt, output: DataRecord): StageA
   for (const section of [
     textSection('根因结论', output.root_cause),
     textSection('置信度', confidence),
-    listSection('还需补充', output.gaps, 'warning'),
+    listSection('验证将自动补采', output.validation_gaps, 'info'),
+    listSection('需要你补充', output.gaps, 'warning'),
+    listSection('非阻塞未覆盖', output.unchecked_scopes, 'info'),
   ]) if (section) view.sections.push(section)
   view.sections.push(evidenceSection('排障证据', output.evidence))
   return view

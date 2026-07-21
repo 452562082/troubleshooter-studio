@@ -93,6 +93,21 @@ const stateCopy = computed(() => {
   if (stableErrorCode.value === 'browser_locator_repair_plan_invalid') {
     return '页面定位修复计划未通过协议校验。当前 Case、原计划与现场证据均已保留，可以直接重新生成计划并重试。'
   }
+  const artifactCopy: Record<string, string> = {
+    browser_artifact_staging_invalid: '验证证据暂存目录不可用，失败发生在浏览器启动前。请检查本地磁盘与目录权限后在当前 Case 重试。',
+    browser_artifact_identity_changed: '验证过程中证据目录身份发生变化，Studio 已拒绝继续使用该目录。请在当前 Case 重试；若持续出现，请检查清理程序或同步工具。',
+    browser_artifact_manifest_invalid: '浏览器已完成操作，但生成的证据清单或文件格式未通过校验。当前错误属于证据验收阶段，不是页面定位失败。',
+    browser_artifact_digest_changed: '浏览器证据完成后内容发生变化，Studio 已拒绝发布不一致的证据。',
+    browser_artifact_sensitive: '浏览器证据包含未脱敏的凭据信息，Studio 已停止发布。请检查 Network 或 Console 的脱敏配置。',
+    browser_artifact_freeze_failed: '浏览器证据已生成，但注册发布失败。页面操作无需补录，请检查本地证据存储后在当前 Case 重试。',
+    browser_artifact_frozen_invalid: '已发布证据未通过最终完整性校验，Studio 已停止后续判定。',
+    browser_artifact_repair_evidence_invalid: '页面定位失败后，供修复计划使用的证据无法读取。原始页面操作已完成，可在当前 Case 重试。',
+    browser_artifact_repair_cleanup_failed: '页面定位修复证据的临时副本清理失败，Studio 已停止后续执行。',
+    browser_artifact_evaluator_evidence_invalid: '浏览器操作已完成，但供最终判定使用的证据无法读取。这不是页面定位失败。',
+    browser_artifact_evaluator_cleanup_failed: '最终判定证据的临时副本清理失败，Studio 已停止后续执行。',
+    browser_artifact_response_assertion_invalid: '接口响应断言证据不完整或与当前执行不一致，Studio 不会改用页面截图猜测结果。',
+  }
+  if (artifactCopy[stableErrorCode.value]) return artifactCopy[stableErrorCode.value]
   return ({
     login: '当前验证需要登录。请在 Studio 打开的验证浏览器中完成登录，不要在 Case 中粘贴账号、密码或 Cookie。',
     runtime: '验证浏览器环境不可用。修复并通过运行时探测后，Studio 会创建一次新的验证继续。',

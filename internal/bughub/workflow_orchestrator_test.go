@@ -619,6 +619,72 @@ func TestOrchestratorReproducedCannotAdvanceWithoutRegisteredEvidence(t *testing
 	}
 }
 
+func TestOrchestratorAutomaticallyReturnsValidationEvidenceGapToValidator(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-validation-refresh", CasePendingValidation)
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, nil, nil)
+	incident, err := o.StartCase(ctx, StartCaseCommand{
+		CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "validation-refresh:start", ActorID: "alice",
+		Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "base|codex", Target: "codex"},
+		InputJSON: []byte(`{"reproduction_steps":["search user"],"expected_behavior":"show both matches"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	validation, _ := store.GetAttempt(ctx, incident.CurrentAttemptID)
+	artifact := EvidenceArtifact{ID: "validation-network", CaseID: incident.ID, AttemptID: validation.ID, Kind: "network", PathOrReference: "/artifacts/validation-network", SHA256: strings.Repeat("a", 64), CapturedAt: validation.StartedAt.Add(time.Second), Environment: "test", RedactionStatus: RedactionStatusNotRequired}
+	if _, _, err := store.recordEvidenceArtifact(ctx, artifact, nil); err != nil {
+		t.Fatal(err)
+	}
+	validationOutput := []byte(`{"verification_status":"reproduced","environment":"test","observed_behavior":"duplicate name","expected_behavior":"show both matches","scenario_hash":"scenario-1","evidence":[{"kind":"network","path":"network.json","environment":"test","redaction_status":"not_required"}],"gaps":[]}`)
+	incident, err = o.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: incident.ID, AttemptID: validation.ID, ExpectedVersion: incident.Version, IdempotencyKey: "validation-refresh:reproduced", ActorID: "validator", Outcome: PhaseOutcomeReproduced, OutputJSON: validationOutput})
+	if err != nil {
+		t.Fatal(err)
+	}
+	investigation, _ := store.GetAttempt(ctx, incident.CurrentAttemptID)
+	investigationOutput := mustJSON(InvestigationResult{
+		InvestigationStatus: "insufficient_info", Environment: "test", Confidence: "medium",
+		ValidationGaps: []string{"frozen Network evidence is missing the response body"}, Gaps: []string{}, UncheckedScopes: []string{},
+		CallChain: []CallChainHop{}, Evidence: []ArtifactReference{},
+	})
+	refreshCommand := CompleteAttemptCommand{
+		CaseID: incident.ID, AttemptID: investigation.ID, ExpectedVersion: incident.Version,
+		IdempotencyKey: "validation-refresh:investigation", ActorID: "investigator",
+		Outcome: PhaseOutcomeValidationEvidenceRequired, OutputJSON: investigationOutput,
+	}
+	incident, err = o.CompleteAttempt(ctx, refreshCommand)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if incident.Status != CaseValidating || runner.startCount() != 3 {
+		t.Fatalf("case=%+v starts=%d", incident, runner.startCount())
+	}
+	refresh := runner.starts[2]
+	if refresh.Phase != PhaseValidation || refresh.Mode != AttemptReproduce || refresh.ParentAttemptID != validation.ID {
+		t.Fatalf("refresh attempt=%+v", refresh)
+	}
+	var refreshInput map[string]any
+	if err := json.Unmarshal(refresh.InputJSON, &refreshInput); err != nil {
+		t.Fatal(err)
+	}
+	if refreshInput["source_investigation_attempt_id"] != investigation.ID || len(refreshInput["evidence_refresh_gaps"].([]any)) != 1 {
+		t.Fatalf("refresh input=%+v", refreshInput)
+	}
+	persistedInvestigation, _ := store.GetAttempt(ctx, investigation.ID)
+	if persistedInvestigation.Status != AttemptStatusSucceeded {
+		t.Fatalf("investigation status=%s", persistedInvestigation.Status)
+	}
+	events, _ := store.ListEvents(ctx, incident.ID)
+	if events[len(events)-1].EventType != "validation_evidence_refresh_started" {
+		t.Fatalf("last event=%+v", events[len(events)-1])
+	}
+	if replayed, err := o.CompleteAttempt(ctx, refreshCommand); err != nil || replayed.ID != incident.ID || replayed.Version != incident.Version || runner.startCount() != 3 {
+		t.Fatalf("replay=%+v err=%v starts=%d", replayed, err, runner.startCount())
+	}
+}
+
 func TestOrchestratorPersistsBrowserSystemFailureWithoutEvidenceRequiredEvent(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)

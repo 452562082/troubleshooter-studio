@@ -39,10 +39,19 @@ const plaintextSessionDirectoryPrefix = ".tshoot-browser-session-"
 var ErrBrowserExecutionInterrupted = errors.New("browser execution was interrupted")
 var ErrBrowserStagingIdentityChanged = errors.New("browser staging directory identity changed")
 var ErrBrowserWorkerOutputTooLarge = errors.New("browser worker output exceeds its limit")
+var errBrowserArtifactContainsCredentials = errors.New("browser artifact contains forbidden credential material")
 
 var errPlaintextSessionCleanup = errors.New("temporary browser session cleanup failed")
 
 var verifierCredentialPattern = regexp.MustCompile(`(?i)(?:["']?(?:authorization|proxy-authorization|set-cookie|cookie)["']?\s*:)|\bbearer\s+[A-Za-z0-9._~+/=-]{3,}|(?:^|[?&;,\s{])["']?(?:password|passwd|access[_-]?token|token|api[_-]?key|client[_-]?secret|secret|session|authorization|auth|cookie|code|key)["']?\s*[:=]\s*["']?[^\s&,;}"']+`)
+
+// Browser evidence contains application payloads as well as transport metadata.
+// Generic business fields such as "code" and "key" are not credentials and
+// must not make an otherwise valid run fail depending on the response body.
+// URL query sanitization remains deliberately broader via
+// verifierSensitiveQueryKey below because authorization codes in URLs are
+// bearer credentials even when their field name is generic.
+var verifierEvidenceCredentialPattern = regexp.MustCompile(`(?i)(?:["']?(?:authorization|proxy-authorization|set-cookie|cookie)["']?\s*:)|\bbearer\s+[A-Za-z0-9._~+/=-]{3,}|(?:^|[?&;,\s{])["']?(?:password|passwd|access[_-]?token|token|api[_-]?key|client[_-]?secret|secret|session|authorization|auth|cookie)["']?\s*[:=]\s*["']?[^\s&,;}"']+`)
 var verifierSensitiveQueryKey = regexp.MustCompile(`(?i)token|password|secret|code|session|auth|cookie|key`)
 var verifierRedactionMarker = regexp.MustCompile(`(?i)(?:\[REDACTED\]|%5B(?:REDACTED|redacted)%5D)`)
 
@@ -223,11 +232,11 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 	}
 	browserDir, err := ensureBrowserStagingDirectory(request.StagingDir)
 	if err != nil {
-		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_invalid", cause: err}
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_staging_invalid", cause: err}
 	}
 	browserIdentity, err := pinBrowserDirectory(browserDir)
 	if err != nil {
-		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_invalid", cause: err}
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_staging_invalid", cause: err}
 	}
 	reservationIdentity := browserReservation{
 		CaseID: request.CaseID, CycleNumber: request.CycleNumber, AttemptID: request.AttemptID,
@@ -245,10 +254,10 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 		}
 		validation, err := validateManifestArtifacts(request.StagingDir, browserIdentity, manifest.Result.Artifacts, manifest.Result.Status, manifest.Result.FinalScreenshotPath)
 		if err != nil {
-			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_invalid", cause: err}
+			return bughub.BrowserVerificationResult{}, browserArtifactManifestError(err)
 		}
 		if !artifactDigestsEqual(validation.SHA256, manifest.ArtifactSHA256) {
-			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_invalid", cause: errors.New("browser artifact digest changed after completion")}
+			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_digest_changed", cause: errors.New("browser artifact digest changed after completion")}
 		}
 		return bindVerifiedBrowserArtifacts(manifest.Result, validation), nil
 	}
@@ -318,7 +327,7 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_failed", cause: errors.New("browser worker exited before producing a result")}
 	}
 	if err := browserIdentity.Verify(); err != nil {
-		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_invalid", cause: err}
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_identity_changed", cause: err}
 	}
 	if err := validateWorkerResultBounds(workerOutput); err != nil {
 		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_protocol_invalid", cause: err}
@@ -330,7 +339,7 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 	result := browserVerificationResult(request, workerOutput)
 	validation, err := validateManifestArtifacts(request.StagingDir, browserIdentity, result.Artifacts, result.Status, result.FinalScreenshotPath)
 	if err != nil {
-		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_invalid", cause: err}
+		return bughub.BrowserVerificationResult{}, browserArtifactManifestError(err)
 	}
 	if result.FinalScreenshotPath == "" {
 		result.FinalScreenshotPath = validation.FinalScreenshot
@@ -1098,7 +1107,7 @@ func validateManifestArtifacts(stagingRoot string, identity browserDirectoryIden
 				return manifestArtifactValidation{}, fmt.Errorf("browser evidence %q exceeds %d bytes", path, maxBrowserEvidenceBytes)
 			}
 			if containsForbiddenBrowserEvidence(content) {
-				return manifestArtifactValidation{}, fmt.Errorf("browser artifact %q contains forbidden credential material", path)
+				return manifestArtifactValidation{}, fmt.Errorf("%w: %q", errBrowserArtifactContainsCredentials, path)
 			}
 		}
 	}
@@ -1263,7 +1272,15 @@ func rejectUndeclaredBrowserOutputs(stagingRoot, browserDir string, declared map
 
 func containsForbiddenBrowserEvidence(content []byte) bool {
 	withoutMarkers := verifierRedactionMarker.ReplaceAll(content, nil)
-	return verifierCredentialPattern.Match(withoutMarkers)
+	return verifierEvidenceCredentialPattern.Match(withoutMarkers)
+}
+
+func browserArtifactManifestError(err error) error {
+	code := "browser_artifact_manifest_invalid"
+	if errors.Is(err, errBrowserArtifactContainsCredentials) {
+		code = "browser_artifact_sensitive"
+	}
+	return &verifierError{code: code, cause: err}
 }
 
 func redactVerifierText(value string, limit int) string {

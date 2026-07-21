@@ -407,14 +407,12 @@ function startBotChoice(): StartBotChoice {
   return { key, bot: matches.value.find(match => match.bot.key === key)?.bot }
 }
 
-function freshCaseID(bugID: string): string {
-  const safeBugID = bugID.replace(/[^a-zA-Z0-9_-]/g, '-')
-  return `case-${safeBugID}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+function freshCaseID(): string {
+  return `case-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 }
 
-function freshResetCaseID(caseID: string): string {
-  const safeCaseID = caseID.replace(/[^a-zA-Z0-9_-]/g, '-')
-  return `case-reset-${safeCaseID}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+function freshResetCaseID(): string {
+  return `case-reset-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 }
 
 async function openResetDialog(incident: IncidentCase, choice: StartBotChoice) {
@@ -427,7 +425,7 @@ async function openResetDialog(incident: IncidentCase, choice: StartBotChoice) {
   const identity = resetRequestIdentity(mode, incident.id, incident.version, choice.key, newBot.target, newEnvironment)
   let request = resetRequests.get(identity)
   if (!request) {
-    const newCaseID = freshResetCaseID(incident.id)
+    const newCaseID = freshResetCaseID()
     request = {
       newCaseID,
       idempotencyKey: mode === 'active_reset'
@@ -686,7 +684,7 @@ async function startNewCase() {
   const actionKey = `start-round:${roundIdentity}`
   let candidateID = startCaseIDs.get(roundIdentity)
   if (!candidateID) {
-    candidateID = freshCaseID(bug.id)
+    candidateID = freshCaseID()
     startCaseIDs.set(roundIdentity, candidateID)
   }
   starting.value = true

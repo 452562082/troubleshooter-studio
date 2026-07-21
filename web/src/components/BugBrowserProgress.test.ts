@@ -120,6 +120,11 @@ describe('BugBrowserProgress', () => {
     expect(system.text()).toContain('浏览器验证遇到系统错误')
     expect(system.get('[data-browser-error-code]').text()).toBe('错误码：browser_worker_failed')
 
+    const artifact = mount(BugBrowserProgress, { props: { attempt: attempt('browser_artifact_manifest_invalid'), events: [], systemID: 'base', environment: 'test' } })
+    expect(artifact.text()).toContain('证据验收阶段')
+    expect(artifact.text()).toContain('不是页面定位失败')
+    expect(artifact.get('[data-browser-error-code]').text()).toBe('错误码：browser_artifact_manifest_invalid')
+
     const plan = mount(BugBrowserProgress, { props: { attempt: attempt('browser_validator_plan_invalid'), events: [], systemID: 'base', environment: 'test' } })
     expect(plan.get('[data-browser-state="plan"]').text()).toContain('未通过结构校验')
     expect(plan.text()).toContain('当前 Case')

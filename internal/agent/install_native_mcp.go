@@ -7,7 +7,8 @@
 //     但 `claude mcp list` 永远看不到装入的 server,只能用 ~/.claude.json。
 //     迁移期顺手清掉旧 settings.json 里残留的同名 keys(避免新旧并存)。
 //   - cursor      → ~/.cursor/mcp.json,顶层 "mcpServers" JSON 字段
-//   - codex       → ~/.codex/agents/<name>.toml 内联 [mcp_servers.<x>] 段(每个 subagent 自带 MCP)。
+//   - codex       → ~/.codex/agents/<name>.toml 内联 [mcp_servers.<x>] 段(交互式 subagent)，
+//     并同步 ~/.codex/tshoot-<name>.config.toml(Studio 后台 codex exec profile)。
 //     **不要**走 `codex mcp add` 写到 ~/.codex/config.toml —— 那会让主 chat 启动时
 //     也拉一遍这些 MCP,而排障 MCP 只对 truss-troubleshooter agent 有意义,主 chat
 //     不该被拖累(node 25 + npx 包并发 EPIPE 崩溃风险)。官方文档明确每个 agent 自带:
@@ -20,6 +21,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -34,7 +36,7 @@ import (
 // MergeMCPIntoIDESettings 把 cfg 派生的 mcpServers 写进对应 target 的 IDE 配置文件。
 //   - target=claude-code → ~/.claude.json(dotfile),顶层 mcpServers 字段
 //   - target=cursor      → ~/.cursor/mcp.json,顶层 mcpServers 字段
-//   - target=codex       → ~/.codex/agents/<name>.toml 内联 [mcp_servers.<x>] 段
+//   - target=codex       → ~/.codex/agents/<name>.toml + ~/.codex/tshoot-<name>.config.toml
 //
 // creds 是 env-var-name → value 的 map(跟 InstallNativeOpenclaw 一样的 schema)。
 // 桌面端 wizard 通过 buildOpenclawCreds() 拼出来传过来;CLI 没 creds 时传 nil,
@@ -338,6 +340,7 @@ func pruneLegacyClaudeSettingsMCP(legacyPath string, servers map[string]any) err
 // 用户手改 toml 时只要保留两行 marker 就能继续重装;两行都丢了 install 报错而不是默默
 // 拼到末尾(避免无限堆叠出多个 [mcp_servers.*] 段、codex 加载时冲突)。
 func injectMCPIntoCodexAgentTOML(root string, cfg *config.SystemConfig, servers map[string]any) error {
+	body := renderCodexMCPSection(servers)
 	for _, agentName := range codexAgentNamesForConfig(cfg) {
 		tomlPath := filepath.Join(root, "agents", agentName+".toml")
 		raw, err := os.ReadFile(tomlPath)
@@ -348,7 +351,7 @@ func injectMCPIntoCodexAgentTOML(root string, cfg *config.SystemConfig, servers 
 			return fmt.Errorf("read codex agent toml %s: %w", tomlPath, err)
 		}
 
-		patched, err := replaceCodexMCPRegion(string(raw), renderCodexMCPSection(servers))
+		patched, err := replaceCodexMCPRegion(string(raw), body)
 		if err != nil {
 			return fmt.Errorf("patch codex agent toml %s: %w", tomlPath, err)
 		}
@@ -363,6 +366,42 @@ func injectMCPIntoCodexAgentTOML(root string, cfg *config.SystemConfig, servers 
 		if err := os.Chmod(tomlPath, 0o600); err != nil {
 			return fmt.Errorf("chmod codex agent toml %s: %w", tomlPath, err)
 		}
+		if err := writeCodexAgentRuntimeProfile(root, agentName, body); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// codexAgentRuntimeProfileName is passed to `codex exec --profile` by Studio's
+// durable phase runner. Codex agent TOML is loaded when another Codex session
+// spawns a subagent, but a direct background `codex exec` does not consume it.
+// Keeping a narrow profile with the same MCP section makes both entrypoints use
+// the installed runtime capabilities without polluting the global main chat.
+func codexAgentRuntimeProfileName(agentName string) string {
+	return "tshoot-" + strings.TrimSpace(agentName)
+}
+
+func writeCodexAgentRuntimeProfile(root, agentName, body string) error {
+	profileName := codexAgentRuntimeProfileName(agentName)
+	if profileName == "tshoot-" {
+		return errors.New("codex runtime profile requires an agent name")
+	}
+	path := filepath.Join(root, profileName+".config.toml")
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refuse to replace symlinked codex runtime profile %s", path)
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("inspect codex runtime profile %s: %w", path, err)
+	}
+	content := "# Managed by tshoot. Used by Studio background codex exec.\n" + body
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return fmt.Errorf("write codex runtime profile %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("chmod codex runtime profile %s: %w", path, err)
 	}
 	return nil
 }

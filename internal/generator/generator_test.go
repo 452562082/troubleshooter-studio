@@ -1097,6 +1097,16 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 	if !strings.Contains(ii, "frontend-repro-investigator") {
 		t.Errorf("incident-investigator should hand client symptoms to frontend-repro-investigator")
 	}
+	for _, required := range []string{
+		"单集群场景不得因空映射放弃查询",
+		"不得声称“缺少数据库只读工具”",
+		"不允许重新索要或持久化原始 response body",
+		"才能 ASK_USER，并写入 `gaps`",
+	} {
+		if !strings.Contains(ii, required) {
+			t.Errorf("incident-investigator missing responsibility rule %q", required)
+		}
+	}
 }
 
 // 配置中心 prompt 派生由 agent.DerivePrompts 验证,

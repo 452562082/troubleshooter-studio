@@ -106,7 +106,7 @@ func TestBrowserCoordinatorRejectsMaliciousFrozenArtifactBeforeEvaluator(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ErrorCode != "browser_artifact_invalid" || executor.Calls != 1 {
+	if result.ErrorCode != "browser_artifact_frozen_invalid" || executor.Calls != 1 {
 		t.Fatalf("calls=%d result=%+v", executor.Calls, result)
 	}
 }
@@ -304,7 +304,7 @@ func TestBrowserCoordinatorSurfacesEvaluatorScreenshotCleanupFailure(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ErrorCode != "browser_artifact_invalid" || calls != 2 {
+	if result.ErrorCode != "browser_artifact_evaluator_cleanup_failed" || calls != 2 {
 		t.Fatalf("calls=%d result=%+v", calls, result)
 	}
 	if viewPath == "" {

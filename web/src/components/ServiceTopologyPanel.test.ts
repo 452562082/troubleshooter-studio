@@ -138,6 +138,33 @@ describe('ServiceTopologyPanel', () => {
     ])
   })
 
+  it('renders an already confirmed relation as completed instead of a no-op action', async () => {
+    const confirmed = makeTopologyEdge('confirmed', 'mall-web', 'mall-bff', 'confirmed', 0.76)
+    const wrapper = mountPanel({ snapshot: makeTopologySnapshot({ edges: [confirmed] }) })
+
+    const confirm = wrapper.get('[data-action="confirm"]')
+    expect(confirm.text()).toBe('已确认')
+    expect(confirm.attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-decision-feedback]').text()).toContain('写入 YAML')
+
+    await confirm.trigger('click')
+    expect(wrapper.emitted('update:overrides')).toBeUndefined()
+  })
+
+  it('allows a rejected relation to be confirmed again', async () => {
+    const rejected = makeTopologyEdge('rejected', 'mall-web', 'mall-bff', 'rejected', 0.76)
+    const wrapper = mountPanel({ snapshot: makeTopologySnapshot({ edges: [rejected] }) })
+
+    expect(wrapper.get('[data-action="reject"]').text()).toBe('已拒绝')
+    expect(wrapper.get('[data-action="reject"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-action="confirm"]').attributes('disabled')).toBeUndefined()
+    await wrapper.get('[data-action="confirm"]').trigger('click')
+
+    expect(wrapper.emitted('update:overrides')?.[0]?.[0]).toEqual([
+      expect.objectContaining({ action: 'confirm', scope: 'service', fromService: 'mall-web', toService: 'mall-bff' }),
+    ])
+  })
+
   it('rejects an arbitrary retarget and accepts a configured service from a labeled select', async () => {
     const wrapper = mountPanel()
 

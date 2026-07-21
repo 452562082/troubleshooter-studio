@@ -137,6 +137,23 @@ function edgeKey(edge: topology.CandidateEdge): string {
 const selectedRelation = computed(() => (
   relationGroups.value.find(group => group.key === selectedRelationKey.value) ?? null
 ))
+const canConfirmSelectedRelation = computed(() => {
+  const status = selectedRelation.value?.status
+  return status === 'candidate' || status === 'rejected'
+})
+const canRejectSelectedRelation = computed(() => (
+  !!selectedRelation.value && selectedRelation.value.status !== 'rejected'
+))
+const decisionFeedback = computed(() => {
+  switch (selectedRelation.value?.status) {
+    case 'confirmed': return '该关系已确认并写入 YAML，无需重复确认。'
+    case 'automatic': return '该关系已由扫描结果自动采纳；如判断错误可拒绝。'
+    case 'manual': return '该关系由人工新增并已写入 YAML；如需撤销可拒绝。'
+    case 'rejected': return '该关系已拒绝；可以重新确认或重定到其他目标服务。'
+    case 'stale': return '该关系的确认证据已失效，请重新扫描后再决定。'
+    default: return '确认或拒绝会立即更新 YAML overrides。'
+  }
+})
 
 watch(relationGroups, (nextGroups) => {
   if (nextGroups.some(group => group.key === selectedRelationKey.value)) return
@@ -174,6 +191,8 @@ function selectRelation(group: RelationGroup) {
 function emitDecision(action: 'confirm' | 'reject') {
   const group = selectedRelation.value
   if (!group || locked.value) return
+  if (action === 'confirm' && !canConfirmSelectedRelation.value) return
+  if (action === 'reject' && !canRejectSelectedRelation.value) return
   emit('update:overrides', upsertTopologyOverride(props.overrides, {
     action,
     scope: 'service',
@@ -327,18 +346,19 @@ function requestRefresh() {
               type="button"
               data-action="confirm"
               data-mutation
-              :disabled="locked"
+              :disabled="locked || !canConfirmSelectedRelation"
               @click="emitDecision('confirm')"
-            >确认关系</button>
+            >{{ selectedRelation.status === 'confirmed' ? '已确认' : '确认关系' }}</button>
             <button
               class="topology-button topology-button--danger"
               type="button"
               data-action="reject"
               data-mutation
-              :disabled="locked"
+              :disabled="locked || !canRejectSelectedRelation"
               @click="emitDecision('reject')"
-            >拒绝关系</button>
+            >{{ selectedRelation.status === 'rejected' ? '已拒绝' : '拒绝关系' }}</button>
           </div>
+          <p class="decision-feedback" data-decision-feedback aria-live="polite">{{ decisionFeedback }}</p>
 
           <div class="retarget-row">
             <label for="topology-retarget">改为目标服务</label>
@@ -687,6 +707,7 @@ function requestRefresh() {
 }
 
 .decision-actions { margin-top: 14px; }
+.decision-feedback { margin: 8px 0 0; color: var(--c-muted); font-size: 12px; line-height: 1.5; }
 .retarget-row { margin-top: 14px; }
 .retarget-row label,
 .manual-grid label { display: grid; gap: 6px; color: #475569; font-size: 13px; font-weight: 600; }

@@ -636,6 +636,121 @@ func TestBrowserPlannerPromptSelectsMobileHybridEvidenceForAPIFieldClarification
 	}
 }
 
+func TestBrowserPlannerPromptConsumesInvestigationEvidenceRefreshGaps(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Attempt.InputJSON = mustJSON(map[string]any{
+		"mode":                            "reproduce",
+		"target_environment":              "test",
+		"source_investigation_attempt_id": "investigation-1",
+		"evidence_refresh_gaps": []string{
+			"补充 GET /api/content/getRecommendVideoList 的 request_facts：keywords、page、page_size",
+			"生成 response_assertions：users.total=1，且同一对象 nick_name 等于 text",
+		},
+	})
+
+	prompt := browserPlannerPrompt(request, nil)
+	for _, expected := range []string{
+		`"evidence_refresh_gaps"`,
+		"/api/content/getRecommendVideoList",
+		"keywords、page、page_size",
+		"response_assertions",
+		"mandatory evidence contract",
+	} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("planner prompt lost investigation evidence gap %q:\n%s", expected, prompt)
+		}
+	}
+}
+
+func TestValidateBrowserPlanScenarioEvidenceEnforcesInvestigationRefreshContract(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Attempt.InputJSON = mustJSON(map[string]any{
+		"source_investigation_attempt_id": "investigation-1",
+		"evidence_refresh_gaps": []string{
+			"补充 GET /api/content/getRecommendVideoList 的 request_facts",
+			"生成 response_assertions 校验 users.list[].nick_name 与 text",
+		},
+	})
+	plan := BrowserPlan{
+		Version: BrowserPlanVersion, DeviceProfile: "desktop", StartURL: request.Bug.FrontendURL,
+		Actions:    []BrowserAction{{ID: "capture", Action: "screenshot"}},
+		Assertions: []BrowserAssertion{{Kind: "visible_text", Value: "用户"}},
+	}
+
+	if err := validateBrowserPlanScenarioEvidence(request, plan); err == nil || !strings.Contains(err.Error(), "requires response_assertions") {
+		t.Fatalf("refresh plan without response assertions was accepted: %v", err)
+	}
+	plan.ResponseAssertions = []BrowserResponseAssertion{{
+		ID: "compare-fields", ActionID: "submit-search", Kind: "json_fields_equal", LeftField: "users.list.nick_name", RightField: "users.list.text",
+	}}
+	if err := validateBrowserPlanScenarioEvidence(request, plan); err == nil || !strings.Contains(err.Error(), "requires request_captures") {
+		t.Fatalf("refresh plan without request facts was accepted: %v", err)
+	}
+}
+
+func TestValidateBrowserPlanScenarioEvidenceDoesNotInventStructuredFieldsForNetworkMetadataGap(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Attempt.InputJSON = mustJSON(map[string]any{
+		"source_investigation_attempt_id": "investigation-1",
+		"evidence_refresh_gaps":           []string{"补采因果 Network 元数据与动作后截图"},
+	})
+	plan, err := ParseBrowserPlan([]byte(validBrowserPlanYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBrowserPlanScenarioEvidence(request, plan); err != nil {
+		t.Fatalf("generic Network metadata gap invented unsupported structured fields: %v", err)
+	}
+}
+
+func TestBrowserValidationRecipeScenarioHashIncludesEvidenceRefreshContract(t *testing.T) {
+	initial := browserCoordinatorRequest(t)
+	refresh := initial
+	refresh.Attempt.InputJSON = mustJSON(map[string]any{
+		"source_investigation_attempt_id": "investigation-1",
+		"evidence_refresh_gaps":           []string{"生成 response_assertions 校验 nick_name 与 text"},
+	})
+
+	initialHash, err := browserValidationRecipeScenarioSHA256(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshHash, err := browserValidationRecipeScenarioSHA256(refresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initialHash == refreshHash {
+		t.Fatal("evidence refresh reused the original validation recipe hash")
+	}
+}
+
+func TestValidateBrowserEvidenceRefreshPreservesSuccessfulReproductionActions(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Attempt.InputJSON = mustJSON(map[string]any{
+		"source_investigation_attempt_id": "investigation-1",
+		"evidence_refresh_gaps":           []string{"补充 request_facts"},
+	})
+	baseline, err := ParseBrowserPlan([]byte(validBrowserPlanYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.refreshBaselinePlan = &baseline
+	candidate := baseline
+	candidate.Version = BrowserPlanVersion
+	candidate.DeviceProfile = "desktop"
+	candidate.RequestCaptures = []BrowserRequestCapture{{
+		ID: "search-request", ActionID: "open-users", URLContains: "/users", Method: "GET", Source: "query", Fields: []string{"keywords"},
+	}}
+	if err := validateBrowserPlanScenarioEvidence(request, candidate); err != nil {
+		t.Fatalf("evidence-only augmentation was rejected: %v", err)
+	}
+	candidate.Actions = append([]BrowserAction(nil), candidate.Actions...)
+	candidate.Actions[0].Locator = &BrowserLocator{Kind: "text", Value: "用户"}
+	if err := validateBrowserPlanScenarioEvidence(request, candidate); err == nil || !strings.Contains(err.Error(), "preserve the previously successful reproduction actions") {
+		t.Fatalf("refresh changed a proven action without rejection: %v", err)
+	}
+}
+
 func TestValidateBrowserPlanScenarioEvidenceRequiresMobileResponseAssertion(t *testing.T) {
 	request := browserCoordinatorRequest(t)
 	request.Bug.Title = "H5 用户搜索字段展示错误"
@@ -1354,6 +1469,77 @@ func TestBrowserCoordinatorReusesFrozenRecipeAcrossAttemptsWithoutPlanner(t *tes
 	}
 	if len(events) == 0 || events[0].Type != "browser_recipe_replayed" {
 		t.Fatalf("events=%+v", events)
+	}
+}
+
+func TestBrowserCoordinatorRefreshReplaysActionsButReplansEvidenceContract(t *testing.T) {
+	initial := browserCoordinatorRequest(t)
+	baseline, err := ParseBrowserPlan([]byte(validBrowserPlanYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialHash, err := browserValidationRecipeScenarioSHA256(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipes := &memoryValidationRecipeStore{recipes: map[string]ValidationRecipe{
+		initial.Attempt.CaseID: {CaseID: initial.Attempt.CaseID, ScenarioSHA256: initialHash, Plan: baseline, SourceAttemptID: initial.Attempt.ID},
+	}}
+	request := browserCoordinatorRequest(t)
+	request.Attempt.CaseID = initial.Attempt.CaseID
+	request.Attempt.ID = "attempt-browser-refresh"
+	request.Attempt.InputJSON = mustJSON(map[string]any{
+		"source_investigation_attempt_id": "investigation-1",
+		"evidence_refresh_gaps":           []string{"补充 request_facts 中的 keywords"},
+	})
+	plan := `version: 2
+device_profile: desktop
+start_url: https://app.example.com/users
+actions:
+  - id: open-users
+    action: click
+    locator:
+      kind: role
+      value: tab
+      name: 用户
+    screenshot_after: true
+  - id: wait-results
+    action: wait_for
+    locator:
+      kind: text
+      value: 搜索结果
+    screenshot_after: true
+assertions:
+  - kind: visible_text
+    value: 汤圆
+request_captures:
+  - id: search-request
+    action_id: open-users
+    url_contains: /users
+    method: GET
+    source: query
+    fields: [keywords]
+`
+	requestFacts := []byte(`[{"capture_id":"search-request","action_id":"submit-search","method":"POST","url":"https://app.example.com/api/search","source":"json","matched_requests":1,"fields":[{"path":"target_user_id","present":true,"value_type":"string","value":"6971db29146ed54034889f22","redacted":false,"count":0}],"passed":true,"failure_reason":""}]`)
+	browserResult := completedBrowserResult("browser/final.png")
+	browserResult.Artifacts = append(browserResult.Artifacts, verifiedBrowserArtifact("request_facts", "browser/request-facts.json", "test", requestFacts))
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: plan},
+		{FinalYAML: reproducedValidationYAML("browser/final.png")},
+	}}
+	events := make([]InvestigationEvent, 0)
+	request.Emit = func(event InvestigationEvent) { events = append(events, event) }
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: &fakeBrowserVerifier{Results: []BrowserVerificationResult{browserResult}}, Recipes: recipes}).Execute(context.Background(), request)
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if executor.Calls != 2 || !strings.Contains(executor.Prompts[0], `"successful_reproduction_recipe"`) {
+		t.Fatalf("refresh did not replan from the successful action recipe: calls=%d prompt=%s", executor.Calls, executor.Prompts[0])
+	}
+	for _, event := range events {
+		if event.Type == "browser_recipe_replayed" {
+			t.Fatalf("refresh replayed the stale visual-only recipe: events=%+v", events)
+		}
 	}
 }
 

@@ -2038,6 +2038,24 @@ func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCa
 		if err != nil || result.InvestigationStatus != "insufficient_info" || len(result.ValidationGaps) == 0 || len(result.Gaps) != 0 {
 			return IncidentCase{}, errors.Join(errors.New("validation evidence refresh requires only validation-owned gaps"), err)
 		}
+		refreshed, err := o.investigationFollowsValidationEvidenceRefresh(ctx, attempt)
+		if err != nil {
+			return IncidentCase{}, err
+		}
+		if refreshed {
+			failure := mustJSON(map[string]any{
+				"error_code":          "validation_evidence_refresh_exhausted",
+				"error_message":       "定向验证补采仍未满足排障证据契约，已停止自动循环",
+				"system_failure":      true,
+				"evidence_limitation": true,
+			})
+			attempt.Status = AttemptStatusFailed
+			attempt.OutputJSON = failure
+			attempt.ErrorCode = "validation_evidence_refresh_exhausted"
+			attempt.ErrorMessage = "定向验证补采仍未满足排障证据契约，已停止自动循环"
+			add(CaseWaitingEvidence, "phase_system_failed", "studio", "orchestrator", failure)
+			break
+		}
 		created, err := o.buildValidationEvidenceRefreshAttempt(ctx, incident, attempt, result.ValidationGaps, cmd.IdempotencyKey+":validation-refresh")
 		if err != nil {
 			return IncidentCase{}, err

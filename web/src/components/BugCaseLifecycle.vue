@@ -31,6 +31,7 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
     const attempt = detail.attempts.find(item => item.id === incident.current_attempt_id)
     const outputCode = typeof attempt?.output_json?.error_code === 'string' ? attempt.output_json.error_code.trim() : ''
     const code = attempt?.error_code?.trim() || outputCode
+    if (code === 'validation_evidence_refresh_exhausted') return undefined
     if (code === 'browser_validator_plan_invalid' || code === 'browser_locator_repair_plan_invalid') return { kind: 'retry_validation', label: '重新生成验证计划并重试' }
     if (code === 'browser_locator_failed') return { kind: 'retry_validation', label: '重新观察页面并生成验证计划' }
     if (['browser_validator_failed', 'browser_validator_attachment_failed', 'browser_validator_no_output', 'browser_validator_process_failed', 'browser_worker_protocol_invalid'].includes(code)) {
@@ -101,6 +102,11 @@ watch(() => props.detail?.events.length ?? 0, count => {
 const action = computed(() => props.detail ? primaryActionFor(props.detail) : undefined)
 const currentAttempt = computed(() => props.detail?.attempts.find(item => item.id === props.detail?.case.current_attempt_id) || null)
 const validationEvidenceRefresh = computed(() => currentAttempt.value?.phase === 'validation' && typeof currentAttempt.value.input_json?.source_investigation_attempt_id === 'string')
+const validationEvidenceRefreshExhausted = computed(() => {
+  const attempt = currentAttempt.value
+  const outputCode = typeof attempt?.output_json?.error_code === 'string' ? attempt.output_json.error_code.trim() : ''
+  return (attempt?.error_code?.trim() || outputCode) === 'validation_evidence_refresh_exhausted'
+})
 const expectedDeploymentCommits = computed(() => {
   const currentAttemptID = props.detail?.case.current_attempt_id || ''
   const changes = (props.detail?.code_changes || []).filter(change => change.attempt_id === currentAttemptID && change.push_status === 'pushed')
@@ -436,13 +442,14 @@ function dialogTitle(): string {
             <p v-else-if="detail.case.status === 'waiting_deployment'">环境分支已推送。人工部署后，Studio 会尝试自动采集运行版本；采集不到也会直接启动回归验证。</p>
             <p v-else-if="detail.case.status === 'waiting_remediation'">根因不需要修改代码。完成数据、配置、运行环境、网络或外部依赖处置后，提交实际结果与证据即可开始回归。</p>
             <p v-else-if="continuedAfterFailedRegression">第 {{ detail.case.cycle_number }} 轮 · 回归仍复现，Studio 已把本轮新证据和差分带入排障。</p>
+            <p v-else-if="validationEvidenceRefreshExhausted">定向验证补采仍未满足结构化证据契约，已停止自动循环。这是系统执行问题，不需要重复补充业务证据。</p>
             <p v-else>第 {{ detail.case.cycle_number }} 轮 · {{ detail.case.environment || '环境未知' }}</p>
           </div>
           <div class="current-action-controls">
             <button v-if="action" class="btn primary primary-action" type="button" :disabled="pending" @click="openAction">
               {{ pending ? '处理中…' : action.label }}
             </button>
-            <span v-else class="terminal-copy">{{ detail.case.status === 'fixed_verified' ? '闭环完成' : detail.case.status === 'reset_archived' ? '已归档，由新 Case 接替' : '当前阶段自动推进' }}</span>
+            <span v-else class="terminal-copy">{{ detail.case.status === 'fixed_verified' ? '闭环完成' : detail.case.status === 'reset_archived' ? '已归档，由新 Case 接替' : validationEvidenceRefreshExhausted ? '等待系统修复后重试' : '当前阶段自动推进' }}</span>
           </div>
         </section>
 

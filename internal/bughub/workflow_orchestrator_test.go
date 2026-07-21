@@ -685,6 +685,76 @@ func TestOrchestratorAutomaticallyReturnsValidationEvidenceGapToValidator(t *tes
 	}
 }
 
+func TestOrchestratorStopsRepeatedValidationEvidenceRefreshLoop(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-validation-refresh-loop", CasePendingValidation)
+	runner := &recordingPhaseRunner{}
+	o := NewCaseOrchestrator(store, runner, nil, nil)
+	incident, err := o.StartCase(ctx, StartCaseCommand{
+		CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "refresh-loop:start", ActorID: "alice",
+		Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "base|codex", Target: "codex"},
+		InputJSON: []byte(`{"reproduction_steps":["search user"],"expected_behavior":"show both matches"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeReproduced := func(key, artifactID string) {
+		validation, getErr := store.GetAttempt(ctx, incident.CurrentAttemptID)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		artifact := EvidenceArtifact{ID: artifactID, CaseID: incident.ID, AttemptID: validation.ID, Kind: "network", PathOrReference: "/artifacts/" + artifactID, SHA256: strings.Repeat("a", 64), CapturedAt: validation.StartedAt.Add(time.Second), Environment: "test", RedactionStatus: RedactionStatusNotRequired}
+		if _, _, recordErr := store.recordEvidenceArtifact(ctx, artifact, nil); recordErr != nil {
+			t.Fatal(recordErr)
+		}
+		output := []byte(`{"verification_status":"reproduced","environment":"test","observed_behavior":"duplicate name","expected_behavior":"show both matches","scenario_hash":"scenario-1","evidence":[{"kind":"network","path":"network.json","environment":"test","redaction_status":"not_required"}],"gaps":[]}`)
+		incident, getErr = o.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: incident.ID, AttemptID: validation.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, ActorID: "validator", Outcome: PhaseOutcomeReproduced, OutputJSON: output})
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+	}
+	completeGap := func(key string) PhaseAttempt {
+		investigation, getErr := store.GetAttempt(ctx, incident.CurrentAttemptID)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		output := mustJSON(InvestigationResult{
+			InvestigationStatus: "insufficient_info", Environment: "test", Confidence: "medium",
+			ValidationGaps: []string{"response_assertions are missing for nick_name and text"},
+			Gaps:           []string{}, UncheckedScopes: []string{}, CallChain: []CallChainHop{}, Evidence: []ArtifactReference{},
+		})
+		incident, getErr = o.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: incident.ID, AttemptID: investigation.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, ActorID: "investigator", Outcome: PhaseOutcomeValidationEvidenceRequired, OutputJSON: output})
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		return investigation
+	}
+
+	completeReproduced("refresh-loop:initial-validation", "refresh-loop-initial-network")
+	completeGap("refresh-loop:first-gap")
+	completeReproduced("refresh-loop:refresh-validation", "refresh-loop-refreshed-network")
+	secondInvestigation := completeGap("refresh-loop:second-gap")
+
+	if incident.Status != CaseWaitingEvidence {
+		t.Fatalf("repeated gap status=%s", incident.Status)
+	}
+	if runner.startCount() != 4 {
+		t.Fatalf("repeated gap started another validation attempt: starts=%d", runner.startCount())
+	}
+	persisted, err := store.GetAttempt(ctx, secondInvestigation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status != AttemptStatusFailed || persisted.ErrorCode != "validation_evidence_refresh_exhausted" {
+		t.Fatalf("second investigation=%+v", persisted)
+	}
+	events, err := store.ListEvents(ctx, incident.ID)
+	if err != nil || events[len(events)-1].EventType != "phase_system_failed" {
+		t.Fatalf("events=%+v err=%v", events, err)
+	}
+}
+
 func TestOrchestratorPersistsBrowserSystemFailureWithoutEvidenceRequiredEvent(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)

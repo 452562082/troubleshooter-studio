@@ -90,6 +90,18 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.text()).not.toContain('private runtime path')
   })
 
+  it('does not ask the user for evidence when automatic validation refresh is exhausted', () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'investigation-refresh-exhausted'
+    snapshot.attempts = [{ id: 'investigation-refresh-exhausted', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'validation_evidence_refresh_exhausted' }, parent_attempt_id: '', started_at: '', error_code: 'validation_evidence_refresh_exhausted', error_message: '', usage: {} }]
+
+    expect(primaryActionFor(snapshot)).toBeUndefined()
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(wrapper.find('.primary-action').exists()).toBe(false)
+    expect(wrapper.find('#case-supplement').exists()).toBe(false)
+    expect(wrapper.get('.current-action-card').text()).toContain('已停止自动循环')
+  })
+
   it('retries an invalid browser plan inside the current Case without an evidence dialog', async () => {
     const snapshot = detail('waiting_evidence')
     snapshot.case.current_attempt_id = 'validation-plan'

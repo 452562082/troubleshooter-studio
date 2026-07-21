@@ -121,6 +121,31 @@ func (o *CaseOrchestrator) buildValidationEvidenceRefreshAttempt(ctx context.Con
 	return newAttempt(incident, PhaseValidation, AttemptReproduce, key, BotRef{Key: investigation.BotKey, Target: investigation.AgentTarget}, encoded, validation.ID), nil
 }
 
+func (o *CaseOrchestrator) investigationFollowsValidationEvidenceRefresh(ctx context.Context, investigation PhaseAttempt) (bool, error) {
+	if investigation.Phase != PhaseInvestigation {
+		return false, nil
+	}
+	var handoff InitialInvestigationInput
+	if err := json.Unmarshal(investigation.InputJSON, &handoff); err != nil || strings.TrimSpace(handoff.ValidationAttemptID) == "" {
+		return false, nil
+	}
+	validation, err := o.store.GetAttempt(ctx, handoff.ValidationAttemptID)
+	if err != nil {
+		return false, err
+	}
+	if validation.CaseID != investigation.CaseID || validation.CycleNumber != investigation.CycleNumber || validation.Phase != PhaseValidation || validation.Mode != AttemptReproduce {
+		return false, errors.New("investigation validation handoff does not match the current Case")
+	}
+	var refresh struct {
+		SourceInvestigationAttemptID string   `json:"source_investigation_attempt_id"`
+		EvidenceRefreshGaps          []string `json:"evidence_refresh_gaps"`
+	}
+	if err := json.Unmarshal(validation.InputJSON, &refresh); err != nil {
+		return false, errors.New("validation evidence refresh input is invalid")
+	}
+	return strings.TrimSpace(refresh.SourceInvestigationAttemptID) != "" && len(refresh.EvidenceRefreshGaps) != 0, nil
+}
+
 func (r *AgentPhaseRunner) materializeInvestigationEvidence(ctx context.Context, attempt PhaseAttempt, staging attemptEvidenceStaging) (string, error) {
 	if attempt.Phase != PhaseInvestigation || len(attempt.InputJSON) == 0 || string(attempt.InputJSON) == "{}" {
 		return "", nil

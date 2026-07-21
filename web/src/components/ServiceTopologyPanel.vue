@@ -531,6 +531,8 @@ function requestRefresh() {
   cursor: pointer;
   font: inherit;
   font-weight: 600;
+  -webkit-user-select: none;
+  user-select: none;
   transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease, opacity 180ms ease;
 }
 
@@ -630,6 +632,8 @@ function requestRefresh() {
   cursor: pointer;
   font: inherit;
   text-align: left;
+  -webkit-user-select: none;
+  user-select: none;
   transition: background-color 180ms ease, border-color 180ms ease;
 }
 

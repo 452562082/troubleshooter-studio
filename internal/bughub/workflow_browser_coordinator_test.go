@@ -79,13 +79,15 @@ type fakeBrowserVerifier struct {
 
 type observingBrowserVerifier struct {
 	fakeBrowserVerifier
-	Observation  BrowserVerificationResult
-	ObserveError error
-	ObserveCalls int
+	Observation         BrowserVerificationResult
+	ObserveError        error
+	ObserveCalls        int
+	ObservationRequests []BrowserVerificationRequest
 }
 
-func (f *observingBrowserVerifier) Observe(_ context.Context, _ BrowserVerificationRequest) (BrowserVerificationResult, error) {
+func (f *observingBrowserVerifier) Observe(_ context.Context, request BrowserVerificationRequest) (BrowserVerificationResult, error) {
 	f.ObserveCalls++
+	f.ObservationRequests = append(f.ObservationRequests, request)
 	return f.Observation, f.ObserveError
 }
 
@@ -951,7 +953,84 @@ func TestValidateBrowserPlanObservationGroundingRejectsInventedSearchEntry(t *te
 	}
 }
 
-func TestBrowserCoordinatorRegeneratesPlanUsingObservedSearchInput(t *testing.T) {
+func TestNormalizeBrowserPlanObservationGroundingPrefersObservedNavigationControl(t *testing.T) {
+	exact := true
+	bug := Bug{Steps: "1. 打开 H5 并进入搜索页面\n2. 输入用户名称并执行搜索"}
+	observation := &BrowserVerificationResult{AccessibilitySummary: []BrowserAccessibilityNode{
+		{Role: "link", Name: "打开搜索页", LocatorKind: "label", Visible: true},
+		{Role: "link", Name: "搜索", LocatorKind: "text", Visible: true},
+		{Role: "textbox", Name: "搜索内容", LocatorKind: "label", Visible: true},
+	}}
+	plan := BrowserPlan{Version: 2, DeviceProfile: "mobile", StartURL: "https://app.example.com", Actions: []BrowserAction{
+		{ID: "enter-search-page", Action: "click", Locator: &BrowserLocator{Kind: "label", Value: "搜索内容", Exact: &exact}},
+		{ID: "fill-search", Action: "fill", Locator: &BrowserLocator{Kind: "label", Value: "搜索内容", Exact: &exact}, Value: "chengzi"},
+	}}
+
+	normalized, changed, err := normalizeBrowserPlanObservationGrounding(bug, plan, observation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("invented search entry was not bound to the observed navigation control")
+	}
+	got := normalized.Actions[0].Locator
+	if got == nil || got.Kind != "label" || got.Value != "打开搜索页" || got.Exact == nil || !*got.Exact {
+		t.Fatalf("normalized entry locator = %+v", got)
+	}
+	if err := validateBrowserPlanObservationGrounding(bug, normalized, observation); err != nil {
+		t.Fatalf("normalized plan was not grounded: %v", err)
+	}
+}
+
+func TestBrowserCoordinatorObservesAndExecutesH5InSameMobileProfile(t *testing.T) {
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: `version: 2
+device_profile: mobile
+start_url: https://app.example.com/users
+actions:
+  - id: enter-search-page
+    action: click
+    locator: {kind: label, value: 搜索内容, exact: true}
+  - id: fill-search
+    action: fill
+    locator: {kind: label, value: 搜索内容, exact: true}
+    value: chengzi
+assertions:
+  - kind: visible_text
+    value: chengzi
+`},
+		{FinalYAML: reproducedValidationYAML("browser/final.png")},
+	}}
+	observation := completedBrowserResult("browser/initial.png")
+	observation.AccessibilitySummary = []BrowserAccessibilityNode{
+		{Role: "link", Name: "打开搜索页", LocatorKind: "label", Visible: true},
+		{Role: "link", Name: "搜索", LocatorKind: "text", Visible: true},
+	}
+	verifier := &observingBrowserVerifier{
+		fakeBrowserVerifier: fakeBrowserVerifier{Results: []BrowserVerificationResult{completedBrowserResult("browser/final.png")}},
+		Observation:         observation,
+	}
+	request := browserCoordinatorRequest(t)
+	request.Bug.Title = "H5 用户搜索"
+	request.Bug.Steps = "1. 打开 H5 并进入搜索页面\n2. 输入用户名称并执行搜索"
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), request)
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(verifier.ObservationRequests) != 1 || verifier.ObservationRequests[0].Plan.DeviceProfile != "mobile" {
+		t.Fatalf("observation did not use mobile profile: %+v", verifier.ObservationRequests)
+	}
+	if len(verifier.Requests) != 1 || verifier.Requests[0].Plan.DeviceProfile != "mobile" {
+		t.Fatalf("execution did not use mobile profile: %+v", verifier.Requests)
+	}
+	got := verifier.Requests[0].Plan.Actions[0].Locator
+	if got == nil || got.Kind != "label" || got.Value != "打开搜索页" {
+		t.Fatalf("execution did not use the observed mobile navigation: %+v", verifier.Requests[0].Plan)
+	}
+}
+
+func TestBrowserCoordinatorBindsPlanToObservedSearchInputWithoutAgentRetry(t *testing.T) {
 	badPlan := `version: 2
 device_profile: mobile
 start_url: https://app.example.com/users
@@ -967,12 +1046,8 @@ assertions:
   - kind: visible_text
     value: chengzi
 `
-	goodPlan := strings.Replace(badPlan,
-		`locator: {kind: text, value: "搜索", exact: true}`,
-		`locator: {kind: placeholder, value: "请输入搜索关键字", exact: true}`, 1)
 	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
 		{FinalYAML: badPlan},
-		{FinalYAML: goodPlan},
 		{FinalYAML: reproducedValidationYAML("browser/final.png")},
 	}}
 	observation := completedBrowserResult("browser/initial.png")
@@ -989,14 +1064,11 @@ assertions:
 	if err != nil || result.ErrorCode != "" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
-	if verifier.ObserveCalls != 1 || verifier.Calls != 1 || executor.Calls != 3 {
+	if verifier.ObserveCalls != 1 || verifier.Calls != 1 || executor.Calls != 2 {
 		t.Fatalf("observe=%d execute=%d agent=%d", verifier.ObserveCalls, verifier.Calls, executor.Calls)
 	}
 	if got := verifier.Requests[0].Plan.Actions[0].Locator; got == nil || got.Kind != "placeholder" || got.Value != "请输入搜索关键字" {
 		t.Fatalf("executed plan was not grounded in observation: %+v", verifier.Requests[0].Plan)
-	}
-	if !strings.Contains(executor.Prompts[1], "exact visible search textbox from initial_page_observation") {
-		t.Fatalf("retry prompt lacks observation grounding: %s", executor.Prompts[1])
 	}
 }
 

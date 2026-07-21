@@ -106,6 +106,10 @@ const DOM_OBSTRUCTION_SAFE_NAMES = Object.freeze([
   'close ad', 'skip ad', 'close dialog', 'close', 'dismiss', 'skip', 'not now',
   '×', '✕', '✖', 'x',
 ]);
+const DOM_OBSTRUCTION_DETACHED_MODAL_SAFE_NAMES = Object.freeze([
+  '关闭广告', '跳过广告', '关闭弹窗广告', '关闭弹窗',
+  'close ad', 'skip ad', 'close dialog',
+]);
 const DOM_OBSTRUCTION_RISKY_NAME = /(同意|接受|确认|继续|提交|登录|注册|支付|购买|删除|移除|授权|accept|agree|confirm|continue|submit|sign[ -]?in|log[ -]?in|register|pay|purchase|delete|remove|allow)/i;
 const RESPONSE_ASSERTION_BODY_MAX_BYTES = 256 << 10;
 const RESPONSE_ASSERTION_MAX_VISITED_NODES = 10_000;
@@ -1394,6 +1398,9 @@ function normalizedObstructionName(value) {
 const NORMALIZED_DOM_OBSTRUCTION_SAFE_NAMES = new Set(
   DOM_OBSTRUCTION_SAFE_NAMES.map(normalizedObstructionName),
 );
+const NORMALIZED_DOM_OBSTRUCTION_DETACHED_MODAL_SAFE_NAMES = new Set(
+  DOM_OBSTRUCTION_DETACHED_MODAL_SAFE_NAMES.map(normalizedObstructionName),
+);
 
 function obstructionStructuralHint(snapshot) {
   return [snapshot.id, snapshot.className, snapshot.testID, snapshot.ariaLabel, snapshot.title]
@@ -1420,6 +1427,26 @@ function obstructionCandidateScore(snapshot) {
   if (snapshot.coverage >= 0.5) score += 5;
   if (/(广告|推广|advert|sponsor|interstitial)/i.test(String(snapshot.overlayText || ''))) score += 10;
   return score;
+}
+
+// Portal-based interstitials sometimes render their close control as a
+// sibling just outside the dialog card. Geometry containment cannot prove
+// ownership in that layout, so this fallback deliberately accepts only a
+// unique, compact control with an ad/dialog-specific exact accessible name
+// while a semantic or full-screen modal is visible. Generic "close"/X
+// controls remain subject to the stricter containment rule above.
+function detachedModalObstructionCandidateScore(snapshot, overlays) {
+  if (!snapshot || snapshot.disabled) return -1;
+  const names = [snapshot.ariaLabel, snapshot.title, snapshot.text]
+    .map(normalizedObstructionName)
+    .filter(Boolean);
+  if (names.some((name) => DOM_OBSTRUCTION_RISKY_NAME.test(name))) return -1;
+  if (!names.some((name) => NORMALIZED_DOM_OBSTRUCTION_DETACHED_MODAL_SAFE_NAMES.has(name))) return -1;
+  const compactControl = snapshot.width > 0 && snapshot.height > 0
+    && snapshot.width <= 128 && snapshot.height <= 128;
+  if (!compactControl) return -1;
+  const modalVisible = overlays.some((overlay) => overlay.modalSemantic || overlay.coverage >= 0.5);
+  return modalVisible ? 95 : -1;
 }
 
 async function visibleObstructionOverlays(page) {
@@ -1550,7 +1577,10 @@ async function exactSafeLabelObstructionCandidate(page, overlays) {
       const candidate = matches.nth(index);
       if (!await candidate.isVisible().catch(() => false)) continue;
       const snapshot = await obstructionCandidateSnapshot(candidate, overlays).catch(() => null);
-      const score = obstructionCandidateScore(snapshot);
+      const score = Math.max(
+        obstructionCandidateScore(snapshot),
+        detachedModalObstructionCandidateScore(snapshot, overlays),
+      );
       if (score >= 0) ranked.push({ candidate, score });
     }
   }
@@ -1621,7 +1651,10 @@ export async function dismissSafeDOMObstructions(page, {
     const candidate = await uniqueSafeObstructionCandidate(page).catch(() => null);
     if (!candidate) break;
     try {
-      await candidate.click({ timeout: 2_000 });
+      // The candidate has already passed the worker-owned, non-business
+      // obstruction guard. Force avoids Playwright waiting forever on close
+      // controls that intentionally float or pulse beside an interstitial.
+      await candidate.click({ timeout: 2_000, force: true });
       await candidate.waitFor?.({ state: 'hidden', timeout: 2_000 }).catch(() => {});
       await page.waitForTimeout?.(settleMs);
       if (await candidate.isVisible().catch(() => false)) break;

@@ -1741,7 +1741,11 @@ test('DOM obstruction guard dismisses one unambiguous advertisement overlay', as
     textContent: async () => '×',
     isDisabled: async () => false,
     boundingBox: async () => ({ x: 618, y: 650, width: 44, height: 44 }),
-    click: async () => { clicks += 1; visible = false; },
+    click: async (options) => {
+      assert.equal(options?.force, true, 'animated detached close control must bypass stability waiting');
+      clicks += 1;
+      visible = false;
+    },
     waitFor: async () => {},
   };
   const controls = { count: async () => 1, nth: () => close };
@@ -1778,7 +1782,11 @@ test('DOM obstruction guard finds an exact accessible close label beyond the gen
     textContent: async () => '',
     isDisabled: async () => false,
     boundingBox: async () => ({ x: 620, y: 650, width: 40, height: 40 }),
-    click: async () => { clicks += 1; visible = false; },
+    click: async (options) => {
+      assert.equal(options?.force, true, 'animated detached close control must bypass stability waiting');
+      clicks += 1;
+      visible = false;
+    },
     waitFor: async () => {},
   };
   const irrelevant = {
@@ -1806,6 +1814,55 @@ test('DOM obstruction guard finds an exact accessible close label beyond the gen
     getByText: () => empty,
     waitForTimeout: async () => {},
     viewportSize: () => ({ width: 1280, height: 720 }),
+  };
+
+  assert.equal(await worker.dismissSafeDOMObstructions(page), 1);
+  assert.equal(clicks, 1);
+});
+
+test('DOM obstruction guard accepts one exact close label rendered beside a modal card', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let visible = true;
+  let clicks = 0;
+  const close = {
+    isVisible: async () => visible,
+    getAttribute: async (name) => ({
+      role: '',
+      'aria-label': '关闭弹窗广告',
+      class: 'rounded-full',
+    })[name] ?? '',
+    textContent: async () => '',
+    isDisabled: async () => false,
+    // The real H5 page renders the close control below the dialog card rather
+    // than inside its bounding box.
+    boundingBox: async () => ({ x: 178, y: 620, width: 34, height: 34 }),
+    click: async (options) => {
+      assert.equal(options?.force, true, 'animated detached close control must bypass stability waiting');
+      clicks += 1;
+      visible = false;
+    },
+    waitFor: async () => {},
+  };
+  const dialog = {
+    isVisible: async () => visible,
+    boundingBox: async () => ({ x: 35, y: 262, width: 320, height: 320 }),
+    getAttribute: async (name) => name === 'role' ? 'dialog' : '',
+    textContent: async () => '广告',
+  };
+  const marked = { count: async () => 1, nth: () => dialog };
+  const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const page = {
+    locator: (selector) => {
+      if (selector.includes('[role="dialog"]')) return marked;
+      return empty;
+    },
+    getByLabel: (name, options) => {
+      assert.deepEqual(options, { exact: true });
+      return name === '关闭弹窗广告' ? { count: async () => 1, nth: () => close } : empty;
+    },
+    getByText: () => empty,
+    waitForTimeout: async () => {},
+    viewportSize: () => ({ width: 390, height: 844 }),
   };
 
   assert.equal(await worker.dismissSafeDOMObstructions(page), 1);

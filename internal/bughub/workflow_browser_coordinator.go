@@ -146,7 +146,7 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 	}
 	if !found {
 		if _, supportsObservation := c.Verifier.(BrowserObserver); supportsObservation {
-			observed, observedFrozen, observeErr := c.executeBrowser(ctx, request, browserObservationPlan(request.Bug.FrontendURL), browserObservationExecution)
+			observed, observedFrozen, observeErr := c.executeBrowser(ctx, request, browserObservationPlan(request.Bug.FrontendURL, browserScenarioDeviceProfile(request)), browserObservationExecution)
 			if observeErr != nil {
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return result, ctxErr
@@ -176,6 +176,13 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 		plan, err = parseValidatedBrowserPlan(planning.FinalYAML, request.Policy)
 		if err == nil {
 			plan = normalizeBrowserSearchSubmissions(plan)
+			var grounded bool
+			plan, grounded, err = normalizeBrowserPlanObservationGrounding(request.Bug, plan, observation)
+			if grounded && request.Emit != nil {
+				request.Emit(InvestigationEvent{Type: "browser_plan_observation_bound", Message: "已将浏览器入口绑定到当前页面的确定控件"})
+			}
+		}
+		if err == nil {
 			err = validateBrowserPlanReproductionCoverage(request.Bug, plan)
 			if err == nil {
 				err = validateBrowserPlanObservationGrounding(request.Bug, plan, observation)
@@ -202,6 +209,9 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 			plan, err = parseValidatedBrowserPlan(planning.FinalYAML, request.Policy)
 			if err == nil {
 				plan = normalizeBrowserSearchSubmissions(plan)
+				plan, _, err = normalizeBrowserPlanObservationGrounding(request.Bug, plan, observation)
+			}
+			if err == nil {
 				err = validateBrowserPlanReproductionCoverage(request.Bug, plan)
 				if err == nil {
 					err = validateBrowserPlanObservationGrounding(request.Bug, plan, observation)
@@ -612,8 +622,13 @@ func browserPlanRetryAllowed(err error) bool {
 
 func validateBrowserPlanScenarioEvidence(request BrowserCoordinatorRequest, plan BrowserPlan) error {
 	context := browserCurrentScenarioText(request)
-	if browserScenarioIsMobile(context) && plan.DeviceProfile != "mobile" {
-		return errors.New("browser plan requires mobile device_profile for the current H5 scenario")
+	wantProfile := browserScenarioDeviceProfile(request)
+	gotProfile := strings.TrimSpace(plan.DeviceProfile)
+	if gotProfile == "" {
+		gotProfile = "desktop"
+	}
+	if gotProfile != wantProfile {
+		return fmt.Errorf("browser plan requires %s device_profile for the current scenario", wantProfile)
 	}
 	if browserScenarioRequiresResponseAssertion(context) && len(plan.ResponseAssertions) == 0 {
 		return errors.New("browser plan requires response_assertions for the current API field comparison")
@@ -686,6 +701,13 @@ func browserValidationRecipeScenarioSHA256(request BrowserCoordinatorRequest) (s
 
 func browserScenarioIsMobile(context string) bool {
 	return strings.Contains(context, "h5") || strings.Contains(context, "移动端") || strings.Contains(context, "mobile")
+}
+
+func browserScenarioDeviceProfile(request BrowserCoordinatorRequest) string {
+	if browserScenarioIsMobile(browserCurrentScenarioText(request)) {
+		return "mobile"
+	}
+	return "desktop"
 }
 
 func browserScenarioRequiresResponseAssertion(context string) bool {
@@ -1432,31 +1454,67 @@ func validateBrowserPlanReproductionCoverage(bug Bug, plan BrowserPlan) error {
 	return errors.New("browser plan skips explicit search page entry before search input")
 }
 
-// validateBrowserPlanObservationGrounding prevents a planner from satisfying
-// an explicit "enter search" step with a generic Search/搜索 label when the
-// host has already observed the actual search input on the initial page. The
-// initial observation is authoritative only for the entry interaction; later
-// controls may legitimately appear after navigation.
-func validateBrowserPlanObservationGrounding(bug Bug, plan BrowserPlan, observation *BrowserVerificationResult) error {
-	if observation == nil || !browserBugRequiresSearchPageEntry(bug.Steps) {
+type browserObservedSearchEntry struct {
+	Locator BrowserLocator
+	Score   int
+}
+
+func observedBrowserSearchEntries(observation *BrowserVerificationResult) []browserObservedSearchEntry {
+	if observation == nil {
 		return nil
 	}
-	observedNames := make(map[string]map[string]struct{})
+	seen := make(map[string]struct{})
+	result := make([]browserObservedSearchEntry, 0)
 	for _, node := range observation.AccessibilitySummary {
 		role := strings.ToLower(strings.TrimSpace(node.Role))
 		name := strings.TrimSpace(node.Name)
-		if !node.Visible || node.Disabled || name == "" || (role != "textbox" && role != "searchbox") || !browserSearchSemantic(name) {
+		kind := strings.ToLower(strings.TrimSpace(node.LocatorKind))
+		if !node.Visible || node.Disabled || name == "" || !browserSearchSemantic(name) {
 			continue
 		}
-		normalizedName := normalizedBrowserVisibleText(name)
-		if observedNames[normalizedName] == nil {
-			observedNames[normalizedName] = make(map[string]struct{})
+		if role != "link" && role != "button" && role != "textbox" && role != "searchbox" {
+			continue
 		}
-		observedNames[normalizedName][strings.ToLower(strings.TrimSpace(node.LocatorKind))] = struct{}{}
+		if kind != "label" && kind != "text" && kind != "placeholder" {
+			continue
+		}
+		key := kind + "\x00" + normalizedBrowserVisibleText(name)
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		exact := true
+		score := 100
+		if role == "link" || role == "button" {
+			score = 200
+		}
+		lowerName := strings.ToLower(name)
+		for _, marker := range []string{"打开搜索", "进入搜索", "搜索页", "open search", "enter search", "search page"} {
+			if strings.Contains(lowerName, marker) {
+				score += 100
+				break
+			}
+		}
+		if kind == "label" {
+			score += 10
+		}
+		result = append(result, browserObservedSearchEntry{
+			Locator: BrowserLocator{Kind: kind, Value: name, Exact: &exact},
+			Score:   score,
+		})
 	}
-	if len(observedNames) == 0 || browserSearchSemantic(plan.StartURL) {
-		return nil
-	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Score != result[j].Score {
+			return result[i].Score > result[j].Score
+		}
+		left := result[i].Locator.Kind + "\x00" + result[i].Locator.Value
+		right := result[j].Locator.Kind + "\x00" + result[j].Locator.Value
+		return left < right
+	})
+	return result
+}
+
+func browserSearchEntryActionIndex(plan BrowserPlan) int {
 	firstSearchFill := len(plan.Actions)
 	for index, action := range plan.Actions {
 		if action.Action == "fill" && action.Locator != nil && (browserSearchSemantic(action.ID) || browserSearchSemantic(action.Locator.Value) || browserSearchSemantic(action.Locator.Name)) {
@@ -1464,36 +1522,62 @@ func validateBrowserPlanObservationGrounding(bug Bug, plan BrowserPlan, observat
 			break
 		}
 	}
-	for _, action := range plan.Actions[:firstSearchFill] {
-		if action.Action == "goto" && browserSearchSemantic(action.URL) {
-			return nil
-		}
+	for index, action := range plan.Actions[:firstSearchFill] {
 		if action.Locator == nil || (action.Action != "click" && action.Action != "press" && action.Action != "select") {
 			continue
 		}
-		locator := *action.Locator
-		if locator.Exact == nil || !*locator.Exact {
-			continue
-		}
-		var candidate string
-		switch locator.Kind {
-		case "placeholder", "label":
-			candidate = locator.Value
-		case "role":
-			if role := strings.ToLower(strings.TrimSpace(locator.Value)); role == "textbox" || role == "searchbox" {
-				candidate = locator.Name
-			}
-		}
-		if observedKinds, ok := observedNames[normalizedBrowserVisibleText(candidate)]; ok {
-			if _, legacyObservation := observedKinds[""]; legacyObservation {
-				return nil
-			}
-			if _, exactKind := observedKinds[locator.Kind]; exactKind {
-				return nil
-			}
+		if browserSearchSemantic(action.ID) || browserSearchSemantic(action.Locator.Value) || browserSearchSemantic(action.Locator.Name) {
+			return index
 		}
 	}
-	return errors.New("browser plan search page entry must use an exact observed search input control")
+	return -1
+}
+
+// normalizeBrowserPlanObservationGrounding turns the Agent's search-entry
+// locator into a host-owned binding to the strongest unique control observed
+// in the same device profile. It does not invent routes or touch later dynamic
+// controls that legitimately appear after navigation.
+func normalizeBrowserPlanObservationGrounding(bug Bug, plan BrowserPlan, observation *BrowserVerificationResult) (BrowserPlan, bool, error) {
+	if observation == nil || !browserBugRequiresSearchPageEntry(bug.Steps) {
+		return plan, false, nil
+	}
+	if browserSearchSemantic(plan.StartURL) {
+		return plan, false, nil
+	}
+	entries := observedBrowserSearchEntries(observation)
+	if len(entries) == 0 {
+		return plan, false, errors.New("browser plan search page entry has no exact observed control")
+	}
+	if len(entries) > 1 && entries[0].Score == entries[1].Score {
+		return plan, false, errors.New("browser plan search page entry has ambiguous observed controls")
+	}
+	index := browserSearchEntryActionIndex(plan)
+	if index < 0 {
+		return plan, false, errors.New("browser plan search page entry is missing before search input")
+	}
+	if reflect.DeepEqual(plan.Actions[index].Locator, &entries[0].Locator) {
+		return plan, false, nil
+	}
+	plan.Actions = append([]BrowserAction(nil), plan.Actions...)
+	locator := entries[0].Locator
+	plan.Actions[index].Locator = &locator
+	return plan, true, nil
+}
+
+func validateBrowserPlanObservationGrounding(bug Bug, plan BrowserPlan, observation *BrowserVerificationResult) error {
+	if observation == nil || !browserBugRequiresSearchPageEntry(bug.Steps) || browserSearchSemantic(plan.StartURL) {
+		return nil
+	}
+	index := browserSearchEntryActionIndex(plan)
+	if index < 0 || plan.Actions[index].Locator == nil {
+		return errors.New("browser plan search page entry must use an exact observed control")
+	}
+	for _, entry := range observedBrowserSearchEntries(observation) {
+		if reflect.DeepEqual(*plan.Actions[index].Locator, entry.Locator) {
+			return nil
+		}
+	}
+	return errors.New("browser plan search page entry must use an exact observed control")
 }
 
 func browserBugRequiresSearchPageEntry(steps string) bool {
@@ -2083,10 +2167,11 @@ func validateBrowserPlanStartOrigin(plan BrowserPlan, policy BrowserSecurityPoli
 	return nil
 }
 
-func browserObservationPlan(startURL string) BrowserPlan {
+func browserObservationPlan(startURL, deviceProfile string) BrowserPlan {
 	return BrowserPlan{
-		Version:  BrowserPlanVersion,
-		StartURL: strings.TrimSpace(startURL),
+		Version:       BrowserPlanVersion,
+		DeviceProfile: strings.TrimSpace(deviceProfile),
+		StartURL:      strings.TrimSpace(startURL),
 		Actions: []BrowserAction{{
 			ID: "capture-initial-page", Action: "screenshot",
 		}},
@@ -2104,6 +2189,7 @@ func browserPlannerPrompt(request BrowserCoordinatorRequest, observation *Browse
 	}
 	if observation != nil {
 		contextFields["initial_page_observation"] = map[string]any{
+			"device_profile":      browserScenarioDeviceProfile(request),
 			"final_url":           observation.FinalURL,
 			"title":               observation.Title,
 			"accessible_controls": observation.AccessibilitySummary,

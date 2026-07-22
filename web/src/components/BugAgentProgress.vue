@@ -8,7 +8,7 @@ const props = withDefaults(defineProps<{
 }>(), { attempt: null, events: () => [] })
 
 const visiblePhases = new Set(['investigation', 'fix'])
-const visibleTypes = new Set(['thread_started', 'turn_started', 'turn_completed', 'command_execution', 'mcp_tool_call', 'agent_message', 'retry', 'error', 'turn_failed', 'result'])
+const visibleTypes = new Set(['thread_started', 'turn_started', 'turn_completed', 'command_execution', 'mcp_tool_call', 'agent_message', 'code_intelligence', 'retry', 'error', 'turn_failed', 'result'])
 const investigationSteps = [
   { key: 'evidence_handoff', label: '验证证据' },
   { key: 'timeline', label: '时间轴' },
@@ -62,6 +62,7 @@ function eventTitle(event: { type: string; state: string; exitCode?: number }): 
     return '正在执行命令'
   }
   if (event.type === 'mcp_tool_call') return event.state === 'completed' ? '工具调用完成' : '正在调用工具'
+  if (event.type === 'code_intelligence') return 'CodeGraph 代码智能'
   if (event.type === 'agent_message' || event.type === 'result') return 'Agent 分析输出'
   if (event.type === 'retry') return 'Agent 正在重试'
   if (event.type === 'turn_failed' || event.type === 'error') return 'Agent 执行异常'

@@ -373,6 +373,7 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 	if runtime.runner != nil {
 		runtime.runner.SetBrowserVerifier(a.workflowBrowser, caseBrowserPolicyResolver{app: a})
 		runtime.runner.SetFrontendRuntimeResolver(caseFrontendRuntimeResolver{app: a})
+		runtime.runner.SetCodeIntelligenceResolver(caseCodeIntelligenceResolver{app: a})
 	}
 	runtime.orchestrator.SetRecoveryContextResolver(bughub.RecoveryContextResolverFunc(a.resolveIncidentRecoveryContext))
 	a.workflowStore = store
@@ -1632,7 +1633,7 @@ func (a *App) emitIncidentPhaseEvent(caseID string, event bughub.InvestigationEv
 var incidentPublicPhaseEventTypes = map[string]bool{
 	"browser_progress": true, "thread_started": true, "turn_started": true,
 	"turn_completed": true, "command_execution": true, "mcp_tool_call": true,
-	"agent_message": true, "phase_step": true, "retry": true, "error": true,
+	"agent_message": true, "phase_step": true, "code_intelligence": true, "retry": true, "error": true,
 	"turn_failed": true, "result": true,
 }
 
@@ -1701,7 +1702,7 @@ func incidentPublicPhaseEventMeta(meta map[string]any) map[string]any {
 	allowed := map[string]struct{}{
 		"case_id": {}, "attempt_id": {}, "cycle_number": {}, "phase": {},
 		"browser_code": {}, "current": {}, "total": {},
-		"state": {}, "status": {}, "exit_code": {},
+		"state": {}, "status": {}, "exit_code": {}, "ready": {},
 		"step_key": {}, "step_index": {}, "step_total": {},
 	}
 	out := make(map[string]any, len(allowed))

@@ -14,8 +14,9 @@ import (
 )
 
 // FixWorkspaceManager turns the configured env -> repository -> branch map
-// into host-owned, detached Git worktrees. The fixer is never allowed to use
-// the user's currently checked-out branch as an implicit base.
+// into host-owned, standalone Git repositories. The fixer is never allowed to
+// use the user's currently checked-out branch as an implicit base, and every
+// repository keeps its .git metadata inside the Agent-approved filesystem root.
 type FixWorkspaceManager struct {
 	root        string
 	resolvePath RepositoryPathResolver
@@ -33,6 +34,7 @@ type fixWorkspaceBinding struct {
 
 type FixWorkspaceLease struct {
 	bindings []fixWorkspaceBinding
+	root     string
 }
 
 type fixWorkspaceFilesystemRoot struct {
@@ -76,11 +78,15 @@ func (m *FixWorkspaceManager) Prepare(ctx context.Context, caseID, attemptID, en
 	if err != nil {
 		return nil, err
 	}
-	root := filepath.Join(m.root, safeFixWorkspaceName(attemptID))
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return nil, fmt.Errorf("create fix worktree root: %w", err)
+	managerRoot, err := filepath.Abs(m.root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve fix workspace root: %w", err)
 	}
-	lease := &FixWorkspaceLease{}
+	root := filepath.Join(filepath.Clean(managerRoot), safeFixWorkspaceName(attemptID))
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return nil, fmt.Errorf("create fix workspace root: %w", err)
+	}
+	lease := &FixWorkspaceLease{root: root}
 	repos := make([]string, 0, len(sourceBaselines))
 	for repo := range sourceBaselines {
 		repos = append(repos, repo)
@@ -135,16 +141,46 @@ func (m *FixWorkspaceManager) prepareRepository(ctx context.Context, root, caseI
 	}
 	worktree := filepath.Join(root, safeFixWorkspaceName(repo))
 	if _, statErr := os.Lstat(worktree); statErr == nil {
-		return fixWorkspaceBinding{}, fmt.Errorf("dedicated fix worktree already exists for %s", repo)
+		return fixWorkspaceBinding{}, fmt.Errorf("dedicated fix workspace already exists for %s", repo)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return fixWorkspaceBinding{}, fmt.Errorf("inspect dedicated fix worktree for %s: %w", repo, statErr)
+		return fixWorkspaceBinding{}, fmt.Errorf("inspect dedicated fix workspace for %s: %w", repo, statErr)
 	}
-	if err := gitRun(ctx, path, "worktree", "add", "--detach", worktree, baseCommit); err != nil {
-		return fixWorkspaceBinding{}, fmt.Errorf("create dedicated fix worktree for %s: %w", repo, err)
+	fetchURL, err := gitOutput(ctx, path, "remote", "get-url", remote)
+	if err != nil {
+		return fixWorkspaceBinding{}, fmt.Errorf("resolve fetch remote for %s: %w", repo, err)
+	}
+	pushURL, pushErr := gitOutput(ctx, path, "remote", "get-url", "--push", remote)
+	if pushErr != nil || strings.TrimSpace(pushURL) == "" {
+		pushURL = fetchURL
+	}
+	// --no-local is mandatory: a normal local clone may hard-link objects or
+	// use external object storage, recreating the same sandbox escape that a
+	// linked worktree causes. The resulting .git directory is self-contained.
+	if err := gitRun(ctx, root, "clone", "--no-checkout", "--no-local", path, worktree); err != nil {
+		return fixWorkspaceBinding{}, fmt.Errorf("create standalone fix workspace for %s: %w", repo, err)
+	}
+	cleanupWorkspace := func() { _ = os.RemoveAll(worktree) }
+	if err := gitRun(ctx, worktree, "remote", "set-url", remote, fetchURL); err != nil {
+		cleanupWorkspace()
+		return fixWorkspaceBinding{}, fmt.Errorf("bind fetch remote for %s: %w", repo, err)
+	}
+	if err := gitRun(ctx, worktree, "remote", "set-url", "--push", remote, pushURL); err != nil {
+		cleanupWorkspace()
+		return fixWorkspaceBinding{}, fmt.Errorf("bind push remote for %s: %w", repo, err)
+	}
+	for key, value := range map[string]string{"user.name": "Troubleshooter Studio", "user.email": "studio@localhost"} {
+		if err := gitRun(ctx, worktree, "config", "--local", key, value); err != nil {
+			cleanupWorkspace()
+			return fixWorkspaceBinding{}, fmt.Errorf("configure standalone fix workspace for %s: %w", repo, err)
+		}
+	}
+	if err := gitRun(ctx, worktree, "checkout", "--detach", baseCommit); err != nil {
+		cleanupWorkspace()
+		return fixWorkspaceBinding{}, fmt.Errorf("lock standalone fix workspace for %s: %w", repo, err)
 	}
 	if err := os.Chmod(worktree, 0o700); err != nil {
-		_ = gitRun(context.Background(), path, "worktree", "remove", "--force", worktree)
-		return fixWorkspaceBinding{}, fmt.Errorf("protect dedicated fix worktree for %s: %w", repo, err)
+		cleanupWorkspace()
+		return fixWorkspaceBinding{}, fmt.Errorf("protect standalone fix workspace for %s: %w", repo, err)
 	}
 	return fixWorkspaceBinding{Repo: repo, SourcePath: path, Worktree: worktree, Remote: remote, BaseBranch: sourceBranch, BaseCommit: strings.TrimSpace(baseCommit), TargetEnvironmentBranch: targetBranch}, nil
 }
@@ -155,11 +191,11 @@ func (l *FixWorkspaceLease) Prompt() string {
 	}
 	var out strings.Builder
 	out.WriteString("\n## Studio locked fix workspaces (mandatory)\n\n")
-	out.WriteString("Studio fetched and locked the user-approved development baseline for each affected repository before this Agent started. Make every code change, commit, test, and push inside the dedicated worktree listed below. The target environment branch is a separate later integration target; never use it as the fix base unless the user explicitly selected the same branch. The configured source checkout is read-only context: do not switch it, merge into it, or create the fix branch from its current HEAD.\n\n")
+	out.WriteString("Studio fetched and locked the user-approved development baseline for each affected repository before this Agent started. Make every code change, commit, test, and push inside the dedicated standalone repository listed below. Its Git metadata is contained inside the approved directory. The target environment branch is a separate later integration target; never use it as the fix base unless the user explicitly selected the same branch. The configured source checkout is read-only context: do not switch it, merge into it, or create the fix branch from its current HEAD.\n\n")
 	for _, binding := range l.bindings {
-		fmt.Fprintf(&out, "- repo: `%s`\n  dedicated_worktree: `%s`\n  source_baseline_branch: `%s`\n  locked_source_baseline_commit: `%s`\n  target_environment_branch: `%s`\n  push_remote: `%s`\n", binding.Repo, binding.Worktree, binding.BaseBranch, binding.BaseCommit, binding.TargetEnvironmentBranch, binding.Remote)
+		fmt.Fprintf(&out, "- repo: `%s`\n  dedicated_workspace: `%s`\n  source_baseline_branch: `%s`\n  locked_source_baseline_commit: `%s`\n  target_environment_branch: `%s`\n  push_remote: `%s`\n", binding.Repo, binding.Worktree, binding.BaseBranch, binding.BaseCommit, binding.TargetEnvironmentBranch, binding.Remote)
 	}
-	out.WriteString("\nInside each selected dedicated worktree, first verify `git rev-parse HEAD` equals `locked_source_baseline_commit`, then create the dedicated fix branch with `git switch -c <fix-branch>`. Do not merge or rebase unrelated branches into the fix branch. Report `base_branch` as `source_baseline_branch` and `target_environment_branch` exactly as bound above. Studio rejects results whose reported branches differ or whose commit is not a linear descendant of the locked source baseline.\n")
+	out.WriteString("\nInside each selected dedicated workspace, first verify `git rev-parse HEAD` equals `locked_source_baseline_commit`, then create the dedicated fix branch with `git switch -c <fix-branch>`. Do not merge or rebase unrelated branches into the fix branch. Report `base_branch` as `source_baseline_branch` and `target_environment_branch` exactly as bound above. Studio rejects results whose reported branches differ or whose commit is not a linear descendant of the locked source baseline.\n")
 	return out.String()
 }
 
@@ -185,7 +221,7 @@ func (l *FixWorkspaceLease) ValidateResult(ctx context.Context, result PhaseResu
 		seen[change.Repo] = struct{}{}
 		binding, ok := bindings[change.Repo]
 		if !ok {
-			return fmt.Errorf("repository %s is not bound to a locked source-baseline worktree", change.Repo)
+			return fmt.Errorf("repository %s is not bound to a locked source-baseline workspace", change.Repo)
 		}
 		if change.BaseBranch != binding.BaseBranch {
 			return fmt.Errorf("repository %s reported base %q; locked source baseline is %q", change.Repo, change.BaseBranch, binding.BaseBranch)
@@ -196,7 +232,7 @@ func (l *FixWorkspaceLease) ValidateResult(ctx context.Context, result PhaseResu
 		if change.PushRemote != binding.Remote {
 			return fmt.Errorf("repository %s reported push remote %q; locked remote is %q", change.Repo, change.PushRemote, binding.Remote)
 		}
-		if err := validateLinearFixAncestry(ctx, binding.SourcePath, binding.BaseCommit, change.FixCommit); err != nil {
+		if err := validateLinearFixAncestry(ctx, binding.Worktree, binding.BaseCommit, change.FixCommit); err != nil {
 			return fmt.Errorf("repository %s fix commit is based on the wrong source baseline history: %w", change.Repo, err)
 		}
 	}
@@ -403,11 +439,29 @@ func (l *FixWorkspaceLease) Close(ctx context.Context) error {
 	var errs []error
 	for index := len(l.bindings) - 1; index >= 0; index-- {
 		binding := l.bindings[index]
-		if err := gitRun(ctx, binding.SourcePath, "worktree", "remove", "--force", binding.Worktree); err != nil {
-			errs = append(errs, fmt.Errorf("remove fix worktree for %s: %w", binding.Repo, err))
+		if err := removeStandaloneFixWorkspace(l.root, binding.Worktree); err != nil {
+			errs = append(errs, fmt.Errorf("remove fix workspace for %s: %w", binding.Repo, err))
+		}
+	}
+	if l.root != "" {
+		if err := os.Remove(l.root); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("remove fix workspace root: %w", err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func removeStandaloneFixWorkspace(root, workspace string) error {
+	root = filepath.Clean(strings.TrimSpace(root))
+	workspace = filepath.Clean(strings.TrimSpace(workspace))
+	if root == "." || workspace == "." || !filepath.IsAbs(root) || !filepath.IsAbs(workspace) {
+		return errors.New("standalone fix workspace paths must be absolute")
+	}
+	relative, err := filepath.Rel(root, workspace)
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.Dir(relative) != "." {
+		return errors.New("refusing to remove a path outside the fix workspace root")
+	}
+	return os.RemoveAll(workspace)
 }
 
 func loadEnvironmentBranches(botPath, environment string) (map[string]string, error) {

@@ -14,6 +14,7 @@ describe('BugAgentProgress', () => {
       { at: '2026-07-18T10:00:01Z', type: 'command_execution', message: 'rg -n navigation web/src', meta: { state: 'started' } },
       { at: '2026-07-18T10:00:02Z', type: 'command_execution', message: 'go test ./...', meta: { state: 'completed', exit_code: 0 } },
       { at: '2026-07-18T10:00:03Z', type: 'mcp_tool_call', message: 'grafana/query', meta: { state: 'started' } },
+	  { at: '2026-07-18T10:00:03Z', type: 'code_intelligence', message: 'CodeGraph 2/2 个仓库已由 Studio 准备完成', meta: { state: 'ready' } },
       { at: '2026-07-18T10:00:04Z', type: 'agent_message', message: '已定位到布局计算逻辑', raw: { password: 'hidden' }, meta: {} },
     ]
     const wrapper = mount(BugAgentProgress, { props: { attempt: attempt(), events } })
@@ -23,6 +24,8 @@ describe('BugAgentProgress', () => {
     expect(wrapper.text()).toContain('正在执行命令')
     expect(wrapper.text()).toContain('命令执行完成 · exit 0')
     expect(wrapper.text()).toContain('正在调用工具')
+	  expect(wrapper.text()).toContain('CodeGraph 代码智能')
+	  expect(wrapper.text()).toContain('CodeGraph 2/2 个仓库已由 Studio 准备完成')
     expect(wrapper.text()).toContain('已定位到布局计算逻辑')
     expect(wrapper.text()).not.toContain('hidden')
   })

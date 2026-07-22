@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -400,6 +401,7 @@ func fixOutputContract() string {
 	sb.WriteString("blocked_reason: \"<only when blocked/failed>\"\n")
 	sb.WriteString("evidence: []\n")
 	sb.WriteString("```\n")
+	sb.WriteString("修复阶段通常不需要另写总结文件作为 evidence，阻塞或失败时保持 `evidence: []`。只有确有可注册的运行时或测试制品时才添加条目，而且每项必须同时包含非空 `kind`、staging 相对 `path` 和 `environment`。\n")
 	sb.WriteString("每个仓库的 base_branch 必须是 Studio 锁定的用户确认开发基线；target_environment_branch 是后续独立集成目标，两者允许不同。fix_branch 必须是不同的专用修复分支，禁止直接在基线分支或环境分支修复、提交或推送；Agent 也不得自行合并这两个目标分支。\n")
 	return sb.String()
 }
@@ -467,6 +469,7 @@ func buildCodexExecCommandWithProfile(codexBin, workspace, prompt string, imageP
 	args = append(args, prompt)
 	cmd := exec.Command(codexBin, args...)
 	cmd.Dir = workspace
+	cmd.Env = codexAgentProcessEnvironment(prompt)
 	return cmd, nil
 }
 
@@ -480,7 +483,7 @@ func buildCodexBotExecCommand(codexBin string, bot BotRef, prompt string, imageP
 		return nil, err
 	}
 	if codexHome != "" {
-		cmd.Env = setProcessEnv(os.Environ(), "CODEX_HOME", codexHome)
+		cmd.Env = setProcessEnv(cmd.Env, "CODEX_HOME", codexHome)
 	}
 	return cmd, nil
 }
@@ -636,6 +639,78 @@ func setProcessEnv(values []string, key, value string) []string {
 		result = append(result, item)
 	}
 	return append(result, prefix+value)
+}
+
+var (
+	codexGitBinDirOnce sync.Once
+	codexGitBinDir     string
+)
+
+func codexAgentProcessEnvironment(prompt string) []string {
+	values := os.Environ()
+	staging := codexStagingPathFromPrompt(prompt)
+	if staging == "" || codexRepositoryAccessPhase(staging) != PhaseFix {
+		return values
+	}
+	for key, value := range map[string]string{
+		"GIT_CONFIG_GLOBAL":   os.DevNull,
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"GIT_TERMINAL_PROMPT": "0",
+		"TMPDIR":              staging,
+		"TMP":                 staging,
+		"TEMP":                staging,
+	} {
+		values = setProcessEnv(values, key, value)
+	}
+	if directory := codexHostGitBinDirectory(); directory != "" {
+		path := processEnvValue(values, "PATH")
+		if path == "" {
+			path = directory
+		} else {
+			path = directory + string(os.PathListSeparator) + path
+		}
+		values = setProcessEnv(values, "PATH", path)
+	}
+	return values
+}
+
+func codexRepositoryAccessPhase(staging string) Phase {
+	data, err := os.ReadFile(filepath.Join(staging, repositoryAccessManifestName))
+	if err != nil {
+		return ""
+	}
+	var manifest repositoryAccessManifest
+	if json.Unmarshal(data, &manifest) != nil {
+		return ""
+	}
+	return manifest.Phase
+}
+
+func codexHostGitBinDirectory() string {
+	if runtime.GOOS != "darwin" {
+		return ""
+	}
+	codexGitBinDirOnce.Do(func() {
+		output, err := exec.Command("/usr/bin/xcrun", "--find", "git").Output()
+		if err != nil {
+			return
+		}
+		path := filepath.Clean(strings.TrimSpace(string(output)))
+		if filepath.IsAbs(path) {
+			codexGitBinDir = filepath.Dir(path)
+		}
+	})
+	return codexGitBinDir
+}
+
+func processEnvValue(values []string, key string) string {
+	prefix := key + "="
+	for index := len(values) - 1; index >= 0; index-- {
+		if strings.HasPrefix(values[index], prefix) {
+			return strings.TrimPrefix(values[index], prefix)
+		}
+	}
+	return ""
 }
 
 func codexFilesystemPermissionConfig(workspace, prompt string, imagePaths []string) (string, error) {

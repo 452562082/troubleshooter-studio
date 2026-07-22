@@ -382,8 +382,14 @@ func TestGenerate_CodeIntelligenceOptIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertExists(t, out, []string{"templates/workspace-template/skills/code-intelligence-query/SKILL.md"})
-	if got := readFile(t, filepath.Join(out, "templates/workspace-template/skills/code-intelligence-query/SKILL.md")); !strings.Contains(got, "codegraph_explore") {
-		t.Fatal(got)
+	codeIntelligenceSkill := readFile(t, filepath.Join(out, "templates/workspace-template/skills/code-intelligence-query/SKILL.md"))
+	if !strings.Contains(codeIntelligenceSkill, "codegraph_explore") || !strings.Contains(codeIntelligenceSkill, "code-intelligence-manifest.json") {
+		t.Fatal(codeIntelligenceSkill)
+	}
+	for _, forbidden := range []string{"$HOME/.tshoot/bin/codegraph", "codegraph status", "codegraph sync"} {
+		if strings.Contains(codeIntelligenceSkill, forbidden) {
+			t.Fatalf("generated Agent skill still executes sandboxed CodeGraph CLI %q:\n%s", forbidden, codeIntelligenceSkill)
+		}
 	}
 	if got := readFile(t, filepath.Join(out, "templates/workspace-template/skills/incident-investigator/SKILL.md")); !strings.Contains(got, "code-intelligence-query") {
 		t.Fatal(got)

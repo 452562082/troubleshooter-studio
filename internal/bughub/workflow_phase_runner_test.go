@@ -1659,6 +1659,64 @@ func TestAgentPhaseRunnerRejectsOutsideAndFakeRedactedEvidence(t *testing.T) {
 	}
 }
 
+func TestAgentPhaseRunnerPreservesBlockedFixWhenOptionalEvidenceIsInvalid(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-fix-invalid-optional-evidence", CaseFixing)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseFix, "")
+	executor := phaseExecutorFunc(func(_ context.Context, _ string, _ BotRef, prompt string, _ func(InvestigationEvent)) (PhaseExecutionResult, error) {
+		staging := stagingPathFromPrompt(prompt)
+		if staging == "" {
+			return PhaseExecutionResult{}, errors.New("missing Studio staging path")
+		}
+		if err := os.WriteFile(filepath.Join(staging, "fix-blocked.yaml"), []byte("blocked: git metadata unavailable\n"), 0o600); err != nil {
+			return PhaseExecutionResult{}, err
+		}
+		return PhaseExecutionResult{FinalYAML: `fix_status: blocked
+environment: test
+branches:
+  - repo: api
+    base_branch: feature/work
+    fix_branch: ""
+    commit: ""
+    pushed: false
+    target_environment_branch: test
+    push_remote: origin
+changes: []
+tests:
+  - repo: api
+    commit: ""
+    command: git status --short
+    result: skipped
+    skipped_reason: Git metadata unavailable
+deployment_notice: no branch was pushed
+risks: [Bug remains unfixed]
+blocked_reason: Git metadata unavailable
+evidence:
+  - path: fix-blocked.yaml
+`}, nil
+	})
+	completed := make(chan CompleteAttemptCommand, 1)
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(_ context.Context, command CompleteAttemptCommand) error {
+		completed <- command
+		return nil
+	})
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, installedPhaseRunnerBot(t, "bot", "codex")); err != nil {
+		t.Fatal(err)
+	}
+	command := <-completed
+	waitForAgentPhaseRunnerInactive(t, runner, attempt.ID)
+	if command.Outcome != PhaseOutcomeFixFailed || command.ErrorCode != "" {
+		t.Fatalf("blocked fix was overwritten by optional evidence: %+v", command)
+	}
+	var result FixResult
+	if err := json.Unmarshal(command.OutputJSON, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.FixStatus != "blocked" || result.BlockedReason != "Git metadata unavailable" || len(result.Evidence) != 0 {
+		t.Fatalf("blocked result was not preserved safely: %+v", result)
+	}
+}
+
 func TestAgentPhaseRunnerSecretScansStructuredOutputBeforeIntent(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-output-secret", CaseValidating)
@@ -1795,7 +1853,7 @@ func TestAgentPhaseRunnerDeferredCleanupRetriesAfterFirstFailure(t *testing.T) {
 	if err := store.ClaimRunnableAttempt(context.Background(), AttemptRunClaim{Attempt: attempt, ClaimToken: claimToken}); err != nil {
 		t.Fatal(err)
 	}
-	runner.run(context.Background(), attempt, incident, Bug{ID: incident.BugID}, installedPhaseRunnerBot(t, "bot", "codex"), "prompt", staging, nil, incident.Version, claimToken, func(context.Context, CompleteAttemptCommand) error { return nil }, nil, nil)
+	runner.run(context.Background(), attempt, incident, Bug{ID: incident.BugID}, installedPhaseRunnerBot(t, "bot", "codex"), "prompt", staging, nil, incident.Version, claimToken, func(context.Context, CompleteAttemptCommand) error { return nil }, nil, nil, nil)
 	if staging.calls != 2 {
 		t.Fatalf("cleanup calls = %d, want initial failure plus deferred retry", staging.calls)
 	}
@@ -1823,7 +1881,7 @@ func TestAgentPhaseRunnerPreservesStagingWhenCompletionIntentSaveFails(t *testin
 	runner.run(context.Background(), attempt, incident, Bug{ID: incident.BugID}, installedPhaseRunnerBot(t, "bot", "codex"), "prompt", staging, nil, incident.Version, claimToken, func(context.Context, CompleteAttemptCommand) error {
 		completionCalled = true
 		return nil
-	}, nil, nil)
+	}, nil, nil, nil)
 	cleanups, closes := staging.lifecycle()
 	if completionCalled || cleanups != 0 || closes != 1 {
 		t.Fatalf("completion=%v staging cleanup=%d close=%d", completionCalled, cleanups, closes)

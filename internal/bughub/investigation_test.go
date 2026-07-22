@@ -589,7 +589,7 @@ func TestBuildCodexExecCommandUsesHostRepositoryAllowlist(t *testing.T) {
 	workspace := t.TempDir()
 	repository := t.TempDir()
 	staging := t.TempDir()
-	manifest := repositoryAccessManifest{Version: 1, Phase: PhaseInvestigation, Roots: []repositoryAccessRoot{{Repo: "base-backend", Path: repository, Access: "read"}}}
+	manifest := repositoryAccessManifest{Version: 1, Phase: PhaseFix, Roots: []repositoryAccessRoot{{Repo: "base-backend", Path: repository, Access: "write"}}}
 	data, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)
@@ -606,7 +606,7 @@ func TestBuildCodexExecCommandUsesHostRepositoryAllowlist(t *testing.T) {
 	for _, want := range []string{
 		strconv.Quote(workspace) + `="write"`,
 		strconv.Quote(staging) + `="write"`,
-		strconv.Quote(repository) + `="read"`,
+		strconv.Quote(repository) + `="write"`,
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("Codex permission profile missing %q:\n%s", want, joined)
@@ -614,6 +614,19 @@ func TestBuildCodexExecCommandUsesHostRepositoryAllowlist(t *testing.T) {
 	}
 	if strings.Contains(joined, strconv.Quote(filepath.Dir(repository))+`="read"`) {
 		t.Fatalf("Codex profile granted a repository parent directory:\n%s", joined)
+	}
+	processEnv := strings.Join(cmd.Env, "\n")
+	for _, want := range []string{
+		"GIT_CONFIG_GLOBAL=" + os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_TERMINAL_PROMPT=0",
+		"TMPDIR=" + staging,
+		"TMP=" + staging,
+		"TEMP=" + staging,
+	} {
+		if !strings.Contains(processEnv, want) {
+			t.Fatalf("Codex process environment missing %q:\n%s", want, processEnv)
+		}
 	}
 }
 

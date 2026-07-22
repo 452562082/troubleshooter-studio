@@ -163,6 +163,7 @@ type AgentPhaseRunner struct {
 	browserPolicyResolver       BrowserPolicyResolver
 	frontendRuntimeResolver     FrontendRuntimeResolver
 	repositoryAccessResolver    RepositoryAccessResolver
+	codeIntelligenceResolver    CodeIntelligenceResolver
 	fixWorkspaceManager         *FixWorkspaceManager
 	openStaging                 func(string, string) (attemptEvidenceStaging, error)
 	completionReconcileAttempts int
@@ -245,6 +246,7 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	browserPolicyResolver := r.browserPolicyResolver
 	frontendRuntimeResolver := r.frontendRuntimeResolver
 	repositoryAccessResolver := r.repositoryAccessResolver
+	codeIntelligenceResolver := r.codeIntelligenceResolver
 	fixWorkspaceManager := r.fixWorkspaceManager
 	r.mu.Unlock()
 	releaseReservation := func() {
@@ -387,7 +389,7 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 		prompt += "\n## Durable fix checkpoint (mandatory)\n\nBefore the first repository push, atomically write `" + fixCheckpointManifestName + "` in the Studio staging directory (write a temporary sibling, fsync, then rename) with state=`prepared`; include every planned repository commit/branch/remote/test. After all pushes succeed, atomically replace it with the same manifest and state=`pushed` before reporting completion. JSON fields: kind=`" + fixCheckpointManifestKind + "`, version=1, case_id=`" + attempt.CaseID + "`, attempt_id=`" + attempt.ID + "`, state=`prepared|pushed`, result=<the exact structured FixResult also returned as final YAML>. Never include credentials. Recovery treats the SSH remote branch as truth, so a crash after push but before the state update remains recoverable while a pre-push crash cannot be misreported.\n"
 	}
 	r.startLegacyProjection(attempt, bug, executionBot)
-	go r.run(runCtx, attempt.Clone(), incident.Clone(), bug, executionBot, prompt, staging, fixWorkspace, incident.Version, claimToken, complete, browserVerifier, browserPolicyResolver)
+	go r.run(runCtx, attempt.Clone(), incident.Clone(), bug, executionBot, prompt, staging, fixWorkspace, incident.Version, claimToken, complete, browserVerifier, browserPolicyResolver, codeIntelligenceResolver)
 	return nil
 }
 
@@ -502,7 +504,7 @@ func (r *AgentPhaseRunner) Cancel(ctx context.Context, attemptID string) error {
 	return err
 }
 
-func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incident IncidentCase, bug Bug, bot BotRef, prompt string, staging attemptEvidenceStaging, fixWorkspace *FixWorkspaceLease, expectedVersion int64, claimToken string, complete PhaseCompletionFunc, browserVerifier BrowserVerifier, browserPolicyResolver BrowserPolicyResolver) {
+func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incident IncidentCase, bug Bug, bot BotRef, prompt string, staging attemptEvidenceStaging, fixWorkspace *FixWorkspaceLease, expectedVersion int64, claimToken string, complete PhaseCompletionFunc, browserVerifier BrowserVerifier, browserPolicyResolver BrowserPolicyResolver, codeIntelligenceResolver CodeIntelligenceResolver) {
 	started := time.Now()
 	cleaned := false
 	preserveStaging := false
@@ -513,6 +515,7 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 	}
 	var runtimeReceiptMu sync.Mutex
 	datastoreReadObserved := false
+	codeGraphQueryObserved := false
 	defer func() {
 		if !cleaned && !preserveStaging {
 			_ = staging.Cleanup()
@@ -545,12 +548,22 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 			datastoreReadObserved = true
 			runtimeReceiptMu.Unlock()
 		}
+		if eventProvesCodeGraphQuery(event) {
+			runtimeReceiptMu.Lock()
+			codeGraphQueryObserved = true
+			runtimeReceiptMu.Unlock()
+		}
 		r.projectEvent(attempt, event)
 	}
 	hasDatastoreRead := func() bool {
 		runtimeReceiptMu.Lock()
 		defer runtimeReceiptMu.Unlock()
 		return datastoreReadObserved
+	}
+	hasCodeGraphQuery := func() bool {
+		runtimeReceiptMu.Lock()
+		defer runtimeReceiptMu.Unlock()
+		return codeGraphQueryObserved
 	}
 	if err := ctx.Err(); err != nil {
 		releaseClaim()
@@ -561,8 +574,21 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 		releaseClaim()
 		return
 	}
+	codeIntelligence, codeIntelligencePrompt, codeIntelligenceErr := r.materializeCodeIntelligence(ctx, attempt, incident, staging, codeIntelligenceResolver)
+	if codeIntelligenceErr == nil {
+		prompt += codeIntelligencePrompt
+		if attempt.Phase == PhaseInvestigation {
+			state := "fallback"
+			message := "CodeGraph 未就绪，代码取证将使用 rg/Read"
+			if codeIntelligence.HasReadyRepository() {
+				state = "ready"
+				message = fmt.Sprintf("CodeGraph %d/%d 个仓库已由 Studio 准备完成", codeIntelligence.Ready, codeIntelligence.Total)
+			}
+			emit(InvestigationEvent{Type: "code_intelligence", Message: message, Meta: map[string]any{"state": state, "ready": codeIntelligence.Ready, "total": codeIntelligence.Total}})
+		}
+	}
 	var result PhaseExecutionResult
-	var runErr error
+	var runErr = codeIntelligenceErr
 	var coordinated *BrowserCoordinatorResult
 	freezeBrowserArtifacts := func(ctx context.Context, references []BrowserArtifactReference) ([]browserFrozenArtifact, error) {
 		return r.freezeBrowserArtifacts(ctx, attempt, staging, references)
@@ -629,6 +655,17 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 			runErr = errors.New("configured datastore evidence was not queried")
 		}
 	}
+	if runErr == nil && coordinated == nil && attempt.Phase == PhaseInvestigation && codeIntelligence.HasReadyRepository() && investigationResultRequiresCodeGraph(result.FinalYAML) && !hasCodeGraphQuery() && ctx.Err() == nil {
+		r.projectEvent(attempt, InvestigationEvent{Type: "retry", Message: "代码根因缺少 CodeGraph 查询，正在自动补齐"})
+		firstUsage := result.Usage
+		retryPrompt := prompt + "\n\n## Mandatory CodeGraph evidence retry\nThe proposed result is a code root cause, but no completed `codegraph_explore` MCP receipt was observed. Read `" + codeIntelligenceManifestName + "`, call `codegraph_explore` for the implicated ready repository using its exact `project_path` and `maxFiles=4`, then corroborate graph inferences with runtime evidence and deployed-revision source. Do not execute the CodeGraph CLI.\n"
+		result, runErr = r.executor.ExecutePhase(ctx, attempt.ID, bot, retryPrompt, emit)
+		result.Usage.InputTokens += firstUsage.InputTokens
+		result.Usage.OutputTokens += firstUsage.OutputTokens
+		if runErr == nil && !hasCodeGraphQuery() {
+			runErr = errors.New("configured CodeGraph was ready but codegraph_explore was not queried")
+		}
+	}
 	if ctx.Err() != nil {
 		releaseClaim()
 		cleanupErr := staging.Cleanup()
@@ -689,10 +726,23 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 				}
 				return r.registerArtifacts(ctx, attempt, staging, parsed.ArtifactInputs)
 			}(); err != nil {
-				command.Outcome = failureOutcome(attempt.Phase)
-				command.OutputJSON = mustJSON(map[string]any{"error_code": artifactErrorCode(err), "error_message": err.Error(), "evidence_limitation": true})
-				command.ErrorCode = artifactErrorCode(err)
-				command.ErrorMessage = err.Error()
+				if attempt.Phase == PhaseFix && parsed.Outcome == PhaseOutcomeFixFailed {
+					sanitized, sanitizeErr := fixResultWithoutOptionalEvidence(parsed.OutputJSON)
+					if sanitizeErr == nil {
+						command.OutputJSON = sanitized
+						r.projectEvent(attempt, InvestigationEvent{Type: "agent_message", Message: "修复已阻塞；Agent 返回的无效可选制品引用已安全忽略"})
+					} else {
+						command.Outcome = failureOutcome(attempt.Phase)
+						command.OutputJSON = mustJSON(map[string]any{"error_code": artifactErrorCode(err), "error_message": err.Error(), "evidence_limitation": true})
+						command.ErrorCode = artifactErrorCode(err)
+						command.ErrorMessage = err.Error()
+					}
+				} else {
+					command.Outcome = failureOutcome(attempt.Phase)
+					command.OutputJSON = mustJSON(map[string]any{"error_code": artifactErrorCode(err), "error_message": err.Error(), "evidence_limitation": true})
+					command.ErrorCode = artifactErrorCode(err)
+					command.ErrorMessage = err.Error()
+				}
 			} else if err := r.validateRegisteredRegressionEvidence(ctx, attempt, parsed); err != nil {
 				command.Outcome = PhaseOutcomeNeedsEvidence
 				command.OutputJSON = mustJSON(map[string]any{"error_code": "regression_evidence_invalid", "error_message": err.Error(), "evidence_limitation": true})
@@ -760,7 +810,19 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 }
 
 func evidenceStagingPrompt(path string) string {
-	return "\n## Studio evidence staging (mandatory)\n\nSTUDIO_EVIDENCE_STAGING_DIR=" + path + "\nWrite every evidence file beneath this exact directory. In final YAML, `path` must be a clean relative path from this directory; absolute paths and `..` are rejected. Studio derives timestamps and redaction status from securely opened file bytes.\n"
+	return "\n## Studio evidence staging (mandatory)\n\nSTUDIO_EVIDENCE_STAGING_DIR=" + path + "\nWrite every evidence file beneath this exact directory. In final YAML, every evidence entry must include non-empty `kind`, `path`, and `environment`; `path` must be a clean relative path from this directory, while absolute paths and `..` are rejected. Scratch notes and summary files are not evidence: leave `evidence: []` when there is no registrable runtime or test artifact. Studio derives timestamps and redaction status from securely opened file bytes.\n"
+}
+
+func fixResultWithoutOptionalEvidence(output json.RawMessage) (json.RawMessage, error) {
+	var result FixResult
+	if err := json.Unmarshal(output, &result); err != nil {
+		return nil, err
+	}
+	if result.FixStatus != "blocked" && result.FixStatus != "failed" {
+		return nil, errors.New("only blocked or failed fix results have optional evidence")
+	}
+	result.Evidence = []ArtifactReference{}
+	return json.Marshal(result)
 }
 
 func (r *AgentPhaseRunner) validateFixCheckpoint(staging attemptEvidenceStaging, attempt PhaseAttempt, result PhaseResult) error {

@@ -13,7 +13,7 @@ const errorMessage = (error: unknown) => error instanceof Error ? error.message 
 export const terminalCaseStatuses = new Set<CaseStatus>(['fixed_verified', 'legacy_archived', 'reset_archived'])
 const phaseRunningCaseStatuses = new Set<CaseStatus>(['validating', 'investigating', 'fixing', 'regression_validating'])
 const browserProgressCodeAllowlist = new Set<string>(incidentBrowserProgressCodes)
-const agentProgressTypeAllowlist = new Set(['thread_started', 'turn_started', 'turn_completed', 'command_execution', 'mcp_tool_call', 'agent_message', 'phase_step', 'retry', 'error', 'turn_failed', 'result'])
+const agentProgressTypeAllowlist = new Set(['thread_started', 'turn_started', 'turn_completed', 'command_execution', 'mcp_tool_call', 'agent_message', 'phase_step', 'code_intelligence', 'retry', 'error', 'turn_failed', 'result'])
 const maxPhaseEventsPerAttempt = 100
 const maxBrowserProgressStep = 100
 const maxAgentProgressMessageLength = 2000

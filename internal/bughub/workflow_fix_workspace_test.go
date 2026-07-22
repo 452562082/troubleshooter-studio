@@ -43,6 +43,25 @@ func TestFixWorkspaceManagerLocksExplicitSourceBaselineAndKeepsEnvironmentTarget
 	if got := strings.TrimSpace(runGitTest(t, binding.Worktree, "rev-parse", "HEAD")); got != featureCommit {
 		t.Fatalf("worktree HEAD = %s, want %s", got, featureCommit)
 	}
+	gitMetadata, err := os.Stat(filepath.Join(binding.Worktree, ".git"))
+	if err != nil || !gitMetadata.IsDir() {
+		t.Fatalf("fix workspace must own a standalone .git directory: info=%v err=%v", gitMetadata, err)
+	}
+	commonDir := strings.TrimSpace(runGitTest(t, binding.Worktree, "rev-parse", "--git-common-dir"))
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(binding.Worktree, commonDir)
+	}
+	relativeCommonDir, err := filepath.Rel(binding.Worktree, filepath.Clean(commonDir))
+	if err != nil || relativeCommonDir == ".." || strings.HasPrefix(relativeCommonDir, ".."+string(filepath.Separator)) {
+		t.Fatalf("fix workspace Git metadata escaped the approved root: %q", commonDir)
+	}
+	if _, err := os.Stat(filepath.Join(binding.Worktree, ".git", "objects", "info", "alternates")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fix workspace must not borrow objects outside its approved root: %v", err)
+	}
+	wantRemote := strings.TrimSpace(runGitTest(t, fixture.repo, "remote", "get-url", "origin"))
+	if remote := strings.TrimSpace(runGitTest(t, binding.Worktree, "remote", "get-url", "origin")); remote != wantRemote {
+		t.Fatalf("fix workspace remote = %q, want %q", remote, wantRemote)
+	}
 	if got := strings.TrimSpace(runGitTest(t, fixture.repo, "branch", "--show-current")); got != "feature/wrong-base" {
 		t.Fatalf("source checkout branch changed to %q", got)
 	}
@@ -71,6 +90,22 @@ func TestFixWorkspaceManagerLocksExplicitSourceBaselineAndKeepsEnvironmentTarget
 	}
 	if _, err := os.Stat(binding.Worktree); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("dedicated worktree retained: %v", err)
+	}
+}
+
+func TestRemoveStandaloneFixWorkspaceRefusesPathsOutsideOwnedRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	for name, path := range map[string]string{
+		"root itself": root,
+		"outside":     outside,
+		"nested":      filepath.Join(root, "repo", "nested"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := removeStandaloneFixWorkspace(root, path); err == nil {
+				t.Fatalf("unsafe cleanup path %q was accepted", path)
+			}
+		})
 	}
 }
 

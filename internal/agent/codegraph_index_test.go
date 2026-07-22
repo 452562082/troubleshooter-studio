@@ -626,6 +626,7 @@ func TestBuildCodeGraphRepoTargets_AnalysisEnabledOnlyAndAbsolutePaths(t *testin
 	runGitForCodeGraphTest(t, "-C", repoRoot, "add", "main.go")
 	runGitForCodeGraphTest(t, "-C", repoRoot, "-c", "user.name=CodeGraph Test", "-c", "user.email=codegraph@example.invalid", "commit", "-qm", "initial")
 	head := strings.TrimSpace(runGitForCodeGraphTest(t, "-C", repoRoot, "rev-parse", "HEAD"))
+	branch := strings.TrimSpace(runGitForCodeGraphTest(t, "-C", repoRoot, "branch", "--show-current"))
 	workingDir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -650,7 +651,7 @@ func TestBuildCodeGraphRepoTargets_AnalysisEnabledOnlyAndAbsolutePaths(t *testin
 	})
 
 	want := []CodeGraphRepoTarget{
-		{Name: "monorepo-first", Path: repoRoot, Head: head},
+		{Name: "monorepo-first", Path: repoRoot, Branch: branch, Head: head},
 		{Name: "not-a-checkout", Path: nonGitRoot, Head: ""},
 		{Name: "missing-visible", Path: ""},
 	}

@@ -218,6 +218,33 @@ describe('generateYAML', () => {
     expect(JSON.stringify(parsed.service_topology)).not.toContain('candidate')
   })
 
+  it('omits stale topology overrides from repository scan input without dropping service identity', () => {
+    const serviceTopology: ServiceTopologyState = {
+      overrides: [{
+        action: 'confirm',
+        fromService: 'base-frontend',
+        toService: 'base-backend-base',
+        scope: 'service',
+      }],
+    }
+    const output = generateYAML(makeCtx({
+      serviceTopology,
+      repos: [{
+        name: 'base-backend',
+        url: 'git@example.com:base-backend.git',
+        stack: 'go',
+        framework: '',
+        role: 'backend',
+        service_names: 'base-backend-base',
+        env_branches: { test: 'test' },
+      }],
+    }), { omitServiceTopology: true })
+    const parsed = yaml.load(output) as Record<string, any>
+
+    expect(parsed.service_topology).toBeUndefined()
+    expect(parsed.repos[0].service_names).toEqual(['base-backend-base'])
+  })
+
   it('round-trips uppercase HTTP and gRPC override semantics through imported state', () => {
     const serviceTopology: ServiceTopologyState = {
       overrides: importServiceTopologyOverrides([

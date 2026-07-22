@@ -185,9 +185,14 @@ export interface YAMLGenContext {
   recomputeEnabledDataStoresFromScanned(): void
 }
 
+export interface YAMLGenOptions {
+  /** 基础代码扫描不消费人工拓扑决策，避免过期服务关系阻断重新识别。 */
+  omitServiceTopology?: boolean
+}
+
 // ── 主函数(对齐原 InitPage::generateYAML) ────────────────────────
 
-export function generateYAML(ctx: YAMLGenContext): string {
+export function generateYAML(ctx: YAMLGenContext, options: YAMLGenOptions = {}): string {
   // 出 yaml 之前先按 scannedDS 实时刷一次 enabledDataStores —— 这是 skills_whitelist
   // 派生 + Step 5 env-vars 字段集 + 校验逻辑共同的"启用清单",必须跟用户 Step 6 实际看到的
   // 数据层组件一致。
@@ -420,7 +425,7 @@ export function generateYAML(ctx: YAMLGenContext): string {
     lines.push('  provider: codegraph')
   }
 
-  if (ctx.serviceTopology.overrides.length > 0) {
+  if (!options.omitServiceTopology && ctx.serviceTopology.overrides.length > 0) {
     lines.push('')
     lines.push('service_topology:')
     lines.push('  overrides:')

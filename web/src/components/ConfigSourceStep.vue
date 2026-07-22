@@ -21,6 +21,41 @@ function toggleCmDropdown(key: string) {
 function closeAllCmDropdown() {
   cmDropdownOpen.value = {}
 }
+function configMapKey(envID: string, svc: string): string {
+  return wizard.svcKey(envID, svc)
+}
+function selectedConfigMaps(envID: string, svc: string): string[] {
+  return (props.one2allSvcMap[configMapKey(envID, svc)]?.configmap || '')
+    .split(',').map(item => item.trim()).filter(Boolean)
+}
+function availableConfigMaps(envID: string, svc: string): string[] {
+  const loc = props.one2allSvcMap[configMapKey(envID, svc)]
+  return wizard.one2allConfigMapsFor(envID, loc?.cluster_id || '', loc?.namespace || '')
+}
+function configMapOptions(envID: string, svc: string): string[] {
+  return [...new Set([...availableConfigMaps(envID, svc), ...selectedConfigMaps(envID, svc)])]
+}
+function isStaleConfigMap(envID: string, svc: string, configMap: string): boolean {
+  return !availableConfigMaps(envID, svc).includes(configMap)
+}
+function configMapSummary(envID: string, svc: string): string {
+  const selected = selectedConfigMaps(envID, svc)
+  const available = availableConfigMaps(envID, svc)
+  if (selected.length > 0) {
+    const staleCount = selected.filter(item => !available.includes(item)).length
+    return staleCount > 0
+      ? `${selected.length} 个 ConfigMap · ${staleCount} 个候选已失效`
+      : `${selected.length} 个 ConfigMap`
+  }
+  return available.length > 0 ? '请选择 ConfigMap' : '暂无 ConfigMap 候选'
+}
+function toggleConfigMap(envID: string, svc: string, configMap: string, checked: boolean) {
+  const selected = selectedConfigMaps(envID, svc)
+  const next = checked
+    ? [...new Set([...selected, configMap])]
+    : selected.filter(item => item !== configMap)
+  emit('setOne2AllLoc', envID, svc, 'configmap', next.join(','))
+}
 // 点击下拉面板外任意位置关闭
 function onDocMouseDown(e: MouseEvent) {
   const target = e.target as HTMLElement
@@ -364,42 +399,34 @@ const emit = defineEmits<{
                   :key="n" :value="n"
                 >{{ n }}</option>
               </select>
-              <!-- ConfigMap 折叠多选/手填 -->
+              <!-- ConfigMap 始终使用折叠多选。候选为空时不回退自由输入，避免控件形态
+                   随预加载结果跳变；旧值未出现在本次结果中时标为失效并允许取消。 -->
               <span class="cm-dropdown" style="min-width:180px;position:relative;">
-                <template v-if="wizard.one2allConfigMapsFor(env.id, one2allSvcMap[wizard.svcKey(env.id, svc)]?.cluster_id || '', one2allSvcMap[wizard.svcKey(env.id, svc)]?.namespace || '').length > 0">
-                  <button
-                    type="button"
-                    class="cm-toggle"
-                    @click="toggleCmDropdown(wizard.svcKey(env.id, svc))"
+                <button
+                  type="button"
+                  class="cm-toggle"
+                  :class="{ 'cm-toggle--stale': selectedConfigMaps(env.id, svc).some(cm => isStaleConfigMap(env.id, svc, cm)) }"
+                  :disabled="configMapOptions(env.id, svc).length === 0"
+                  @click="toggleCmDropdown(configMapKey(env.id, svc))"
+                >
+                  {{ configMapSummary(env.id, svc) }} <span aria-hidden="true">▾</span>
+                </button>
+                <div v-if="cmDropdownOpen[configMapKey(env.id, svc)]" class="cm-panel" @mousedown.prevent>
+                  <label
+                    v-for="cm in configMapOptions(env.id, svc)"
+                    :key="cm"
+                    class="cm-check-label"
+                    :class="{ 'cm-check-label--stale': isStaleConfigMap(env.id, svc, cm) }"
                   >
-                    {{ (one2allSvcMap[wizard.svcKey(env.id, svc)]?.configmap || '').split(',').filter(Boolean).length || 0 }} 个 ConfigMap ▾
-                  </button>
-                  <div v-if="cmDropdownOpen[wizard.svcKey(env.id, svc)]" class="cm-panel" @mousedown.prevent>
-                    <label
-                      v-for="cm in wizard.one2allConfigMapsFor(env.id, one2allSvcMap[wizard.svcKey(env.id, svc)]?.cluster_id || '', one2allSvcMap[wizard.svcKey(env.id, svc)]?.namespace || '')"
-                      :key="cm"
-                      class="cm-check-label"
-                    >
-                      <input
-                        type="checkbox"
-                        :checked="(one2allSvcMap[wizard.svcKey(env.id, svc)]?.configmap || '').split(',').includes(cm)"
-                        @change="(e: any) => emit('setOne2AllLoc', env.id, svc, 'configmap',
-                          e.target.checked
-                            ? [...new Set([...(one2allSvcMap[wizard.svcKey(env.id, svc)]?.configmap || '').split(',').filter(Boolean), cm])].join(',')
-                            : (one2allSvcMap[wizard.svcKey(env.id, svc)]?.configmap || '').split(',').filter((x: string) => x !== cm).join(','))"
-                      />
-                      {{ cm }}
-                    </label>
-                  </div>
-                </template>
-                <input
-                  v-else
-                  :value="one2allSvcMap[wizard.svcKey(env.id, svc)]?.configmap || ''"
-                  class="cc-input"
-                  style="width:180px;"
-                  placeholder="ConfigMap 名(多个逗号分隔)"
-                  @input="(e: any) => emit('setOne2AllLoc', env.id, svc, 'configmap', e.target.value)"
-                />
+                    <input
+                      type="checkbox"
+                      :checked="selectedConfigMaps(env.id, svc).includes(cm)"
+                      @change="(e: any) => toggleConfigMap(env.id, svc, cm, e.target.checked)"
+                    />
+                    <span>{{ cm }}</span>
+                    <small v-if="isStaleConfigMap(env.id, svc, cm)">本次未读取到</small>
+                  </label>
+                </div>
               </span>
             </div>
           </div>
@@ -510,6 +537,8 @@ const emit = defineEmits<{
   white-space: nowrap;
 }
 .cm-toggle:hover { border-color: #3b82f6; color: #1e40af; }
+.cm-toggle:disabled { cursor: not-allowed; color: #94a3b8; background: #f8fafc; }
+.cm-toggle--stale { border-color: #f59e0b; color: #92400e; background: #fffbeb; }
 .cm-panel {
   position: absolute; top: 100%; left: 0; z-index: 100;
   background: #fff; border: 1px solid #d1d5db; border-radius: 8px;
@@ -522,6 +551,8 @@ const emit = defineEmits<{
 }
 .cm-check-label:hover { background: #eff6ff; }
 .cm-check-label input[type="checkbox"] { margin: 0; accent-color: #3b82f6; }
+.cm-check-label--stale { color: #92400e; background: #fffbeb; }
+.cm-check-label small { margin-left: auto; color: #b45309; white-space: nowrap; }
 .source-instance-list {
   display: grid;
   gap: 8px;

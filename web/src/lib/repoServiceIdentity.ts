@@ -46,6 +46,9 @@ export function serviceNamesAfterScan(input: ScannedServiceIdentityInput): strin
   }
   if (input.role === 'frontend') {
     const previous = splitServiceNames(input.previousServiceNames)
+    // frontend 已经是当前角色且服务名为空，表示用户明确删空并停用运行时映射。
+    // 重新扫描只能刷新代码发现，不能把 repo.name 又悄悄补回来。
+    if (input.previousRole === 'frontend' && previous.length === 0) return ''
     const legacyPackageIdentity = previous.length === 1 && /^@[^/]+\/[^/]+$/.test(previous[0])
     const previousIsRepoFallback = previous.length === 1 && previous[0] === repoName
     if (detected.length > 1 && (
@@ -70,8 +73,10 @@ export interface RuntimeIdentityRepo {
 // 配置中心/数据层与原逻辑完全隔离。
 export function runtimeOnlyServiceNames(repo: RuntimeIdentityRepo): string[] {
   if (repo.role === 'frontend') {
-    const explicit = splitServiceNames(repo.service_names)
-    return explicit.length > 0 ? explicit : [repo.name.trim()].filter(Boolean)
+    // 空数组是显式选择：该前端不参与 Deployment、日志和调用链映射。
+    // 首次切换为 frontend 时 serviceNamesForRole 已负责填 repo.name，这里不能再次
+    // fallback，否则用户从 Step 4 删除后会在可观测性步骤被重新补回。
+    return splitServiceNames(repo.service_names)
   }
   if (repo.role === 'mobile') {
     return [repo.name.trim()].filter(Boolean)

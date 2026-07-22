@@ -24,14 +24,14 @@ const emit = defineEmits<{
       <span
         class="help-icon"
         :title="repo.role === 'frontend'
-          ? '用于前端仓库与 Web 域名、K8s Deployment、日志和调用链的映射；不会进入配置中心或数据层扫描。默认使用仓库名，可按实际 Deployment/app 标签修改。'
+          ? '用于前端仓库与 Web 域名、K8s Deployment、日志和调用链的映射；不会进入配置中心或数据层扫描。首次默认使用仓库名，删除全部服务名可停用这些运行时映射。'
           : 'config-map 以此为 key。扫描会自动识别(monorepo 列所有子模块);识别不全时点 + 手动补,不想要的点 ✕ 删。'"
       >?</span>
       <span v-if="serviceNames.length" class="field-hint">
         — {{ serviceNames.length }} 个(✕ 删 / + 补)
       </span>
       <span v-else class="field-hint">
-        {{ repo.role === 'frontend' ? '(默认仓库名，可按 Deployment/app 标签修改)' : '(扫一下自动填,或点下方 + 手动补)' }}
+        {{ repo.role === 'frontend' ? '(已停用运行时映射，添加服务名可重新启用)' : '(扫一下自动填,或点下方 + 手动补)' }}
       </span>
     </label>
     <div v-if="repo._scanning" class="service-chips-row">

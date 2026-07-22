@@ -24,7 +24,7 @@ describe('repo service identity roles', () => {
     })).toBe('base-frontend')
   })
 
-  it('migrates an existing empty frontend draft to a visible repo-name identity', () => {
+  it('defaults a newly selected frontend role to the repo-name identity', () => {
     expect(serviceNamesForRole('frontend', 'base-frontend', '')).toBe('base-frontend')
     expect(serviceNamesForRole('frontend', 'base-frontend', 'funhub-web')).toBe('funhub-web')
     expect(serviceNamesForRole('docs', 'docs', 'stale-name')).toBe('')
@@ -38,6 +38,16 @@ describe('repo service identity roles', () => {
       previousRole: 'frontend',
       previousServiceNames: 'funhub-web',
     })).toBe('funhub-web')
+  })
+
+  it('preserves an explicitly emptied frontend runtime identity on rescan', () => {
+    expect(serviceNamesAfterScan({
+      role: 'frontend',
+      repoName: 'base-frontend',
+      detectedServiceNames: ['base-frontend', 'base-frontend-document'],
+      previousRole: 'frontend',
+      previousServiceNames: '',
+    })).toBe('')
   })
 
   it('uses all deployable frontend entries and replaces the legacy package identity', () => {
@@ -70,11 +80,11 @@ describe('repo service identity roles', () => {
     })).toBe('')
   })
 
-  it('feeds explicit frontend identity to runtime mapping with a repo-name fallback', () => {
+  it('feeds only explicit frontend identities to runtime mapping', () => {
     expect(runtimeOnlyServiceNames({
       role: 'frontend', name: 'base-frontend', service_names: 'funhub-web',
     })).toEqual(['funhub-web'])
     expect(runtimeOnlyServiceNames({ role: 'frontend', name: 'base-frontend' }))
-      .toEqual(['base-frontend'])
+      .toEqual([])
   })
 })

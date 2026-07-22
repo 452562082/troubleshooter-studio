@@ -43,6 +43,7 @@ import {
   type CodeIntelligenceState,
   type ServiceTopologyState,
   type YAMLGenContext,
+  type YAMLGenOptions,
 } from '../lib/yamlGenerator'
 import { computeStepErrors as libComputeStepErrors, labelForErrorKey as libLabelForErrorKey, type ValidatorContext } from '../lib/yamlValidator'
 import { prepareEnvironmentForWizard, type ApplyImportContext } from '../lib/yamlImporter'
@@ -533,13 +534,9 @@ const repos = reactive<RepoItem[]>(
   // saved 真的存的是窄字符串,直接 cast 一下复用 reactive。yaml import / makeEmptyRepo 仍走窄类型。
   Array.isArray(saved?.repos) && saved.repos.length ? (saved.repos as RepoItem[]) : [makeEmptyRepo()]
 )
-// 老草稿曾主动清掉 frontend.service_names。加载时一次性补成 repo.name，让用户无需
-// 删除草稿或重新扫描，就能立即看到并按真实 Deployment/app 标签修正运行时身份。
-for (const repo of repos) {
-  if (repo.role === 'frontend') {
-    repo.service_names = serviceNamesForRole(repo.role, repo.name, repo.service_names)
-  }
-}
+// frontend.service_names 为空是用户明确停用运行时映射的有效状态。首次把仓库角色
+// 设为 frontend 时 syncServiceNamesWithRole 会填 repo.name；草稿恢复不能再次回填，
+// 否则用户删掉的服务会重新出现在 Loki / K8s / 调用链配置中。
 const scanningAllRepos = ref(false)
 const scanAllRepoStats = reactive({ done: 0, total: 0, failed: 0 })
 
@@ -1679,7 +1676,7 @@ const allServiceNames = computed<string[]>(() => {
 })
 
 // 可观测性使用“运行时工作负载”而不是只使用配置中心服务。前端允许显式维护
-// service_names（默认 repo.name），用于映射 Deployment、容器日志和调用链；移动端
+// service_names（首次选择角色时默认 repo.name；删空即停用），用于映射 Deployment、容器日志和调用链；移动端
 // 没有可编辑的工作负载名，仍用 repo.name 作为 RUM/调用发起方身份。
 const runtimeWorkloadNames = computed<string[]>(() => {
   const set = new Set(allServiceNames.value)
@@ -3082,7 +3079,7 @@ function deriveSkillsWhitelist(): string[] {
 // ── YAML generation ──
 // 整个 generateYAML 主体在 lib/yamlGenerator.ts;此处只负责把 setup() 里的 25+
 // 个 closure deps 打包成 YAMLGenContext 传进去。
-function generateYAML(): string {
+function generateYAML(options: YAMLGenOptions = {}): string {
   const ctx: YAMLGenContext = {
     system, agent, agentNameDefault: agentNameDefault.value,
     targetModels, enabledTargets, codeIntelligence, serviceTopology, enabledObservability,
@@ -3110,7 +3107,7 @@ function generateYAML(): string {
     getObsAccessMode, obsGrafanaDsKey, svcKey, toolKeyFor, toolSpecByKey,
     deriveSkillsWhitelist, recomputeEnabledDataStoresFromScanned,
   }
-  return libGenerateYAML(ctx)
+  return libGenerateYAML(ctx, options)
 }
 
 // ── Step 4 仓库扫描(useRepoScan) ──────────────────────────────────

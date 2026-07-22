@@ -43,7 +43,17 @@ describe('ConfigSourceStep', () => {
     },
   }
 
-  function mountStep() {
+  function mountStep(options: { configmaps?: string[]; selectedConfigMaps?: string } = {}) {
+    const configmaps = options.configmaps ?? ['base-config']
+    const selectedConfigMaps = options.selectedConfigMaps ?? 'base-config'
+    wizard.one2allStateByEnv.dev = {
+      status: 'ok',
+      clusters: [{
+        name: 'ZH',
+        cluster_id: '1',
+        namespaces: [{ name: 'base-dev', configmaps }],
+      }],
+    }
     return mount(ConfigSourceStep, {
       props: {
         configTypeOptions: ['one2all'],
@@ -74,7 +84,7 @@ describe('ConfigSourceStep', () => {
         serviceConfigGroup: {},
         kuboardSvcMap: {},
         one2allSvcMap: {
-          'dev::base-backend-base': { cluster_id: '1', namespace: 'base-dev', configmap: 'base-config' },
+          'dev::base-backend-base': { cluster_id: '1', namespace: 'base-dev', configmap: selectedConfigMaps },
         },
         ccKeyFor: (type: string, envID: string, field: string) => `cc:${type}:${envID}:${field}`,
         isFieldHidden: () => false,
@@ -111,5 +121,26 @@ describe('ConfigSourceStep', () => {
     await wrapper.findComponent({ name: 'PreloadStatusRow' }).trigger('click')
 
     expect(wrapper.emitted('runOne2AllPreload')?.[0]).toEqual(['dev', 'config_source'])
+  })
+
+  it('keeps ConfigMap as a dropdown when the current preload has no candidates', async () => {
+    const wrapper = mountStep({ configmaps: [], selectedConfigMaps: 'legacy-config' })
+
+    expect(wrapper.find('input.cc-input').exists()).toBe(false)
+    const toggle = wrapper.find('button.cm-toggle')
+    expect(toggle.text()).toContain('1 个候选已失效')
+
+    await toggle.trigger('click')
+    expect(wrapper.find('.cm-panel').text()).toContain('legacy-config')
+    expect(wrapper.find('.cm-panel').text()).toContain('本次未读取到')
+  })
+
+  it('disables the ConfigMap dropdown when there are no candidates or saved values', () => {
+    const wrapper = mountStep({ configmaps: [], selectedConfigMaps: '' })
+
+    const toggle = wrapper.find('button.cm-toggle')
+    expect(toggle.attributes('disabled')).toBeDefined()
+    expect(toggle.text()).toContain('暂无 ConfigMap 候选')
+    expect(wrapper.find('input.cc-input').exists()).toBe(false)
   })
 })

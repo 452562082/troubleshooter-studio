@@ -224,7 +224,7 @@ describe('applyParsedYAMLToWizardState observability import', () => {
     expect(ctx.codeIntelligence).toEqual({ enabled: false, provider: 'codegraph' })
   })
 
-  it('preserves frontend runtime service identity without treating it as config data', async () => {
+  it('preserves explicit and explicitly empty frontend runtime identities', async () => {
     const ctx = makeImportCtx()
     await applyParsedYAMLToWizardState({
       repos: [
@@ -241,7 +241,7 @@ describe('applyParsedYAMLToWizardState observability import', () => {
 
     expect(ctx.repos[0].service_names).toBe('funhub-web')
     expect(ctx.repos[0].role).toBe('frontend')
-    expect(ctx.repos[1].service_names).toBe('admin-frontend')
+    expect(ctx.repos[1].service_names).toBe('')
   })
 
   it('imports all topology override actions and ignores scan data', async () => {

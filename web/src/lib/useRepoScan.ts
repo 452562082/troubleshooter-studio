@@ -73,6 +73,11 @@ export interface RepoScanEnv {
   is_prod?: boolean
 }
 
+export interface RepoScanYAMLOptions {
+  /** 单仓基础扫描不消费人工拓扑决策；排除后避免旧服务名关系阻断重新识别。 */
+  omitServiceTopology?: boolean
+}
+
 export interface RepoScanDeps {
   /** repo.name → 真实 git 分支列表(scan 后填,env_branches 下拉的 options 用) */
   repoBranchesMap: Ref<Record<string, string[]>>
@@ -88,7 +93,7 @@ export interface RepoScanDeps {
   /** url → 推 repo.name(本地反填用) */
   deriveRepoName: (url: string) => string
   /** 跑 bridgeAnalyzeV2 前要把当前 InitPage state 序列化成 yaml,closure 持有 25+ 个 InitPage reactive */
-  generateYAML: () => string
+  generateYAML: (options?: RepoScanYAMLOptions) => string
 }
 
 export function useRepoScan(deps: RepoScanDeps) {
@@ -230,8 +235,8 @@ export function useRepoScan(deps: RepoScanDeps) {
   // pickLocalRepoDir 本地模式:用户点"选目录"挑一个已 clone 好的仓库目录。
   // 选了新目录 = 换了仓库,彻底重置身份(URL / 名字 / 手改标记 / 已扫过)再从新目录反填,
   // 然后触发扫描。不保留上一个目录的任何身份字段 —— 新目录可能 git remote 完全不一样,
-  // 继承旧 URL 会误导用户。scanSingleRepo 内部还会再清 stack / service_names / 分支映射,
-  // 保证扫描结果不会混着两次的数据。
+  // 继承旧 URL 会误导用户。scanSingleRepo 会在分析成功后一次性替换扫描结果，
+  // 失败时则保留上一份完整、可用的识别信息。
   async function pickLocalRepoDir(r: RepoScanItem) {
     if (!isDesktop()) {
       toast.error('选目录需要桌面 app 环境')
@@ -390,20 +395,12 @@ export function useRepoScan(deps: RepoScanDeps) {
     const serviceNamesBeforeScan = r.service_names
     r._scanning = true
     r._scanError = undefined
-    // 扫描开始前,把上一次扫描留下的 stack / service_names / 分支全清零。
-    // 这样用户换了目录(比如从 truss 切到 nacos-go)后,新目录如果没识别出 service_names,
-    // UI 会老老实实显示空,而不是残留前一个仓库的 7 个服务名。分支下拉同理。
-    // 名字 / URL 不清:用户可能已经在上面的 pickLocalRepoDir / 自动反填改掉了,不动。
-    r.stack = ''
-    r.service_names = ''
-    for (const eid of Object.keys(r.env_branches)) {
-      r.env_branches[eid] = ''
-    }
-    if (r.name in deps.repoBranchesMap.value) {
-      delete deps.repoBranchesMap.value[r.name]
-    }
     try {
-      const yamlText = deps.generateYAML()
+      // 单仓扫描只需要仓库、环境与基础资源配置，不消费人工确认的跨仓拓扑关系。
+      // 旧实现先清 service_names 再生成完整 YAML，导致仍引用旧服务名的 override
+      // 在真正分析代码前被后端 schema 校验拒绝。现在保留页面旧状态，并明确从扫描输入
+      // 排除 service_topology；扫描成功后再原子替换扫描派生字段。
+      const yamlText = deps.generateYAML({ omitServiceTopology: true })
       const res = (await bridgeAnalyzeV2(yamlText, effectiveRoot, repoPaths, autoClone, r.name)) as {
         per_repo?: Array<{
           name: string
@@ -428,29 +425,43 @@ export function useRepoScan(deps: RepoScanDeps) {
         return
       }
 
-      if (hit.detected_stack) r.stack = hit.detected_stack
-      if (hit.detected_framework) r.framework = hit.detected_framework
-
+      // 先在临时副本上完成角色推荐和所有派生计算。分析或推荐失败时页面仍保留上一次
+      // 成功结果；只有下面全部准备完成后才同步写回 reactive repo。
+      const staged: RepoScanItem = {
+        ...r,
+        stack: hit.detected_stack || '',
+        framework: hit.detected_framework || '',
+        env_branches: { ...r.env_branches },
+      }
       // role 推荐必须先完成，再决定 service_names 的语义。旧逻辑先按 backend 写入
       // package.json.name，随后异步把 role 改成 frontend，却没有再次同步身份，导致 UI
       // 隐藏且 K8s/日志只能退化猜仓库名。
-      await refreshRoleHint(r)
+      await refreshRoleHint(staged)
       const rpt = (res.report?.repos || []).find(rr => rr.name === r.name)
-      r.service_names = serviceNamesAfterScan({
-        role: r.role,
+      const nextServiceNames = serviceNamesAfterScan({
+        role: staged.role,
         repoName: r.name,
         detectedServiceNames: rpt?.service_names,
         previousRole: roleBeforeScan,
         previousServiceNames: serviceNamesBeforeScan,
       })
-      if (hit.branches?.length) {
-        deps.repoBranchesMap.value[r.name] = hit.branches
-        for (const env of deps.environments) {
-          if (!env.id) continue
-          const mapped = deps.pickBranchForEnv(env, hit.branches)
-          if (mapped) r.env_branches[env.id] = mapped
-        }
+      const nextBranches = [...new Set((hit.branches || []).map(branch => branch.trim()).filter(Boolean))]
+      const nextEnvBranches: Record<string, string> = {}
+      for (const env of deps.environments) {
+        if (!env.id) continue
+        nextEnvBranches[env.id] = deps.pickBranchForEnv(env, nextBranches)
       }
+
+      r.stack = staged.stack
+      r.framework = staged.framework
+      r.role = staged.role
+      r._roleHint = staged._roleHint
+      r._roleHintLoading = false
+      r.service_names = nextServiceNames
+      for (const eid of Object.keys(r.env_branches)) r.env_branches[eid] = ''
+      for (const [eid, branch] of Object.entries(nextEnvBranches)) r.env_branches[eid] = branch
+      if (nextBranches.length > 0) deps.repoBranchesMap.value[r.name] = nextBranches
+      else delete deps.repoBranchesMap.value[r.name]
 
       // 配置中心提示:toast 一次,不静默改 Step 5
       const cc = res.report?.config_center

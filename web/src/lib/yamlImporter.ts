@@ -20,7 +20,7 @@ import type {
 import { emptyDeploymentVerification } from './yamlGenerator'
 import { VIA_GRAFANA_ELIGIBLE } from './yamlShared'
 import type { ConfigSourceInstance } from './configSourceInstances'
-import { serviceNamesForRole, supportsRuntimeServiceNames } from './repoServiceIdentity'
+import { supportsRuntimeServiceNames } from './repoServiceIdentity'
 
 /** yaml 字段值是否为模板占位符 "{{XYZ}}";占位符不应当作真值反填。 */
 export function isPlaceholder(v: unknown): boolean {
@@ -395,13 +395,11 @@ export async function applyParsedYAMLToWizardState(
     //    commerce/api/... 的 umbrella),用户在 yaml 里显式写 service_names: [truss]
     //    → 必须尊重,不能 import 时就被清掉
     //
-    // **但**:role 跟 service_names 必须一致(syncServiceNamesWithRole 的 yaml-side
-    // 镜像)。frontend 的值是运行时身份，必须保留；common-lib/docs/infra/mobile
-    // 没有可编辑的运行时服务名，导入时清理老版本残留。
+    // **但**:role 跟 service_names 必须一致。frontend 的显式值或显式空值都必须
+    // 原样保留；空值表示不参与运行时映射。common-lib/docs/infra/mobile 没有可编辑的
+    // 运行时服务名，导入时清理老版本残留。
     for (const r of ctx.repos as any[]) {
-      if (r.role === 'frontend') {
-        r.service_names = serviceNamesForRole(r.role, r.name, r.service_names)
-      } else if (!supportsRuntimeServiceNames(r.role)) {
+      if (!supportsRuntimeServiceNames(r.role)) {
         r.service_names = ''
       }
     }

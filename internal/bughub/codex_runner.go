@@ -23,6 +23,11 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 )
 
+const (
+	codexStudioAgentNetworkConfig = "permissions.studio_agent.network.enabled=true"
+	claudeStudioAgentSettings     = `{"sandbox":{"enabled":false}}`
+)
+
 type InvestigationEventSink func(run InvestigationRun, event InvestigationEvent)
 
 type CodexInvestigator struct {
@@ -451,6 +456,11 @@ func buildCodexExecCommandWithProfile(codexBin, workspace, prompt string, imageP
 		// but now leaves the profile table without an active default and makes
 		// `codex exec` fail before the Agent turn starts.
 		"-c", `default_permissions="studio_agent"`,
+		// Every workflow phase may need runtime evidence, dependency downloads,
+		// MCP/API access, or Git transport. A named Codex permission profile has
+		// networking disabled by default, and respect_system_proxy only controls
+		// proxy behavior; it does not grant network access by itself.
+		"-c", codexStudioAgentNetworkConfig,
 		"-c", filesystemConfig,
 	}
 	if profile = strings.TrimSpace(profile); profile != "" {
@@ -750,6 +760,17 @@ func codexFilesystemPermissionConfig(workspace, prompt string, imagePaths []stri
 					return "", fmt.Errorf("repository access path for %s is unavailable", root.Repo)
 				}
 				roots[path] = access
+				if manifest.Phase == PhaseFix && access == "write" {
+					gitMetadata := filepath.Join(path, ".git")
+					gitInfo, gitErr := os.Lstat(gitMetadata)
+					if gitErr != nil || !gitInfo.IsDir() {
+						return "", fmt.Errorf("standalone fix repository Git metadata for %s is unavailable", root.Repo)
+					}
+					// Codex protects .git recursively even when its workspace root is
+					// writable. Reopen only the metadata owned by Studio's standalone
+					// fix clone so the Agent can create, commit, and push its fix branch.
+					roots[gitMetadata] = "write"
+				}
 			}
 		}
 	}
@@ -817,7 +838,10 @@ func buildClaudeInvestigationCommand(claudeBin, workspace, agentPath, prompt str
 	if agentName == "" {
 		return nil, errors.New("claude agent is required")
 	}
-	args := []string{"-p", "--dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose", "--agent", agentName}
+	// Claude's permission mode and OS sandbox are independent. Disable the
+	// per-invocation sandbox explicitly so a user-level domain allowlist cannot
+	// silently block runtime queries, dependency downloads, or Git transport.
+	args := []string{"-p", "--dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--settings", claudeStudioAgentSettings, "--output-format", "stream-json", "--verbose", "--agent", agentName}
 	for _, directory := range attachmentDirs {
 		args = append(args, "--add-dir", directory)
 	}

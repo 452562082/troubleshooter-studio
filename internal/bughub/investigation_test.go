@@ -418,7 +418,7 @@ func TestBuildCodexExecCommandUsesSafeWorkspace(t *testing.T) {
 		t.Fatalf("BuildCodexExecCommand: %v", err)
 	}
 	got := strings.Join(cmd.Args, " ")
-	for _, want := range []string{"exec", "--json", "--enable respect_system_proxy", "-c suppress_unstable_features_warning=true", `-c approval_policy="never"`, `-c default_permissions="studio_agent"`, `permissions.studio_agent.filesystem={":minimal"="read"`, "--cd " + workspace, "--skip-git-repo-check"} {
+	for _, want := range []string{"exec", "--json", "--enable respect_system_proxy", "-c suppress_unstable_features_warning=true", `-c approval_policy="never"`, `-c default_permissions="studio_agent"`, `-c permissions.studio_agent.network.enabled=true`, `permissions.studio_agent.filesystem={":minimal"="read"`, "--cd " + workspace, "--skip-git-repo-check"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("args %q missing %q", got, want)
 		}
@@ -588,6 +588,10 @@ func TestBuildCodexBotExecCommandPreservesStandaloneWorkspaceCompatibility(t *te
 func TestBuildCodexExecCommandUsesHostRepositoryAllowlist(t *testing.T) {
 	workspace := t.TempDir()
 	repository := t.TempDir()
+	gitMetadata := filepath.Join(repository, ".git")
+	if err := os.Mkdir(gitMetadata, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	staging := t.TempDir()
 	manifest := repositoryAccessManifest{Version: 1, Phase: PhaseFix, Roots: []repositoryAccessRoot{{Repo: "base-backend", Path: repository, Access: "write"}}}
 	data, err := json.Marshal(manifest)
@@ -607,6 +611,7 @@ func TestBuildCodexExecCommandUsesHostRepositoryAllowlist(t *testing.T) {
 		strconv.Quote(workspace) + `="write"`,
 		strconv.Quote(staging) + `="write"`,
 		strconv.Quote(repository) + `="write"`,
+		strconv.Quote(gitMetadata) + `="write"`,
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("Codex permission profile missing %q:\n%s", want, joined)
@@ -627,6 +632,57 @@ func TestBuildCodexExecCommandUsesHostRepositoryAllowlist(t *testing.T) {
 		if !strings.Contains(processEnv, want) {
 			t.Fatalf("Codex process environment missing %q:\n%s", want, processEnv)
 		}
+	}
+}
+
+func TestBuildCodexExecCommandKeepsInvestigationGitMetadataReadOnly(t *testing.T) {
+	workspace := t.TempDir()
+	repository := t.TempDir()
+	gitMetadata := filepath.Join(repository, ".git")
+	if err := os.Mkdir(gitMetadata, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	staging := t.TempDir()
+	manifest := repositoryAccessManifest{Version: 1, Phase: PhaseInvestigation, Roots: []repositoryAccessRoot{{Repo: "base-backend", Path: repository, Access: "read"}}}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, repositoryAccessManifestName), data, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	prompt := "investigate\nSTUDIO_EVIDENCE_STAGING_DIR=" + staging + "\n"
+	cmd, err := BuildCodexExecCommand("codex", workspace, prompt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(cmd.Args, "\n")
+	if !strings.Contains(joined, strconv.Quote(repository)+`="read"`) {
+		t.Fatalf("Codex permission profile omitted investigation repository:\n%s", joined)
+	}
+	if strings.Contains(joined, strconv.Quote(gitMetadata)+`="write"`) {
+		t.Fatalf("Codex profile made investigation Git metadata writable:\n%s", joined)
+	}
+}
+
+func TestBuildCodexExecCommandRejectsFixRepositoryWithExternalGitMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	repository := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repository, ".git"), []byte("gitdir: /outside/repository\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staging := t.TempDir()
+	manifest := repositoryAccessManifest{Version: 1, Phase: PhaseFix, Roots: []repositoryAccessRoot{{Repo: "base-backend", Path: repository, Access: "write"}}}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, repositoryAccessManifestName), data, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	prompt := "fix\nSTUDIO_EVIDENCE_STAGING_DIR=" + staging + "\n"
+	if _, err := BuildCodexExecCommand("codex", workspace, prompt); err == nil || !strings.Contains(err.Error(), "standalone fix repository Git metadata") {
+		t.Fatalf("external Git metadata was accepted: %v", err)
 	}
 }
 
@@ -849,7 +905,7 @@ func TestBuildClaudeInvestigationCommand(t *testing.T) {
 		t.Fatalf("BuildClaudeInvestigationCommand: %v", err)
 	}
 	got := strings.Join(cmd.Args, " ")
-	for _, want := range []string{"-p", "--dangerously-skip-permissions", "--permission-mode bypassPermissions", "--output-format stream-json", "--verbose", "--agent base-troubleshooter", "hello"} {
+	for _, want := range []string{"-p", "--dangerously-skip-permissions", "--permission-mode bypassPermissions", `--settings {"sandbox":{"enabled":false}}`, "--output-format stream-json", "--verbose", "--agent base-troubleshooter", "hello"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("args %q missing %q", got, want)
 		}

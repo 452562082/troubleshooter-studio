@@ -69,18 +69,33 @@ func injectAgent(root map[string]any, id, name, model, workspace string) error {
 	for _, item := range list {
 		if m, ok := item.(map[string]any); ok {
 			if existID, _ := m["id"].(string); existID == id {
+				setOpenClawAgentNetworkMode(m)
 				return nil
 			}
 		}
 	}
-	list = append(list, map[string]any{
+	agent := map[string]any{
 		"id":        id,
 		"name":      name,
 		"model":     model,
 		"workspace": workspace,
-	})
+	}
+	setOpenClawAgentNetworkMode(agent)
+	list = append(list, agent)
 	agents["list"] = list
 	return nil
+}
+
+func setOpenClawAgentNetworkMode(agent map[string]any) {
+	sandbox, _ := agent["sandbox"].(map[string]any)
+	if sandbox == nil {
+		sandbox = map[string]any{}
+		agent["sandbox"] = sandbox
+	}
+	// Studio's workflow Agent needs host network access for runtime evidence,
+	// MCP/API calls, dependency downloads, and Git push. Pin this per agent so a
+	// restrictive agents.defaults.sandbox setting cannot silently break it.
+	sandbox["mode"] = "off"
 }
 
 // copyDirAll:整目录拷贝,保留 mode。dst 必须不存在(由调用方保证)。

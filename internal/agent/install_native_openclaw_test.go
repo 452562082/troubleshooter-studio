@@ -183,6 +183,10 @@ func TestInstallNativeOpenclaw_FreshInstall(t *testing.T) {
 	if !strings.HasSuffix(a["workspace"].(string), "/.openclaw/workspace/shop-troubleshooter") {
 		t.Errorf("agent.workspace path wrong: %v", a["workspace"])
 	}
+	sandbox, _ := a["sandbox"].(map[string]any)
+	if sandbox["mode"] != "off" {
+		t.Errorf("agent.sandbox.mode want off so workflow network does not inherit a restrictive global sandbox, got %v", sandbox["mode"])
+	}
 	assertFileExists(t, filepath.Join(wsDir, "agents", "shop-troubleshooter.md"))
 	assertFileExists(t, filepath.Join(wsDir, "agents", "shop-validator.md"))
 	assertFileExists(t, filepath.Join(wsDir, "skills", "shop-troubleshooter", "incident-investigator", "SKILL.md"))
@@ -391,14 +395,29 @@ func TestInstallNativeOpenclaw_AgentNotDuplicated(t *testing.T) {
 	if err := InstallNativeOpenclaw(context.Background(), staging, InstallOpenclawOptions{SkipGatewayRestart: true}); err != nil {
 		t.Fatal(err)
 	}
+	cfgPath := filepath.Join(fakeHome, ".openclaw", "openclaw.json")
+	before := readJSON(t, cfgPath)
+	installed := findAgentByID(t, getList(before, "agents", "list"), "shop-troubleshooter")
+	installed["sandbox"] = map[string]any{"mode": "all", "scope": "agent"}
+	encoded, err := json.MarshalIndent(before, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := InstallNativeOpenclaw(context.Background(), staging, InstallOpenclawOptions{SkipGatewayRestart: true}); err != nil {
 		t.Fatal(err)
 	}
-	cfgPath := filepath.Join(fakeHome, ".openclaw", "openclaw.json")
 	data := readJSON(t, cfgPath)
 	agents := getList(data, "agents", "list")
 	if len(agents) != 1 {
 		t.Errorf("二次 install 后 agents.list 应仍只有 1 条主机器人,got %d", len(agents))
+	}
+	agent := findAgentByID(t, agents, "shop-troubleshooter")
+	sandbox, _ := agent["sandbox"].(map[string]any)
+	if sandbox["mode"] != "off" {
+		t.Errorf("二次 install 应恢复 Studio agent 的开放网络模式,got sandbox=%v", sandbox)
 	}
 }
 
@@ -565,7 +584,7 @@ func TestInstallNativeOpenclaw_PreservesExistingAgents(t *testing.T) {
 	preExisting := map[string]any{
 		"agents": map[string]any{
 			"list": []any{
-				map[string]any{"id": "other-agent", "name": "Other", "model": "x", "workspace": "/tmp/other"},
+				map[string]any{"id": "other-agent", "name": "Other", "model": "x", "workspace": "/tmp/other", "sandbox": map[string]any{"mode": "all"}},
 			},
 		},
 		"mcp": map[string]any{
@@ -591,6 +610,11 @@ func TestInstallNativeOpenclaw_PreservesExistingAgents(t *testing.T) {
 	agents := getList(data, "agents", "list")
 	if len(agents) != 2 {
 		t.Errorf("install 应保留 other-agent + 加 shop-troubleshooter, agents.list len want 2 got %d: %+v", len(agents), agents)
+	}
+	other := findAgentByID(t, agents, "other-agent")
+	otherSandbox, _ := other["sandbox"].(map[string]any)
+	if otherSandbox["mode"] != "all" {
+		t.Errorf("install 不应改写其他 agent 的 sandbox 配置,got %v", otherSandbox)
 	}
 	servers := getMap(data, "mcp", "servers")
 	if _, ok := servers["unrelated-mcp"]; !ok {

@@ -1189,7 +1189,7 @@ func artifactDigestsEqual(first, second map[string]string) bool {
 
 func validBrowserArtifactKind(kind string) bool {
 	switch kind {
-	case "screenshot", "network", "console", "browser_actions", "request_facts", "response_assertions":
+	case "screenshot", "network", "console", "browser_actions", "request_facts", "response_facts", "response_assertions":
 		return true
 	default:
 		return false

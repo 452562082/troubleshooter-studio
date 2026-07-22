@@ -90,7 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_events_case_created ON transition_events(case_id,
 `
 
 const (
-	workflowStoreSchemaVersion   = 10
+	workflowStoreSchemaVersion   = 11
 	workflowStoreSchemaV1Key     = "workflow-schema-v1"
 	workflowStoreSchemaV1Upgrade = `
 ALTER TABLE transition_events ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT '';
@@ -214,10 +214,13 @@ CREATE TABLE validation_recipes (
 );
 CREATE INDEX idx_validation_recipes_scenario ON validation_recipes(scenario_sha256);
 `
+	workflowStoreSchemaV11Upgrade = `
+ALTER TABLE incident_cases ADD COLUMN frontend_entry_json TEXT NOT NULL DEFAULT '{}';
+`
 )
 
 var legacyWorkflowTableColumns = map[string][]string{
-	"incident_cases":                {"id", "bug_id", "source", "system_id", "environment", "status", "cycle_number", "current_attempt_id", "selected_bot_key", "version", "created_at", "updated_at", "closed_at", "reset_from_case_id", "superseded_by_case_id"},
+	"incident_cases":                {"id", "bug_id", "source", "system_id", "environment", "status", "cycle_number", "current_attempt_id", "selected_bot_key", "version", "created_at", "updated_at", "closed_at", "reset_from_case_id", "superseded_by_case_id", "frontend_entry_json"},
 	"phase_attempts":                {"id", "case_id", "cycle_number", "phase", "mode", "status", "agent_target", "bot_key", "input_json", "output_json", "parent_attempt_id", "started_at", "finished_at", "error_code", "error_message", "input_tokens", "output_tokens", "duration_nanos"},
 	"transition_events":             {"id", "case_id", "from_status", "to_status", "event_type", "actor_type", "actor_id", "idempotency_key", "payload_json", "created_at"},
 	"evidence_artifacts":            {"id", "case_id", "attempt_id", "kind", "path_or_reference", "sha256", "captured_at", "environment", "version", "request_id", "trace_id", "redaction_status"},

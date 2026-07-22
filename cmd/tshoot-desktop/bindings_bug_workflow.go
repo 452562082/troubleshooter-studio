@@ -150,6 +150,7 @@ type StartIncidentCaseInput struct {
 	BugID           string         `json:"bug_id,omitempty"`
 	BotKey          string         `json:"bot_key,omitempty"`
 	BotEnvironment  string         `json:"bot_environment,omitempty"`
+	FrontendEntryID string         `json:"frontend_entry_id,omitempty"`
 	ExpectedVersion int64          `json:"expected_version"`
 	IdempotencyKey  string         `json:"idempotency_key"`
 	ActorID         string         `json:"actor_id"`
@@ -161,10 +162,18 @@ type ResetIncidentCaseInput struct {
 	NewCaseID       string         `json:"new_case_id"`
 	BotKey          string         `json:"bot_key"`
 	BotEnvironment  string         `json:"bot_environment,omitempty"`
+	FrontendEntryID string         `json:"frontend_entry_id,omitempty"`
 	ExpectedVersion int64          `json:"expected_version"`
 	IdempotencyKey  string         `json:"idempotency_key"`
 	ActorID         string         `json:"actor_id"`
 	InputJSON       map[string]any `json:"input_json,omitempty"`
+}
+
+type ResolveIncidentFrontendEntryInput struct {
+	BugID           string `json:"bug_id"`
+	BotKey          string `json:"bot_key"`
+	BotEnvironment  string `json:"bot_environment,omitempty"`
+	FrontendEntryID string `json:"frontend_entry_id,omitempty"`
 }
 
 type ContinueIncidentCaseInput struct {
@@ -183,6 +192,15 @@ type ApproveIncidentFixInput struct {
 	ActorID            string         `json:"actor_id"`
 	RootCauseAttemptID string         `json:"root_cause_attempt_id"`
 	InputJSON          map[string]any `json:"input_json,omitempty"`
+}
+
+type ReconsiderIncidentRemediationInput struct {
+	CaseID             string `json:"case_id"`
+	ExpectedVersion    int64  `json:"expected_version"`
+	IdempotencyKey     string `json:"idempotency_key"`
+	ActorID            string `json:"actor_id"`
+	RootCauseAttemptID string `json:"root_cause_attempt_id"`
+	Proposal           string `json:"proposal"`
 }
 
 type CompleteIncidentRemediationInput struct {
@@ -516,13 +534,11 @@ func (a *App) resolveIncidentRecoveryContext(_ context.Context, incident bughub.
 		return bughub.Bug{}, bughub.BotRef{}, err
 	}
 	bot.Env = strings.TrimSpace(incident.Environment)
-	// Automatic phase transitions (validation -> investigation -> validation
-	// evidence refresh) resolve their context through this recovery path rather
-	// than the user-facing StartIncidentCase path. Keep the same deployment
-	// config hydration here, otherwise a source ticket without frontend_url can
-	// reproduce successfully once and then immediately lose the configured
-	// environments[].web_domain during automatic evidence refresh.
-	bug = a.hydrateIncidentBrowserContext(bug, bot)
+	if incident.FrontendEntry.IsZero() {
+		bug = a.hydrateIncidentBrowserContext(bug, bot)
+	} else {
+		bug = bindIncidentFrontendEntry(bug, incident.FrontendEntry)
+	}
 	return bug, bot, nil
 }
 
@@ -923,13 +939,23 @@ func (a *App) StartIncidentCase(input StartIncidentCaseInput) (bughub.IncidentCa
 	if err := validateWorkflowStartScalars(input.CaseID, input.ExpectedVersion, input.IdempotencyKey, input.ActorID); err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	_, orchestrator, err := a.workflowComponents()
+	store, orchestrator, err := a.workflowComponents()
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
 	bug, bot, err := a.loadIncidentStartContext(input)
 	if err != nil {
 		return bughub.IncidentCase{}, err
+	}
+	frontendEntry := bughub.FrontendEntryBinding{}
+	if existing, getErr := store.GetCase(a.workflowCommandContext(), strings.TrimSpace(input.CaseID)); getErr == nil && !existing.FrontendEntry.IsZero() {
+		frontendEntry = existing.FrontendEntry.Clone()
+		bug = bindIncidentFrontendEntry(bug, frontendEntry)
+	} else {
+		frontendEntry, bug, err = a.resolveIncidentFrontendBinding(bug, bot, input.FrontendEntryID)
+		if err != nil {
+			return bughub.IncidentCase{}, err
+		}
 	}
 	if err := a.requireIncidentBrowserRuntimeReady(bug); err != nil {
 		return bughub.IncidentCase{}, err
@@ -938,7 +964,7 @@ func (a *App) StartIncidentCase(input StartIncidentCaseInput) (bughub.IncidentCa
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	incident, err := orchestrator.CreateAndStartCase(a.workflowCommandContext(), bughub.CreateAndStartCaseCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), Bug: bug, Bot: bot, InputJSON: inputJSON})
+	incident, err := orchestrator.CreateAndStartCase(a.workflowCommandContext(), bughub.CreateAndStartCaseCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), Bug: bug, Bot: bot, FrontendEntry: frontendEntry, InputJSON: inputJSON})
 	a.emitIncidentResult(incident, err)
 	return incident, err
 }
@@ -991,6 +1017,10 @@ func (a *App) resetIncidentCaseWithWarnings(input ResetIncidentCaseInput) (bughu
 	if err != nil {
 		return bughub.ResetCaseOutcome{}, err
 	}
+	frontendEntry, bug, err := a.resolveIncidentFrontendBinding(bug, bot, input.FrontendEntryID)
+	if err != nil {
+		return bughub.ResetCaseOutcome{}, err
+	}
 	if err := a.requireIncidentBrowserRuntimeReady(bug); err != nil {
 		return bughub.ResetCaseOutcome{}, err
 	}
@@ -1001,7 +1031,7 @@ func (a *App) resetIncidentCaseWithWarnings(input ResetIncidentCaseInput) (bughu
 	result, err := orchestrator.ResetCaseWithOutcome(a.workflowCommandContext(), bughub.ResetCaseCommand{
 		CaseID: strings.TrimSpace(input.CaseID), NewCaseID: strings.TrimSpace(input.NewCaseID),
 		ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID),
-		Bug: bug, Bot: bot, InputJSON: inputJSON,
+		Bug: bug, Bot: bot, FrontendEntry: frontendEntry, InputJSON: inputJSON,
 	})
 	if errors.Is(err, bughub.ErrCaseVersionConflict) {
 		err = fmt.Errorf("workflow_conflict:case_version_conflict: %w", err)
@@ -1065,6 +1095,40 @@ func (a *App) ApproveIncidentFix(input ApproveIncidentFixInput) (bughub.Incident
 		return bughub.IncidentCase{}, err
 	}
 	incident, err := orchestrator.ApproveFix(a.workflowCommandContext(), bughub.ApproveFixCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), RootCauseAttemptID: strings.TrimSpace(input.RootCauseAttemptID), Bug: bug, Bot: bot, InputJSON: inputJSON})
+	a.emitIncidentResult(incident, err)
+	return incident, err
+}
+
+func (a *App) ReconsiderIncidentRemediation(input ReconsiderIncidentRemediationInput) (bughub.IncidentCase, error) {
+	if err := validateWorkflowCommandScalars(input.CaseID, input.ExpectedVersion, input.IdempotencyKey, input.ActorID); err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	caseID := strings.TrimSpace(input.CaseID)
+	actorID := strings.TrimSpace(input.ActorID)
+	rootCauseAttemptID := strings.TrimSpace(input.RootCauseAttemptID)
+	proposal := strings.TrimSpace(input.Proposal)
+	if rootCauseAttemptID == "" {
+		return bughub.IncidentCase{}, errors.New("root_cause_attempt_id is required")
+	}
+	if proposal == "" {
+		return bughub.IncidentCase{}, errors.New("proposal is required")
+	}
+	expectedKey := bughub.ReconsiderRemediationKey(caseID, rootCauseAttemptID, input.ExpectedVersion)
+	if strings.TrimSpace(input.IdempotencyKey) != expectedKey {
+		return bughub.IncidentCase{}, errors.New("remediation reassessment key does not match the dialog snapshot scope")
+	}
+	_, orchestrator, err := a.workflowComponents()
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	bug, bot, err := a.loadIncidentContext(caseID)
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	incident, err := orchestrator.ReconsiderRemediation(a.workflowCommandContext(), bughub.ReconsiderRemediationCommand{
+		CaseID: caseID, ExpectedVersion: input.ExpectedVersion, IdempotencyKey: expectedKey, ActorID: actorID,
+		RootCauseAttemptID: rootCauseAttemptID, Proposal: proposal, Bug: bug, Bot: bot,
+	})
 	a.emitIncidentResult(incident, err)
 	return incident, err
 }
@@ -1231,7 +1295,11 @@ func (a *App) loadIncidentContext(caseID string) (bughub.Bug, bughub.BotRef, err
 		return bughub.Bug{}, bughub.BotRef{}, err
 	}
 	bot.Env = strings.TrimSpace(incident.Environment)
-	bug = a.hydrateIncidentBrowserContext(bug, bot)
+	if incident.FrontendEntry.IsZero() {
+		bug = a.hydrateIncidentBrowserContext(bug, bot)
+	} else {
+		bug = bindIncidentFrontendEntry(bug, incident.FrontendEntry)
+	}
 	return bug, bot, nil
 }
 
@@ -1395,10 +1463,11 @@ func (a *App) hydrateIncidentBrowserContext(bug bughub.Bug, bot bughub.BotRef) b
 		if strings.TrimSpace(candidate.ID) != environment {
 			continue
 		}
-		frontendURL := strings.TrimSpace(candidate.WebDomain)
-		if frontendURL == "" {
+		entries := candidate.EffectiveFrontendEntries()
+		if len(entries) != 1 {
 			return bug
 		}
+		frontendURL := strings.TrimSpace(entries[0].URL)
 		if !strings.Contains(frontendURL, "://") {
 			frontendURL = "https://" + frontendURL
 		}
@@ -1407,6 +1476,65 @@ func (a *App) hydrateIncidentBrowserContext(bug bughub.Bug, bot bughub.BotRef) b
 			bug.FrontendURL = canonical
 		}
 		return bug
+	}
+	return bug
+}
+
+func (a *App) ResolveIncidentFrontendEntry(input ResolveIncidentFrontendEntryInput) (bughub.FrontendEntryResolution, error) {
+	if strings.TrimSpace(input.BugID) == "" || strings.TrimSpace(input.BotKey) == "" {
+		return bughub.FrontendEntryResolution{}, errors.New("bug_id and bot_key are required")
+	}
+	bug, bot, err := a.loadFreshBugAndBot(strings.TrimSpace(input.BugID), strings.TrimSpace(input.BotKey), input.BotEnvironment)
+	if err != nil {
+		return bughub.FrontendEntryResolution{}, err
+	}
+	return a.resolveIncidentFrontendEntryForContext(bug, bot, input.FrontendEntryID)
+}
+
+func (a *App) resolveIncidentFrontendBinding(bug bughub.Bug, bot bughub.BotRef, selectedID string) (bughub.FrontendEntryBinding, bughub.Bug, error) {
+	if !bughub.SuggestsBrowserValidation(bug) {
+		return bughub.FrontendEntryBinding{}, bug, nil
+	}
+	resolution, err := a.resolveIncidentFrontendEntryForContext(bug, bot, selectedID)
+	if err != nil {
+		return bughub.FrontendEntryBinding{}, bug, err
+	}
+	if resolution.Status == bughub.FrontendResolutionAmbiguous {
+		return bughub.FrontendEntryBinding{}, bug, errors.New("frontend_entry_selection_required: 工单证据无法唯一确定前端入口")
+	}
+	if resolution.Status != bughub.FrontendResolutionSelected || resolution.Selected == nil {
+		return bughub.FrontendEntryBinding{}, bug, errors.New("frontend_entry_unavailable: 当前环境没有可用的前端入口")
+	}
+	binding := resolution.Selected.Clone()
+	return binding, bindIncidentFrontendEntry(bug, binding), nil
+}
+
+func (a *App) resolveIncidentFrontendEntryForContext(bug bughub.Bug, bot bughub.BotRef, selectedID string) (bughub.FrontendEntryResolution, error) {
+	environment := strings.TrimSpace(bot.Env)
+	incident := bughub.IncidentCase{SystemID: strings.TrimSpace(bug.SystemID), Environment: environment, SelectedBotKey: bot.Key}
+	loader := a.workflowLoadDeploymentConfig
+	if loader == nil {
+		loader = a.loadInstalledIncidentConfig
+	}
+	cfg, err := loader(a.workflowCommandContext(), incident)
+	if err != nil || cfg == nil || strings.TrimSpace(cfg.System.ID) != strings.TrimSpace(bug.SystemID) {
+		return bughub.FrontendEntryResolution{}, errors.New("incident frontend configuration is unavailable")
+	}
+	for _, candidate := range cfg.Environments {
+		if strings.TrimSpace(candidate.ID) == environment {
+			return bughub.ResolveFrontendEntry(candidate.EffectiveFrontendEntries(), bug, selectedID)
+		}
+	}
+	return bughub.FrontendEntryResolution{}, errors.New("incident frontend environment is unavailable")
+}
+
+func bindIncidentFrontendEntry(bug bughub.Bug, binding bughub.FrontendEntryBinding) bughub.Bug {
+	if binding.IsZero() {
+		return bug
+	}
+	bug.FrontendURL = strings.TrimSpace(binding.URL)
+	if strings.TrimSpace(binding.Repo) != "" {
+		bug.FrontendRepo = strings.TrimSpace(binding.Repo)
 	}
 	return bug
 }
@@ -1491,16 +1619,33 @@ func incidentPhaseEventsForDetail(root string, incident bughub.IncidentCase) []b
 		return nil
 	}
 	const maxEvents = 100
-	start := 0
-	if len(run.Events) > maxEvents {
-		start = len(run.Events) - maxEvents
-	}
-	out := make([]bughub.InvestigationEvent, 0, len(run.Events)-start)
-	for _, event := range run.Events[start:] {
+	out := make([]bughub.InvestigationEvent, 0, min(len(run.Events), maxEvents))
+	for _, event := range run.Events {
 		if safe, ok := incidentPublicPhaseEvent(event); ok {
 			out = append(out, safe)
 		}
 	}
+	return capIncidentPhaseEvents(out, maxEvents)
+}
+
+func capIncidentPhaseEvents(events []bughub.InvestigationEvent, limit int) []bughub.InvestigationEvent {
+	if limit <= 0 || len(events) <= limit {
+		return events
+	}
+	recentStart := len(events) - limit
+	latestStep := -1
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].Type == "phase_step" {
+			latestStep = index
+			break
+		}
+	}
+	if latestStep < 0 || latestStep >= recentStart {
+		return events[recentStart:]
+	}
+	out := make([]bughub.InvestigationEvent, 0, limit)
+	out = append(out, events[latestStep])
+	out = append(out, events[len(events)-(limit-1):]...)
 	return out
 }
 

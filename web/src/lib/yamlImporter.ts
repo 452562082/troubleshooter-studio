@@ -75,8 +75,36 @@ export interface ParsedEnv {
   id: string
   api_domain: string
   web_domain: string
+  frontend_entries: ParsedFrontendEntry[]
   is_prod: boolean
   deployment_verification?: DeploymentVerificationState
+}
+
+export interface ParsedFrontendEntry {
+  id: string
+  name: string
+  url: string
+  repo: string
+  device_profile: string
+  aliases: string
+  product_hints: string
+  module_hints: string
+  path_prefixes: string
+}
+
+function parseStringList(value: unknown): string {
+  return Array.isArray(value) ? value.filter(item => typeof item === 'string').join(', ') : ''
+}
+
+function parseFrontendEntry(value: unknown): ParsedFrontendEntry {
+  const entry = (value ?? {}) as Record<string, unknown>
+  const text = (key: string) => typeof entry[key] === 'string' ? entry[key] as string : ''
+  return {
+    id: text('id'), name: text('name'), url: text('url'), repo: text('repo'),
+    device_profile: text('device_profile'), aliases: parseStringList(entry.aliases),
+    product_hints: parseStringList(entry.product_hints), module_hints: parseStringList(entry.module_hints),
+    path_prefixes: parseStringList(entry.path_prefixes),
+  }
 }
 
 /** parsed.environments[i] → ParsedEnv,字段全 fallback 空串/false。 */
@@ -116,6 +144,7 @@ export function parseEnvironment(e: unknown): ParsedEnv {
     id: typeof o.id === 'string' ? o.id : '',
     api_domain: typeof o.api_domain === 'string' ? o.api_domain : '',
     web_domain: typeof o.web_domain === 'string' ? o.web_domain : '',
+    frontend_entries: Array.isArray(o.frontend_entries) ? o.frontend_entries.map(parseFrontendEntry) : [],
     is_prod: Boolean(o.is_prod),
     ...(deploymentVerification ? { deployment_verification: deploymentVerification } : {}),
   }

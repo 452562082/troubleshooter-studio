@@ -31,9 +31,21 @@ const callChain = computed<DisplayCallChainHop[]>(() => {
     return [{ kind: text('kind'), name, service: text('service'), repo: text('repo'), revision: text('revision'), operation: text('operation'), file: text('file'), line, precision: text('precision'), evidence: text('evidence') }]
   })
 })
+type DisplayRemediation = { mode: string; target: string; summary: string; rollback: string; verification: string }
+const remediation = computed<DisplayRemediation | null>(() => {
+  const raw = investigation.value?.output_json?.remediation
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const plan = raw as Record<string, unknown>
+  const text = (key: string) => typeof plan[key] === 'string' ? String(plan[key]).trim().slice(0, 2000) : ''
+  const value = { mode: text('mode'), target: text('target'), summary: text('summary'), rollback: text('rollback'), verification: text('verification') }
+  return Object.values(value).some(Boolean) ? value : null
+})
 
 function precisionLabel(precision: string): string {
   return ({ runtime_verified: '运行时已验证', source_mapped: 'Source Map 精确定位', deployed_revision: '部署版本定位', static_candidate: '静态候选', unavailable: '暂不可定位' } as Record<string, string>)[precision] || '精度未知'
+}
+function remediationModeLabel(mode: string): string {
+  return ({ code_change: '代码修复', operator_action: '人工处置', external_recovery: '外部恢复', observe_only: '持续观察' } as Record<string, string>)[mode] || mode
 }
 function safeAttemptForDisplay(attempt: PhaseAttempt): PhaseAttempt {
   const outputCode = typeof attempt.output_json?.error_code === 'string' ? attempt.output_json.error_code.trim() : ''
@@ -247,8 +259,11 @@ watch(
 
 <template>
   <div class="artifact-sections">
-    <section class="artifact-card" aria-labelledby="evidence-title">
-      <h3 id="evidence-title">验证证据</h3>
+    <details class="artifact-card evidence-card" aria-labelledby="evidence-title">
+      <summary>
+        <h3 id="evidence-title">验证证据</h3>
+        <span>{{ detail.artifacts.length }} 条</span>
+      </summary>
       <p v-if="detail.artifacts.length === 0" class="empty-copy">尚无证据</p>
       <article v-for="artifact in detail.artifacts" :key="artifact.id" class="artifact-item evidence-item" :data-artifact-id="artifact.id">
         <div class="artifact-item-heading">
@@ -266,7 +281,7 @@ watch(
         <p v-if="previewErrors[artifact.id]" class="artifact-local-error" role="status">{{ previewErrors[artifact.id] }}</p>
         <p v-if="saveStatus(artifact.id)" :class="saveStates[artifact.id] === 'failed' ? 'artifact-local-error' : 'artifact-local-status'" role="status">{{ saveStatus(artifact.id) }}</p>
       </article>
-    </section>
+    </details>
 
     <dialog v-if="selectedPreview && previewURLs[selectedPreview.id]" ref="previewDialog" class="screenshot-dialog" aria-modal="true" :aria-labelledby="previewDialogTitleID" @cancel.prevent="closePreview" @close="finishPreviewClose">
       <header>
@@ -279,6 +294,16 @@ watch(
     <section class="artifact-card" aria-labelledby="cause-title">
       <h3 id="cause-title">根因结论</h3>
       <pre>{{ rootCause(investigation) }}</pre>
+      <div v-if="remediation" class="remediation-plan">
+        <h4>建议修复方向</h4>
+        <dl>
+          <div v-if="remediation.mode"><dt>处置方式</dt><dd>{{ remediationModeLabel(remediation.mode) }}</dd></div>
+          <div v-if="remediation.target"><dt>修复对象</dt><dd>{{ remediation.target }}</dd></div>
+          <div v-if="remediation.summary"><dt>修复建议</dt><dd>{{ remediation.summary }}</dd></div>
+          <div v-if="remediation.rollback"><dt>回退方案</dt><dd>{{ remediation.rollback }}</dd></div>
+          <div v-if="remediation.verification"><dt>回归方式</dt><dd>{{ remediation.verification }}</dd></div>
+        </dl>
+      </div>
     </section>
 
     <section class="artifact-card call-chain-card" aria-labelledby="call-chain-title">
@@ -376,6 +401,18 @@ watch(
 .attempt-output-scroll:focus-visible { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; border-radius: var(--r-md); }
 .artifact-card { min-width: 0; border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); padding: var(--sp-3); }
 .artifact-card h3 { margin: 0 0 var(--sp-2); color: var(--c-ink); font-size: var(--fs-base); }
+.evidence-card > summary { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); cursor: pointer; list-style: none; }
+.evidence-card > summary::-webkit-details-marker { display: none; }
+.evidence-card > summary::after { content: '›'; color: var(--c-muted); font-size: 20px; transform: rotate(0deg); transition: transform 160ms ease; }
+.evidence-card[open] > summary::after { transform: rotate(90deg); }
+.evidence-card > summary h3 { margin: 0; }
+.evidence-card > summary span { margin-left: auto; color: var(--c-muted); font-size: var(--fs-xs); }
+.evidence-card > summary:focus-visible { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; border-radius: var(--r-md); }
+.remediation-plan { margin-top: var(--sp-3); border-top: 1px solid var(--c-line); padding-top: var(--sp-2); }
+.remediation-plan h4 { margin: 0 0 var(--sp-2); color: var(--c-ink); font-size: var(--fs-sm); }
+.remediation-plan dl { display: grid; gap: 8px; margin: 0; }
+.remediation-plan dl > div { display: grid; grid-template-columns: minmax(76px, auto) minmax(0, 1fr); gap: 10px; }
+.remediation-plan dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
 .call-chain-card { grid-column: 1 / -1; }
 .call-chain-list { display: grid; gap: var(--sp-2); margin: 0; padding: 0; list-style: none; counter-reset: call-chain; }
 .call-chain-hop { counter-increment: call-chain; display: grid; gap: 4px; min-width: 0; padding: 10px 12px; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); }

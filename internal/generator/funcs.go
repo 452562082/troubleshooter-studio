@@ -73,6 +73,48 @@ func frontendEndpointsForRepo(ctx *Context, repoName string) []string {
 	return out
 }
 
+type frontendApplicationView struct {
+	Environment   string
+	ID            string
+	Name          string
+	URL           string
+	DeviceProfile string
+	Aliases       []string
+	ProductHints  []string
+	ModuleHints   []string
+	PathPrefixes  []string
+}
+
+func frontendApplicationsForRepo(ctx *Context, repoName string) []frontendApplicationView {
+	if ctx == nil {
+		return nil
+	}
+	var out []frontendApplicationView
+	for _, environment := range ctx.Environments {
+		entries := environment.EffectiveFrontendEntries()
+		for _, entry := range entries {
+			if entry.Repo != "" && entry.Repo != repoName {
+				continue
+			}
+			out = append(out, frontendApplicationView{
+				Environment: environment.ID, ID: entry.ID, Name: entry.Name, URL: entry.URL,
+				DeviceProfile: entry.DeviceProfile, Aliases: entry.Aliases, ProductHints: entry.ProductHints,
+				ModuleHints: entry.ModuleHints, PathPrefixes: entry.PathPrefixes,
+			})
+		}
+	}
+	return out
+}
+
+func frontendURLForRepoEnvironment(ctx *Context, repoName, environmentID string) string {
+	for _, application := range frontendApplicationsForRepo(ctx, repoName) {
+		if application.Environment == environmentID {
+			return application.URL
+		}
+	}
+	return ""
+}
+
 func frontendCandidateServicesForRepo(ctx *Context, repoName string) []string {
 	if ctx == nil {
 		return nil
@@ -420,6 +462,8 @@ func funcMap() template.FuncMap {
 		"lower":                                  strings.ToLower,
 		"dataStoreSkill":                         dataStoreSkillName,
 		"frontendEndpointsForRepo":               frontendEndpointsForRepo,
+		"frontendApplicationsForRepo":            frontendApplicationsForRepo,
+		"frontendURLForRepoEnvironment":          frontendURLForRepoEnvironment,
 		"frontendCandidateServicesForRepo":       frontendCandidateServicesForRepo,
 		"frontendRouteCandidatesForRepoEndpoint": frontendRouteCandidatesForRepoEndpoint,
 		"dependencyServicesForRepo":              dependencyServicesForRepo,

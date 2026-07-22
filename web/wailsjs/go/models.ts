@@ -64,6 +64,7 @@ export namespace agent {
 		    return a;
 		}
 	}
+
 	export class Result {
 	    agent_path: string;
 	    target: string;
@@ -871,12 +872,113 @@ export namespace bughub {
 		    return a;
 		}
 	}
+	export class FrontendEntryBinding {
+	    id: string;
+	    name: string;
+	    url: string;
+	    config_url?: string;
+	    repo?: string;
+	    device_profile?: string;
+	    resolution_source: string;
+	    score?: number;
+	    reason?: string;
+	    config_sha256?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new FrontendEntryBinding(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.url = source["url"];
+	        this.config_url = source["config_url"];
+	        this.repo = source["repo"];
+	        this.device_profile = source["device_profile"];
+	        this.resolution_source = source["resolution_source"];
+	        this.score = source["score"];
+	        this.reason = source["reason"];
+	        this.config_sha256 = source["config_sha256"];
+	    }
+	}
+	export class FrontendEntryCandidate {
+	    binding: FrontendEntryBinding;
+	    score: number;
+	    reasons: string[];
+
+	    static createFrom(source: any = {}) {
+	        return new FrontendEntryCandidate(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.binding = this.convertValues(source["binding"], FrontendEntryBinding);
+	        this.score = source["score"];
+	        this.reasons = source["reasons"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class FrontendEntryResolution {
+	    status: string;
+	    selected?: FrontendEntryBinding;
+	    candidates?: FrontendEntryCandidate[];
+	    message?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new FrontendEntryResolution(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.status = source["status"];
+	        this.selected = this.convertValues(source["selected"], FrontendEntryBinding);
+	        this.candidates = this.convertValues(source["candidates"], FrontendEntryCandidate);
+	        this.message = source["message"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class IncidentCase {
 	    id: string;
 	    bug_id: string;
 	    source: string;
 	    system_id: string;
 	    environment: string;
+	    frontend_entry?: FrontendEntryBinding;
 	    status: string;
 	    cycle_number: number;
 	    current_attempt_id: string;
@@ -902,6 +1004,7 @@ export namespace bughub {
 	        this.source = source["source"];
 	        this.system_id = source["system_id"];
 	        this.environment = source["environment"];
+	        this.frontend_entry = this.convertValues(source["frontend_entry"], FrontendEntryBinding);
 	        this.status = source["status"];
 	        this.cycle_number = source["cycle_number"];
 	        this.current_attempt_id = source["current_attempt_id"];
@@ -3862,11 +3965,34 @@ export namespace main {
 	        this.size = source["size"];
 	    }
 	}
+	export class ReconsiderIncidentRemediationInput {
+	    case_id: string;
+	    expected_version: number;
+	    idempotency_key: string;
+	    actor_id: string;
+	    root_cause_attempt_id: string;
+	    proposal: string;
+
+	    static createFrom(source: any = {}) {
+	        return new ReconsiderIncidentRemediationInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.expected_version = source["expected_version"];
+	        this.idempotency_key = source["idempotency_key"];
+	        this.actor_id = source["actor_id"];
+	        this.root_cause_attempt_id = source["root_cause_attempt_id"];
+	        this.proposal = source["proposal"];
+	    }
+	}
 	export class ResetIncidentCaseInput {
 	    case_id: string;
 	    new_case_id: string;
 	    bot_key: string;
 	    bot_environment?: string;
+	    frontend_entry_id?: string;
 	    expected_version: number;
 	    idempotency_key: string;
 	    actor_id: string;
@@ -3882,10 +4008,29 @@ export namespace main {
 	        this.new_case_id = source["new_case_id"];
 	        this.bot_key = source["bot_key"];
 	        this.bot_environment = source["bot_environment"];
+	        this.frontend_entry_id = source["frontend_entry_id"];
 	        this.expected_version = source["expected_version"];
 	        this.idempotency_key = source["idempotency_key"];
 	        this.actor_id = source["actor_id"];
 	        this.input_json = source["input_json"];
+	    }
+	}
+	export class ResolveIncidentFrontendEntryInput {
+	    bug_id: string;
+	    bot_key: string;
+	    bot_environment?: string;
+	    frontend_entry_id?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new ResolveIncidentFrontendEntryInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.bug_id = source["bug_id"];
+	        this.bot_key = source["bot_key"];
+	        this.bot_environment = source["bot_environment"];
+	        this.frontend_entry_id = source["frontend_entry_id"];
 	    }
 	}
 	export class RunInstallResult {
@@ -3946,6 +4091,7 @@ export namespace main {
 	    bug_id?: string;
 	    bot_key?: string;
 	    bot_environment?: string;
+	    frontend_entry_id?: string;
 	    expected_version: number;
 	    idempotency_key: string;
 	    actor_id: string;
@@ -3961,6 +4107,7 @@ export namespace main {
 	        this.bug_id = source["bug_id"];
 	        this.bot_key = source["bot_key"];
 	        this.bot_environment = source["bot_environment"];
+	        this.frontend_entry_id = source["frontend_entry_id"];
 	        this.expected_version = source["expected_version"];
 	        this.idempotency_key = source["idempotency_key"];
 	        this.actor_id = source["actor_id"];

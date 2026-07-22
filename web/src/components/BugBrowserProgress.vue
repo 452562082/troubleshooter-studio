@@ -47,6 +47,9 @@ function progressCopy(event: { code: IncidentBrowserProgressCode; current?: numb
   if (event.code === 'browser_login_completed') return '浏览器登录会话已保存'
   if (event.code === 'browser_action_started' || event.code === 'action_started') return count ? `执行 ${count}：开始页面操作` : '正在执行页面操作'
   if (event.code === 'browser_action_completed' || event.code === 'action_completed') return count ? `执行 ${count}：页面操作完成` : '页面操作已完成'
+  if (event.code === 'browser_plan_generating') return '正在生成浏览器验证计划'
+  if (event.code === 'browser_repair_generating') return '正在生成页面定位修复计划'
+  if (event.code === 'browser_result_evaluating') return '正在判定浏览器验证结果'
   return '浏览器操作进行中'
 }
 
@@ -63,7 +66,7 @@ const stableErrorCode = computed(() => {
   return value.startsWith('browser_') || value === 'validator_not_installed' ? value : ''
 })
 
-const state = computed<'progress' | 'login' | 'runtime' | 'validator' | 'quota' | 'locator' | 'url' | 'business' | 'plan' | 'attachment' | 'process' | 'retry' | 'system' | ''>(() => {
+const state = computed<'progress' | 'login' | 'runtime' | 'validator' | 'quota' | 'locator' | 'url' | 'business' | 'plan' | 'attachment' | 'configuration' | 'process' | 'retry' | 'system' | ''>(() => {
   const code = stableErrorCode.value
   if (code === 'browser_login_required') return 'login'
   if (code === 'browser_runtime_broken') return 'runtime'
@@ -74,7 +77,8 @@ const state = computed<'progress' | 'login' | 'runtime' | 'validator' | 'quota' 
   if (code === 'browser_assertion_failed') return 'business'
   if (code === 'browser_validator_plan_invalid' || code === 'browser_locator_repair_plan_invalid') return 'plan'
   if (code === 'browser_validator_attachment_failed') return 'attachment'
-  if (code === 'browser_validator_no_output' || code === 'browser_validator_process_failed') return 'process'
+  if (code === 'browser_validator_configuration_invalid') return 'configuration'
+  if (code === 'browser_validator_timeout' || code === 'browser_validator_no_output' || code === 'browser_validator_process_failed') return 'process'
   if (code === 'browser_validator_failed') return 'retry'
   if (code.startsWith('browser_')) return 'system'
   return safeEvents.value.length > 0 ? 'progress' : ''
@@ -90,6 +94,9 @@ const loginOrigin = computed(() => {
 })
 
 const stateCopy = computed(() => {
+  if (stableErrorCode.value === 'browser_validator_timeout') {
+    return '等待验证机器人超时。当前 Case 和已采集的浏览器证据均已保留，可以直接重试，无需补充附件或重建故障闭环。'
+  }
   if (stableErrorCode.value === 'browser_locator_repair_plan_invalid') {
     return '页面定位修复计划未通过协议校验。当前 Case、原计划与现场证据均已保留，可以直接重新生成计划并重试。'
   }
@@ -118,6 +125,7 @@ const stateCopy = computed(() => {
     business: '页面结果与预期不一致。请补充最小业务预期或测试数据后重试。',
     plan: '验证机器人生成的浏览器计划未通过结构校验。可以在当前 Case 内重新生成计划，无需重建故障闭环。',
     attachment: '验证机器人无法读取本次截图证据。Studio 会优先使用结构化页面与网络证据降级判定；仍失败时请检查 macOS 文件访问权限后在当前 Case 重试。',
+    configuration: '验证机器人启动配置不兼容。请升级或重新启动已修复的 Studio 后，在当前 Case 直接重试验证；无需补充证据或重建故障闭环。',
     process: '验证机器人进程异常退出或没有返回结构化结果。当前 Case 和浏览器证据均已保留，可以直接重试。',
     retry: '验证机器人本次执行异常。可以在当前 Case 内重新运行验证，无需补附件或重建故障闭环。',
     system: '浏览器验证遇到系统错误。请刷新 Case 后按稳定错误码处理，不要用附件补充来掩盖运行时故障。',

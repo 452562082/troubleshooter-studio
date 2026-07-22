@@ -12,6 +12,20 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 )
 
+func TestTopologyServiceHostsIncludesAllFrontendApplications(t *testing.T) {
+	hosts := topologyServiceHosts(config.RoleFrontend, []config.Environment{{
+		WebDomain: "legacy.test",
+		FrontendEntries: []config.FrontendEntry{
+			{ID: "consumer", Name: "C 端", URL: "https://m.test/app"},
+			{ID: "admin", Name: "管理端", URL: "https://admin.test/console"},
+		},
+	}})
+	want := []string{"https://admin.test/console", "https://m.test/app", "legacy.test"}
+	if !reflect.DeepEqual(hosts, want) {
+		t.Fatalf("hosts=%v want=%v", hosts, want)
+	}
+}
+
 func TestRun_ServiceTopologyBuildsThreeRepositoryChain(t *testing.T) {
 	repoPaths, cfg := serviceTopologyFixture(t)
 

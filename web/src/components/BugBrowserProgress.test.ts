@@ -142,6 +142,23 @@ describe('BugBrowserProgress', () => {
     const process = mount(BugBrowserProgress, { props: { attempt: attempt('browser_validator_process_failed'), events: [], systemID: 'base', environment: 'test' } })
     expect(process.get('[data-browser-state="process"]').text()).toContain('进程异常退出')
     expect(process.text()).toContain('可以直接重试')
+
+    const configuration = mount(BugBrowserProgress, { props: { attempt: attempt('browser_validator_configuration_invalid'), events: [], systemID: 'base', environment: 'test' } })
+    expect(configuration.get('[data-browser-state="configuration"]').text()).toContain('启动配置不兼容')
+    expect(configuration.text()).toContain('升级或重新启动')
+
+    const timeout = mount(BugBrowserProgress, { props: { attempt: attempt('browser_validator_timeout'), events: [], systemID: 'base', environment: 'test' } })
+    expect(timeout.get('[data-browser-state="process"]').text()).toContain('等待验证机器人超时')
+    expect(timeout.text()).toContain('浏览器证据均已保留')
+  })
+
+  it('shows planner and evaluator work after browser actions complete', () => {
+    const wrapper = mount(BugBrowserProgress, { props: { events: [
+      { type: 'browser_progress', message: '', meta: { browser_code: 'browser_plan_generating' } },
+      { type: 'browser_progress', message: '', meta: { browser_code: 'browser_result_evaluating' } },
+    ] } })
+    expect(wrapper.text()).toContain('正在生成浏览器验证计划')
+    expect(wrapper.text()).toContain('正在判定浏览器验证结果')
   })
 
   it('never renders an untrusted error code as recovery copy', () => {

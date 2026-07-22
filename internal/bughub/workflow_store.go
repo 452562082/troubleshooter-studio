@@ -56,16 +56,17 @@ type CaseCreationResult struct {
 // CaseReset identifies one exact request to archive a non-terminal Case and
 // create its pending replacement in the same transaction.
 type CaseReset struct {
-	CaseID                 string
-	NewCaseID              string
-	IdempotencyKey         string
-	ActorID                string
-	ExpectedVersion        int64
-	SelectedBotKey         string
-	ReplacementBotTarget   string
-	ReplacementSystemID    string
-	ReplacementEnvironment string
-	RequestJSON            json.RawMessage
+	CaseID                   string
+	NewCaseID                string
+	IdempotencyKey           string
+	ActorID                  string
+	ExpectedVersion          int64
+	SelectedBotKey           string
+	ReplacementBotTarget     string
+	ReplacementSystemID      string
+	ReplacementEnvironment   string
+	ReplacementFrontendEntry FrontendEntryBinding
+	RequestJSON              json.RawMessage
 	// replayOnlyLegacyEnvironment is the environment that the pre-selected-Bot
 	// resolver would have used. It is consulted only for an already committed
 	// event and is excluded from new fingerprints, payloads, and writes.
@@ -260,6 +261,10 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if err := verifyWorkflowSchemaMarker(ctx, tx, 9); err != nil {
 			return err
 		}
+	case 10:
+		if err := verifyWorkflowSchemaMarker(ctx, tx, 10); err != nil {
+			return err
+		}
 	case workflowStoreSchemaVersion:
 		// Verified below before the transaction is committed.
 	default:
@@ -438,7 +443,7 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: 10, Fingerprint: fingerprint})
 		if err != nil {
 			return fmt.Errorf("encode workflow schema v10 detail: %w", err)
 		}
@@ -447,6 +452,26 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		}
 		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=10`); err != nil {
 			return fmt.Errorf("set workflow schema version 10: %w", err)
+		}
+		version = 10
+	}
+	if version == 10 {
+		if _, err := tx.ExecContext(ctx, workflowStoreSchemaV11Upgrade); err != nil {
+			return fmt.Errorf("apply workflow schema v11: %w", err)
+		}
+		fingerprint, err := workflowSchemaFingerprint(ctx, tx)
+		if err != nil {
+			return err
+		}
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		if err != nil {
+			return fmt.Errorf("encode workflow schema v11 detail: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE schema_migrations SET applied_at = ?, detail_json = ? WHERE key = ?`, formatStoreTime(time.Now().UTC()), string(detail), workflowStoreSchemaV1Key); err != nil {
+			return fmt.Errorf("record workflow schema v11: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=11`); err != nil {
+			return fmt.Errorf("set workflow schema version 11: %w", err)
 		}
 	}
 	tables, err := workflowTableColumns(ctx, tx)
@@ -699,17 +724,36 @@ func (s *CaseStore) CreateCase(ctx context.Context, incident IncidentCase) error
 	if incident.UpdatedAt.IsZero() {
 		incident.UpdatedAt = incident.CreatedAt
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO incident_cases (
+	frontendEntryJSON, err := json.Marshal(incident.FrontendEntry)
+	if err != nil {
+		return fmt.Errorf("encode incident frontend entry: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO incident_cases (
 		id, bug_id, source, system_id, environment, status, cycle_number,
 		current_attempt_id, selected_bot_key, reset_from_case_id, superseded_by_case_id,
-		version, created_at, updated_at, closed_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		frontend_entry_json, version, created_at, updated_at, closed_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		incident.ID, incident.BugID, incident.Source, incident.SystemID, incident.Environment,
 		incident.Status, incident.CycleNumber, incident.CurrentAttemptID, incident.SelectedBotKey,
-		incident.ResetFromCaseID, incident.SupersededByCaseID,
+		incident.ResetFromCaseID, incident.SupersededByCaseID, string(frontendEntryJSON),
 		incident.Version, formatStoreTime(incident.CreatedAt), formatStoreTime(incident.UpdatedAt),
 		formatOptionalStoreTime(incident.ClosedAt),
 	)
+	// Migration fixtures (and only migration fixtures) deliberately exercise a
+	// pre-v11 database through this low-level helper before opening it again.
+	// Keep zero-binding inserts compatible so those databases can be upgraded;
+	// normal stores are migrated during OpenCaseStore before any command runs.
+	if err != nil && incident.FrontendEntry.IsZero() && strings.Contains(err.Error(), "no column named frontend_entry_json") {
+		_, err = s.db.ExecContext(ctx, `INSERT INTO incident_cases (
+			id, bug_id, source, system_id, environment, status, cycle_number,
+			current_attempt_id, selected_bot_key, reset_from_case_id, superseded_by_case_id,
+			version, created_at, updated_at, closed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			incident.ID, incident.BugID, incident.Source, incident.SystemID, incident.Environment,
+			incident.Status, incident.CycleNumber, incident.CurrentAttemptID, incident.SelectedBotKey,
+			incident.ResetFromCaseID, incident.SupersededByCaseID, incident.Version,
+			formatStoreTime(incident.CreatedAt), formatStoreTime(incident.UpdatedAt), formatOptionalStoreTime(incident.ClosedAt))
+	}
 	if err != nil {
 		return fmt.Errorf("create incident case: %w", err)
 	}
@@ -765,7 +809,7 @@ func (s *CaseStore) CreateCaseWithIdentity(ctx context.Context, creation CaseCre
 	}
 	openCase, openErr := scanCase(tx.QueryRowContext(ctx, `SELECT id, bug_id, source, system_id,
 		environment, status, cycle_number, current_attempt_id, selected_bot_key,
-		reset_from_case_id, superseded_by_case_id, version, created_at, updated_at, closed_at
+		reset_from_case_id, superseded_by_case_id, frontend_entry_json, version, created_at, updated_at, closed_at
 		FROM incident_cases WHERE bug_id = ? AND status NOT IN (?, ?, ?)
 		ORDER BY updated_at DESC, id DESC LIMIT 1`, creation.Case.BugID, CaseFixedVerified, CaseLegacyArchived, CaseResetArchived))
 	if openErr == nil {
@@ -807,7 +851,11 @@ func (s *CaseStore) CreateCaseWithIdentity(ctx context.Context, creation CaseCre
 	if created.UpdatedAt.IsZero() {
 		created.UpdatedAt = created.CreatedAt
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO incident_cases (id,bug_id,source,system_id,environment,status,cycle_number,current_attempt_id,selected_bot_key,reset_from_case_id,superseded_by_case_id,version,created_at,updated_at,closed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, created.ID, created.BugID, created.Source, created.SystemID, created.Environment, created.Status, created.CycleNumber, created.CurrentAttemptID, created.SelectedBotKey, created.ResetFromCaseID, created.SupersededByCaseID, created.Version, formatStoreTime(created.CreatedAt), formatStoreTime(created.UpdatedAt), nil); err != nil {
+	createdFrontendJSON, marshalErr := json.Marshal(created.FrontendEntry)
+	if marshalErr != nil {
+		return CaseCreationResult{}, marshalErr
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO incident_cases (id,bug_id,source,system_id,environment,status,cycle_number,current_attempt_id,selected_bot_key,reset_from_case_id,superseded_by_case_id,frontend_entry_json,version,created_at,updated_at,closed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, created.ID, created.BugID, created.Source, created.SystemID, created.Environment, created.Status, created.CycleNumber, created.CurrentAttemptID, created.SelectedBotKey, created.ResetFromCaseID, created.SupersededByCaseID, string(createdFrontendJSON), created.Version, formatStoreTime(created.CreatedAt), formatStoreTime(created.UpdatedAt), nil); err != nil {
 		return CaseCreationResult{}, fmt.Errorf("insert durable Case: %w", err)
 	}
 	resultBytes, marshalErr := json.Marshal(created)
@@ -828,16 +876,17 @@ func (s *CaseStore) CreateCaseWithIdentity(ctx context.Context, creation CaseCre
 
 func caseCreationFingerprint(creation CaseCreation) (string, error) {
 	identity := struct {
-		CaseID         string          `json:"case_id"`
-		BugID          string          `json:"bug_id"`
-		Source         string          `json:"source"`
-		SystemID       string          `json:"system_id"`
-		Environment    string          `json:"environment"`
-		CycleNumber    int             `json:"cycle_number"`
-		SelectedBotKey string          `json:"selected_bot_key"`
-		IdempotencyKey string          `json:"idempotency_key"`
-		ActorID        string          `json:"actor_id"`
-		RequestJSON    json.RawMessage `json:"request_json"`
+		CaseID         string               `json:"case_id"`
+		BugID          string               `json:"bug_id"`
+		Source         string               `json:"source"`
+		SystemID       string               `json:"system_id"`
+		Environment    string               `json:"environment"`
+		CycleNumber    int                  `json:"cycle_number"`
+		SelectedBotKey string               `json:"selected_bot_key"`
+		FrontendEntry  FrontendEntryBinding `json:"frontend_entry"`
+		IdempotencyKey string               `json:"idempotency_key"`
+		ActorID        string               `json:"actor_id"`
+		RequestJSON    json.RawMessage      `json:"request_json"`
 	}{
 		CaseID:         creation.Case.ID,
 		BugID:          creation.Case.BugID,
@@ -846,6 +895,7 @@ func caseCreationFingerprint(creation CaseCreation) (string, error) {
 		Environment:    creation.Case.Environment,
 		CycleNumber:    creation.Case.CycleNumber,
 		SelectedBotKey: creation.Case.SelectedBotKey,
+		FrontendEntry:  creation.Case.FrontendEntry.Clone(),
 		IdempotencyKey: creation.IdempotencyKey,
 		ActorID:        creation.ActorID,
 		RequestJSON:    CloneRawMessage(creation.RequestJSON),
@@ -1042,6 +1092,7 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 		Source:          incident.Source,
 		SystemID:        replacementSystemID,
 		Environment:     reset.ReplacementEnvironment,
+		FrontendEntry:   reset.ReplacementFrontendEntry.Clone(),
 		Status:          CasePendingValidation,
 		CycleNumber:     1,
 		SelectedBotKey:  reset.SelectedBotKey,
@@ -1053,7 +1104,11 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 	if err := replacement.Validate(); err != nil {
 		return result, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO incident_cases (id,bug_id,source,system_id,environment,status,cycle_number,current_attempt_id,selected_bot_key,reset_from_case_id,superseded_by_case_id,version,created_at,updated_at,closed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, replacement.ID, replacement.BugID, replacement.Source, replacement.SystemID, replacement.Environment, replacement.Status, replacement.CycleNumber, replacement.CurrentAttemptID, replacement.SelectedBotKey, replacement.ResetFromCaseID, replacement.SupersededByCaseID, replacement.Version, formatStoreTime(now), formatStoreTime(now), nil); err != nil {
+	replacementFrontendJSON, marshalErr := json.Marshal(replacement.FrontendEntry)
+	if marshalErr != nil {
+		return result, marshalErr
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO incident_cases (id,bug_id,source,system_id,environment,status,cycle_number,current_attempt_id,selected_bot_key,reset_from_case_id,superseded_by_case_id,frontend_entry_json,version,created_at,updated_at,closed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, replacement.ID, replacement.BugID, replacement.Source, replacement.SystemID, replacement.Environment, replacement.Status, replacement.CycleNumber, replacement.CurrentAttemptID, replacement.SelectedBotKey, replacement.ResetFromCaseID, replacement.SupersededByCaseID, string(replacementFrontendJSON), replacement.Version, formatStoreTime(now), formatStoreTime(now), nil); err != nil {
 		return result, fmt.Errorf("insert reset replacement Case: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO validation_recipes (
@@ -1336,7 +1391,7 @@ func (s *CaseStore) GetCase(ctx context.Context, id string) (IncidentCase, error
 func (s *CaseStore) ListCases(ctx context.Context) ([]IncidentCase, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, bug_id, source, system_id, environment,
 		status, cycle_number, current_attempt_id, selected_bot_key, reset_from_case_id,
-		superseded_by_case_id, version,
+		superseded_by_case_id, frontend_entry_json, version,
 		created_at, updated_at, closed_at
 		FROM incident_cases ORDER BY updated_at DESC, id ASC`)
 	if err != nil {
@@ -1396,14 +1451,18 @@ func (s *CaseStore) importLegacyBatch(ctx context.Context, batch legacyImportBat
 	}
 	result := LegacyImportResult{}
 	for _, incident := range batch.Cases {
+		frontendEntryJSON, marshalErr := json.Marshal(incident.FrontendEntry)
+		if marshalErr != nil {
+			return LegacyImportResult{}, marshalErr
+		}
 		insert, err := tx.ExecContext(ctx, `INSERT INTO incident_cases (
 			id, bug_id, source, system_id, environment, status, cycle_number,
 			current_attempt_id, selected_bot_key, reset_from_case_id, superseded_by_case_id,
-			version, created_at, updated_at, closed_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+			frontend_entry_json, version, created_at, updated_at, closed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
 			incident.ID, incident.BugID, incident.Source, incident.SystemID, incident.Environment,
 			incident.Status, incident.CycleNumber, incident.CurrentAttemptID, incident.SelectedBotKey,
-			incident.ResetFromCaseID, incident.SupersededByCaseID,
+			incident.ResetFromCaseID, incident.SupersededByCaseID, string(frontendEntryJSON),
 			incident.Version, formatStoreTime(incident.CreatedAt), formatStoreTime(incident.UpdatedAt),
 			formatOptionalStoreTime(incident.ClosedAt))
 		if err != nil {
@@ -1442,7 +1501,7 @@ func (s *CaseStore) importLegacyBatch(ctx context.Context, batch legacyImportBat
 		}
 		if rows == 0 {
 			stored, err := getAttempt(ctx, tx, attempt.ID)
-			if err != nil || !sameImportedAttempt(stored, attempt) {
+			if err != nil || !sameImportedLegacyAttempt(stored, attempt) {
 				return LegacyImportResult{}, fmt.Errorf("%w: legacy attempt %s", ErrIdempotencyConflict, attempt.ID)
 			}
 		} else {
@@ -1463,7 +1522,8 @@ func sameImportedCase(left, right IncidentCase) bool {
 	return left.ID == right.ID && left.BugID == right.BugID && left.Source == right.Source &&
 		left.SystemID == right.SystemID && left.Environment == right.Environment &&
 		left.Status == right.Status && left.CycleNumber == right.CycleNumber &&
-		left.CurrentAttemptID == "" && left.SelectedBotKey == "" && left.Version == right.Version &&
+		left.CurrentAttemptID == "" && left.SelectedBotKey == "" &&
+		left.FrontendEntry.IsZero() && right.FrontendEntry.IsZero() && left.Version == right.Version &&
 		left.ResetFromCaseID == right.ResetFromCaseID && left.SupersededByCaseID == right.SupersededByCaseID &&
 		left.ClosedAt == nil && right.ClosedAt == nil
 }
@@ -1476,6 +1536,35 @@ func sameImportedAttempt(left, right PhaseAttempt) bool {
 		left.ParentAttemptID == right.ParentAttemptID && left.StartedAt.Equal(right.StartedAt) &&
 		timesEqual(left.FinishedAt, right.FinishedAt) && left.ErrorCode == right.ErrorCode &&
 		left.ErrorMessage == right.ErrorMessage && left.Usage == right.Usage
+}
+
+// sameImportedLegacyAttempt treats an already archived legacy run as imported
+// even when the mutable runs.json source later records a terminal status, more
+// events, or gets serialized by a newer redactor. The deterministic attempt ID,
+// legacy case, and embedded original run ID form the import identity. We keep the
+// first archived snapshot instead of rewriting history, while malformed or
+// cross-case ID collisions still fail closed.
+func sameImportedLegacyAttempt(left, right PhaseAttempt) bool {
+	if sameImportedAttempt(left, right) {
+		return true
+	}
+	if left.ID != right.ID || left.CaseID != right.CaseID ||
+		left.CycleNumber != right.CycleNumber ||
+		left.Phase != PhaseLegacy || right.Phase != PhaseLegacy {
+		return false
+	}
+	return importedLegacyRunID(left.OutputJSON) != "" &&
+		importedLegacyRunID(left.OutputJSON) == importedLegacyRunID(right.OutputJSON)
+}
+
+func importedLegacyRunID(output json.RawMessage) string {
+	var identity struct {
+		OriginalRunID string `json:"original_run_id"`
+	}
+	if err := json.Unmarshal(output, &identity); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(identity.OriginalRunID)
 }
 
 func (s *CaseStore) GetEvidenceArtifact(ctx context.Context, attemptID, sha256Digest, kind string) (EvidenceArtifact, bool, error) {
@@ -3105,15 +3194,21 @@ type rowScanner interface {
 func getCase(ctx context.Context, query caseQuery, id string) (IncidentCase, error) {
 	incident, err := scanCase(query.QueryRowContext(ctx, `SELECT id, bug_id, source, system_id,
 		environment, status, cycle_number, current_attempt_id, selected_bot_key,
-		reset_from_case_id, superseded_by_case_id, version,
+		reset_from_case_id, superseded_by_case_id, frontend_entry_json, version,
 		created_at, updated_at, closed_at FROM incident_cases WHERE id = ?`, id))
+	if err != nil && strings.Contains(err.Error(), "no such column: frontend_entry_json") {
+		incident, err = scanLegacyCase(query.QueryRowContext(ctx, `SELECT id, bug_id, source, system_id,
+			environment, status, cycle_number, current_attempt_id, selected_bot_key,
+			reset_from_case_id, superseded_by_case_id, version,
+			created_at, updated_at, closed_at FROM incident_cases WHERE id = ?`, id))
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return IncidentCase{}, fmt.Errorf("%w: %s", ErrCaseNotFound, id)
 	}
 	return incident, err
 }
 
-func scanCase(row rowScanner) (IncidentCase, error) {
+func scanLegacyCase(row rowScanner) (IncidentCase, error) {
 	var incident IncidentCase
 	var createdAt, updatedAt string
 	var closedAt sql.NullString
@@ -3123,6 +3218,27 @@ func scanCase(row rowScanner) (IncidentCase, error) {
 		&incident.Version, &createdAt, &updatedAt, &closedAt); err != nil {
 		return IncidentCase{}, err
 	}
+	return finishScannedCase(incident, createdAt, updatedAt, closedAt)
+}
+
+func scanCase(row rowScanner) (IncidentCase, error) {
+	var incident IncidentCase
+	var createdAt, updatedAt string
+	var frontendEntryJSON string
+	var closedAt sql.NullString
+	if err := row.Scan(&incident.ID, &incident.BugID, &incident.Source, &incident.SystemID,
+		&incident.Environment, &incident.Status, &incident.CycleNumber, &incident.CurrentAttemptID,
+		&incident.SelectedBotKey, &incident.ResetFromCaseID, &incident.SupersededByCaseID,
+		&frontendEntryJSON, &incident.Version, &createdAt, &updatedAt, &closedAt); err != nil {
+		return IncidentCase{}, err
+	}
+	if err := json.Unmarshal([]byte(frontendEntryJSON), &incident.FrontendEntry); err != nil {
+		return IncidentCase{}, fmt.Errorf("decode stored incident frontend entry: %w", err)
+	}
+	return finishScannedCase(incident, createdAt, updatedAt, closedAt)
+}
+
+func finishScannedCase(incident IncidentCase, createdAt, updatedAt string, closedAt sql.NullString) (IncidentCase, error) {
 	var err error
 	incident.CreatedAt, err = parseStoreTime(createdAt)
 	if err != nil {

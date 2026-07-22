@@ -9,6 +9,10 @@ interface EnvItem {
   id: string
   api_domain: string
   web_domain: string
+  frontend_entries: Array<{
+    id: string; name: string; url: string; repo: string; device_profile: string
+    aliases: string; product_hints: string; module_hints: string; path_prefixes: string
+  }>
   is_prod: boolean
 }
 

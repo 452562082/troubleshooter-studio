@@ -444,7 +444,11 @@ func buildCodexExecCommandWithProfile(codexBin, workspace, prompt string, imageP
 		// host-generated allowlist, so a model command cannot traverse $HOME and
 		// trigger macOS App Data / Documents / Photos privacy prompts.
 		"-c", `approval_policy="never"`,
-		"-c", `permission_profile="studio_agent"`,
+		// Current Codex CLI requires default_permissions when named permission
+		// profiles are defined. permission_profile was accepted by older builds
+		// but now leaves the profile table without an active default and makes
+		// `codex exec` fail before the Agent turn starts.
+		"-c", `default_permissions="studio_agent"`,
 		"-c", filesystemConfig,
 	}
 	if profile = strings.TrimSpace(profile); profile != "" {
@@ -467,7 +471,7 @@ func buildCodexExecCommandWithProfile(codexBin, workspace, prompt string, imageP
 }
 
 func buildCodexBotExecCommand(codexBin string, bot BotRef, prompt string, imagePaths []string) (*exec.Cmd, error) {
-	profile, codexHome, err := ensureCodexAgentRuntimeProfile(bot)
+	profile, codexHome, err := ensureCodexAgentRuntimeHome(bot)
 	if err != nil {
 		return nil, err
 	}
@@ -481,7 +485,7 @@ func buildCodexBotExecCommand(codexBin string, bot BotRef, prompt string, imageP
 	return cmd, nil
 }
 
-func ensureCodexAgentRuntimeProfile(bot BotRef) (string, string, error) {
+func ensureCodexAgentRuntimeHome(bot BotRef) (string, string, error) {
 	agentID := strings.TrimSpace(bot.AgentID)
 	if agentID == "" {
 		return "", "", nil
@@ -491,50 +495,135 @@ func ensureCodexAgentRuntimeProfile(bot BotRef) (string, string, error) {
 	if filepath.Base(skillsDir) != "skills" || filepath.Base(workspace) != agentID {
 		// Tests and embedding callers may inject a standalone workspace rather
 		// than a native ~/.codex/skills/<agent> installation. There is no safe
-		// profile root to infer in that case, so preserve the legacy command.
+		// runtime root to infer in that case, so preserve the legacy command.
 		return "", "", nil
 	}
 	if strings.ContainsAny(agentID, "/\\\x00") || agentID == "." || agentID == ".." {
 		return "", "", errors.New("Codex agent id is invalid")
 	}
 	codexHome := filepath.Dir(skillsDir)
-	profile := "tshoot-" + agentID
-	profilePath := filepath.Join(codexHome, profile+".config.toml")
-	if info, err := os.Lstat(profilePath); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return "", "", fmt.Errorf("Codex runtime profile %s is not a regular file", profilePath)
-		}
-		return profile, codexHome, nil
-	} else if !os.IsNotExist(err) {
+	runtimeHome := filepath.Join(codexHome, "tshoot-runtimes", agentID)
+	if err := ensureCodexRuntimeDirectory(runtimeHome); err != nil {
 		return "", "", err
 	}
 
-	// Backfill profiles for robots installed before Studio background phases
-	// learned to use `codex exec --profile`. The source agent TOML is already a
-	// trusted tshoot-managed 0600 file; copy only its managed MCP region.
+	// Codex profile layers currently ignore mcp_servers. Give each background
+	// agent an isolated CODEX_HOME whose standard config.toml contains exactly the
+	// managed MCP region. This keeps business MCPs out of the user's global main
+	// session while using a configuration path that codex exec actually loads.
 	agentPath := filepath.Join(codexHome, "agents", agentID+".toml")
 	raw, err := os.ReadFile(agentPath)
 	if err != nil {
-		return "", "", fmt.Errorf("Codex runtime profile is missing; re-apply agent %q: %w", agentID, err)
+		return "", "", fmt.Errorf("Codex runtime config source is missing; re-apply agent %q: %w", agentID, err)
 	}
 	text := string(raw)
 	begin := strings.Index(text, generator.CodexMCPRegionBegin)
 	end := strings.Index(text, generator.CodexMCPRegionEnd)
 	if begin < 0 || end < begin {
-		return "", "", fmt.Errorf("Codex runtime profile is missing and agent %q has no managed MCP region; re-apply the robot", agentID)
+		return "", "", fmt.Errorf("Codex runtime config source is invalid and agent %q has no managed MCP region; re-apply the robot", agentID)
 	}
 	bodyStart := begin + len(generator.CodexMCPRegionBegin)
 	body := strings.TrimSpace(text[bodyStart:end])
 	content := "# Managed by tshoot. Used by Studio background codex exec.\n" + body + "\n"
-	if err := os.WriteFile(profilePath, []byte(content), 0o600); err != nil {
-		if _, statErr := os.Stat(profilePath); statErr != nil {
-			return "", "", fmt.Errorf("create Codex runtime profile %s: %w", profilePath, err)
+	configPath := filepath.Join(runtimeHome, "config.toml")
+	if info, err := os.Lstat(configPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return "", "", fmt.Errorf("Codex runtime config %s is not a regular file", configPath)
+		}
+	} else if !os.IsNotExist(err) {
+		return "", "", err
+	}
+	if current, readErr := os.ReadFile(configPath); readErr == nil && string(current) == content {
+		if err := os.Chmod(configPath, 0o600); err != nil {
+			return "", "", fmt.Errorf("secure Codex runtime config %s: %w", configPath, err)
+		}
+	} else if readErr != nil && !os.IsNotExist(readErr) {
+		return "", "", fmt.Errorf("read Codex runtime config %s: %w", configPath, readErr)
+	} else if err := replaceCodexRuntimeConfig(configPath, []byte(content)); err != nil {
+		return "", "", err
+	}
+	for _, shared := range []string{"skills", "auth.json"} {
+		target := filepath.Join(codexHome, shared)
+		if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return "", "", fmt.Errorf("inspect shared Codex %s: %w", shared, err)
+		}
+		if err := ensureCodexRuntimeLink(filepath.Join(runtimeHome, shared), target); err != nil {
+			return "", "", err
 		}
 	}
-	if err := os.Chmod(profilePath, 0o600); err != nil {
-		return "", "", fmt.Errorf("secure Codex runtime profile %s: %w", profilePath, err)
+	return "", runtimeHome, nil
+}
+
+func ensureCodexRuntimeDirectory(path string) error {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("Codex runtime home %s is not a directory", path)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect Codex runtime home %s: %w", path, err)
+	} else if err := os.MkdirAll(path, 0o700); err != nil {
+		return fmt.Errorf("create Codex runtime home %s: %w", path, err)
 	}
-	return profile, codexHome, nil
+	if err := os.Chmod(path, 0o700); err != nil {
+		return fmt.Errorf("secure Codex runtime home %s: %w", path, err)
+	}
+	return nil
+}
+
+func ensureCodexRuntimeLink(path, target string) error {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink == 0 {
+			return fmt.Errorf("Codex runtime shared path %s is not a symlink", path)
+		}
+		linked, err := os.Readlink(path)
+		if err != nil {
+			return fmt.Errorf("read Codex runtime link %s: %w", path, err)
+		}
+		if !filepath.IsAbs(linked) {
+			linked = filepath.Join(filepath.Dir(path), linked)
+		}
+		if filepath.Clean(linked) != filepath.Clean(target) {
+			return fmt.Errorf("Codex runtime link %s points outside the managed target", path)
+		}
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect Codex runtime link %s: %w", path, err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		return fmt.Errorf("create Codex runtime link %s: %w", path, err)
+	}
+	return nil
+}
+
+func replaceCodexRuntimeConfig(path string, content []byte) error {
+	directory := filepath.Dir(path)
+	temporary, err := os.CreateTemp(directory, ".tshoot-codex-config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary Codex runtime config: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("secure temporary Codex runtime config: %w", err)
+	}
+	if _, err := temporary.Write(content); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("write temporary Codex runtime config: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("sync temporary Codex runtime config: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close temporary Codex runtime config: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("replace Codex runtime config %s: %w", path, err)
+	}
+	return nil
 }
 
 func setProcessEnv(values []string, key, value string) []string {

@@ -23,18 +23,20 @@ const (
 )
 
 type browserRouteJournal struct {
-	Kind           string                `json:"kind"`
-	Version        int                   `json:"version"`
-	CaseID         string                `json:"case_id"`
-	CycleNumber    int                   `json:"cycle_number"`
-	AttemptID      string                `json:"attempt_id"`
-	Assisted       bool                  `json:"assisted"`
-	FrontendURL    string                `json:"frontend_url"`
-	SystemID       string                `json:"system_id"`
-	Environment    string                `json:"environment"`
-	PolicyResolved bool                  `json:"policy_resolved"`
-	PolicySHA256   string                `json:"policy_sha256"`
-	Policy         BrowserSecurityPolicy `json:"policy"`
+	Kind                 string                `json:"kind"`
+	Version              int                   `json:"version"`
+	CaseID               string                `json:"case_id"`
+	CycleNumber          int                   `json:"cycle_number"`
+	AttemptID            string                `json:"attempt_id"`
+	Assisted             bool                  `json:"assisted"`
+	FrontendURL          string                `json:"frontend_url"`
+	FrontendEntryID      string                `json:"frontend_entry_id,omitempty"`
+	FrontendConfigSHA256 string                `json:"frontend_config_sha256,omitempty"`
+	SystemID             string                `json:"system_id"`
+	Environment          string                `json:"environment"`
+	PolicyResolved       bool                  `json:"policy_resolved"`
+	PolicySHA256         string                `json:"policy_sha256"`
+	Policy               BrowserSecurityPolicy `json:"policy"`
 }
 
 type BrowserRouteRecoveryReader interface {
@@ -95,6 +97,7 @@ func (r *AgentPhaseRunner) resolveBrowserRoute(ctx context.Context, attempt Phas
 		Kind: browserRouteJournalKind, Version: browserRouteJournalVersion,
 		CaseID: attempt.CaseID, CycleNumber: attempt.CycleNumber, AttemptID: attempt.ID,
 		Assisted: browserAssistedAttempt(bug, attempt), SystemID: incident.SystemID, Environment: incident.Environment,
+		FrontendEntryID: incident.FrontendEntry.ID, FrontendConfigSHA256: incident.FrontendEntry.ConfigSHA256,
 	}
 	if rawURL := strings.TrimSpace(bug.FrontendURL); rawURL != "" {
 		canonical, _, canonicalErr := canonicalBrowserURL(rawURL)
@@ -258,6 +261,9 @@ func loadBrowserRouteJournal(root string, incident IncidentCase, attempt PhaseAt
 	}
 	if route.Kind != browserRouteJournalKind || route.Version != browserRouteJournalVersion || route.CaseID != attempt.CaseID || route.CycleNumber != attempt.CycleNumber || route.AttemptID != attempt.ID {
 		return browserRouteJournal{}, false, errors.New("browser route journal identity mismatch")
+	}
+	if !incident.FrontendEntry.IsZero() && (route.FrontendEntryID != incident.FrontendEntry.ID || route.FrontendConfigSHA256 != incident.FrontendEntry.ConfigSHA256) {
+		return browserRouteJournal{}, false, errors.New("browser route frontend entry binding mismatch")
 	}
 	if route.SystemID != incident.SystemID || route.Environment != incident.Environment {
 		return browserRouteJournal{}, false, errors.New("browser route journal Case binding mismatch")

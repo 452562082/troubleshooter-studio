@@ -1,5 +1,7 @@
 package config
 
+import "strings"
+
 type System struct {
 	ID          string `yaml:"id"`
 	Name        string `yaml:"name"`
@@ -93,10 +95,55 @@ type Environment struct {
 	Aliases                []string                     `yaml:"aliases"`
 	APIDomain              string                       `yaml:"api_domain"`
 	WebDomain              string                       `yaml:"web_domain"`
+	FrontendEntries        []FrontendEntry              `yaml:"frontend_entries,omitempty"`
 	BrowserAllowedOrigins  []string                     `yaml:"browser_allowed_origins,omitempty"`
 	BrowserAuthOrigins     []string                     `yaml:"browser_auth_origins,omitempty"`
 	IsProd                 bool                         `yaml:"is_prod"`
 	DeploymentVerification DeploymentVerificationConfig `yaml:"deployment_verification,omitempty"`
+}
+
+// FrontendEntry describes one independently addressable frontend application
+// in an environment. URL may contain a stable path prefix (for example an
+// admin console mounted below /admin), but must not contain credentials,
+// query parameters, or a fragment.
+type FrontendEntry struct {
+	ID            string   `yaml:"id"`
+	Name          string   `yaml:"name"`
+	URL           string   `yaml:"url"`
+	Repo          string   `yaml:"repo,omitempty"`
+	DeviceProfile string   `yaml:"device_profile,omitempty"`
+	Aliases       []string `yaml:"aliases,omitempty"`
+	ProductHints  []string `yaml:"product_hints,omitempty"`
+	ModuleHints   []string `yaml:"module_hints,omitempty"`
+	PathPrefixes  []string `yaml:"path_prefixes,omitempty"`
+}
+
+// EffectiveFrontendEntries preserves the historical web_domain contract by
+// exposing it as a synthetic default entry. Explicit entries with the same URL
+// replace that synthetic entry instead of producing duplicate candidates.
+func (e Environment) EffectiveFrontendEntries() []FrontendEntry {
+	entries := make([]FrontendEntry, 0, len(e.FrontendEntries)+1)
+	legacy := strings.TrimSpace(e.WebDomain)
+	legacyIdentity := comparableFrontendURL(legacy)
+	legacyCovered := false
+	for _, entry := range e.FrontendEntries {
+		if legacyIdentity != "" && comparableFrontendURL(entry.URL) == legacyIdentity {
+			legacyCovered = true
+		}
+		entries = append(entries, entry)
+	}
+	if legacy != "" && !legacyCovered {
+		entries = append(entries, FrontendEntry{ID: "default-web", Name: "默认 Web 入口", URL: legacy})
+	}
+	return entries
+}
+
+func comparableFrontendURL(raw string) string {
+	normalized := strings.ToLower(strings.TrimRight(strings.TrimSpace(raw), "/"))
+	if normalized != "" && !strings.Contains(normalized, "://") {
+		normalized = "https://" + normalized
+	}
+	return normalized
 }
 
 type Generation struct {

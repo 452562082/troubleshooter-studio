@@ -144,9 +144,11 @@ describe('BugCaseLifecycle', () => {
   })
 
   it.each([
+    ['browser_validator_timeout', 'process'],
     ['browser_validator_attachment_failed', 'attachment'],
     ['browser_validator_no_output', 'process'],
     ['browser_validator_process_failed', 'process'],
+    ['browser_validator_configuration_invalid', 'configuration'],
     ['browser_worker_protocol_invalid', 'system'],
   ])('retries classified validation agent failure %s inside the current Case', async (errorCode, browserState) => {
     const snapshot = detail('waiting_evidence')
@@ -385,6 +387,7 @@ describe('BugCaseLifecycle', () => {
     const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
 
     expect(wrapper.findAll('.current-action-card .primary-action')).toHaveLength(1)
+    expect(wrapper.findAll('.current-action-card .reconsider-action')).toHaveLength(1)
     expect(wrapper.find('.reset-action').exists()).toBe(false)
     expect(wrapper.emitted('primary')).toBeUndefined()
   })
@@ -426,6 +429,33 @@ describe('BugCaseLifecycle', () => {
     await wrapper.find('[data-confirm]').trigger('click')
 
     expect(wrapper.emitted('primary')?.[0]).toEqual([{ kind: 'approve_fix', rootCauseAttemptID: 'investigation-7', caseVersion: 7, sourceBaselines: { 'admin-web': 'feature/new-navigation' } }])
+  })
+
+  it('submits a user remediation proposal for reassessment without authorizing a fix', async () => {
+    const snapshot = detail('waiting_fix_approval')
+    snapshot.case.version = 7
+    snapshot.case.current_attempt_id = 'investigation-7'
+    snapshot.attempts = [{ id: 'investigation-7', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', confidence: 'high', root_cause: '字段语义错配', gaps: [], call_chain: [{ repo: 'admin-web' }] }, parent_attempt_id: '', started_at: '2026-07-11T10:00:00Z', error_code: '', error_message: '', usage: {} }]
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+
+    expect(wrapper.get('.current-action-card').text()).toContain('前端、后端或其他修复思路')
+    await wrapper.get('.reconsider-action').trigger('click')
+    const dialog = wrapper.get('[role="dialog"]')
+    expect(dialog.text()).toContain('只重新评估方案')
+    expect(dialog.text()).toContain('不会授权修复 Agent')
+    const confirm = wrapper.get<HTMLButtonElement>('[data-confirm]')
+    expect(confirm.element.disabled).toBe(true)
+    await wrapper.get('#remediation-proposal').setValue('优先由后端统一字段语义，前端只保留兼容兜底')
+    await wrapper.setProps({ detail: { ...snapshot, case: { ...snapshot.case, version: 8 } } })
+    expect(confirm.element.disabled).toBe(false)
+    await confirm.trigger('click')
+
+    expect(wrapper.emitted('primary')).toEqual([[{
+      kind: 'reconsider_remediation',
+      rootCauseAttemptID: 'investigation-7',
+      caseVersion: 7,
+      input: '优先由后端统一字段语义，前端只保留兼容兜底',
+    }]])
   })
 
   it('allows an empty baseline and delegates the environment-branch default to the host', async () => {

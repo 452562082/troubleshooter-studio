@@ -2,7 +2,7 @@
 # 前端复现入口图:把页面/浏览器证据转成 API endpoint 和候选后端服务。
 # 来源:
 #   - repos[].role in troubleshooter.yaml
-#   - env web_domain / api_domain
+#   - env frontend_entries / legacy web_domain / api_domain
 #   - service-dependency-map downstream edges and service_names
 
 frontend_entries:
@@ -17,7 +17,41 @@ frontend_entries:
     framework: {{if $repo.Framework}}{{$repo.Framework | printf "%q"}}{{else}}"unknown"{{end}}
     web_domains:
     {{- range $ctx.Environments}}
-      {{.ID}}: {{if .WebDomain}}{{.WebDomain | printf "%q"}}{{else}}""{{end}}
+      {{.ID}}: {{frontendURLForRepoEnvironment $ctx $repo.Name .ID | printf "%q"}}
+    {{- end}}
+    applications:
+    {{- range frontendApplicationsForRepo $ctx $repo.Name}}
+      - environment: {{.Environment | printf "%q"}}
+        id: {{.ID | printf "%q"}}
+        name: {{.Name | printf "%q"}}
+        url: {{.URL | printf "%q"}}
+        device_profile: {{if .DeviceProfile}}{{.DeviceProfile | printf "%q"}}{{else}}""{{end}}
+        aliases:
+        {{- range .Aliases}}
+          - {{. | printf "%q"}}
+        {{- else}}
+          []
+        {{- end}}
+        product_hints:
+        {{- range .ProductHints}}
+          - {{. | printf "%q"}}
+        {{- else}}
+          []
+        {{- end}}
+        module_hints:
+        {{- range .ModuleHints}}
+          - {{. | printf "%q"}}
+        {{- else}}
+          []
+        {{- end}}
+        path_prefixes:
+        {{- range .PathPrefixes}}
+          - {{. | printf "%q"}}
+        {{- else}}
+          []
+        {{- end}}
+    {{- else}}
+      []
     {{- end}}
     api_domains:
     {{- range $ctx.Environments}}

@@ -15,7 +15,9 @@ import {
   notifyIncidentDeployed,
   openIncidentBrowserLogin,
   prepareIncidentBrowserRuntime,
+  reconsiderIncidentRemediation,
   repairIncidentBrowserRuntime,
+  resolveIncidentFrontendEntry,
   IncidentWorkflowCommandError,
   resetIncidentCaseWithWarnings,
   saveBugSelectedBot,
@@ -58,7 +60,9 @@ vi.mock('../lib/bridge', async importOriginal => ({
   notifyIncidentDeployed: vi.fn(),
   openIncidentBrowserLogin: vi.fn(),
   prepareIncidentBrowserRuntime: vi.fn(),
+  reconsiderIncidentRemediation: vi.fn(),
   repairIncidentBrowserRuntime: vi.fn(),
+  resolveIncidentFrontendEntry: vi.fn().mockResolvedValue({ status: 'selected', selected: { id: 'default-web', name: '默认 Web 入口', url: 'https://app.test/', resolution_source: 'only_candidate' } }),
   resetIncidentCaseWithWarnings: vi.fn(),
   saveBugSelectedBot: vi.fn(),
   startIncidentCase: vi.fn(),
@@ -176,6 +180,7 @@ afterEach(() => {
   vi.mocked(listBugs).mockReset().mockResolvedValue([])
   vi.mocked(listIncidentCases).mockReset().mockResolvedValue([])
   vi.mocked(getIncidentCase).mockReset()
+  vi.mocked(resolveIncidentFrontendEntry).mockReset().mockResolvedValue({ status: 'selected', selected: { id: 'default-web', name: '默认 Web 入口', url: 'https://app.test/', resolution_source: 'only_candidate' } })
   vi.mocked(getIncidentBrowserRuntimeStatus).mockReset().mockResolvedValue({ state: 'ready', version: '1.61.1', error_code: '', message: '' })
   vi.mocked(matchBugBots).mockReset().mockResolvedValue([botMatch])
   vi.mocked(saveBugSelectedBot).mockReset().mockResolvedValue(bugA as any)
@@ -183,6 +188,7 @@ afterEach(() => {
   vi.mocked(uploadIncidentEvidenceImages).mockReset()
   vi.mocked(continueIncidentCase).mockReset()
   vi.mocked(approveIncidentFix).mockReset()
+  vi.mocked(reconsiderIncidentRemediation).mockReset()
   vi.mocked(approveIncidentMerge).mockReset()
   vi.mocked(notifyIncidentDeployed).mockReset()
   vi.mocked(openIncidentBrowserLogin).mockReset()
@@ -715,6 +721,41 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
   })
 
+  it('requires an explicit frontend choice when ticket evidence is ambiguous and freezes it into Start', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([{ ...bugA, frontend_url: 'https://portal.test/search' }])
+    vi.mocked(resolveIncidentFrontendEntry).mockResolvedValue({
+      status: 'ambiguous',
+      message: '工单证据无法唯一确定前端入口，请选择本次验证对应的应用',
+      candidates: [
+        { binding: { id: 'consumer', name: 'C 端 H5', url: 'https://m.test/', resolution_source: '' }, score: 0, reasons: [] },
+        { binding: { id: 'admin', name: '管理端', url: 'https://admin.test/', resolution_source: '' }, score: 0, reasons: [] },
+      ],
+    })
+    const opened = incident('case-admin-frontend', 'validating', '2026-07-13T00:01:00Z', {
+      version: 1,
+      frontend_entry: { id: 'admin', name: '管理端', url: 'https://admin.test/', resolution_source: 'user' },
+    })
+    vi.mocked(startIncidentCase).mockResolvedValue(opened)
+    mockCaseDetails(detail(opened))
+
+    const wrapper = await mountedPage()
+
+    const start = wrapper.get<HTMLButtonElement>('[data-action="start-case"]')
+    expect(start.element.disabled).toBe(true)
+    expect(wrapper.get('.frontend-entry-resolution').text()).toContain('请选择本次验证对应的应用')
+
+    const admin = wrapper.findAll<HTMLInputElement>('.frontend-entry-option input').find(input => input.element.value === 'admin')
+    expect(admin).toBeTruthy()
+    await admin!.setValue(true)
+    expect(start.element.disabled).toBe(false)
+
+    await start.trigger('click')
+    await flushPromises()
+
+    expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({ frontend_entry_id: 'admin' }))
+  })
+
   it('clears Start pending before scrolling and focusing the opened Case', async () => {
     const scrollIntoView = stubIncidentEntry()
     route.query = { bug_id: 'bug-a' }
@@ -863,6 +904,31 @@ describe('IncidentWorkbenchPage', () => {
       case_id: 'case-1', expected_version: 7, root_cause_attempt_id: 'attempt-1', idempotency_key: 'start-fix:case-1:attempt-1:7', actor_id: 'desktop-user',
       input_json: { source_baselines: { 'admin-web': 'feature/new-navigation' } },
     }))
+  })
+
+  it('submits an alternative remediation for investigation reassessment without fix approval', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-1', 'waiting_fix_approval', '2026-07-13T00:00:00Z')
+    const snapshot = detail(item, {
+      attempts: [{ id: 'attempt-1', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', root_cause: '字段语义错配', call_chain: [{ repo: 'admin-web' }] }, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(snapshot)
+    vi.mocked(reconsiderIncidentRemediation).mockResolvedValue({ ...item, status: 'investigating', current_attempt_id: 'reassessment-1', version: 8 })
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.reconsider-action').trigger('click')
+    await wrapper.get('#remediation-proposal').setValue('优先由后端统一字段语义，前端只保留兼容兜底')
+    await wrapper.get('[data-confirm]').trigger('click')
+    await flushPromises()
+
+    expect(reconsiderIncidentRemediation).toHaveBeenCalledWith({
+      case_id: 'case-1', expected_version: 7, root_cause_attempt_id: 'attempt-1',
+      idempotency_key: 'reconsider-remediation:case-1:attempt-1:7', actor_id: 'desktop-user',
+      proposal: '优先由后端统一字段语义，前端只保留兼容兜底',
+    })
+    expect(approveIncidentFix).not.toHaveBeenCalled()
   })
 
   it('submits a non-code remediation confirmation and immediately enters regression', async () => {

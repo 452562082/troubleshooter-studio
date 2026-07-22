@@ -243,6 +243,31 @@ describe('incident Case controller', () => {
     expect(controller.phaseEvents.value['attempt-1'][99].meta.current).toBe(100)
   })
 
+  it('retains the latest investigation step checkpoint when command events roll over', () => {
+    const controller = createIncidentCaseController()
+    const snapshot = detail(4)
+    snapshot.case.status = 'investigating'
+    snapshot.case.current_attempt_id = 'investigation-1'
+    snapshot.attempts = [{ id: 'investigation-1', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }]
+    controller.applySnapshot(snapshot)
+
+    controller.acceptEvent({
+      kind: 'snapshot', case: snapshot.case, snapshot,
+      phase_event: { at: '2026-07-18T10:00:00Z', type: 'phase_step', message: 'ignored', meta: { case_id: 'case-1', attempt_id: 'investigation-1', phase: 'investigation', step_key: 'runtime_scope', step_index: 3, step_total: 7, state: 'running' } },
+    })
+    for (let index = 0; index < 110; index++) {
+      controller.acceptEvent({
+        kind: 'snapshot', case: snapshot.case, snapshot,
+        phase_event: { at: `2026-07-18T10:01:${String(index).padStart(2, '0')}Z`, type: 'command_execution', message: `command-${index}`, meta: { case_id: 'case-1', attempt_id: 'investigation-1', phase: 'investigation', state: 'completed', exit_code: 0 } },
+      })
+    }
+
+    const events = controller.phaseEvents.value['investigation-1'] || []
+    expect(events).toHaveLength(100)
+    expect(events.find(item => item.type === 'phase_step')?.meta.step_key).toBe('runtime_scope')
+    expect(events[events.length - 1]?.message).toBe('command-109')
+  })
+
   it('clears stale browser progress for a new current attempt and when the Case stops running', () => {
     const controller = createIncidentCaseController()
     const first = detail(5)

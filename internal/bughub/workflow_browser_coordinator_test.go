@@ -23,6 +23,18 @@ type scriptedPhaseExecutor struct {
 	Calls       int
 }
 
+type blockingPhaseExecutor struct {
+	Calls int
+}
+
+func (b *blockingPhaseExecutor) ExecutePhase(ctx context.Context, _ string, _ BotRef, _ string, _ func(InvestigationEvent)) (PhaseExecutionResult, error) {
+	b.Calls++
+	<-ctx.Done()
+	return PhaseExecutionResult{}, ctx.Err()
+}
+
+func (b *blockingPhaseExecutor) CancelPhase(context.Context, string) error { return nil }
+
 type memoryValidationRecipeStore struct {
 	recipes map[string]ValidationRecipe
 }
@@ -322,6 +334,8 @@ func browserCoordinatorRequest(t *testing.T) BrowserCoordinatorRequest {
 					content = []byte(`[{"capture_id":"search-request","action_id":"submit-search","method":"POST","url":"https://app.example.com/api/search","source":"json","matched_requests":1,"fields":[{"path":"target_user_id","present":true,"value_type":"string","value":"6971db29146ed54034889f22","redacted":false,"count":0}],"passed":true,"failure_reason":""}]`)
 				case "response_assertions":
 					content = []byte(`[{"assertion_id":"compare-fields","action_id":"submit-search","kind":"json_fields_not_equal","url":"https://app.example.com/api/search","method":"POST","status":200,"left_field":"nick_name","right_field":"text","matched_objects":1,"violations":1,"passed":false,"failure_reason":""}]`)
+				case "response_facts":
+					content = []byte(`[{"action_id":"submit-search","method":"GET","url":"https://app.example.com/api/search","status":200,"fields":[{"path":"users.list[].nick_name","value_type":"string","occurrences":1,"unique_values":1}],"arrays":[{"path":"users.list","length":1}],"equal_field_pairs":[],"count_relations":[]}]`)
 				default:
 					return nil, errors.New("unsupported frozen fixture kind")
 				}
@@ -479,7 +493,11 @@ func TestBrowserCoordinatorFallsBackToTextPlannerWhenHistoricalScreenshotCallFai
 	if strings.Contains(executor.Prompts[1], "Historical Bug screenshots are attached") || strings.Contains(executor.Prompts[1], "历史截图.png") {
 		t.Fatalf("text fallback still claims historical screenshots are attached:\n%s", executor.Prompts[1])
 	}
-	if len(events) == 0 || events[0].Type != "browser_planner_attachment_fallback" {
+	foundFallback := false
+	for _, event := range events {
+		foundFallback = foundFallback || event.Type == "browser_planner_attachment_fallback"
+	}
+	if !foundFallback {
 		t.Fatalf("events=%+v", events)
 	}
 	if _, err := os.Stat(executor.Attachments[0][0].Path); !errors.Is(err, os.ErrNotExist) {
@@ -2070,6 +2088,26 @@ func TestBrowserCoordinatorReturnsBoundedValidatorFailure(t *testing.T) {
 	}
 }
 
+func TestBrowserCoordinatorTimesOutSilentPlannerAndReturnsRetryableFailure(t *testing.T) {
+	executor := &blockingPhaseExecutor{}
+	request := browserCoordinatorRequest(t)
+	started := time.Now()
+	result, err := (BrowserCoordinator{
+		Executor:         executor,
+		Verifier:         &fakeBrowserVerifier{},
+		AgentCallTimeout: 20 * time.Millisecond,
+	}).Execute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("silent planner was not bounded: %s", elapsed)
+	}
+	if result.ErrorCode != "browser_validator_timeout" || result.FailureStage != "planning" || executor.Calls != 1 {
+		t.Fatalf("result=%+v calls=%d", result, executor.Calls)
+	}
+}
+
 func TestBrowserCoordinatorMapsValidatorUsageLimitWithoutLeakingProviderText(t *testing.T) {
 	executor := &scriptedPhaseExecutor{
 		Results: []PhaseExecutionResult{{}},
@@ -2134,15 +2172,37 @@ func TestBrowserCoordinatorFallsBackToStructuredEvidenceWhenEvaluatorScreenshotC
 
 func TestBrowserValidatorErrorsKeepActionableFailureClass(t *testing.T) {
 	tests := map[string]string{
-		"operation not permitted while reading evidence attachment": "browser_validator_attachment_failed",
-		"agent returned no final structured result":                 "browser_validator_no_output",
-		"exec: claude: executable file not found":                   "browser_validator_unavailable",
+		"deadline": "browser_validator_timeout",
+		"config defines [permissions] profiles but does not set default_permissions": "browser_validator_configuration_invalid",
+		"operation not permitted while reading evidence attachment":                  "browser_validator_attachment_failed",
+		"agent returned no final structured result":                                  "browser_validator_no_output",
+		"exec: claude: executable file not found":                                    "browser_validator_unavailable",
 		"exit status 1":            "browser_validator_process_failed",
 		"private provider failure": "browser_validator_failed",
 	}
 	for message, want := range tests {
-		if got := browserValidatorErrorCode(errors.New(message)); got != want {
+		err := errors.New(message)
+		if message == "deadline" {
+			err = context.DeadlineExceeded
+		}
+		if got := browserValidatorErrorCode(err); got != want {
 			t.Errorf("message=%q got=%q want=%q", message, got, want)
+		}
+	}
+}
+
+func TestBrowserAttachmentFallbackOnlyAcceptsAttachmentTransportFailures(t *testing.T) {
+	ctx := context.Background()
+	if !browserAgentAttachmentFallbackAllowed(ctx, errors.New("repair screenshot transport failed")) {
+		t.Fatal("screenshot transport failure should fall back to structured evidence")
+	}
+	for _, err := range []error{
+		errors.New("config defines [permissions] profiles but does not set default_permissions"),
+		errors.New("private provider failure"),
+		errors.New("exit status 1"),
+	} {
+		if browserAgentAttachmentFallbackAllowed(ctx, err) {
+			t.Errorf("non-attachment failure unexpectedly allowed fallback: %v", err)
 		}
 	}
 }

@@ -16,9 +16,14 @@
 import type { URLProbeState } from '../lib/probeTypes'
 import URLProbeBadge from './URLProbeBadge.vue'
 
-defineProps<{
+interface FrontendEntryItem {
+  id: string; name: string; url: string; repo: string; device_profile: string
+  aliases: string; product_hints: string; module_hints: string; path_prefixes: string
+}
+
+const props = defineProps<{
   /** 本行的环境对象;reactive 直引,改字段不必 emit */
-  env: { id: string; api_domain: string; web_domain: string; is_prod: boolean }
+  env: { id: string; api_domain: string; web_domain: string; frontend_entries: FrontendEntryItem[]; is_prod: boolean }
   /** API 域名探测态;undefined / status='idle' 时不显示 badge */
   apiProbe: URLProbeState | undefined
   /** Web 域名探测态 */
@@ -35,6 +40,16 @@ const emit = defineEmits<{
   probe: [kind: 'api' | 'web', url: string]
   remove: []
 }>()
+
+if (!Array.isArray(props.env.frontend_entries)) props.env.frontend_entries = []
+
+function addFrontendEntry() {
+  props.env.frontend_entries.push({ id: '', name: '', url: '', repo: '', device_profile: 'desktop', aliases: '', product_hints: '', module_hints: '', path_prefixes: '' })
+}
+
+function removeFrontendEntry(index: number) {
+  props.env.frontend_entries.splice(index, 1)
+}
 </script>
 
 <template>
@@ -97,6 +112,33 @@ const emit = defineEmits<{
         </svg>
       </button>
     </div>
+    <details class="frontend-entries">
+      <summary>前端应用入口 <span class="auto-tag">{{ env.frontend_entries.length || '未配置' }}</span></summary>
+      <p class="entry-help">有 C 端、管理端等多个前端时在这里分别配置。机器人会结合工单 URL、产品/模块、文字和截图尺寸自动识别；证据不足时要求人工选择。</p>
+      <div v-for="(entry, entryIndex) in env.frontend_entries" :key="entryIndex" class="frontend-entry-card">
+        <div class="entry-grid entry-grid-primary">
+          <label>入口 ID<input v-model="entry.id" placeholder="consumer-h5" /></label>
+          <label>显示名称<input v-model="entry.name" placeholder="C 端 H5" /></label>
+          <label>入口 URL<input v-model="entry.url" placeholder="https://m-test.example.com" /></label>
+          <label>前端仓库<input v-model="entry.repo" placeholder="base-frontend" /></label>
+          <label>设备
+            <select v-model="entry.device_profile">
+              <option value="desktop">桌面</option>
+              <option value="mobile">手机</option>
+              <option value="tablet">平板</option>
+            </select>
+          </label>
+          <button class="btn-icon remove" type="button" @click="removeFrontendEntry(entryIndex)" aria-label="删除前端入口">×</button>
+        </div>
+        <div class="entry-grid entry-grid-hints">
+          <label>名称/页面别名<input v-model="entry.aliases" placeholder="C端, H5, 用户端" /></label>
+          <label>产品提示<input v-model="entry.product_hints" placeholder="用户中心, 商城" /></label>
+          <label>模块提示<input v-model="entry.module_hints" placeholder="搜索, 个人主页" /></label>
+          <label>路径前缀<input v-model="entry.path_prefixes" placeholder="/search, /user" /></label>
+        </div>
+      </div>
+      <button class="btn add-entry" type="button" @click="addFrontendEntry">+ 添加前端应用入口</button>
+    </details>
   </article>
 </template>
 
@@ -125,6 +167,16 @@ const emit = defineEmits<{
   border-radius: var(--r-md);
   background: var(--c-surf-2);
 }
+.frontend-entries { margin-top: 14px; border-top: 1px solid var(--c-line); padding-top: 12px; }
+.frontend-entries summary { cursor: pointer; font-weight: 650; user-select: none; }
+.entry-help { margin: 9px 0 12px; color: var(--c-text-3); font-size: 13px; }
+.frontend-entry-card { margin: 10px 0; padding: 12px; border: 1px solid var(--c-line); border-radius: 8px; background: var(--c-bg); }
+.entry-grid { display: grid; gap: 10px; align-items: end; }
+.entry-grid-primary { grid-template-columns: 0.8fr 1fr 1.7fr 1fr 0.75fr 36px; }
+.entry-grid-hints { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 10px; }
+.entry-grid label { min-width: 0; font-size: 12px; color: var(--c-text-2); }
+.entry-grid input, .entry-grid select { width: 100%; margin-top: 5px; }
+.add-entry { margin-top: 4px; }
 .environment-remove {
   width: 38px;
   height: 38px;

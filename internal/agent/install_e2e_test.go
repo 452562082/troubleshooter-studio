@@ -273,15 +273,20 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 				assertJSONHasMCPKeys(t, cursorPath, expectedKeys)
 				assertFileMode(t, cursorPath, 0o600)
 			case "codex":
-				// codex MCP 同时嵌入 agent toml(交互式 subagent)与独立
-				// runtime profile(Studio 后台 codex exec),不污染全局 config.toml。
+				// codex MCP 同时嵌入 agent toml(交互式 subagent)与隔离
+				// runtime CODEX_HOME(Studio 后台 codex exec),不污染全局 config.toml。
 				for _, name := range agentNames {
 					path := agentMDLocationFor(rootDir, target, name)
 					assertCodexAgentTOMLHasMCPKeys(t, path, expectedKeys)
 					assertFileMode(t, path, 0o600)
-					profile := filepath.Join(rootDir, "tshoot-"+name+".config.toml")
-					assertCodexAgentTOMLHasMCPKeys(t, profile, expectedKeys)
-					assertFileMode(t, profile, 0o600)
+					runtimeHome := filepath.Join(rootDir, "tshoot-runtimes", name)
+					runtimeConfig := filepath.Join(runtimeHome, "config.toml")
+					assertCodexAgentTOMLHasMCPKeys(t, runtimeConfig, expectedKeys)
+					assertFileMode(t, runtimeConfig, 0o600)
+					assertFileMode(t, runtimeHome, 0o700)
+					if _, err := os.Stat(filepath.Join(rootDir, "tshoot-"+name+".config.toml")); !os.IsNotExist(err) {
+						t.Fatalf("obsolete Codex MCP profile still exists for %s", name)
+					}
 				}
 			}
 
@@ -372,7 +377,7 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 			case "codex":
 				for _, name := range agentNames {
 					assertCodexAgentTOMLAbsent(t, agentMDLocationFor(rootDir, target, name))
-					assertCodexAgentTOMLAbsent(t, filepath.Join(rootDir, "tshoot-"+name+".config.toml"))
+					assertCodexAgentTOMLAbsent(t, filepath.Join(rootDir, "tshoot-runtimes", name))
 				}
 			}
 

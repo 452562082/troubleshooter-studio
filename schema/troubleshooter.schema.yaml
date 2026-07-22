@@ -41,7 +41,22 @@ environments:
   - id: dev                          # [required] 环境短 id
     aliases: [dev, develop]          # [optional] 用户口语里的叫法
     api_domain: api-dev.example.com  # [required if applicable] 主 API 入口
-    web_domain: www-dev.example.com  # [optional]
+    web_domain: www-dev.example.com  # [legacy optional] 单前端入口；与下方同 URL 时自动去重
+    frontend_entries:                # [optional] 多前端应用；验证前按工单证据识别，歧义时由用户选择
+      - id: consumer-h5              # [required] 环境内唯一 kebab-case ID
+        name: "C 端 H5"              # [required] 用户可识别的名称
+        url: https://www-dev.example.com/app  # [required] HTTP(S)，可含稳定路径，不含 query/fragment
+        # repo: user-web             # [optional] 对应 repos[].name
+        device_profile: mobile       # [optional] desktop / mobile / tablet，仅作辅助信号
+        aliases: [C端, 用户端]        # [optional] 工单标题、正文、附件名匹配词
+        product_hints: [商城]         # [optional] 工单产品匹配词
+        module_hints: [搜索, 用户]    # [optional] 工单模块匹配词
+        path_prefixes: [/search, /user] # [optional] 同域多应用时的强匹配路径
+      - id: admin
+        name: "管理端"
+        url: https://admin-dev.example.com/
+        device_profile: desktop
+        aliases: [后台, CMS]
     browser_allowed_origins:         # [optional] Web 验证必需的额外绝对 HTTP(S) origin（如 CDN）
       - https://static.shop.example.com
     browser_auth_origins:            # [optional] 允许人工登录的绝对 HTTP(S) origin；不得含路径/查询/凭据

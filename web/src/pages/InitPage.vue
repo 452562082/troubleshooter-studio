@@ -325,6 +325,7 @@ interface EnvItem {
   // 同级记到 env-domain-map.yaml,bot 排障时知道"用户在哪个 URL 看到这个 bug"
   // vs "后端哪个接口报的错"。很多系统就一个域名,这栏留空也没关系。
   web_domain: string
+  frontend_entries: import('../lib/yamlImporter').ParsedFrontendEntry[]
   is_prod: boolean
   deployment_verification?: import('../lib/yamlGenerator').DeploymentVerificationState
 }
@@ -333,8 +334,8 @@ const environments = reactive<EnvItem[]>(
   Array.isArray(saved?.environments) && saved.environments.length
     ? saved.environments.map(parseEnvironment)
     : [
-        { id: 'dev', api_domain: '', web_domain: '', is_prod: false },
-        { id: 'prod', api_domain: '', web_domain: '', is_prod: true },
+        { id: 'dev', api_domain: '', web_domain: '', frontend_entries: [], is_prod: false },
+        { id: 'prod', api_domain: '', web_domain: '', frontend_entries: [], is_prod: true },
       ]
 )
 
@@ -362,7 +363,7 @@ function normalizeDomain(input: string): string {
 }
 
 function addEnv() {
-  environments.push({ id: '', api_domain: '', web_domain: '', is_prod: false })
+  environments.push({ id: '', api_domain: '', web_domain: '', frontend_entries: [], is_prod: false })
 }
 
 function removeEnv(idx: number) {
@@ -2901,8 +2902,8 @@ async function clearDraft() {
   clearServiceTopology()
   // 环境 / 仓库回到初始 1 条
   environments.splice(0, environments.length,
-    { id: 'dev', api_domain: '', web_domain: '', is_prod: false },
-    { id: 'prod', api_domain: '', web_domain: '', is_prod: true },
+    { id: 'dev', api_domain: '', web_domain: '', frontend_entries: [], is_prod: false },
+    { id: 'prod', api_domain: '', web_domain: '', frontend_entries: [], is_prod: true },
   )
   repos.splice(0, repos.length, makeEmptyRepo())
   repoBranchesMap.value = {}
@@ -3071,7 +3072,7 @@ function generateYAML(): string {
   const ctx: YAMLGenContext = {
     system, agent, agentNameDefault: agentNameDefault.value,
     targetModels, enabledTargets, codeIntelligence, serviceTopology, enabledObservability,
-    environments: environments.map(e => ({ id: e.id, api_domain: e.api_domain, web_domain: e.web_domain, is_prod: e.is_prod, deployment_verification: e.deployment_verification })),
+    environments: environments.map(e => ({ id: e.id, api_domain: e.api_domain, web_domain: e.web_domain, frontend_entries: e.frontend_entries, is_prod: e.is_prod, deployment_verification: e.deployment_verification })),
     repos: repos.map(r => ({
       name: r.name, url: r.url, stack: r.stack, framework: r.framework,
       role: r.role, sub_path: r.sub_path,

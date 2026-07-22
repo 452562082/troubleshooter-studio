@@ -539,6 +539,9 @@ func topologyServiceHosts(role string, environments []config.Environment) []stri
 		switch role {
 		case config.RoleFrontend, config.RoleMobile, config.RoleAdmin:
 			hosts = append(hosts, environment.WebDomain)
+			for _, entry := range environment.EffectiveFrontendEntries() {
+				hosts = append(hosts, entry.URL)
+			}
 		case config.RoleGateway:
 			hosts = append(hosts, environment.APIDomain)
 		}

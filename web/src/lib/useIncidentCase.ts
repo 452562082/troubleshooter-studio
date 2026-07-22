@@ -28,6 +28,14 @@ const investigationStepLabels: Record<(typeof investigationStepKeys)[number], st
   knowledge_sink: '沉淀与结果',
 }
 
+function capPhaseEvents(events: IncidentPhaseEvent[]): IncidentPhaseEvent[] {
+  if (events.length <= maxPhaseEventsPerAttempt) return events
+  const recent = events.slice(-maxPhaseEventsPerAttempt)
+  const latestStep = [...events].reverse().find(event => event.type === 'phase_step')
+  if (!latestStep || recent.includes(latestStep)) return recent
+  return [latestStep, ...events.slice(-(maxPhaseEventsPerAttempt - 1))]
+}
+
 export function casesForBug(cases: IncidentCase[], bugID: string): IncidentCase[] {
   return cases
     .filter(item => item.bug_id === bugID)
@@ -197,7 +205,7 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
     if (duplicate) return
     phaseEvents.value = {
       ...phaseEvents.value,
-      [attemptID]: [...existing, safeEvent].slice(-maxPhaseEventsPerAttempt),
+      [attemptID]: capPhaseEvents([...existing, safeEvent]),
     }
   }
 

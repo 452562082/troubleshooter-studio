@@ -193,6 +193,8 @@ export function ReadEnv(arg1:string):Promise<Record<string, string>>;
 
 export function RecommendRoleForRepo(arg1:string,arg2:string,arg3:string):Promise<analyzer.RoleHint>;
 
+export function ReconsiderIncidentRemediation(arg1:main.ReconsiderIncidentRemediationInput):Promise<bughub.IncidentCase>;
+
 export function ReindexCodeGraph(arg1:string,arg2:Record<string, string>):Promise<agent.CodeGraphIndexReport>;
 
 export function RepairIncidentBrowserRuntime(arg1:main.IncidentBrowserCommandInput):Promise<bughub.IncidentCase>;
@@ -200,6 +202,8 @@ export function RepairIncidentBrowserRuntime(arg1:main.IncidentBrowserCommandInp
 export function ResetIncidentCase(arg1:main.ResetIncidentCaseInput):Promise<bughub.IncidentCase>;
 
 export function ResetIncidentCaseWithWarnings(arg1:main.ResetIncidentCaseInput):Promise<bughub.ResetCaseOutcome>;
+
+export function ResolveIncidentFrontendEntry(arg1:main.ResolveIncidentFrontendEntryInput):Promise<bughub.FrontendEntryResolution>;
 
 export function RevealInFinder(arg1:string):Promise<void>;
 

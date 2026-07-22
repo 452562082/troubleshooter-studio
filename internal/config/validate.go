@@ -59,6 +59,35 @@ func Validate(c *SystemConfig) error {
 			return fmt.Errorf("duplicate environment id: %s", env.ID)
 		}
 		envIDs[env.ID] = true
+		entryIDs := map[string]bool{}
+		for j, entry := range env.FrontendEntries {
+			if entry.ID == "" || !idPattern.MatchString(entry.ID) {
+				return fmt.Errorf("environments[%s].frontend_entries[%d].id must match [a-z0-9][a-z0-9-]*", env.ID, j)
+			}
+			if entryIDs[entry.ID] {
+				return fmt.Errorf("environments[%s] duplicate frontend entry id: %s", env.ID, entry.ID)
+			}
+			entryIDs[entry.ID] = true
+			if entry.ID == "default-web" && strings.TrimSpace(env.WebDomain) != "" {
+				return fmt.Errorf("environments[%s].frontend_entries[%d].id default-web is reserved while web_domain is configured", env.ID, j)
+			}
+			if strings.TrimSpace(entry.Name) == "" {
+				return fmt.Errorf("environments[%s].frontend_entries[%d].name required", env.ID, j)
+			}
+			if err := validateFrontendEntryURL(entry.URL); err != nil {
+				return fmt.Errorf("environments[%s].frontend_entries[%d].url: %w", env.ID, j, err)
+			}
+			switch entry.DeviceProfile {
+			case "", "desktop", "mobile", "tablet":
+			default:
+				return fmt.Errorf("environments[%s].frontend_entries[%d].device_profile=%q invalid (valid: desktop/mobile/tablet)", env.ID, j, entry.DeviceProfile)
+			}
+			for k, prefix := range entry.PathPrefixes {
+				if strings.TrimSpace(prefix) == "" || !strings.HasPrefix(prefix, "/") || strings.ContainsAny(prefix, "?#") {
+					return fmt.Errorf("environments[%s].frontend_entries[%d].path_prefixes[%d] must start with '/' and not contain query or fragment", env.ID, j, k)
+				}
+			}
+		}
 		for j, origin := range env.BrowserAllowedOrigins {
 			if err := validateBrowserAuthOrigin(origin); err != nil {
 				return fmt.Errorf("environments[%s].browser_allowed_origins[%d]: %w", env.ID, j, err)
@@ -159,6 +188,13 @@ func Validate(c *SystemConfig) error {
 			return fmt.Errorf("repos[%s].config_source=%q references unknown config_centers[].id (有效 id: %v)", r.Name, r.ConfigSource, sortedKeys(sourceIDs))
 		}
 	}
+	for _, env := range c.Environments {
+		for i, entry := range env.FrontendEntries {
+			if entry.Repo != "" && !repoNames[entry.Repo] {
+				return fmt.Errorf("environments[%s].frontend_entries[%d].repo references unknown repo: %s", env.ID, i, entry.Repo)
+			}
+		}
+	}
 	if err := validateResourceCatalog(c, envIDs, repoNames, sourceIDs); err != nil {
 		return err
 	}
@@ -203,6 +239,29 @@ func validateBrowserAuthOrigin(raw string) error {
 	}
 	if parsed.Path != "" || parsed.RawPath != "" {
 		return fmt.Errorf("must not contain a path")
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return fmt.Errorf("must not contain a query")
+	}
+	if parsed.Fragment != "" || strings.Contains(raw, "#") {
+		return fmt.Errorf("must not contain a fragment")
+	}
+	return nil
+}
+
+func validateFrontendEntryURL(raw string) error {
+	if raw == "" || raw != strings.TrimSpace(raw) {
+		return fmt.Errorf("must be an absolute HTTP(S) URL")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.Hostname() == "" || parsed.Opaque != "" {
+		return fmt.Errorf("must be an absolute HTTP(S) URL")
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return fmt.Errorf("must use http or https")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("must not contain userinfo")
 	}
 	if parsed.RawQuery != "" || parsed.ForceQuery {
 		return fmt.Errorf("must not contain a query")

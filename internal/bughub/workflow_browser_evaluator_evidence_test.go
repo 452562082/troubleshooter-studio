@@ -277,6 +277,25 @@ func TestPrepareBrowserEvaluatorEvidenceIncludesSanitizedResponseAssertions(t *t
 	}
 }
 
+func TestPrepareBrowserEvaluatorEvidenceIncludesAutomaticResponseFactsWithoutValues(t *testing.T) {
+	content := []byte(`[{"action_id":"switch-user-results","method":"GET","url":"https://app.example.com/api/search","status":200,"fields":[{"path":"users.list[].user_id","value_type":"string","occurrences":1,"unique_values":1},{"path":"users.list[].nick_name","value_type":"string","occurrences":1,"unique_values":1}],"arrays":[{"path":"users.list","length":1}],"equal_field_pairs":[{"object_path":"users.list[]","left_field":"nick_name","right_field":"text","matched_objects":1}],"count_relations":[{"object_path":"users","count_field":"total","array_field":"list","matched_objects":1,"equal":true}]}]`)
+	_, structured, cleanup, err := prepareBrowserEvaluatorEvidence(BrowserVerificationResult{}, []browserFrozenArtifact{{Kind: "response_facts", Content: content}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cleanup() }()
+	for _, expected := range []string{`"response_facts"`, `"path":"users.list"`, `"length":1`, `"unique_values":1`, `"left_field":"nick_name"`, `"right_field":"text"`, `"count_field":"total"`, `"array_field":"list"`, `"equal":true`} {
+		if !strings.Contains(structured, expected) {
+			t.Fatalf("structured response facts lack %s: %s", expected, structured)
+		}
+	}
+	for _, rawValue := range []string{"user-42", "chengzi", "private biography"} {
+		if strings.Contains(structured, rawValue) {
+			t.Fatalf("structured response facts leaked %q: %s", rawValue, structured)
+		}
+	}
+}
+
 func TestBrowserCoordinatorSurfacesEvaluatorScreenshotCleanupFailure(t *testing.T) {
 	request := browserCoordinatorRequest(t)
 	var viewPath string

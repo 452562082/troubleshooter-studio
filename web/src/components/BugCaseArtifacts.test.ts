@@ -65,6 +65,24 @@ describe('BugCaseArtifacts', () => {
     expect(wrapper.text()).toContain('build-1')
     expect(wrapper.text()).toContain('2026-07-11T12:05:00Z')
     expect(wrapper.text()).toContain('commit_mismatch')
+    const evidence = wrapper.get('details.evidence-card')
+    expect(evidence.attributes('open')).toBeUndefined()
+    expect(evidence.get('summary').text()).toContain('1 条')
+  })
+
+  it('shows the structured remediation plan next to the root cause', () => {
+    const attempts = [{ ...detail.attempts[0], output_json: {
+      root_cause: '前端将 text 和 nick_name 同时渲染',
+      remediation: { mode: 'code_change', target: 'src/user-card.tsx', summary: '标题只渲染 nick_name', verification: '回归搜索结果同名次数' },
+    } }]
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: { ...detail, attempts } } })
+
+    const card = wrapper.get('[aria-labelledby="cause-title"]')
+    expect(card.text()).toContain('建议修复方向')
+    expect(card.text()).toContain('代码修复')
+    expect(card.text()).toContain('src/user-card.tsx')
+    expect(card.text()).toContain('标题只渲染 nick_name')
+    expect(card.text()).toContain('回归搜索结果同名次数')
   })
 
   it('renders an ordered structured call chain with explicit location precision', () => {

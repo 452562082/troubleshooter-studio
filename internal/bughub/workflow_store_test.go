@@ -26,6 +26,38 @@ func openTestCaseStore(t *testing.T) *CaseStore {
 	return store
 }
 
+func TestIncidentCaseFrontendEntrySurvivesStoreReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "frontend-binding.db")
+	store, err := OpenCaseStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := IncidentCase{
+		ID: "case-frontend-binding", BugID: "bug-frontend-binding", Source: "zentao", SystemID: "base", Environment: "test",
+		FrontendEntry: FrontendEntryBinding{ID: "admin", Name: "管理端", URL: "https://admin.test/users", ConfigURL: "https://admin.test/", Repo: "admin-web", ResolutionSource: "ticket_signals", ConfigSHA256: strings.Repeat("a", 64)},
+		Status:        CasePendingValidation, CycleNumber: 1, SelectedBotKey: "base|codex", Version: 1,
+	}
+	if err := store.CreateCase(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenCaseStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	got, err := store.GetCase(context.Background(), want.ID)
+	if err != nil || got.FrontendEntry != want.FrontendEntry {
+		t.Fatalf("got=%+v want=%+v err=%v", got.FrontendEntry, want.FrontendEntry, err)
+	}
+	var version int
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != workflowStoreSchemaVersion {
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+}
+
 func TestCreateCaseWithIdentityReturnsExistingOpenCaseForBug(t *testing.T) {
 	ctx := context.Background()
 	store := openTestCaseStore(t)
@@ -800,6 +832,66 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 				t.Fatalf("browser recovery schema missing %q: %s", required, browserRecoveryDDL)
 			}
 		}
+	})
+
+	t.Run("v10 preserves Cases while adding frozen frontend binding", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "private", "workflows.db")
+		store, err := OpenCaseStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.CreateCase(context.Background(), IncidentCase{
+			ID: "case-v10-frontend", BugID: "bug-v10-frontend", Status: CasePendingValidation, CycleNumber: 1, Version: 1,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		db := openRawWorkflowDB(t, path)
+		if _, err := db.Exec(`ALTER TABLE incident_cases DROP COLUMN frontend_entry_json`); err != nil {
+			t.Fatal(err)
+		}
+		tx, err := db.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fingerprint, err := workflowSchemaFingerprint(context.Background(), tx)
+		if err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		detailJSON, err := json.Marshal(workflowSchemaMigrationDetail{Version: 10, Fingerprint: fingerprint})
+		if err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`UPDATE schema_migrations SET detail_json = ? WHERE key = ?`, string(detailJSON), workflowStoreSchemaV1Key); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`PRAGMA user_version=10`); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		migrated, err := OpenCaseStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer migrated.Close()
+		incident, err := migrated.GetCase(context.Background(), "case-v10-frontend")
+		if err != nil || !incident.FrontendEntry.IsZero() {
+			t.Fatalf("incident=%+v err=%v", incident, err)
+		}
+		assertTableColumns(t, migrated.db, "incident_cases", "frontend_entry_json")
 	})
 
 	t.Run("pre-release unversioned schema with explicit event time is rejected without mutation", func(t *testing.T) {

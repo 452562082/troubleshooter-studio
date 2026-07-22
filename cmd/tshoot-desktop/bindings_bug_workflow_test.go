@@ -217,6 +217,23 @@ func TestIncidentPhaseEventsForDetailRestoresOnlySafeCurrentAttemptProgress(t *t
 	}
 }
 
+func TestIncidentPhaseEventsForDetailRetainsLatestInvestigationStepAcrossEventRollover(t *testing.T) {
+	root := t.TempDir()
+	store := bughub.NewInvestigationStore(root)
+	events := []bughub.InvestigationEvent{{Type: "phase_step", Message: "横向运行时检查", Meta: map[string]any{"case_id": "case-1", "attempt_id": "attempt-current", "phase": "investigation", "step_key": "runtime_scope", "step_index": 3, "step_total": 7, "state": "running"}}}
+	for index := 0; index < 110; index++ {
+		events = append(events, bughub.InvestigationEvent{Type: "command_execution", Message: fmt.Sprintf("command-%d", index), Meta: map[string]any{"case_id": "case-1", "attempt_id": "attempt-current", "phase": "investigation", "state": "completed", "exit_code": 0}})
+	}
+	if err := store.Upsert(bughub.InvestigationRun{ID: "attempt-current", BugID: "bug-1", Status: bughub.InvestigationRunning, Events: events}); err != nil {
+		t.Fatal(err)
+	}
+
+	restored := incidentPhaseEventsForDetail(root, bughub.IncidentCase{ID: "case-1", CurrentAttemptID: "attempt-current"})
+	if len(restored) != 100 || restored[0].Type != "phase_step" || restored[0].Meta["step_key"] != "runtime_scope" || restored[len(restored)-1].Message != "command-109" {
+		t.Fatalf("restored events lost step checkpoint: first=%+v last=%+v len=%d", restored[0], restored[len(restored)-1], len(restored))
+	}
+}
+
 func TestIncidentPhaseAttemptsRecoversSafeLegacyInvestigationGaps(t *testing.T) {
 	root := t.TempDir()
 	legacy := bughub.NewInvestigationStore(root)
@@ -855,6 +872,68 @@ func TestApproveIncidentFixRejectsMismatchedDialogScopeBeforeOpeningRuntime(t *t
 	}
 }
 
+func TestReconsiderIncidentRemediationRejectsMismatchedDialogScopeBeforeOpeningRuntime(t *testing.T) {
+	rootFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(rootFile, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (&App{workflowRoot: rootFile}).ReconsiderIncidentRemediation(ReconsiderIncidentRemediationInput{
+		CaseID: "case-1", ExpectedVersion: 7, IdempotencyKey: "reconsider-remediation:wrong", ActorID: "alice",
+		RootCauseAttemptID: "investigation-7", Proposal: "改为后端统一字段语义",
+	})
+	if err == nil || !strings.Contains(err.Error(), "dialog snapshot scope") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestReconsiderIncidentRemediationUsesPersistedBotAndStartsInvestigation(t *testing.T) {
+	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
+	ctx := context.Background()
+	incident := bughub.IncidentCase{
+		ID: "case-reconsider-binding", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test",
+		Status: bughub.CaseWaitingFixApproval, CycleNumber: 1, SelectedBotKey: "base|codex",
+	}
+	if err := store.CreateCase(ctx, incident); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	root := bughub.PhaseAttempt{
+		ID: "root-reconsider-binding", CaseID: incident.ID, CycleNumber: 1, Phase: bughub.PhaseInvestigation,
+		Status: bughub.AttemptStatusSucceeded, AgentTarget: "codex", BotKey: incident.SelectedBotKey, InputJSON: []byte(`{}`),
+		OutputJSON: []byte(`{"investigation_status":"root_cause_ready","environment":"test","root_cause":"field mismatch","confidence":"high","root_cause_type":"code","remediation":{"mode":"code_change","target":"frontend","summary":"deduplicate labels","verification":"run regression"},"call_chain":[],"evidence":[],"validation_gaps":[],"gaps":[],"unchecked_scopes":[]}`),
+		StartedAt:  now.Add(-time.Minute), FinishedAt: &now,
+	}
+	if err := store.CreateAttempt(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.GetCase(ctx, incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := store.ApplyCaseMutation(ctx, bughub.CaseMutation{
+		CaseID: current.ID, ExpectedVersion: current.Version, IdempotencyKey: "bind-reconsider-root", RequestJSON: []byte(`{}`),
+		Snapshot: bughub.CaseSnapshotUpdate{CurrentAttemptID: stringPointer(root.ID)},
+		Steps:    []bughub.CaseMutationStep{{To: bughub.CaseWaitingFixApproval, AuditOnly: true, Event: bughub.TransitionEvent{ID: "bind-reconsider-root-event", EventType: "root_bound", ActorType: "studio", ActorID: "test", PayloadJSON: []byte(`{}`)}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := bughub.ReconsiderRemediationKey(bound.Case.ID, root.ID, bound.Case.Version)
+	updated, err := app.ReconsiderIncidentRemediation(ReconsiderIncidentRemediationInput{
+		CaseID: bound.Case.ID, ExpectedVersion: bound.Case.Version, IdempotencyKey: key, ActorID: "alice",
+		RootCauseAttemptID: root.ID, Proposal: "优先在后端统一字段语义",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != bughub.CaseInvestigating || runner.count() != 1 {
+		t.Fatalf("updated=%+v starts=%d", updated, runner.count())
+	}
+	if got := runner.lastBot(); got.Key != incident.SelectedBotKey || got.Env != "test" {
+		t.Fatalf("runner bot=%+v", got)
+	}
+}
+
 func TestCompleteIncidentRemediationRejectsMismatchedDialogScopeBeforeOpeningRuntime(t *testing.T) {
 	rootFile := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(rootFile, []byte("occupied"), 0o600); err != nil {
@@ -987,6 +1066,46 @@ func TestStartIncidentCaseHydratesUIBugFromSelectedBotEnvironment(t *testing.T) 
 	startedBug := runner.lastBug()
 	if startedBug.SystemID != "base" || startedBug.FrontendURL != "https://app.test" {
 		t.Fatalf("runner Bug = %+v, want hydrated system and configured Web URL", startedBug)
+	}
+}
+
+func TestStartIncidentCaseRequiresAndPersistsAmbiguousFrontendSelection(t *testing.T) {
+	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
+	app.workflowLoadBug = func(id string) (bughub.Bug, error) {
+		return bughub.Bug{ID: id, Source: "zentao", Title: "页面用户名称展示异常", Env: "test"}, nil
+	}
+	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
+		return &config.SystemConfig{
+			System: config.System{ID: "base"},
+			Environments: []config.Environment{{ID: "test", FrontendEntries: []config.FrontendEntry{
+				{ID: "consumer", Name: "C 端", URL: "https://m.test", Repo: "consumer-web", DeviceProfile: "mobile"},
+				{ID: "admin", Name: "管理端", URL: "https://admin.test", Repo: "admin-web", DeviceProfile: "desktop"},
+			}}},
+		}, nil
+	}
+	resolution, err := app.ResolveIncidentFrontendEntry(ResolveIncidentFrontendEntryInput{BugID: "bug-multi-front", BotKey: "base|codex"})
+	if err != nil || resolution.Status != bughub.FrontendResolutionAmbiguous {
+		t.Fatalf("resolution=%+v err=%v", resolution, err)
+	}
+	base := StartIncidentCaseInput{CaseID: "case-multi-front", BugID: "bug-multi-front", BotKey: "base|codex", ExpectedVersion: 0, IdempotencyKey: "create:multi-front", ActorID: "user-1", InputJSON: map[string]any{"mode": "reproduce"}}
+	if _, err := app.StartIncidentCase(base); err == nil || !strings.Contains(err.Error(), "frontend_entry_selection_required") {
+		t.Fatalf("error=%v", err)
+	}
+	base.FrontendEntryID = "admin"
+	created, err := app.StartIncidentCase(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.FrontendEntry.ID != "admin" || created.FrontendEntry.URL != "https://admin.test/" || created.FrontendEntry.ResolutionSource != "user" {
+		t.Fatalf("created binding=%+v", created.FrontendEntry)
+	}
+	stored, err := store.GetCase(context.Background(), created.ID)
+	if err != nil || stored.FrontendEntry != created.FrontendEntry {
+		t.Fatalf("stored=%+v err=%v", stored.FrontendEntry, err)
+	}
+	startedBug := runner.lastBug()
+	if startedBug.FrontendURL != "https://admin.test/" || startedBug.FrontendRepo != "admin-web" {
+		t.Fatalf("runner bug=%+v", startedBug)
 	}
 }
 

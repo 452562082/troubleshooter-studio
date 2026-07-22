@@ -690,6 +690,17 @@ func TestGenerate_FrontendEntryMap(t *testing.T) {
 	if !strings.Contains(fm, "candidate_downstream:") {
 		t.Errorf("frontend-entry-map should include candidate_downstream, got:\n%s", fm)
 	}
+	for _, want := range []string{
+		`id: "consumer-h5"`,
+		`id: "admin"`,
+		`url: "https://admin-dev.mall.example.com/console"`,
+		`device_profile: "mobile"`,
+		`- "/console"`,
+	} {
+		if !strings.Contains(fm, want) {
+			t.Fatalf("frontend-entry-map missing named application %q:\n%s", want, fm)
+		}
+	}
 }
 
 func TestGenerate_FrontendEntryMapIncludesAnalysisEndpoints(t *testing.T) {

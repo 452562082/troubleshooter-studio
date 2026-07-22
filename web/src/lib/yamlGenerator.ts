@@ -33,8 +33,21 @@ export interface YAMLGenEnvironment {
   id: string
   api_domain: string
   web_domain: string
+  frontend_entries?: YAMLGenFrontendEntry[]
   is_prod: boolean
   deployment_verification?: DeploymentVerificationState
+}
+
+export interface YAMLGenFrontendEntry {
+  id: string
+  name: string
+  url: string
+  repo: string
+  device_profile: string
+  aliases: string
+  product_hints: string
+  module_hints: string
+  path_prefixes: string
 }
 
 export interface DeploymentVerificationState {
@@ -234,6 +247,21 @@ export function generateYAML(ctx: YAMLGenContext): string {
     const webD = ctx.normalizeDomain(env.web_domain)
     if (apiD) lines.push(`    api_domain: ${yamlStr(apiD)}     # 后端接口(带 http/https 前缀更明确;不带视为 https)`)
     if (webD) lines.push(`    web_domain: ${yamlStr(webD)}     # 前端入口(同上)`)
+    const frontendEntries = Array.isArray(env.frontend_entries) ? env.frontend_entries : []
+    if (frontendEntries.length > 0) {
+      lines.push('    frontend_entries:')
+      for (const entry of frontendEntries) {
+        lines.push(`      - id: ${entry.id || 'frontend'}`)
+        lines.push(`        name: ${yamlStr(entry.name || entry.id || '前端入口')}`)
+        lines.push(`        url: ${yamlStr(entry.url.trim())}`)
+        if (entry.repo.trim()) lines.push(`        repo: ${yamlStr(entry.repo.trim())}`)
+        if (entry.device_profile.trim()) lines.push(`        device_profile: ${entry.device_profile.trim()}`)
+        for (const [key, value] of [['aliases', entry.aliases], ['product_hints', entry.product_hints], ['module_hints', entry.module_hints], ['path_prefixes', entry.path_prefixes]] as const) {
+          const values = value.split(',').map(item => item.trim()).filter(Boolean)
+          if (values.length > 0) lines.push(`        ${key}: [${values.map(yamlStr).join(', ')}]`)
+        }
+      }
+    }
     lines.push(`    is_prod: ${env.is_prod}         # 生产环境标记:true 时机器人默认更保守、查询前二次确认`)
     const verification = env.deployment_verification
     if (verification?.provider === 'http' && verification.http.url.trim() && verification.http.json_pointer.trim()) {

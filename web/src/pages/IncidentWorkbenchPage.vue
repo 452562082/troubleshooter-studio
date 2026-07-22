@@ -22,7 +22,9 @@ import {
   notifyIncidentDeployed,
   openIncidentBrowserLogin,
   prepareIncidentBrowserRuntime,
+  reconsiderIncidentRemediation,
   repairIncidentBrowserRuntime,
+  resolveIncidentFrontendEntry,
   isIncidentWorkflowConflict,
   resetIncidentCaseWithWarnings,
   saveBugSelectedBot,
@@ -34,6 +36,7 @@ import {
   type IncidentBrowserRuntimeStatus,
   type IncidentCase,
   type IncidentEvidenceImageInput,
+  type FrontendEntryResolution,
 } from '../lib/bridge'
 import { toast, toastError } from '../lib/toast'
 import { useBugTickets } from '../lib/useBugTickets'
@@ -52,6 +55,9 @@ const visibleBugs = computed(() => tickets.filteredBugs.value.filter(bug => tick
   : bug.inbox_state !== 'history'))
 const matches = ref<BotMatch[]>([])
 const selectedBotKey = ref('')
+const frontendResolution = ref<FrontendEntryResolution | null>(null)
+const selectedFrontendEntryID = ref('')
+const resolvingFrontendEntry = ref(false)
 const explicitlySelectedBots = ref<Record<string, string>>({})
 const matching = ref(false)
 const botError = ref('')
@@ -77,6 +83,7 @@ type ResetDialogSnapshot = {
   newBotName: string
   newBotTarget: string
   newEnvironment: string
+  frontendEntryID: string
   newCaseID: string
   idempotencyKey: string
 }
@@ -106,6 +113,14 @@ const selectedBot = computed(() => matches.value.find(match => match.bot.key ===
 const selectedBotSupportsStart = computed(() => Boolean(selectedBot.value && ['codex', 'claude-code', 'openclaw'].includes(selectedBot.value.target)))
 const selectedBugRequiresBrowser = computed(() => suggestsBrowserValidation(tickets.selectedBug.value))
 const browserRuntimeBlocksSelectedBug = computed(() => selectedBugRequiresBrowser.value && browserRuntimeStatus.value.state !== 'ready')
+const frontendEntryBlocksSelectedBug = computed(() => {
+  if (!selectedBugRequiresBrowser.value) return false
+  if (resolvingFrontendEntry.value) return true
+  const resolution = frontendResolution.value
+  if (!resolution) return true
+  if (resolution.status === 'selected') return false
+  return resolution.status === 'unavailable' || !selectedFrontendEntryID.value
+})
 const browserRuntimePercent = computed(() => {
   const { current, total } = browserRuntimeProgress.value
   if (total <= 0) return 0
@@ -123,7 +138,7 @@ const browserRuntimeSummary = computed(() => {
   }
 })
 const writeActionPending = computed(() => matching.value || starting.value || resetting.value || restartPreparing.value || incidentWorkflow.pending.value)
-const writeActionDisabled = computed(() => writeActionPending.value || browserRuntimeBlocksSelectedBug.value || !tickets.selectedBug.value || !selectedBot.value || !selectedBotSupportsStart.value || !selectedBot.value.env?.trim())
+const writeActionDisabled = computed(() => writeActionPending.value || browserRuntimeBlocksSelectedBug.value || frontendEntryBlocksSelectedBug.value || !tickets.selectedBug.value || !selectedBot.value || !selectedBotSupportsStart.value || !selectedBot.value.env?.trim())
 const writeActionDisabledReason = computed(() => {
   if (matching.value) return '正在匹配排障机器人…'
   if (starting.value || resetting.value || restartPreparing.value || incidentWorkflow.pending.value) return '故障闭环操作正在处理中…'
@@ -133,6 +148,9 @@ const writeActionDisabledReason = computed(() => {
       ? 'Studio 正在初始化验证浏览器基础工具；完成后才能启动 Web 验证。'
       : '验证浏览器基础工具未就绪，请先重新准备 Chromium。'
   }
+  if (resolvingFrontendEntry.value) return '正在识别工单对应的前端应用入口…'
+  if (frontendResolution.value?.status === 'ambiguous' && !selectedFrontendEntryID.value) return '工单可能对应多个前端应用，请先选择验证入口。'
+  if (frontendResolution.value?.status === 'unavailable') return frontendResolution.value.message || '当前环境未配置可用的前端应用入口。'
   if (!selectedBot.value) return '请选择排障机器人后继续。'
   if (!selectedBotSupportsStart.value) return `${selectedBot.value.target} 暂不支持由 Studio 后台启动，请选择 Codex、Claude Code 或 OpenClaw。`
   if (!selectedBot.value.env?.trim()) return '所选机器人缺少目标环境，请先完善平台机器人映射。'
@@ -158,6 +176,32 @@ watch(() => tickets.selectedID.value, async bugID => {
   }
   await Promise.all([refreshMatches(bugID), openPreferredCase()])
 })
+
+let frontendResolutionGeneration = 0
+watch(() => [tickets.selectedBug.value?.id || '', selectedBot.value?.key || '', selectedBot.value?.env || ''], () => {
+  void refreshFrontendEntryResolution()
+})
+
+async function refreshFrontendEntryResolution() {
+  const bug = tickets.selectedBug.value
+  const bot = selectedBot.value
+  const generation = ++frontendResolutionGeneration
+  selectedFrontendEntryID.value = ''
+  frontendResolution.value = null
+  if (!bug || !bot || !bot.env?.trim() || !suggestsBrowserValidation(bug)) return
+  resolvingFrontendEntry.value = true
+  try {
+    const resolution = await resolveIncidentFrontendEntry({ bug_id: bug.id, bot_key: bot.key, bot_environment: bot.env })
+    if (generation !== frontendResolutionGeneration) return
+    frontendResolution.value = resolution
+    if (resolution.status === 'selected' && resolution.selected) selectedFrontendEntryID.value = resolution.selected.id
+  } catch (error) {
+    if (generation !== frontendResolutionGeneration) return
+    frontendResolution.value = { status: 'unavailable', message: error instanceof Error ? error.message : String(error) }
+  } finally {
+    if (generation === frontendResolutionGeneration) resolvingFrontendEntry.value = false
+  }
+}
 
 watch(incidentWorkflow.cases, () => {
   void openPreferredCase()
@@ -487,7 +531,7 @@ async function openResetDialog(incident: IncidentCase, choice: StartBotChoice) {
   const newEnvironment = newBot?.env?.trim() || ''
   if (!choice.key || !newBot || !['codex', 'claude-code', 'openclaw'].includes(newBot.target) || !newEnvironment) return
   const mode: RestartMode = terminalCaseStatuses.has(incident.status) ? 'terminal_new_round' : 'active_reset'
-  const identity = resetRequestIdentity(mode, incident.id, incident.version, choice.key, newBot.target, newEnvironment)
+  const identity = resetRequestIdentity(mode, incident.id, incident.version, choice.key, newBot.target, newEnvironment, selectedFrontendEntryID.value)
   let request = resetRequests.get(identity)
   if (!request) {
     const newCaseID = freshResetCaseID()
@@ -511,14 +555,15 @@ async function openResetDialog(incident: IncidentCase, choice: StartBotChoice) {
     newBotName: newBot.name?.trim() || newBot.system_id?.trim() || '排障机器人',
     newBotTarget: newBot.target,
     newEnvironment,
+    frontendEntryID: selectedFrontendEntryID.value,
     ...request,
   }
   await nextTick()
   resetCancelButton.value?.focus()
 }
 
-function resetRequestIdentity(mode: RestartMode, caseID: string, caseVersion: number, botKey: string, botTarget: string, environment: string): string {
-  return `${mode}:${caseID}:v${caseVersion}:${botKey}:${botTarget}:${environment}`
+function resetRequestIdentity(mode: RestartMode, caseID: string, caseVersion: number, botKey: string, botTarget: string, environment: string, frontendEntryID: string): string {
+  return `${mode}:${caseID}:v${caseVersion}:${botKey}:${botTarget}:${environment}:${frontendEntryID}`
 }
 
 function botTargetLabel(target: string): string {
@@ -602,6 +647,7 @@ async function confirmReset() {
       actor_id: 'desktop-user',
       bot_key: request.newBotKey,
       bot_environment: request.newEnvironment,
+      frontend_entry_id: request.frontendEntryID,
       input_json: { target_environment: request.newEnvironment },
     }))
     const replacement = result.case
@@ -625,7 +671,7 @@ async function confirmReset() {
   } catch (error) {
     if (isIncidentWorkflowConflict(error)) {
       if (!isCurrentResetRequest()) return
-      const identity = resetRequestIdentity(request.mode, request.caseID, request.caseVersion, request.newBotKey, request.newBotTarget, request.newEnvironment)
+      const identity = resetRequestIdentity(request.mode, request.caseID, request.caseVersion, request.newBotKey, request.newBotTarget, request.newEnvironment, request.frontendEntryID)
       resetRequests.delete(identity)
       resetting.value = false
       closeResetDialog()
@@ -698,6 +744,7 @@ async function confirmTerminalNewRound(request: ResetDialogSnapshot) {
       bug_id: request.bugID,
       bot_key: request.newBotKey,
       bot_environment: request.newEnvironment,
+      frontend_entry_id: request.frontendEntryID,
       expected_version: 0,
       idempotency_key: request.idempotencyKey,
       actor_id: 'desktop-user',
@@ -761,6 +808,7 @@ async function startNewCase() {
       bug_id: bug.id,
       bot_key: choice.key,
       bot_environment: selectedEnvironment,
+      frontend_entry_id: selectedFrontendEntryID.value,
       expected_version: 0,
       idempotency_key: `start:${candidate}`,
       actor_id: 'desktop-user',
@@ -960,6 +1008,16 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
           input_json: { source_baselines: payload.sourceBaselines || {} },
         })
       }
+      if (payload.kind === 'reconsider_remediation') {
+        if (!payload.rootCauseAttemptID || payload.caseVersion === undefined || !payload.input?.trim()) throw new Error('重新评估缺少用户方案、根因或 Case 版本快照')
+        return reconsiderIncidentRemediation({
+          ...base,
+          expected_version: payload.caseVersion,
+          idempotency_key: `reconsider-remediation:${incident.id}:${payload.rootCauseAttemptID}:${payload.caseVersion}`,
+          root_cause_attempt_id: payload.rootCauseAttemptID,
+          proposal: payload.input.trim(),
+        })
+      }
       if (payload.kind === 'complete_remediation') {
         if (!payload.rootCauseAttemptID || payload.caseVersion === undefined) throw new Error('处置确认缺少根因或 Case 版本快照')
         return completeIncidentRemediation({
@@ -1068,6 +1126,20 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         <p v-else-if="selectedBot && !selectedBotSupportsStart" class="support-note">{{ selectedBot.target }} 暂不支持由 Studio 后台启动，请选择 Codex、Claude Code 或 OpenClaw。</p>
         <section v-if="tickets.selectedBug.value" class="bot-action-panel" aria-label="故障闭环操作">
           <p class="bot-action-status" role="status">{{ botActionStatus }}</p>
+          <section v-if="selectedBugRequiresBrowser && frontendResolution" class="frontend-entry-resolution" aria-label="前端验证入口">
+            <p class="frontend-entry-title">验证入口</p>
+            <p v-if="frontendResolution.status === 'selected' && frontendResolution.selected" class="frontend-entry-selected">
+              {{ frontendResolution.selected.name }} · {{ frontendResolution.selected.url }}
+            </p>
+            <fieldset v-else-if="frontendResolution.status === 'ambiguous'">
+              <legend>{{ frontendResolution.message }}</legend>
+              <label v-for="candidate in frontendResolution.candidates || []" :key="candidate.binding.id" class="frontend-entry-option">
+                <input v-model="selectedFrontendEntryID" type="radio" :value="candidate.binding.id" />
+                <span><strong>{{ candidate.binding.name }}</strong><small>{{ candidate.binding.url }}<template v-if="candidate.reasons?.length"> · {{ candidate.reasons.join('、') }}</template></small></span>
+              </label>
+            </fieldset>
+            <p v-else class="live-error">{{ frontendResolution.message }}</p>
+          </section>
           <div class="bot-action-controls">
             <button v-if="!displayedCase" class="btn primary" type="button" data-action="start-case" :disabled="writeActionDisabled" @click="startNewCase()">
               {{ starting ? '开启中…' : '开启故障闭环' }}
@@ -1115,6 +1187,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
           <div><dt>开始阶段</dt><dd>验证</dd></div>
           <div><dt>排障机器人</dt><dd>{{ resetDialog.newBotName }} · {{ botTargetLabel(resetDialog.newBotTarget) }}</dd></div>
           <div><dt>目标环境</dt><dd>{{ resetDialog.newEnvironment }}</dd></div>
+          <div v-if="resetDialog.frontendEntryID"><dt>验证入口</dt><dd>{{ resetDialog.frontendEntryID }}</dd></div>
         </dl>
         <p data-reset-error class="reset-live-error" role="status" aria-live="assertive">{{ resetError }}</p>
         <footer>
@@ -1173,6 +1246,16 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
 .workflow-notice { border: 1px solid #bbf7d0; background: #f0fdf4; color: #166534; }
 .bot-action-panel { margin-top: var(--sp-3); padding-top: var(--sp-3); display: grid; gap: var(--sp-2); border-top: 1px solid var(--c-line); }
 .bot-action-status, .bot-action-disabled-reason { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--c-muted); font-size: var(--fs-sm); line-height: 1.5; }
+.frontend-entry-resolution { min-width: 0; padding: 10px; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); }
+.frontend-entry-title, .frontend-entry-selected { margin: 0; overflow-wrap: anywhere; }
+.frontend-entry-title { color: var(--c-muted); font-size: var(--fs-xs); font-weight: 700; }
+.frontend-entry-selected { margin-top: 4px; color: var(--c-text); font-size: var(--fs-sm); }
+.frontend-entry-resolution fieldset { min-width: 0; margin: 4px 0 0; padding: 0; border: 0; }
+.frontend-entry-resolution legend { margin-bottom: 7px; color: #92400e; font-size: var(--fs-xs); line-height: 1.45; }
+.frontend-entry-option { min-width: 0; display: flex; align-items: flex-start; gap: 8px; padding: 7px; border-radius: 6px; cursor: pointer; }
+.frontend-entry-option:hover { background: var(--c-surf); }
+.frontend-entry-option span, .frontend-entry-option small { min-width: 0; display: block; overflow-wrap: anywhere; }
+.frontend-entry-option small { margin-top: 2px; color: var(--c-muted); font-size: 11px; }
 .bot-action-disabled-reason { color: #92400e; }
 .bot-action-controls { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .bot-action-controls .btn { flex: 1 1 160px; min-height: 44px; transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease; }

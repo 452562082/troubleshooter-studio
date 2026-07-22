@@ -115,6 +115,11 @@ const RESPONSE_ASSERTION_BODY_MAX_BYTES = 256 << 10;
 const RESPONSE_ASSERTION_MAX_VISITED_NODES = 10_000;
 const REQUEST_FACT_BODY_MAX_BYTES = 64 << 10;
 const REQUEST_FACT_MAX_FIELDS = 16;
+const AUTOMATIC_RESPONSE_FACT_MAX_FIELDS = 64;
+const AUTOMATIC_RESPONSE_FACT_MAX_PAIRS = 64;
+const AUTOMATIC_RESPONSE_FACT_MAX_ARRAYS = 32;
+const AUTOMATIC_RESPONSE_FACT_MAX_COUNT_RELATIONS = 32;
+const SENSITIVE_BUSINESS_FIELD = /(?:password|passwd|secret|token|authorization|auth|cookie|session|api[_-]?key|private[_-]?key|access[_-]?key|captcha|otp)/i;
 const AUTH_ATTRIBUTED_ACTIONS = new Set(['click', 'fill', 'press', 'select']);
 const NETWORK_PROTOCOLS = new Set(['http:', 'https:', 'ws:', 'wss:']);
 const BROWSER_LAUNCH_ARGS = Object.freeze([
@@ -503,6 +508,193 @@ function requestFactPathValue(value, fieldPath) {
   return { found: true, value: current };
 }
 
+function safeEndpointURL(rawURL) {
+  const safe = safeResponseRecord({ method: 'GET', url: rawURL, status: 0, headers: {} }).url;
+  try {
+    const parsed = new URL(safe);
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return '[INVALID_URL]';
+  }
+}
+
+function parseBoundedQueryValue(value) {
+  const text = String(value ?? '');
+  if (Buffer.byteLength(text, 'utf8') > 4096 || !/^[\s]*[\[{]/.test(text)) return text;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === 'object' ? parsed : text;
+  } catch {
+    return text;
+  }
+}
+
+function automaticFieldSensitive(path) {
+  return SENSITIVE_BUSINESS_FIELD.test(path) || String(path).split('.').some((part) => part.toLowerCase() === 'code');
+}
+
+function automaticFactFields(value, prefix = '', result = []) {
+  if (result.length >= REQUEST_FACT_MAX_FIELDS || automaticFieldSensitive(prefix)) return result;
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    for (const key of Object.keys(value)) {
+      if (result.length >= REQUEST_FACT_MAX_FIELDS) break;
+      if (!/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(key)) continue;
+      const path = prefix ? `${prefix}.${key}` : key;
+      automaticFactFields(value[key], path, result);
+    }
+    return result;
+  }
+  if (!prefix || automaticFieldSensitive(prefix)) return result;
+  const field = safeRequestFactField(prefix, true, value);
+  if (!field.redacted) result.push(field);
+  return result;
+}
+
+export function evaluateAutomaticQueryRequestFact(browserRequest, requestContext) {
+  const resourceType = String(browserRequest.resourceType?.() ?? '').toLowerCase();
+  if (resourceType !== 'xhr' && resourceType !== 'fetch') return null;
+  const method = String(browserRequest.method?.() ?? '').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') return null;
+  let parsed;
+  try {
+    parsed = new URL(String(browserRequest.url?.() ?? ''));
+  } catch {
+    return null;
+  }
+  const payload = {};
+  for (const [name, rawValue] of parsed.searchParams) {
+    if (!/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(name) || automaticFieldSensitive(name)) continue;
+    const value = parseBoundedQueryValue(rawValue);
+    if (!Object.hasOwn(payload, name)) payload[name] = value;
+    else if (Array.isArray(payload[name])) payload[name].push(value);
+    else payload[name] = [payload[name], value];
+  }
+  const fields = automaticFactFields(payload);
+  if (fields.length === 0) return null;
+  const actionID = String(requestContext?.actionID ?? '');
+  const identity = `${actionID}\n${method}\n${parsed.origin}${parsed.pathname}`;
+  return {
+    capture_id: `auto-query-${createHash('sha256').update(identity).digest('hex').slice(0, 16)}`,
+    action_id: actionID,
+    method,
+    url: safeEndpointURL(parsed.toString()),
+    source: 'query',
+    matched_requests: 1,
+    fields,
+    passed: true,
+    failure_reason: '',
+  };
+}
+
+function automaticResponseValueType(value) {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  return typeof value;
+}
+
+function automaticResponseFacts(payload) {
+  const fields = new Map();
+  const arrays = new Map();
+  const equalPairs = new Map();
+  const countRelations = new Map();
+  const queue = [{ value: payload, path: '', depth: 0 }];
+  let visited = 0;
+  while (queue.length > 0 && visited < RESPONSE_ASSERTION_MAX_VISITED_NODES) {
+    const { value, path, depth } = queue.shift();
+    visited += 1;
+    if (!value || typeof value !== 'object' || depth > 32) continue;
+    if (Array.isArray(value)) {
+      if (path && arrays.size < AUTOMATIC_RESPONSE_FACT_MAX_ARRAYS && !arrays.has(path)) arrays.set(path, { path, length: value.length });
+      for (const child of value) queue.push({ value: child, path: `${path}[]`, depth: depth + 1 });
+      continue;
+    }
+    const scalarEntries = [];
+    const arrayEntries = [];
+    for (const [key, child] of Object.entries(value)) {
+      if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key) || automaticFieldSensitive(key)) continue;
+      const childPath = path ? `${path}.${key}` : key;
+      if (child && typeof child === 'object') {
+        if (Array.isArray(child)) arrayEntries.push([key, child.length]);
+        queue.push({ value: child, path: childPath, depth: depth + 1 });
+        continue;
+      }
+      if (fields.size < AUTOMATIC_RESPONSE_FACT_MAX_FIELDS || fields.has(childPath)) {
+        const state = fields.get(childPath) ?? { path: childPath, value_type: automaticResponseValueType(child), occurrences: 0, values: new Set() };
+        state.occurrences += 1;
+        if (state.values.size <= RESPONSE_ASSERTION_MAX_VISITED_NODES) state.values.add(JSON.stringify(child));
+        fields.set(childPath, state);
+      }
+      scalarEntries.push([key, child]);
+    }
+    for (const [countField, countValue] of scalarEntries) {
+      if (!Number.isInteger(countValue) || countRelations.size >= AUTOMATIC_RESPONSE_FACT_MAX_COUNT_RELATIONS) continue;
+      for (const [arrayField, arrayLength] of arrayEntries) {
+        if (countRelations.size >= AUTOMATIC_RESPONSE_FACT_MAX_COUNT_RELATIONS) break;
+        const key = `${path}\u0000${countField}\u0000${arrayField}`;
+        const state = countRelations.get(key) ?? { object_path: path, count_field: countField, array_field: arrayField, matched_objects: 0, equal: true };
+        state.matched_objects += 1;
+        state.equal &&= countValue === arrayLength;
+        countRelations.set(key, state);
+      }
+    }
+    for (let left = 0; left < scalarEntries.length && equalPairs.size < AUTOMATIC_RESPONSE_FACT_MAX_PAIRS; left += 1) {
+      for (let right = left + 1; right < scalarEntries.length && equalPairs.size < AUTOMATIC_RESPONSE_FACT_MAX_PAIRS; right += 1) {
+        if (scalarEntries[left][1] === null || scalarEntries[left][1] === undefined || scalarEntries[left][1] === '') continue;
+        if (!isDeepStrictEqual(scalarEntries[left][1], scalarEntries[right][1])) continue;
+        const leftField = scalarEntries[left][0];
+        const rightField = scalarEntries[right][0];
+        const key = `${path}\u0000${leftField}\u0000${rightField}`;
+        const state = equalPairs.get(key) ?? { object_path: path, left_field: leftField, right_field: rightField, matched_objects: 0 };
+        state.matched_objects += 1;
+        equalPairs.set(key, state);
+      }
+    }
+  }
+  return {
+    fields: [...fields.values()].map(({ values, ...field }) => ({ ...field, unique_values: values.size })),
+    arrays: [...arrays.values()],
+    equal_field_pairs: [...equalPairs.values()],
+    count_relations: [...countRelations.values()],
+  };
+}
+
+export function evaluateAutomaticResponseFactPayload(payload, metadata = {}) {
+  if (!payload || typeof payload !== 'object') return null;
+  const facts = automaticResponseFacts(payload);
+  if (facts.fields.length === 0 && facts.arrays.length === 0) return null;
+  return {
+    action_id: String(metadata.actionID ?? ''),
+    method: String(metadata.method ?? '').toUpperCase(),
+    url: safeEndpointURL(metadata.url ?? ''),
+    status: Number.isInteger(metadata.status) && metadata.status >= 0 ? metadata.status : 0,
+    fields: facts.fields,
+    arrays: facts.arrays,
+    equal_field_pairs: facts.equal_field_pairs,
+    count_relations: facts.count_relations,
+  };
+}
+
+async function evaluateAutomaticResponseFactForResponse(response, requestContext, headers = {}) {
+  const browserRequest = response.request();
+  const resourceType = String(browserRequest.resourceType?.() ?? '').toLowerCase();
+  if (resourceType !== 'xhr' && resourceType !== 'fetch') return null;
+  const contentType = String(headers['content-type'] ?? headers['Content-Type'] ?? '').toLowerCase();
+  if (contentType && !contentType.includes('json')) return null;
+  const declaredLength = Number(headers['content-length'] ?? headers['Content-Length'] ?? 0);
+  if (Number.isFinite(declaredLength) && declaredLength > RESPONSE_ASSERTION_BODY_MAX_BYTES) return null;
+  try {
+    const body = await response.body();
+    if (!Buffer.isBuffer(body) || body.length === 0 || body.length > RESPONSE_ASSERTION_BODY_MAX_BYTES) return null;
+    return evaluateAutomaticResponseFactPayload(JSON.parse(body.toString('utf8')), {
+      actionID: requestContext?.actionID ?? '', method: browserRequest.method(), url: response.url(), status: response.status(),
+    });
+  } catch {
+    return null;
+  }
+}
+
 function safeRequestFactField(path, found, rawValue) {
   if (!found) return { path, present: false, value_type: '', value: '', redacted: false, count: 0 };
   if (rawValue === null) return { path, present: true, value_type: 'null', value: 'null', redacted: false, count: 0 };
@@ -526,9 +718,10 @@ async function requestCapturePayload(browserRequest, source) {
     const parsed = new URL(browserRequest.url());
     const payload = {};
     for (const [name, value] of parsed.searchParams) {
-      if (!Object.hasOwn(payload, name)) payload[name] = value;
-      else if (Array.isArray(payload[name])) payload[name].push(value);
-      else payload[name] = [payload[name], value];
+      const normalized = parseBoundedQueryValue(value);
+      if (!Object.hasOwn(payload, name)) payload[name] = normalized;
+      else if (Array.isArray(payload[name])) payload[name].push(normalized);
+      else payload[name] = [payload[name], normalized];
     }
     return payload;
   }
@@ -621,10 +814,13 @@ function createRequestFactCollector(captures = []) {
   return {
     captures,
     observe(record) {
+      if (!record) return;
+      const declared = captures.some((capture) => capture.id === record.capture_id);
+      if (!declared && !observations.has(record.capture_id) && observations.size >= 40 + captures.length) return;
       if (!observations.has(record.capture_id)) observations.set(record.capture_id, record);
     },
     snapshot() {
-      return captures.map((capture) => observations.get(capture.id) ?? {
+      const declared = captures.map((capture) => observations.get(capture.id) ?? {
         capture_id: capture.id,
         action_id: capture.action_id,
         method: capture.method || '',
@@ -635,7 +831,22 @@ function createRequestFactCollector(captures = []) {
         passed: false,
         failure_reason: 'no_matching_request',
       });
+      const automatic = [...observations.values()].filter((record) => !captures.some((capture) => capture.id === record.capture_id));
+      return [...declared, ...automatic].slice(0, 40);
     },
+  };
+}
+
+function createAutomaticResponseFactCollector() {
+  const observations = new Map();
+  return {
+    observe(record) {
+      if (!record) return;
+      const key = `${record.action_id}\u0000${record.method}\u0000${record.url}`;
+      if (!observations.has(key) && observations.size < 40) observations.set(key, record);
+    },
+    isFull() { return observations.size >= 40; },
+    snapshot() { return [...observations.values()]; },
   };
 }
 
@@ -2616,12 +2827,13 @@ function checkedEvidenceContent(content, label) {
   return content;
 }
 
-async function writeEvidenceFiles(request, networkCollector, consoleCollector, actions, requestFacts, responseAssertions, artifactBudget) {
+async function writeEvidenceFiles(request, networkCollector, consoleCollector, actions, requestFacts, responseFacts, responseAssertions, artifactBudget) {
   const network = networkCollector.snapshot();
   const consoleRecords = consoleCollector.snapshot();
   const requestFactRecords = requestFacts.snapshot();
+  const responseFactRecords = responseFacts.snapshot();
   const responseAssertionRecords = responseAssertions.snapshot();
-  if (network.length > EVIDENCE_MAX_RECORDS || consoleRecords.length > EVIDENCE_MAX_RECORDS || actions.length > 40 || requestFactRecords.length > 40 || responseAssertionRecords.length > 40) {
+  if (network.length > EVIDENCE_MAX_RECORDS || consoleRecords.length > EVIDENCE_MAX_RECORDS || actions.length > 40 || requestFactRecords.length > 40 || responseFactRecords.length > 40 || responseAssertionRecords.length > 40) {
     throw new Error('browser evidence exceeds its record limit');
   }
   const networkJSON = checkedEvidenceContent(`${JSON.stringify(network)}\n`, 'network');
@@ -2631,16 +2843,20 @@ async function writeEvidenceFiles(request, networkCollector, consoleCollector, a
   const requestFactJSON = requestFactRecords.length > 0
     ? checkedEvidenceContent(`${JSON.stringify(requestFactRecords)}\n`, 'request fact')
     : '';
+  const responseFactJSON = responseFactRecords.length > 0
+    ? checkedEvidenceContent(`${JSON.stringify(responseFactRecords)}\n`, 'response fact')
+    : '';
   const responseAssertionJSON = responseAssertionRecords.length > 0
     ? checkedEvidenceContent(`${JSON.stringify(responseAssertionRecords)}\n`, 'response assertion')
     : '';
-  for (const content of [networkJSON, consoleContent, actionJSON, requestFactJSON, responseAssertionJSON].filter(Boolean)) {
+  for (const content of [networkJSON, consoleContent, actionJSON, requestFactJSON, responseFactJSON, responseAssertionJSON].filter(Boolean)) {
     if (!artifactBudget.reserve(Buffer.byteLength(content, 'utf8'))) throw new Error('browser evidence exceeds the artifact budget');
   }
   await atomicWrite(join(request.staging_dir, 'network.json'), networkJSON);
   await atomicWrite(join(request.staging_dir, 'console.jsonl'), consoleContent);
   await atomicWrite(join(request.staging_dir, 'browser-actions.json'), actionJSON);
   if (requestFactJSON) await atomicWrite(join(request.staging_dir, 'request-facts.json'), requestFactJSON);
+  if (responseFactJSON) await atomicWrite(join(request.staging_dir, 'response-facts.json'), responseFactJSON);
   if (responseAssertionJSON) await atomicWrite(join(request.staging_dir, 'response-assertions.json'), responseAssertionJSON);
   const firstRequest = network.find((record) => record.request_id || record.trace_id) ?? {};
   const artifacts = [
@@ -2649,6 +2865,7 @@ async function writeEvidenceFiles(request, networkCollector, consoleCollector, a
     { kind: 'browser_actions', path: 'browser/browser-actions.json' },
   ];
   if (requestFactJSON) artifacts.push({ kind: 'request_facts', path: 'browser/request-facts.json' });
+  if (responseFactJSON) artifacts.push({ kind: 'response_facts', path: 'browser/response-facts.json' });
   if (responseAssertionJSON) artifacts.push({ kind: 'response_assertions', path: 'browser/response-assertions.json' });
   return artifacts;
 }
@@ -2668,6 +2885,7 @@ async function executeWorker(request) {
   const artifactBudget = createArtifactBudget();
   const actions = [];
   const requestFacts = createRequestFactCollector(request.plan.request_captures ?? []);
+  const responseFacts = createAutomaticResponseFactCollector();
   const responseAssertions = createResponseAssertionCollector(request.plan.response_assertions ?? []);
   const pendingResponses = new Set();
   const pendingRequestFacts = new Set();
@@ -2702,6 +2920,7 @@ async function executeWorker(request) {
       for (const observation of observations) {
         responseAssertions.observe(observation.assertion, observation.metadata, observation.evaluation);
       }
+      if (!responseFacts.isFull()) responseFacts.observe(await evaluateAutomaticResponseFactForResponse(response, requestContext, headers));
     })().finally(() => pendingResponses.delete(pending));
     pendingResponses.add(pending);
   };
@@ -2718,7 +2937,10 @@ async function executeWorker(request) {
           authFailures.observeRequest(browserRequest);
           if (pendingRequestFacts.size < EVIDENCE_MAX_RECORDS) {
             const pending = evaluateRequestCapturesForRequest(browserRequest, requestContext, requestFacts.captures)
-              .then((records) => { for (const record of records) requestFacts.observe(record); })
+              .then((records) => {
+                for (const record of records) requestFacts.observe(record);
+                requestFacts.observe(evaluateAutomaticQueryRequestFact(browserRequest, requestContext));
+              })
               .finally(() => pendingRequestFacts.delete(pending));
             pendingRequestFacts.add(pending);
           }
@@ -2766,7 +2988,7 @@ async function executeWorker(request) {
     const finishLogin = async () => {
       for (const screenshot of screenshots) await rm(join(request.staging_dir, screenshot.replace('browser/', '')), { force: true });
       await Promise.allSettled([...pendingResponses, ...pendingRequestFacts]);
-      const artifacts = await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseAssertions, artifactBudget);
+      const artifacts = await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseFacts, responseAssertions, artifactBudget);
       const loginPage = await activeLoginPage(context.pages(), request.policy, authFailures.active());
       return {
         status: 'login_required',
@@ -2793,7 +3015,7 @@ async function executeWorker(request) {
       screenshots.push(failure);
       actions.push({ id: 'start_url', action: 'goto', locator_kind: '', started_at: new Date().toISOString(), duration_ms: 0, result: 'failed', error_code: supervised.blocked() ? 'browser_destination_blocked' : 'navigation_failed' });
       await Promise.allSettled([...pendingResponses, ...pendingRequestFacts]);
-      const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseAssertions, artifactBudget))];
+      const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseFacts, responseAssertions, artifactBudget))];
       const finalURL = page.url().startsWith('http:') || page.url().startsWith('https:') ? page.url() : '';
       return {
         status: 'locator_failed',
@@ -2872,7 +3094,7 @@ async function executeWorker(request) {
         const failure = captured.path;
         screenshots.push(failure);
         await Promise.allSettled([...pendingResponses, ...pendingRequestFacts]);
-        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseAssertions, artifactBudget))];
+        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseFacts, responseAssertions, artifactBudget))];
         return {
           status: 'locator_failed',
           error_code: actionErrorCode,
@@ -2897,7 +3119,7 @@ async function executeWorker(request) {
         const failure = captured.path;
         screenshots.push(failure);
         await Promise.allSettled([...pendingResponses, ...pendingRequestFacts]);
-        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseAssertions, artifactBudget))];
+        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseFacts, responseAssertions, artifactBudget))];
         return {
           status: 'assertion_failed',
           error_code: 'assertion_failed',
@@ -2917,7 +3139,7 @@ async function executeWorker(request) {
     const finalScreenshot = captured.path;
     screenshots.push(finalScreenshot);
     await Promise.allSettled([...pendingResponses, ...pendingRequestFacts]);
-    const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseAssertions, artifactBudget))];
+    const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseFacts, responseAssertions, artifactBudget))];
     return {
       status: 'completed',
       final_url: page.url(),

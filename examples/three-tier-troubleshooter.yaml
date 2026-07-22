@@ -13,6 +13,23 @@ environments:
   - id: dev
     api_domain: api-dev.mall.example.com
     web_domain: www-dev.mall.example.com
+    frontend_entries:
+      - id: consumer-h5
+        name: "C 端 H5"
+        url: https://www-dev.mall.example.com
+        repo: mall-web
+        device_profile: mobile
+        aliases: [C端, 用户端]
+        product_hints: [商城]
+        path_prefixes: [/search, /user]
+      - id: admin
+        name: "管理端"
+        url: https://admin-dev.mall.example.com/console
+        repo: mall-web
+        device_profile: desktop
+        aliases: [后台, CMS]
+        product_hints: [运营]
+        path_prefixes: [/console, /admin]
     is_prod: false
     deployment_verification:
       provider: http
@@ -22,6 +39,23 @@ environments:
   - id: prod
     api_domain: api.mall.example.com
     web_domain: www.mall.example.com
+    frontend_entries:
+      - id: consumer-h5
+        name: "C 端 H5"
+        url: https://www.mall.example.com
+        repo: mall-web
+        device_profile: mobile
+        aliases: [C端, 用户端]
+        product_hints: [商城]
+        path_prefixes: [/search, /user]
+      - id: admin
+        name: "管理端"
+        url: https://admin.mall.example.com/console
+        repo: mall-web
+        device_profile: desktop
+        aliases: [后台, CMS]
+        product_hints: [运营]
+        path_prefixes: [/console, /admin]
     is_prod: true
 
 repos:

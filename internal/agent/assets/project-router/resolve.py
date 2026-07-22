@@ -244,6 +244,8 @@ def resolve(root: Path, cwd: str, requested: str, expected_agent: str) -> dict:
     base = {
         "status": "unmatched",
         "allowed": False,
+        "action": "continue_without_troubleshooter",
+        "silent": True,
         "cwd": cwd,
         "git_root": git_root,
         "reason": "no_project_binding",
@@ -255,6 +257,8 @@ def resolve(root: Path, cwd: str, requested: str, expected_agent: str) -> dict:
     if not scored:
         if requested:
             base["reason"] = "unknown_system"
+            base["action"] = "request_system_correction"
+            base["silent"] = False
         return base
 
     top_score = scored[0][0]
@@ -262,6 +266,8 @@ def resolve(root: Path, cwd: str, requested: str, expected_agent: str) -> dict:
     if len(winners) != 1:
         base["status"] = "ambiguous"
         base["reason"] = "multiple_equal_project_bindings"
+        base["action"] = "request_binding_choice"
+        base["silent"] = False
         base["candidates"] = [public_candidate(system, score, match) for score, system, match in winners]
         return base
 
@@ -272,6 +278,8 @@ def resolve(root: Path, cwd: str, requested: str, expected_agent: str) -> dict:
     return {
         "status": "matched",
         "allowed": allowed,
+        "action": "use_troubleshooter" if allowed else "deny_cross_system_agent",
+        "silent": False,
         "reason": "matched" if allowed else "expected_agent_belongs_to_another_system",
         "cwd": cwd,
         "git_root": git_root,

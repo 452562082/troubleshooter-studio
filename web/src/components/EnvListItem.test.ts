@@ -8,6 +8,7 @@ function mountItem() {
     id: 'test',
     api_domain: 'https://api-test.example.com',
     web_domain: 'https://web-test.example.com',
+    frontend_entries: [],
     is_prod: false,
   })
   const wrapper = mount(EnvListItem, {
@@ -40,5 +41,16 @@ describe('EnvListItem', () => {
     expect(wrapper.get('.environment-fields').classes()).toContain('environment-fields')
     expect(wrapper.get('.environment-remove').attributes('aria-label')).toBe('删除 test 环境')
     expect(wrapper.get('.environment-remove svg').attributes('aria-hidden')).toBe('true')
+  })
+
+  it('edits multiple named frontend application entries', async () => {
+    const { wrapper, env } = mountItem()
+    await wrapper.get('.add-entry').trigger('click')
+    expect(env.frontend_entries).toHaveLength(1)
+    const inputs = wrapper.findAll('.frontend-entry-card input')
+    await inputs[0].setValue('admin')
+    await inputs[1].setValue('管理端')
+    await inputs[2].setValue('https://admin-test.example.com')
+    expect(env.frontend_entries[0]).toMatchObject({ id: 'admin', name: '管理端', url: 'https://admin-test.example.com' })
   })
 })

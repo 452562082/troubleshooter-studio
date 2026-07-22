@@ -25,6 +25,9 @@ const resultLabels: Record<string, { label: string; tone: StageTone }> = {
 type DataRecord = Record<string, unknown>
 
 const confidenceLabels: Record<string, string> = { high: '高', medium: '中', low: '低' }
+const remediationModeLabels: Record<string, string> = {
+  code_change: '代码修复', operator_action: '人工处置', external_recovery: '外部恢复', observe_only: '持续观察',
+}
 const fieldLabels: Record<string, string> = {
   summary: '阶段结论', conclusion: '阶段结论', report: '阶段结论', notes: '备注', metadata: '元数据', owner: '负责人', retried: '是否重试',
   kind: '类型', path: '路径', captured_at: '采集时间', environment: '环境', version: '版本', request_id: 'Request ID', trace_id: 'Trace ID', repo: '仓库', summary_text: '变更',
@@ -103,6 +106,18 @@ function evidenceSection(title: string, value: unknown): StageSection {
   return groups.length ? { title, groups, groupLabel: '证据' } : { title, emptyText: '尚无有效证据' }
 }
 
+function remediationSection(value: unknown): StageSection | undefined {
+  const plan = recordValue(value)
+  const fields = [
+    { label: '处置方式', value: remediationModeLabels[stringValue(plan.mode)] || stringValue(plan.mode) },
+    { label: '修复对象', value: stringValue(plan.target) },
+    { label: '修复建议', value: stringValue(plan.summary) },
+    { label: '回退方案', value: stringValue(plan.rollback) },
+    { label: '回归方式', value: stringValue(plan.verification) },
+  ].filter(field => field.value)
+  return fields.length ? { title: '建议修复方向', fields } : undefined
+}
+
 function presentValidation(attempt: PhaseAttempt, output: DataRecord): StageAttemptPresentation {
   const view = basePresentation(attempt, resultFor(stringValue(output.verification_status), attempt), stringValue(output.environment))
   for (const section of [
@@ -117,12 +132,14 @@ function presentValidation(attempt: PhaseAttempt, output: DataRecord): StageAtte
 function presentInvestigation(attempt: PhaseAttempt, output: DataRecord): StageAttemptPresentation {
   const view = basePresentation(attempt, resultFor(stringValue(output.investigation_status), attempt), stringValue(output.environment))
   const confidence = confidenceLabels[stringValue(output.confidence)] || stringValue(output.confidence)
+  const terminalRootCause = stringValue(output.investigation_status) === 'root_cause_ready'
   for (const section of [
     textSection('根因结论', output.root_cause),
+    remediationSection(output.remediation),
     textSection('置信度', confidence),
     listSection('验证将自动补采', output.validation_gaps, 'info'),
     listSection('需要你补充', output.gaps, 'warning'),
-    listSection('非阻塞未覆盖', output.unchecked_scopes, 'info'),
+    terminalRootCause ? undefined : listSection('非阻塞未覆盖', output.unchecked_scopes, 'info'),
   ]) if (section) view.sections.push(section)
   view.sections.push(evidenceSection('排障证据', output.evidence))
   return view

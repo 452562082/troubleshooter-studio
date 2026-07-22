@@ -22,6 +22,7 @@ export interface IncidentCase {
   source: string
   system_id: string
   environment: string
+  frontend_entry?: FrontendEntryBinding
   status: CaseStatus
   cycle_number: number
   current_attempt_id: string
@@ -32,6 +33,18 @@ export interface IncidentCase {
   created_at: string
   updated_at: string
   closed_at?: string | null
+}
+
+export interface FrontendEntryBinding {
+  id: string; name: string; url: string; config_url?: string; repo?: string; device_profile?: string
+  resolution_source: string; score?: number; reason?: string; config_sha256?: string
+}
+export interface FrontendEntryCandidate { binding: FrontendEntryBinding; score: number; reasons: string[] }
+export interface FrontendEntryResolution {
+  status: 'selected' | 'ambiguous' | 'unavailable'
+  selected?: FrontendEntryBinding
+  candidates?: FrontendEntryCandidate[]
+  message?: string
 }
 
 export interface PhaseAttempt {
@@ -110,6 +123,9 @@ export const incidentBrowserProgressCodes = [
   'browser_starting',
   'browser_action_started',
   'browser_action_completed',
+  'browser_plan_generating',
+  'browser_repair_generating',
+  'browser_result_evaluating',
   'browser_login_opened',
   'browser_login_completed',
   'browser_runtime_installing',
@@ -137,8 +153,8 @@ export type IncidentCaseEventPayload = {
 export interface WorkflowCommandInput { case_id: string; expected_version: number; idempotency_key: string; actor_id: string }
 export interface IncidentBrowserCommandInput extends WorkflowCommandInput { attempt_id: string }
 export interface IncidentArtifactPreview { artifact_id: string; mime_type: 'image/png'; base64_data: string; size: number }
-export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: string; bot_key?: string; bot_environment?: string; input_json?: Record<string, unknown> }
-export interface ResetIncidentCaseInput extends WorkflowCommandInput { new_case_id: string; bot_key: string; bot_environment?: string; input_json?: Record<string, unknown> }
+export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: string; bot_key?: string; bot_environment?: string; frontend_entry_id?: string; input_json?: Record<string, unknown> }
+export interface ResetIncidentCaseInput extends WorkflowCommandInput { new_case_id: string; bot_key: string; bot_environment?: string; frontend_entry_id?: string; input_json?: Record<string, unknown> }
 export interface WorkflowWarning { code: string; message: string }
 export interface ResetIncidentCaseResult { case: IncidentCase; warnings: WorkflowWarning[] }
 export type IncidentWorkflowConflictCode = 'case_version_conflict' | 'idempotency_conflict'
@@ -168,6 +184,7 @@ export interface IncidentEvidenceImageInput { name: string; mime_type: 'image/pn
 export interface UploadIncidentEvidenceImagesInput { case_id: string; attempt_id: string; expected_version: number; images: IncidentEvidenceImageInput[] }
 export interface IncidentEvidenceImage { artifact_id: string; name: string; mime_type: 'image/png'; size: number }
 export interface ApproveIncidentFixInput extends WorkflowCommandInput { root_cause_attempt_id: string; input_json?: Record<string, unknown> }
+export interface ReconsiderIncidentRemediationInput extends WorkflowCommandInput { root_cause_attempt_id: string; proposal: string }
 export interface CompleteIncidentRemediationInput extends WorkflowCommandInput { root_cause_attempt_id: string; summary: string; evidence: string }
 export interface ApproveIncidentMergeInput extends WorkflowCommandInput { fix_commits: Record<string, string>; target_branches: Record<string, string>; target_heads?: Record<string, string> }
 export interface NotifyIncidentDeployedInput extends WorkflowCommandInput { observed_version?: string; observed_commits?: Record<string, string>; version_source?: string; notification_text?: string; input_json?: Record<string, unknown> }
@@ -214,6 +231,10 @@ export async function startIncidentCase(input: StartIncidentCaseInput): Promise<
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.StartIncidentCase(input))
 }
+export async function resolveIncidentFrontendEntry(input: { bug_id: string; bot_key: string; bot_environment?: string; frontend_entry_id?: string }): Promise<FrontendEntryResolution> {
+  if (!isDesktop()) return { status: 'unavailable', message: desktopOnly }
+  return await App.ResolveIncidentFrontendEntry(input) as FrontendEntryResolution
+}
 export async function resetIncidentCase(input: ResetIncidentCaseInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.ResetIncidentCase(input))
@@ -257,6 +278,10 @@ export async function uploadIncidentEvidenceImages(input: UploadIncidentEvidence
 export async function approveIncidentFix(input: ApproveIncidentFixInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.ApproveIncidentFix(input))
+}
+export async function reconsiderIncidentRemediation(input: ReconsiderIncidentRemediationInput): Promise<IncidentCase> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  return normalizeCase(await App.ReconsiderIncidentRemediation(input))
 }
 export async function completeIncidentRemediation(input: CompleteIncidentRemediationInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)

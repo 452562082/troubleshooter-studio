@@ -342,6 +342,23 @@ func TestCaseBrowserPolicyResolverCanonicalizesConfiguredOrigins(t *testing.T) {
 	}
 }
 
+func TestCaseBrowserPolicyResolverAuthorizesOnlyFrozenFrontendApplication(t *testing.T) {
+	app, _, _, _, incident, _ := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
+	incident.FrontendEntry = bughub.FrontendEntryBinding{ID: "admin", URL: "https://admin.test/console/users", ConfigURL: "https://admin.test/console", ConfigSHA256: strings.Repeat("a", 64)}
+	policy, err := (caseBrowserPolicyResolver{app: app}).ResolveBrowserPolicy(context.Background(), incident, bughub.Bug{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(policy.ApplicationOrigins, []string{"https://admin.test"}) || !reflect.DeepEqual(policy.StartOrigins, []string{"https://admin.test"}) {
+		t.Fatalf("policy=%+v", policy)
+	}
+	for _, origin := range policy.AllowedOrigins {
+		if origin == "https://app.test" {
+			t.Fatalf("unselected legacy frontend was authorized: %+v", policy.AllowedOrigins)
+		}
+	}
+}
+
 func TestCanonicalIncidentBrowserOriginNormalizesIPLiteralSpellingsAndDefaultPorts(t *testing.T) {
 	expanded, err := canonicalIncidentBrowserOrigin("https://[2001:0db8:0000:0000:0000:0000:0000:0001]:443")
 	if err != nil {

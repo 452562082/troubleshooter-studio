@@ -81,6 +81,8 @@ func workerFixtureBytes(kind string) []byte {
 		return []byte("[]\n")
 	case "response_assertions":
 		return []byte("[]\n")
+	case "response_facts":
+		return []byte("[]\n")
 	default:
 		return []byte("fixture\n")
 	}

@@ -244,11 +244,22 @@ func (r caseBrowserPolicyResolver) ResolveBrowserPolicy(ctx context.Context, inc
 	if environment == nil {
 		return bughub.BrowserSecurityPolicy{}, errors.New("incident browser environment is unavailable")
 	}
-	application, err := canonicalIncidentBrowserOrigins([]string{environment.WebDomain})
+	applicationURL := strings.TrimSpace(incident.FrontendEntry.ConfigURL)
+	if applicationURL == "" {
+		applicationURL = strings.TrimSpace(incident.FrontendEntry.URL)
+	}
+	if applicationURL == "" {
+		applicationURL = strings.TrimSpace(environment.WebDomain)
+	}
+	_, applicationOrigin, err := canonicalIncidentBrowserApplicationURL(applicationURL)
+	if err != nil {
+		return bughub.BrowserSecurityPolicy{}, errors.New("incident browser application origin is invalid")
+	}
+	application, err := canonicalIncidentBrowserOrigins([]string{applicationOrigin})
 	if err != nil || len(application) != 1 {
 		return bughub.BrowserSecurityPolicy{}, errors.New("incident browser application origin is invalid")
 	}
-	configuredAllowed := append([]string{environment.WebDomain, environment.APIDomain}, environment.BrowserAllowedOrigins...)
+	configuredAllowed := append([]string{applicationOrigin, environment.APIDomain}, environment.BrowserAllowedOrigins...)
 	allowed, err := canonicalIncidentBrowserOrigins(append(configuredAllowed, environment.BrowserAuthOrigins...))
 	if err != nil || len(allowed) == 0 {
 		return bughub.BrowserSecurityPolicy{}, errors.New("incident browser origins are invalid")
@@ -445,8 +456,12 @@ func incidentArtifactDefaultFilename(kind string) string {
 		return "incident-console.txt"
 	case "browser_actions":
 		return "incident-browser-actions.json"
+	case "request_facts":
+		return "incident-request-facts.json"
 	case "response_assertions":
 		return "incident-response-assertions.json"
+	case "response_facts":
+		return "incident-response-facts.json"
 	default:
 		return "incident-evidence.bin"
 	}

@@ -33,6 +33,8 @@ import {
   dialPinnedTarget,
   executeAssertion,
   evaluateJSONResponseAssertion,
+  evaluateAutomaticQueryRequestFact,
+  evaluateAutomaticResponseFactPayload,
   evaluateRequestCapturesForRequest,
   evaluateResponseAssertionsForResponse,
   launchPinnedBrowser,
@@ -41,6 +43,50 @@ import {
   startPinnedProxy,
   validateWorkerRequest,
 } from './browser_worker.mjs';
+
+test('automatic query facts flatten bounded JSON parameters and omit credential fields', () => {
+  const fact = evaluateAutomaticQueryRequestFact({
+    method: () => 'GET',
+    url: () => 'https://api.test/search?data_type=2&extra_params=%7B%22type%22%3A1%2C%22keywords%22%3A%22chengzi%22%2C%22sort%22%3A1%2C%22access_token%22%3A%22secret%22%7D&page=1&page_size=10&token=top-secret',
+    resourceType: () => 'fetch',
+  }, { actionID: 'switch-user-results' });
+
+  assert.ok(fact);
+  assert.equal(fact.source, 'query');
+  assert.equal(fact.passed, true);
+  assert.deepEqual(fact.fields.map(({ path, value }) => ({ path, value })), [
+    { path: 'data_type', value: '2' },
+    { path: 'extra_params.type', value: '1' },
+    { path: 'extra_params.keywords', value: 'chengzi' },
+    { path: 'extra_params.sort', value: '1' },
+    { path: 'page', value: '1' },
+    { path: 'page_size', value: '10' },
+  ]);
+  const encoded = JSON.stringify(fact);
+  assert.equal(encoded.includes('top-secret'), false);
+  assert.equal(encoded.includes('secret'), false);
+  assert.equal(fact.url.includes('?'), false);
+});
+
+test('automatic response facts expose structure and equality counts without raw response values', () => {
+  const fact = evaluateAutomaticResponseFactPayload({
+    users: {
+      total: 1,
+      list: [{ user_id: 'user-42', nick_name: 'chengzi', text: 'chengzi', signature: 'private biography' }],
+    },
+  }, {
+    actionID: 'switch-user-results', method: 'GET', url: 'https://api.test/search?keywords=chengzi', status: 200,
+  });
+
+  assert.ok(fact);
+  assert.deepEqual(fact.arrays, [{ path: 'users.list', length: 1 }]);
+  assert.ok(fact.fields.some((field) => field.path === 'users.list[].user_id' && field.occurrences === 1 && field.unique_values === 1));
+  assert.ok(fact.equal_field_pairs.some((pair) => pair.object_path === 'users.list[]' && pair.left_field === 'nick_name' && pair.right_field === 'text' && pair.matched_objects === 1));
+  assert.deepEqual(fact.count_relations, [{ object_path: 'users', count_field: 'total', array_field: 'list', matched_objects: 1, equal: true }]);
+  const encoded = JSON.stringify(fact);
+  for (const rawValue of ['user-42', 'chengzi', 'private biography']) assert.equal(encoded.includes(rawValue), false, rawValue);
+  assert.equal(fact.url.includes('?'), false);
+});
 
 test('accessibilitySummary infers native search inputs as searchable text controls', async () => {
   const attributes = { role: '', type: 'search', 'aria-label': '', placeholder: '请输入搜索关键字' };
@@ -405,6 +451,19 @@ test('request captures emit only declared query and JSON fields', async () => {
   ]);
   assert.equal(JSON.stringify(queryRecords).includes('ignored'), false);
   assert.equal(queryRecords[0].passed, true);
+
+  const nestedQueryRecords = await evaluateRequestCapturesForRequest({
+    method: () => 'GET',
+    url: () => 'https://app.test/search?extra_params=%7B%22type%22%3A1%2C%22keywords%22%3A%22chengzi%22%7D',
+    headers: () => ({}),
+  }, { actionID: 'submit-search' }, [{
+    ...captures[0], id: 'nested-query-facts', fields: ['extra_params.type', 'extra_params.keywords'],
+  }]);
+  assert.deepEqual(nestedQueryRecords[0].fields.map(({ path, value }) => ({ path, value })), [
+    { path: 'extra_params.type', value: '1' },
+    { path: 'extra_params.keywords', value: 'chengzi' },
+  ]);
+  assert.equal(nestedQueryRecords[0].passed, true);
 
   const jsonRecords = await evaluateRequestCapturesForRequest({
     method: () => 'POST',

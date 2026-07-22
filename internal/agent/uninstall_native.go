@@ -144,11 +144,17 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 			}
 		}
 		if t == TargetCodex {
-			profile := filepath.Join(root, codexAgentRuntimeProfileName(name)+".config.toml")
-			if err := os.Remove(profile); err == nil {
-				logf("[ok] %s 已删除", profile)
+			runtimeHome := codexAgentRuntimeHome(root, name)
+			if err := os.RemoveAll(runtimeHome); err == nil {
+				logf("[ok] %s 已删除", runtimeHome)
+			} else {
+				logf("[warn] 删 %s 失败:%v", runtimeHome, err)
+			}
+			legacyProfile := filepath.Join(root, "tshoot-"+name+".config.toml")
+			if err := os.Remove(legacyProfile); err == nil {
+				logf("[ok] %s 已删除", legacyProfile)
 			} else if !os.IsNotExist(err) {
-				logf("[warn] 删 %s 失败:%v", profile, err)
+				logf("[warn] 删 %s 失败:%v", legacyProfile, err)
 			}
 		}
 	}

@@ -40,10 +40,10 @@ func TestLiveFunhubRepairWorker(t *testing.T) {
 		t.Fatalf("worker runner: %v", err)
 	}
 	t.Logf("worker result: status=%s code=%s failed=%s url=%s title=%s accessibility=%+v", result.Status, result.ErrorCode, result.FailedActionID, result.FinalURL, result.Title, result.AccessibilitySummary)
-	var requestFactContent, responseAssertionContent []byte
+	var requestFactContent, responseFactContent, responseAssertionContent []byte
 	for _, artifact := range result.Artifacts {
 		t.Logf("artifact reference: kind=%s path=%s", artifact.Kind, artifact.Path)
-		if artifact.Kind != "network" && artifact.Kind != "console" && artifact.Kind != "browser_actions" && artifact.Kind != "request_facts" && artifact.Kind != "response_assertions" {
+		if artifact.Kind != "network" && artifact.Kind != "console" && artifact.Kind != "browser_actions" && artifact.Kind != "request_facts" && artifact.Kind != "response_facts" && artifact.Kind != "response_assertions" {
 			continue
 		}
 		content, readErr := os.ReadFile(filepath.Join(request.StagingDir, strings.TrimPrefix(artifact.Path, "browser/")))
@@ -55,6 +55,8 @@ func TestLiveFunhubRepairWorker(t *testing.T) {
 		switch artifact.Kind {
 		case "request_facts":
 			requestFactContent = content
+		case "response_facts":
+			responseFactContent = content
 		case "response_assertions":
 			responseAssertionContent = content
 		}
@@ -69,7 +71,7 @@ func TestLiveFunhubRepairWorker(t *testing.T) {
 			Present bool   `json:"present"`
 		} `json:"fields"`
 	}
-	if err := json.Unmarshal(requestFactContent, &requestFacts); err != nil || len(requestFacts) != 1 || requestFacts[0].MatchedRequests < 1 {
+	if err := json.Unmarshal(requestFactContent, &requestFacts); err != nil || len(requestFacts) < 1 || requestFacts[0].MatchedRequests < 1 {
 		t.Fatalf("live request facts were not captured: facts=%+v err=%v", requestFacts, err)
 	}
 	for _, field := range requestFacts[0].Fields {
@@ -87,5 +89,29 @@ func TestLiveFunhubRepairWorker(t *testing.T) {
 	}
 	if responseAssertions[0].LeftField != "nick_name" || responseAssertions[0].RightField != "text" {
 		t.Fatalf("live response assertion fields = %+v", responseAssertions[0])
+	}
+	var responseFacts []struct {
+		Fields []struct {
+			Path string `json:"path"`
+		} `json:"fields"`
+		EqualFieldPairs []struct {
+			LeftField      string `json:"left_field"`
+			RightField     string `json:"right_field"`
+			MatchedObjects int    `json:"matched_objects"`
+		} `json:"equal_field_pairs"`
+	}
+	if err := json.Unmarshal(responseFactContent, &responseFacts); err != nil || len(responseFacts) < 1 {
+		t.Fatalf("live automatic response facts were not captured: facts=%+v err=%v", responseFacts, err)
+	}
+	foundPair := false
+	for _, fact := range responseFacts {
+		for _, pair := range fact.EqualFieldPairs {
+			if ((pair.LeftField == "nick_name" && pair.RightField == "text") || (pair.LeftField == "text" && pair.RightField == "nick_name")) && pair.MatchedObjects > 0 {
+				foundPair = true
+			}
+		}
+	}
+	if !foundPair {
+		t.Fatalf("live automatic response facts did not include nick_name/text equality: %+v", responseFacts)
 	}
 }

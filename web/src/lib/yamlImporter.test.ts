@@ -74,20 +74,29 @@ describe('inferAuthMode', () => {
 })
 
 describe('parseEnvironment', () => {
+  it('restores named frontend applications and their resolver hints', () => {
+    expect(parseEnvironment({
+      id: 'test',
+      frontend_entries: [{ id: 'admin', name: '管理端', url: 'https://admin.test/app', repo: 'admin-web', device_profile: 'desktop', aliases: ['后台', 'CMS'], product_hints: ['运营'], module_hints: ['用户管理'], path_prefixes: ['/users'] }],
+    }).frontend_entries).toEqual([{
+      id: 'admin', name: '管理端', url: 'https://admin.test/app', repo: 'admin-web', device_profile: 'desktop',
+      aliases: '后台, CMS', product_hints: '运营', module_hints: '用户管理', path_prefixes: '/users',
+    }])
+  })
   it('extracts all fields with sensible fallbacks', () => {
     expect(parseEnvironment({ id: 'dev', api_domain: 'a', web_domain: 'w', is_prod: true }))
-      .toEqual({ id: 'dev', api_domain: 'a', web_domain: 'w', is_prod: true })
+      .toEqual({ id: 'dev', api_domain: 'a', web_domain: 'w', frontend_entries: [], is_prod: true })
   })
   it('handles missing fields', () => {
-    expect(parseEnvironment({})).toEqual({ id: '', api_domain: '', web_domain: '', is_prod: false })
+    expect(parseEnvironment({})).toEqual({ id: '', api_domain: '', web_domain: '', frontend_entries: [], is_prod: false })
   })
   it('coerces is_prod with Boolean', () => {
     expect(parseEnvironment({ is_prod: 'truthy' }).is_prod).toBe(true)
     expect(parseEnvironment({ is_prod: 0 }).is_prod).toBe(false)
   })
   it('handles null/undefined input', () => {
-    expect(parseEnvironment(null)).toEqual({ id: '', api_domain: '', web_domain: '', is_prod: false })
-    expect(parseEnvironment(undefined)).toEqual({ id: '', api_domain: '', web_domain: '', is_prod: false })
+    expect(parseEnvironment(null)).toEqual({ id: '', api_domain: '', web_domain: '', frontend_entries: [], is_prod: false })
+    expect(parseEnvironment(undefined)).toEqual({ id: '', api_domain: '', web_domain: '', frontend_entries: [], is_prod: false })
   })
   it('imports HTTP and K8s deployment verification provider blocks', () => {
     expect(parseEnvironment({ deployment_verification: { provider: 'http', http: { url: 'https://x/version', json_pointer: '/git/commit', allow_private: true } } }).deployment_verification)
@@ -99,7 +108,7 @@ describe('parseEnvironment', () => {
     expect(parseEnvironment({
       id: 'dev',
       deployment_verification: { provider: 'http', http: { url: '', json_pointer: '/git/commit' } },
-    })).toEqual({ id: 'dev', api_domain: '', web_domain: '', is_prod: false })
+    })).toEqual({ id: 'dev', api_domain: '', web_domain: '', frontend_entries: [], is_prod: false })
   })
 })
 

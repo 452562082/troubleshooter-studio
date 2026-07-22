@@ -58,6 +58,16 @@ function makeCtx(overrides: Partial<YAMLGenContext> = {}): YAMLGenContext {
 }
 
 describe('generateYAML', () => {
+  it('emits named frontend applications and resolver hints', () => {
+    const parsed = yaml.load(generateYAML(makeCtx({ environments: [{
+      id: 'test', api_domain: 'https://api.test', web_domain: '', is_prod: false,
+      frontend_entries: [{ id: 'consumer-h5', name: 'C 端 H5', url: 'https://m.test/app', repo: 'web', device_profile: 'mobile', aliases: 'C端, 用户端', product_hints: '商城', module_hints: '搜索', path_prefixes: '/search, /user' }],
+    }] }))) as any
+    expect(parsed.environments[0].frontend_entries).toEqual([{
+      id: 'consumer-h5', name: 'C 端 H5', url: 'https://m.test/app', repo: 'web', device_profile: 'mobile',
+      aliases: ['C端', '用户端'], product_hints: ['商城'], module_hints: ['搜索'], path_prefixes: ['/search', '/user'],
+    }])
+  })
   it('round-trips exact HTTP deployment verification values after import restoration', () => {
     const env = parseEnvironment({
       id: 'test', api_domain: '', web_domain: '', is_prod: false,

@@ -418,10 +418,13 @@ func TestBuildCodexExecCommandUsesSafeWorkspace(t *testing.T) {
 		t.Fatalf("BuildCodexExecCommand: %v", err)
 	}
 	got := strings.Join(cmd.Args, " ")
-	for _, want := range []string{"exec", "--json", "--enable respect_system_proxy", "-c suppress_unstable_features_warning=true", `-c approval_policy="never"`, `-c permission_profile="studio_agent"`, `permissions.studio_agent.filesystem={":minimal"="read"`, "--cd " + workspace, "--skip-git-repo-check"} {
+	for _, want := range []string{"exec", "--json", "--enable respect_system_proxy", "-c suppress_unstable_features_warning=true", `-c approval_policy="never"`, `-c default_permissions="studio_agent"`, `permissions.studio_agent.filesystem={":minimal"="read"`, "--cd " + workspace, "--skip-git-repo-check"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("args %q missing %q", got, want)
 		}
+	}
+	if strings.Contains(got, `permission_profile=`) {
+		t.Fatalf("obsolete Codex permission selector remains enabled: %q", got)
 	}
 	if strings.Contains(got, "--sandbox") || strings.Contains(got, "workspace-write") {
 		t.Fatalf("legacy broad-read sandbox remains enabled: %q", got)
@@ -431,7 +434,7 @@ func TestBuildCodexExecCommandUsesSafeWorkspace(t *testing.T) {
 	}
 }
 
-func TestBuildCodexBotExecCommandLoadsManagedAgentRuntimeProfile(t *testing.T) {
+func TestBuildCodexBotExecCommandLoadsManagedAgentRuntimeHome(t *testing.T) {
 	codexHome := t.TempDir()
 	agentID := "base-troubleshooter"
 	workspace := filepath.Join(codexHome, "skills", agentID)
@@ -446,35 +449,126 @@ func TestBuildCodexBotExecCommandLoadsManagedAgentRuntimeProfile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(agentsDir, agentID+".toml"), []byte(agentTOML), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte(`{"auth_mode":"test"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	cmd, err := buildCodexBotExecCommand("codex", BotRef{Target: "codex", AgentID: agentID, Path: workspace}, "investigate", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(cmd.Args, " ")
-	if !strings.Contains(joined, "--profile tshoot-base-troubleshooter") {
-		t.Fatalf("Codex command did not load the bot runtime profile: %s", joined)
+	if strings.Contains(joined, "--profile") {
+		t.Fatalf("Codex command still uses an MCP-incompatible profile layer: %s", joined)
 	}
+	runtimeHome := filepath.Join(codexHome, "tshoot-runtimes", agentID)
 	foundHome := false
 	for _, item := range cmd.Env {
-		if item == "CODEX_HOME="+codexHome {
+		if item == "CODEX_HOME="+runtimeHome {
 			foundHome = true
 		}
 	}
 	if !foundHome {
-		t.Fatalf("Codex command did not bind CODEX_HOME to installed bot root")
+		t.Fatalf("Codex command did not bind the isolated bot CODEX_HOME")
 	}
-	profilePath := filepath.Join(codexHome, "tshoot-"+agentID+".config.toml")
+	profilePath := filepath.Join(runtimeHome, "config.toml")
 	profile, err := os.ReadFile(profilePath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(profile), "[mcp_servers.base-mongodb-test]") || strings.Contains(string(profile), "developer_instructions") {
-		t.Fatalf("runtime profile did not copy exactly the managed MCP region:\n%s", profile)
+		t.Fatalf("runtime config did not copy exactly the managed MCP region:\n%s", profile)
 	}
 	if info, err := os.Stat(profilePath); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("runtime profile mode is not 0600: info=%v err=%v", info, err)
+		t.Fatalf("runtime config mode is not 0600: info=%v err=%v", info, err)
 	}
+	for name, target := range map[string]string{"auth.json": filepath.Join(codexHome, "auth.json"), "skills": filepath.Join(codexHome, "skills")} {
+		got, err := os.Readlink(filepath.Join(runtimeHome, name))
+		if err != nil || got != target {
+			t.Fatalf("runtime %s link = %q, %v; want %q", name, got, err, target)
+		}
+	}
+}
+
+func TestBuildCodexBotExecCommandRefreshesStaleManagedRuntimeConfig(t *testing.T) {
+	codexHome := t.TempDir()
+	agentID := "base-troubleshooter"
+	workspace := filepath.Join(codexHome, "skills", agentID)
+	agentsDir := filepath.Join(codexHome, "agents")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agentPath := filepath.Join(agentsDir, agentID+".toml")
+	profilePath := filepath.Join(codexHome, "tshoot-runtimes", agentID, "config.toml")
+	oldAgent := generator.CodexMCPRegionBegin + "\n[mcp_servers.base-mongodb-test]\ncommand = \"mongo-old\"\n" + generator.CodexMCPRegionEnd + "\n"
+	if err := os.WriteFile(agentPath, []byte(oldAgent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bot := BotRef{Target: "codex", AgentID: agentID, Path: workspace}
+	if _, err := buildCodexBotExecCommand("codex", bot, "first", nil); err != nil {
+		t.Fatal(err)
+	}
+	updatedAgent := generator.CodexMCPRegionBegin + "\n[mcp_servers.base-mongodb-test]\ncommand = \"mongo-new\"\n[mcp_servers.base-one2all]\nurl = \"https://one2all.example/mcp\"\n" + generator.CodexMCPRegionEnd + "\n"
+	if err := os.WriteFile(agentPath, []byte(updatedAgent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := buildCodexBotExecCommand("codex", bot, "second", nil); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := os.ReadFile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(profile), "base-one2all") || !strings.Contains(string(profile), "mongo-new") || strings.Contains(string(profile), "mongo-old") {
+		t.Fatalf("stale runtime config was not refreshed:\n%s", profile)
+	}
+}
+
+func TestCodexCLIReadsManagedRuntimeHomeMCPServers(t *testing.T) {
+	codexBin, err := exec.LookPath("codex")
+	if err != nil {
+		t.Skip("codex CLI is not installed")
+	}
+	codexHome := t.TempDir()
+	agentID := "base-troubleshooter"
+	workspace := filepath.Join(codexHome, "skills", agentID)
+	agentsDir := filepath.Join(codexHome, "agents")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agentTOML := generator.CodexMCPRegionBegin + "\n[mcp_servers.tshoot-runtime-probe]\ncommand = \"/usr/bin/true\"\n" + generator.CodexMCPRegionEnd + "\n"
+	if err := os.WriteFile(filepath.Join(agentsDir, agentID+".toml"), []byte(agentTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, runtimeHome, err := ensureCodexAgentRuntimeHome(BotRef{Target: "codex", AgentID: agentID, Path: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(codexBin, "mcp", "list", "--json")
+	cmd.Env = setProcessEnv(os.Environ(), "CODEX_HOME", runtimeHome)
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("codex mcp list: %v", err)
+	}
+	var servers []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(output, &servers); err != nil {
+		t.Fatalf("decode codex mcp list: %v\n%s", err, output)
+	}
+	for _, server := range servers {
+		if server.Name == "tshoot-runtime-probe" {
+			return
+		}
+	}
+	t.Fatalf("Codex CLI ignored the managed runtime MCP config: %s", output)
 }
 
 func TestBuildCodexBotExecCommandPreservesStandaloneWorkspaceCompatibility(t *testing.T) {

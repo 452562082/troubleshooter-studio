@@ -837,12 +837,22 @@ func (r *AgentPhaseRunner) promptForAttempt(attempt PhaseAttempt, bug Bug, bot B
 		return BuildRegressionValidationPrompt(bug, bot, input), nil
 	case PhaseInvestigation:
 		prompt := buildStructuredInvestigationPrompt(bug, bot)
+		if reassessment, ok := remediationReassessmentFromInput(attempt.InputJSON); ok {
+			prompt += "\n## 用户修复方案重新评估\n\n"
+			prompt += "用户没有授权任何修复操作，只要求重新评估修复路径。必须保留已经验证的事实和根因，除非既有证据明确支持修正；不得为了迎合用户方案而改写证据。对用户方案与当前建议做只读比较，至少评估前端、后端、配置/数据/运行处置中与该根因实际相关的可选路径，比较影响面、风险、回滚和回归方式，并在标准 remediation 字段中输出最终推荐。若用户方案可行，可采纳或收敛；若不可行，仍输出证据支持的更安全方案。不得启动修复 Agent、修改代码、配置、数据或运行资源。\n"
+			prompt += "本次重新评估绑定的原根因 Attempt：" + reassessment.SourceRootCauseAttemptID + "。原根因结构和用户方案均在 Studio structured investigation input 中。\n"
+		}
 		if len(attempt.InputJSON) != 0 && string(attempt.InputJSON) != "{}" {
 			prompt += "\n## Studio structured investigation input\n\n```json\n" + string(attempt.InputJSON) + "\n```\n"
 		}
 		return prompt, nil
 	case PhaseFix:
 		prompt := BuildCodexFixPrompt(bug, bot, InvestigationRun{}, "")
+		handoff, err := r.fixPromptHandoff(context.Background(), attempt)
+		if err != nil {
+			return "", err
+		}
+		prompt += "\n## 已批准的排障交接\n\n下列根因与修复方向已通过 Studio 授权关口。先在锁定工作区核对实际代码，再做最小修复；不得忽略或自行替换该交接。\n\n```json\n" + string(handoff) + "\n```\n"
 		if len(attempt.InputJSON) != 0 && string(attempt.InputJSON) != "{}" {
 			prompt += "\n## 已授权结构化阶段输入\n\n```json\n" + string(attempt.InputJSON) + "\n```\n"
 		}
@@ -850,6 +860,35 @@ func (r *AgentPhaseRunner) promptForAttempt(attempt PhaseAttempt, bug Bug, bot B
 	default:
 		return "", fmt.Errorf("unsupported phase %q", attempt.Phase)
 	}
+}
+
+func (r *AgentPhaseRunner) fixPromptHandoff(ctx context.Context, attempt PhaseAttempt) ([]byte, error) {
+	if r == nil || r.store == nil {
+		return nil, errors.New("fix prompt requires a workflow store")
+	}
+	parentID := strings.TrimSpace(attempt.ParentAttemptID)
+	if parentID == "" {
+		return nil, errors.New("fix prompt requires an approved root-cause attempt")
+	}
+	parent, err := r.store.GetAttempt(ctx, parentID)
+	if err != nil {
+		return nil, fmt.Errorf("load approved root-cause attempt: %w", err)
+	}
+	if parent.CaseID != attempt.CaseID || parent.CycleNumber != attempt.CycleNumber || parent.Phase != PhaseInvestigation || parent.Status != AttemptStatusSucceeded {
+		return nil, errors.New("fix prompt root-cause handoff does not match the fix attempt")
+	}
+	result, err := ParseInvestigationResult(parent.OutputJSON)
+	if err != nil {
+		return nil, fmt.Errorf("parse approved root-cause handoff: %w", err)
+	}
+	if result.InvestigationStatus != "root_cause_ready" || !result.UsesCodeFixWorkflow() {
+		return nil, errors.New("fix prompt requires an approved code root cause and remediation plan")
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("encode approved root-cause handoff: %w", err)
+	}
+	return encoded, nil
 }
 
 type validationPromptContext struct {
@@ -1008,8 +1047,8 @@ func buildStructuredInvestigationPrompt(bug Bug, bot BotRef) string {
 	sb.WriteString("请作为选定的 AI 排障机器人执行只读根因分析。先遵循 incident-investigator/SKILL.md 的取证流程。\n")
 	sb.WriteString("本 Studio 阶段契约优先于 incident-investigator 中面向普通交互式会话的 ASK_USER / missing_critical_evidence 兼容规则；不得把部署、配置、trace、日志、指标、数据库或 K8s 取证转为用户补证。\n")
 	sb.WriteString("Studio 已由验证 Agent 完成复现并冻结证据；第 1 步只是接收并校验 Studio structured investigation input 与 validation-evidence-manifest.json，不是再次复现。不得调用 bug-verifier、api-verifier、attachment-evidence-verifier，不得重新操作浏览器复现。\n")
-	sb.WriteString("证据责任必须分流：先读取 manifest 全部文件；request_facts 是实际浏览器请求中按白名单冻结的业务参数事实，必须优先用于 trace、日志和数据库关联；已有 response_assertions 对字段关系是权威证据。不得索要或持久化原始 request body；不得索要或持久化原始 response body。冻结证据确实缺失、损坏，或缺少验证宿主可安全生成的动作后截图、因果 Network 元数据、request_facts、response_assertions 时才写入 validation_gaps，Studio 会自动交回验证 Agent 补采。\n")
-	sb.WriteString("在最终输出前，必须根据环境和服务读 routing，并对本问题需要的部署版本、调用链、日志、指标、配置、数据库和 K8s 逐项调用已安装的目标环境 skill / MCP。对数据库，单集群时直接调 `<type>-<env>`；service-to-datastore-source 空映射不代表 MCP 不存在。未真实调用工具及其只读 fallback 前，不得声称“缺少映射后的只读工具”。工具实际失败且不阻塞现有结论时写 unchecked_scopes；gaps 只允许记录必须由用户提供的权限、登录态、测试账号或外部资料。\n")
+	sb.WriteString("证据责任必须分流：先读取 manifest 全部文件；request_facts 是首次浏览器执行从实际请求中自动发现或按白名单冻结的业务参数事实，必须优先用于 trace、日志和数据库关联；response_facts 是首次执行对真实 JSON 响应生成的无原始值结构摘要（字段路径、数组长度、唯一值数量、相等字段对、计数字段与数组长度关系）；已有 response_assertions 则是业务预期字段关系的权威机器判定。response_facts 已覆盖所需字段结构或关系时，不得仅因缺少原始 response body 或预声明 response_assertions 而写 validation_gaps。不得索要或持久化原始 request body；不得索要或持久化原始 response body。只有冻结证据确实缺失、损坏，或验证宿主尚未安全生成业务判断必需且无法由 response_facts 替代的精确断言时才写入 validation_gaps，Studio 才会自动交回验证 Agent 补采。\n")
+	sb.WriteString("在最终输出前，必须根据环境和服务读 routing，并对本问题因果判断真正需要的部署版本、调用链、日志、指标、配置、数据库和 K8s 调用已安装的目标环境 skill / MCP；不得为填满七步而查询与候选根因无关的系统。对数据库，单集群时直接调 `<type>-<env>`；service-to-datastore-source 空映射不代表 MCP 不存在。未真实调用工具及其只读 fallback 前，不得声称“缺少映射后的只读工具”。仅在结论仍为 insufficient_info、该范围会改变候选根因判断且工具实际失败时写 unchecked_scopes；已有等价或更强证据时不得记录重复替代工具、可选观测项或 source map。root_cause_ready 时 unchecked_scopes 必须为 []；gaps 只允许记录必须由用户提供的权限、登录态、测试账号或外部资料。\n")
 	sb.WriteString("最终 YAML 必须显式输出 validation_gaps、gaps、unchecked_scopes 三个数组，无内容时也必须写 []。任何要求用户提供 deployment revision/image digest/rollout、trace/日志/指标、配置、数据库查询结果、K8s 状态或原始 response body 的 gaps 都是无效阶段结果。\n")
 	sb.WriteString("只有 confidence: high 且 validation_gaps: [] 且 gaps: [] 时才能输出 investigation_status: root_cause_ready；confidence 为 medium/low、validation_gaps 非空或 gaps 非空时必须输出 investigation_status: insufficient_info。\n")
 	sb.WriteString("执行每一步前，必须单独发送且原样发送对应进度标记（标记不是最终结果）：\n")
@@ -1363,6 +1402,10 @@ func ParseInvestigationResult(data []byte) (InvestigationResult, error) {
 			if err := validateRemediationPlan(result.RootCauseType, result.Remediation); err != nil {
 				return InvestigationResult{}, err
 			}
+			// A high-confidence terminal result is already complete. Optional or
+			// redundant tool failures do not belong in its durable phase summary;
+			// they remain observable in the attempt event stream and evidence.
+			result.UncheckedScopes = nil
 		}
 	}
 	if len(result.CallChain) > 64 {

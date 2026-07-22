@@ -452,6 +452,35 @@ gaps: []
 	}
 }
 
+func TestParsePhaseResultRootCauseReadyDropsNonBlockingUncheckedScopes(t *testing.T) {
+	parsed, err := ParsePhaseResult(PhaseAttempt{Phase: PhaseInvestigation}, []byte(`
+investigation_status: root_cause_ready
+environment: test
+root_cause: frontend renders nick_name and text as duplicate headings
+confidence: high
+call_chain: []
+evidence: []
+validation_gaps: []
+gaps: []
+unchecked_scopes:
+  - optional ConfigMap query failed after the root cause was proven
+  - source map was unavailable but the deployed bundle was verified
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Outcome != PhaseOutcomeRootCauseReady {
+		t.Fatalf("outcome = %q", parsed.Outcome)
+	}
+	var result InvestigationResult
+	if err := json.Unmarshal(parsed.OutputJSON, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.UncheckedScopes) != 0 {
+		t.Fatalf("root-cause-ready result retained non-blocking scopes: %+v", result.UncheckedScopes)
+	}
+}
+
 func TestParsePhaseResultRoutesPrematureRootCauseToNeedsEvidence(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -556,8 +585,11 @@ func TestStructuredInvestigationPromptExplainsRootCauseReadinessGate(t *testing.
 		"自动交回验证 Agent 补采",
 		"不得索要或持久化原始 response body",
 		"response_assertions",
+		"response_facts",
+		"不得仅因缺少原始 response body",
 		"gaps 只允许记录必须由用户提供",
 		"unchecked_scopes",
+		"root_cause_ready 时 unchecked_scopes 必须为 []",
 		"本 Studio 阶段契约优先于 incident-investigator",
 		"service-to-datastore-source 空映射不代表 MCP 不存在",
 		"未真实调用工具及其只读 fallback 前",
@@ -692,13 +724,15 @@ func TestAgentPhaseRunnerCoordinatesBrowserAndRegistersCurrentAttemptArtifacts(t
 	if len(artifacts) != 2 || artifacts[0].AttemptID != attempt.ID || artifacts[1].AttemptID != attempt.ID {
 		t.Fatalf("artifacts=%+v", artifacts)
 	}
-	select {
-	case event := <-events:
-		if event.Type != "browser_progress" || event.Meta["attempt_id"] != attempt.ID || event.Meta["browser_code"] != "action_started" {
-			t.Fatalf("event=%+v", event)
+	foundAction := false
+	deadline := time.After(time.Second)
+	for !foundAction {
+		select {
+		case event := <-events:
+			foundAction = event.Type == "browser_progress" && event.Meta["attempt_id"] == attempt.ID && event.Meta["browser_code"] == "action_started"
+		case <-deadline:
+			t.Fatal("browser progress event was not projected")
 		}
-	case <-time.After(time.Second):
-		t.Fatal("browser progress event was not projected")
 	}
 }
 
@@ -982,8 +1016,8 @@ func TestBrowserFailureOutcomeSeparatesSystemFailuresFromEvidenceGaps(t *testing
 		"browser_artifact_manifest_invalid", "browser_artifact_digest_changed", "browser_artifact_sensitive", "browser_artifact_freeze_failed",
 		"browser_artifact_frozen_invalid", "browser_artifact_repair_evidence_invalid", "browser_artifact_repair_cleanup_failed",
 		"browser_artifact_evaluator_evidence_invalid", "browser_artifact_evaluator_cleanup_failed", "browser_artifact_response_assertion_invalid",
-		"browser_validator_failed",
-		"browser_validator_attachment_failed", "browser_validator_no_output", "browser_validator_process_failed",
+		"browser_validator_failed", "browser_validator_timeout",
+		"browser_validator_attachment_failed", "browser_validator_no_output", "browser_validator_process_failed", "browser_validator_configuration_invalid",
 	} {
 		if got := browserFailureOutcome(PhaseValidation, code); got != PhaseOutcomeSystemFailed {
 			t.Errorf("code=%s outcome=%s", code, got)
@@ -1724,6 +1758,19 @@ func statusForRunningPhase(phase Phase) CaseStatus {
 func createPhaseRunnerAttempt(t *testing.T, store *CaseStore, incident IncidentCase, phase Phase, mode AttemptMode) PhaseAttempt {
 	t.Helper()
 	attempt := PhaseAttempt{ID: "attempt-" + incident.ID, CaseID: incident.ID, CycleNumber: incident.CycleNumber, Phase: phase, Mode: mode, Status: AttemptStatusRunning, AgentTarget: "codex", BotKey: "bot", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`), StartedAt: time.Now().UTC()}
+	if phase == PhaseFix {
+		now := time.Now().UTC()
+		parent := PhaseAttempt{
+			ID: "root-" + incident.ID, CaseID: incident.ID, CycleNumber: incident.CycleNumber, Phase: PhaseInvestigation,
+			Status: AttemptStatusSucceeded, AgentTarget: "codex", BotKey: "bot", InputJSON: []byte(`{}`),
+			OutputJSON: []byte(`{"investigation_status":"root_cause_ready","environment":"test","root_cause":"verified code defect","confidence":"high","root_cause_type":"code","remediation":{"mode":"code_change","target":"affected repository","summary":"apply the minimal code correction","verification":"run the original scenario"},"call_chain":[],"evidence":[],"validation_gaps":[],"gaps":[],"unchecked_scopes":[]}`),
+			StartedAt:  now.Add(-time.Minute), FinishedAt: &now,
+		}
+		if err := store.CreateAttempt(context.Background(), parent); err != nil {
+			t.Fatal(err)
+		}
+		attempt.ParentAttemptID = parent.ID
+	}
 	if err := store.CreateAttempt(context.Background(), attempt); err != nil {
 		t.Fatal(err)
 	}
@@ -2267,13 +2314,35 @@ func TestAgentPhaseRunnerRejectsAdapterTargetMismatch(t *testing.T) {
 func TestAgentPhaseRunnerFixPromptIncludesAuthorizedStructuredInput(t *testing.T) {
 	store := newOrchestratorStore(t)
 	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
-	attempt := PhaseAttempt{Phase: PhaseFix, InputJSON: []byte(`{"root_cause":"authorized-race-in-cache"}`)}
+	incident := createWorkflowCase(t, store, "case-fix-prompt-handoff", CaseWaitingFixApproval)
+	now := time.Now().UTC()
+	rootCause := PhaseAttempt{
+		ID: "root-cause-fix-prompt", CaseID: incident.ID, CycleNumber: incident.CycleNumber, Phase: PhaseInvestigation,
+		Status: AttemptStatusSucceeded, AgentTarget: "codex", BotKey: "bot", InputJSON: []byte(`{}`),
+		OutputJSON: []byte(`{"investigation_status":"root_cause_ready","environment":"test","root_cause":"cache write race","confidence":"high","root_cause_type":"code","remediation":{"mode":"code_change","target":"internal/cache/store.go","summary":"serialize cache writes","verification":"run cache race tests"},"call_chain":[],"evidence":[],"validation_gaps":[],"gaps":[],"unchecked_scopes":[]}`),
+		StartedAt:  now.Add(-time.Minute), FinishedAt: &now,
+	}
+	if err := store.CreateAttempt(context.Background(), rootCause); err != nil {
+		t.Fatal(err)
+	}
+	attempt := PhaseAttempt{ID: "fix-prompt", CaseID: incident.ID, CycleNumber: incident.CycleNumber, Phase: PhaseFix, ParentAttemptID: rootCause.ID, InputJSON: []byte(`{"user_requirement":"authorized-race-in-cache"}`)}
 	prompt, err := runner.promptForAttempt(attempt, Bug{ID: "bug"}, BotRef{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(prompt, "authorized-race-in-cache") || !strings.Contains(prompt, "结构化阶段输入") {
-		t.Fatalf("fix prompt lost authorized input:\n%s", prompt)
+	for _, required := range []string{"authorized-race-in-cache", "结构化阶段输入", "已批准的排障交接", "cache write race", "serialize cache writes", "run cache race tests"} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("fix prompt lost %q:\n%s", required, prompt)
+		}
+	}
+}
+
+func TestAgentPhaseRunnerFixPromptRejectsMissingRootCauseHandoff(t *testing.T) {
+	store := newOrchestratorStore(t)
+	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, phaseArtifactsRoot(t), func(context.Context, CompleteAttemptCommand) error { return nil })
+	_, err := runner.promptForAttempt(PhaseAttempt{Phase: PhaseFix, InputJSON: []byte(`{}`)}, Bug{ID: "bug"}, BotRef{})
+	if err == nil || !strings.Contains(err.Error(), "approved root-cause attempt") {
+		t.Fatalf("missing root-cause handoff err=%v", err)
 	}
 }
 

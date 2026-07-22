@@ -105,11 +105,50 @@ type browserRequestFactEvidence struct {
 	FailureReason   string                            `json:"failure_reason"`
 }
 
+type browserResponseFactFieldEvidence struct {
+	Path         string `json:"path"`
+	ValueType    string `json:"value_type"`
+	Occurrences  int64  `json:"occurrences"`
+	UniqueValues int64  `json:"unique_values"`
+}
+
+type browserResponseFactArrayEvidence struct {
+	Path   string `json:"path"`
+	Length int64  `json:"length"`
+}
+
+type browserResponseFactEqualPairEvidence struct {
+	ObjectPath     string `json:"object_path"`
+	LeftField      string `json:"left_field"`
+	RightField     string `json:"right_field"`
+	MatchedObjects int64  `json:"matched_objects"`
+}
+
+type browserResponseFactCountRelationEvidence struct {
+	ObjectPath     string `json:"object_path"`
+	CountField     string `json:"count_field"`
+	ArrayField     string `json:"array_field"`
+	MatchedObjects int64  `json:"matched_objects"`
+	Equal          bool   `json:"equal"`
+}
+
+type browserResponseFactEvidence struct {
+	ActionID        string                                     `json:"action_id"`
+	Method          string                                     `json:"method"`
+	URL             string                                     `json:"url"`
+	Status          int64                                      `json:"status"`
+	Fields          []browserResponseFactFieldEvidence         `json:"fields"`
+	Arrays          []browserResponseFactArrayEvidence         `json:"arrays"`
+	EqualFieldPairs []browserResponseFactEqualPairEvidence     `json:"equal_field_pairs"`
+	CountRelations  []browserResponseFactCountRelationEvidence `json:"count_relations"`
+}
+
 type browserEvaluatorEvidence struct {
 	Network            []browserNetworkEvidence           `json:"network,omitempty"`
 	Console            []browserConsoleEvidence           `json:"console,omitempty"`
 	BrowserActions     []browserActionEvidence            `json:"browser_actions,omitempty"`
 	RequestFacts       []browserRequestFactEvidence       `json:"request_facts,omitempty"`
+	ResponseFacts      []browserResponseFactEvidence      `json:"response_facts,omitempty"`
 	ResponseAssertions []browserResponseAssertionEvidence `json:"response_assertions,omitempty"`
 	TruncatedKinds     []string                           `json:"truncated_kinds,omitempty"`
 }
@@ -145,7 +184,7 @@ func validateFrozenBrowserArtifacts(references []BrowserArtifactReference, froze
 			if item.Size > maxEvidenceArtifactBytes || !bytes.HasPrefix(item.Content, browserPNGSignature) {
 				return errors.New("frozen browser screenshot is not a bounded PNG")
 			}
-		case "network", "console", "browser_actions", "request_facts", "response_assertions":
+		case "network", "console", "browser_actions", "request_facts", "response_facts", "response_assertions":
 			if item.Size > maxFrozenBrowserStructuredBytes {
 				return errors.New("frozen browser structured evidence exceeds its byte limit")
 			}
@@ -250,6 +289,17 @@ func parseFrozenBrowserStructuredEvidence(frozen []browserFrozenArtifact) (brows
 				}
 			}
 			result.ResponseAssertions = append(result.ResponseAssertions, records...)
+		case "response_facts":
+			var records []browserResponseFactEvidence
+			if err := decodeStrictBrowserJSON(item.Content, &records); err != nil || len(records) > 40 {
+				return browserEvaluatorEvidence{}, errors.New("frozen browser response facts are invalid")
+			}
+			for index := range records {
+				if err := sanitizeBrowserResponseFactEvidence(&records[index]); err != nil {
+					return browserEvaluatorEvidence{}, err
+				}
+			}
+			result.ResponseFacts = append(result.ResponseFacts, records...)
 		}
 	}
 	if len(result.Network) > maxEvaluatorBrowserRecords {
@@ -271,6 +321,10 @@ func parseFrozenBrowserStructuredEvidence(frozen []browserFrozenArtifact) (brows
 	if len(result.RequestFacts) > 40 {
 		result.RequestFacts = result.RequestFacts[:40]
 		truncated["request_facts"] = true
+	}
+	if len(result.ResponseFacts) > 40 {
+		result.ResponseFacts = result.ResponseFacts[:40]
+		truncated["response_facts"] = true
 	}
 	for kind := range truncated {
 		result.TruncatedKinds = append(result.TruncatedKinds, kind)
@@ -444,6 +498,62 @@ func sanitizeBrowserRequestFactEvidence(record *browserRequestFactEvidence) erro
 		}
 	}
 	record.CaptureID = safeBoundedBrowserText(record.CaptureID, 128)
+	record.ActionID = safeBoundedBrowserText(record.ActionID, 128)
+	record.Method = safeBoundedBrowserText(record.Method, 16)
+	record.URL = safeBoundedBrowserText(record.URL, 2048)
+	return nil
+}
+
+func validBrowserObservedJSONPath(value string) bool {
+	if strings.TrimSpace(value) == "" || len(value) > 256 {
+		return false
+	}
+	for _, part := range strings.Split(value, ".") {
+		part = strings.TrimSuffix(part, "[]")
+		if part == "" || !validBrowserJSONFieldPath(part) || browserRequestFieldSensitive(part) {
+			return false
+		}
+	}
+	return true
+}
+
+func sanitizeBrowserResponseFactEvidence(record *browserResponseFactEvidence) error {
+	if strings.TrimSpace(record.ActionID) == "" || record.Status < 0 || len(record.Fields) > 64 || len(record.Arrays) > 32 || len(record.EqualFieldPairs) > 64 || len(record.CountRelations) > 32 || (len(record.Fields) == 0 && len(record.Arrays) == 0) {
+		return errors.New("frozen browser response facts are invalid")
+	}
+	allowedTypes := map[string]bool{"null": true, "string": true, "number": true, "boolean": true, "undefined": true, "bigint": true}
+	for index := range record.Fields {
+		field := &record.Fields[index]
+		if !validBrowserObservedJSONPath(field.Path) || !allowedTypes[field.ValueType] || field.Occurrences < 1 || field.UniqueValues < 0 || field.UniqueValues > field.Occurrences {
+			return errors.New("frozen browser response fact field is invalid")
+		}
+		field.Path = safeBoundedBrowserText(field.Path, 256)
+	}
+	for index := range record.Arrays {
+		array := &record.Arrays[index]
+		if !validBrowserObservedJSONPath(array.Path) || array.Length < 0 {
+			return errors.New("frozen browser response fact array is invalid")
+		}
+		array.Path = safeBoundedBrowserText(array.Path, 256)
+	}
+	for index := range record.EqualFieldPairs {
+		pair := &record.EqualFieldPairs[index]
+		if (pair.ObjectPath != "" && !validBrowserObservedJSONPath(pair.ObjectPath)) || !validBrowserJSONFieldPath(pair.LeftField) || !validBrowserJSONFieldPath(pair.RightField) || browserRequestFieldSensitive(pair.LeftField) || browserRequestFieldSensitive(pair.RightField) || pair.MatchedObjects < 1 {
+			return errors.New("frozen browser response fact equality is invalid")
+		}
+		pair.ObjectPath = safeBoundedBrowserText(pair.ObjectPath, 256)
+		pair.LeftField = safeBoundedBrowserText(pair.LeftField, 64)
+		pair.RightField = safeBoundedBrowserText(pair.RightField, 64)
+	}
+	for index := range record.CountRelations {
+		relation := &record.CountRelations[index]
+		if (relation.ObjectPath != "" && !validBrowserObservedJSONPath(relation.ObjectPath)) || !validBrowserJSONFieldPath(relation.CountField) || !validBrowserJSONFieldPath(relation.ArrayField) || browserRequestFieldSensitive(relation.CountField) || browserRequestFieldSensitive(relation.ArrayField) || relation.MatchedObjects < 1 {
+			return errors.New("frozen browser response fact count relation is invalid")
+		}
+		relation.ObjectPath = safeBoundedBrowserText(relation.ObjectPath, 256)
+		relation.CountField = safeBoundedBrowserText(relation.CountField, 64)
+		relation.ArrayField = safeBoundedBrowserText(relation.ArrayField, 64)
+	}
 	record.ActionID = safeBoundedBrowserText(record.ActionID, 128)
 	record.Method = safeBoundedBrowserText(record.Method, 16)
 	record.URL = safeBoundedBrowserText(record.URL, 2048)

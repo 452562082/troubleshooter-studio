@@ -234,6 +234,7 @@ type ResetCaseCommand struct {
 	ExpectedVersion int64
 	Bug             Bug
 	Bot             BotRef
+	FrontendEntry   FrontendEntryBinding
 	InputJSON       json.RawMessage
 }
 
@@ -263,6 +264,7 @@ type CreateAndStartCaseCommand struct {
 	ActorID         string
 	Bug             Bug
 	Bot             BotRef
+	FrontendEntry   FrontendEntryBinding
 	InputJSON       json.RawMessage
 }
 
@@ -534,6 +536,7 @@ func (o *CaseOrchestrator) ResetCaseWithOutcome(ctx context.Context, cmd ResetCa
 		ReplacementBotTarget:        cmd.Bot.Target,
 		ReplacementSystemID:         cmd.Bug.SystemID,
 		ReplacementEnvironment:      environment,
+		ReplacementFrontendEntry:    cmd.FrontendEntry.Clone(),
 		RequestJSON:                 mustJSON(cmd),
 		replayOnlyLegacyEnvironment: resolveLegacyResetEnvironment(cmd.Bug, cmd.Bot),
 	}
@@ -714,7 +717,7 @@ func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAnd
 		return o.StartCase(ctx, StartCaseCommand{CaseID: existing.ID, ExpectedVersion: cmd.ExpectedVersion, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, Bug: cmd.Bug, Bot: cmd.Bot, InputJSON: cmd.InputJSON})
 	}
 	environment := resolveIncidentEnvironment(cmd.Bug, cmd.Bot)
-	pending := IncidentCase{ID: targetID, BugID: cmd.Bug.ID, Source: cmd.Bug.Source, SystemID: cmd.Bug.SystemID, Environment: environment, Status: CasePendingValidation, CycleNumber: cycle, SelectedBotKey: cmd.Bot.Key}
+	pending := IncidentCase{ID: targetID, BugID: cmd.Bug.ID, Source: cmd.Bug.Source, SystemID: cmd.Bug.SystemID, Environment: environment, FrontendEntry: cmd.FrontendEntry.Clone(), Status: CasePendingValidation, CycleNumber: cycle, SelectedBotKey: cmd.Bot.Key}
 	creation, createErr := o.store.CreateCaseWithIdentity(ctx, CaseCreation{Case: pending, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, RequestJSON: mustJSON(cmd)})
 	if createErr != nil {
 		return IncidentCase{}, createErr

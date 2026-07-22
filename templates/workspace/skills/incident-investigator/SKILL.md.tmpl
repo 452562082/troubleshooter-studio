@@ -12,7 +12,8 @@ description: 排障主线 skill。固化"症状→时间轴→横向→纵向→
 - 步骤 1 直接读取 manifest 及其不可变证据文件，复现结论是本轮排障的既定输入。
 - 不调用 `bug-verifier`、`api-verifier`、`attachment-evidence-verifier`，不重新操作浏览器复现。
 - 验证宿主可安全重新采集的冻结证据缺失或损坏时，写入 `validation_gaps`，由 Studio 自动调度验证补采；不得向用户索要原始响应体。
-- 部署、配置、trace、日志、指标、数据库和 K8s 属于排障 Agent 运行时取证：必须调对应 skill / MCP 自己查，不得写入用户 `gaps`。
+- 部署、配置、trace、日志、指标、数据库和 K8s 中与本问题因果判断真正相关的范围，属于排障 Agent 运行时取证：必须调对应 skill / MCP 自己查，不得写入用户 `gaps`；不得为了填满七步查询无关系统。
+- `unchecked_scopes` 只用于 `insufficient_info` 中会改变候选根因判断、但工具实际失败的关键范围；已有等价或更强证据时，不记录重复替代工具、可选观测项或 source map。`root_cause_ready` 时必须为 `[]`。
 - 每进入一步，先按 Studio 提示中给出的 `[[TSHOOT_STEP ...]]` 固定标记单独发送进度；不得修改 index 或 key。
 
 ```
@@ -200,7 +201,7 @@ nice-to-have / 已有充分代理证据 / 取证 ROI 极低 —— 这些不写,
 
 任一子段 `missing_critical_evidence` 非空时，先按责任方分流，不得统一 ASK_USER：
 
-- **排障运行时证据**（部署/配置/trace/日志/指标/数据库/K8s）：先调对应 skill / MCP / 只读 fallback 自己取证；实际调用失败才标 `unavailable` / `unchecked_scopes`，不得要求用户代查。
+- **排障运行时证据**（部署/配置/trace/日志/指标/数据库/K8s）：仅对会改变候选根因判断的范围调用对应 skill / MCP / 只读 fallback；实际调用失败且结论仍为 `insufficient_info` 才标 `unavailable` / `unchecked_scopes`，不得要求用户代查。已有充分代理证据或范围与根因无关时不记录。
 - **验证冻结证据**：Studio 结构化阶段写 `validation_gaps`，由 Studio 自动补采；不得索要原始 response body。
 - **用户独有资料**（权限、登录态、测试账号或外部文档）：才能 ASK_USER，并写入 `gaps`。
 
@@ -286,7 +287,7 @@ grep -rn "<关键报错串|关键业务字段名>" <repo_root>/<service>/ --incl
 **触发**:5 维表第 1/2 行命中(数据/状态类 或 逻辑/计算类)。
 性能/可用性/环境类此节直接跳过,不绕路。
 
-**取证内容**：优先消费 Studio 冻结的 `request_facts`（动作、请求方法/路径、白名单业务字段和值）以及 `response_assertions`（字段路径、命中对象数、违反数、passed）与因果 Network 元数据。`request_facts` 中的实体 ID / 搜索条件必须直接用于 trace、日志和数据库只读查询；不得要求用户重复提供。它们已证明请求事实和字段关系，不需要、也不允许重新索要或持久化原始 response body / request body。
+**取证内容**：优先消费 Studio 首次验证冻结的 `request_facts`（动作、请求方法/路径、自动发现的非敏感 query 字段和值，以及显式白名单 body 字段）、`response_facts`（真实 JSON 响应的字段路径、出现/唯一值数量、数组长度、相等字段对计数、计数字段与数组长度关系）、`response_assertions`（业务预期字段路径、命中对象数、违反数、passed）与因果 Network 元数据。`request_facts` 中的实体 ID / 搜索条件必须直接用于 trace、日志和数据库只读查询；不得要求用户重复提供。`response_facts` 已覆盖所需结构、数量或相等关系时，不得仅因缺少原始 response body 或预声明 `response_assertions` 而让验证阶段补采。上述证据不包含原始响应值或完整 body，不允许重新索要或持久化原始 response body / request body。
 
 如需 partial-success 统计，使用网关/业务日志已脱敏的聚合字段（总数、成功数、失败数、错误码分组），只落盘统计与字段关系，不落盘原始对象值。
 
@@ -508,7 +509,7 @@ conclusion: 业务参数校验早返回(parent.title 超 200 字)
    - 只有 repo/sub_path → 只报告仓库级候选(`repository candidate`)
 
    **禁止**把 bundle 行列号、Deployment 映射、image tag 或静态 grep 命中写成精确源码位置。
-   sourcemap 拿不到时降低 confidence，并在 `unchecked_scopes` 写明当前定位精度；部署版本必须先用 K8s / 发布记录自查，不得写入用户 `gaps`。
+   sourcemap 拿不到且精确源码位置会改变候选根因判断时降低 confidence，并在 `insufficient_info.unchecked_scopes` 写明当前定位精度；若部署 bundle、Network 与源码语义已有等价证据，sourcemap 只是可选定位增强，不得列入 `unchecked_scopes`。部署版本必须先用 K8s / 发布记录自查，不得写入用户 `gaps`。
 
 5. trace 在 Kafka/RabbitMQ 边界中断 → 读取 `routing/references/async-topology.yaml`,按已观测 topic/queue/exchange 找生产者和消费者候选；随后用 message id、trace link 或同窗口两侧日志验证。只有静态 destination 匹配时，`call_chain` precision 必须是 `static_candidate`，缺少的消息关联字段写入 `unchecked_scopes`，不得转成用户 `gaps`。
 
@@ -546,7 +547,7 @@ conclusion: 业务参数校验早返回(parent.title 超 200 字)
    **配置中心不可达的 fallback 规则**(关键 — 防 silent fallback 撞坑):
    - 调 `config-executor` 失败(nacos 脚本 login 不通 / apollo/consul mcp not found /
      网络不通 / namespace 拿不到 / 401 / 403)→ **绝对不允许 silent fallback 到代码 `config.yaml` 当 runtime 真值**
-   - 失败这件事本身要**当作 `missing_critical_evidence` 列出**，但这是排障运行时能力问题，Studio 结构化阶段必须写入 `unchecked_scopes` 并标明实际工具错误，不得要求用户代查配置中心。
+   - 仅当配置事实会改变候选根因判断时，失败才作为 `missing_critical_evidence`；Studio 结构化阶段以 `insufficient_info` 写入 `unchecked_scopes` 并标明实际工具错误，不得要求用户代查配置中心。配置与已证实根因无关或已有等价运行时证据时，不查询也不列未覆盖。
    - **文件头注释含 "本地" / "开发" / "fallback" / "default" / "示例" / "example" 关键词**的 yaml →
      降级为"参考值",**绝不允许当唯一证据**(本次 truss case 的代码 config.yaml 头注释就明示"本地开发环境
      中间件配置",agent 没看注释直接当 dev 真值)

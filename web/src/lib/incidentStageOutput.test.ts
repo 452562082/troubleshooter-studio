@@ -84,12 +84,21 @@ describe('presentStageAttempt', () => {
 
   it('presents investigation root cause and confidence', () => {
     const view = presentStageAttempt(attempt('investigation', {
-      investigation_status: 'root_cause_ready', environment: 'test', root_cause: '昵称搜索只取首条精确匹配', confidence: 'high', gaps: [], evidence: [],
+      investigation_status: 'root_cause_ready', environment: 'test', root_cause: '昵称搜索只取首条精确匹配', confidence: 'high', gaps: [],
+      remediation: { mode: 'code_change', target: 'src/user-card.tsx', summary: '只渲染 nick_name 作为标题', verification: '重新执行原始搜索场景' },
+      unchecked_scopes: ['历史结果中的非阻塞可选项'], evidence: [],
     }))
 
     expect(view).toMatchObject({ phaseLabel: '排障', resultLabel: '根因已确认', tone: 'success', environment: 'test' })
     expect(view.sections[0]).toMatchObject({ title: '根因结论', text: '昵称搜索只取首条精确匹配' })
-    expect(view.sections[1]).toMatchObject({ title: '置信度', text: '高' })
+    expect(view.sections[1]).toEqual({ title: '建议修复方向', fields: [
+      { label: '处置方式', value: '代码修复' },
+      { label: '修复对象', value: 'src/user-card.tsx' },
+      { label: '修复建议', value: '只渲染 nick_name 作为标题' },
+      { label: '回归方式', value: '重新执行原始搜索场景' },
+    ] })
+    expect(view.sections[2]).toMatchObject({ title: '置信度', text: '高' })
+    expect(view.sections.some(section => section.title === '非阻塞未覆盖')).toBe(false)
   })
 
   it('presents a recovered legacy investigation failure as evidence required', () => {

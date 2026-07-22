@@ -8,7 +8,7 @@
 //     迁移期顺手清掉旧 settings.json 里残留的同名 keys(避免新旧并存)。
 //   - cursor      → ~/.cursor/mcp.json,顶层 "mcpServers" JSON 字段
 //   - codex       → ~/.codex/agents/<name>.toml 内联 [mcp_servers.<x>] 段(交互式 subagent)，
-//     并同步 ~/.codex/tshoot-<name>.config.toml(Studio 后台 codex exec profile)。
+//     并同步 ~/.codex/tshoot-runtimes/<name>/config.toml(Studio 后台隔离 CODEX_HOME)。
 //     **不要**走 `codex mcp add` 写到 ~/.codex/config.toml —— 那会让主 chat 启动时
 //     也拉一遍这些 MCP,而排障 MCP 只对 truss-troubleshooter agent 有意义,主 chat
 //     不该被拖累(node 25 + npx 包并发 EPIPE 崩溃风险)。官方文档明确每个 agent 自带:
@@ -36,7 +36,7 @@ import (
 // MergeMCPIntoIDESettings 把 cfg 派生的 mcpServers 写进对应 target 的 IDE 配置文件。
 //   - target=claude-code → ~/.claude.json(dotfile),顶层 mcpServers 字段
 //   - target=cursor      → ~/.cursor/mcp.json,顶层 mcpServers 字段
-//   - target=codex       → ~/.codex/agents/<name>.toml + ~/.codex/tshoot-<name>.config.toml
+//   - target=codex       → ~/.codex/agents/<name>.toml + ~/.codex/tshoot-runtimes/<name>/config.toml
 //
 // creds 是 env-var-name → value 的 map(跟 InstallNativeOpenclaw 一样的 schema)。
 // 桌面端 wizard 通过 buildOpenclawCreds() 拼出来传过来;CLI 没 creds 时传 nil,
@@ -366,42 +366,68 @@ func injectMCPIntoCodexAgentTOML(root string, cfg *config.SystemConfig, servers 
 		if err := os.Chmod(tomlPath, 0o600); err != nil {
 			return fmt.Errorf("chmod codex agent toml %s: %w", tomlPath, err)
 		}
-		if err := writeCodexAgentRuntimeProfile(root, agentName, body); err != nil {
+		if err := writeCodexAgentRuntimeHome(root, agentName, body); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// codexAgentRuntimeProfileName is passed to `codex exec --profile` by Studio's
-// durable phase runner. Codex agent TOML is loaded when another Codex session
-// spawns a subagent, but a direct background `codex exec` does not consume it.
-// Keeping a narrow profile with the same MCP section makes both entrypoints use
-// the installed runtime capabilities without polluting the global main chat.
-func codexAgentRuntimeProfileName(agentName string) string {
-	return "tshoot-" + strings.TrimSpace(agentName)
+func codexAgentRuntimeHome(root, agentName string) string {
+	return filepath.Join(root, "tshoot-runtimes", strings.TrimSpace(agentName))
 }
 
-func writeCodexAgentRuntimeProfile(root, agentName, body string) error {
-	profileName := codexAgentRuntimeProfileName(agentName)
-	if profileName == "tshoot-" {
-		return errors.New("codex runtime profile requires an agent name")
+// writeCodexAgentRuntimeHome writes the standard config.toml that a Studio
+// background process loads through its isolated CODEX_HOME. Codex profile
+// layers intentionally do not support mcp_servers, so a *.config.toml profile
+// would look valid on disk while exposing zero robot MCP tools at runtime.
+func writeCodexAgentRuntimeHome(root, agentName, body string) error {
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return errors.New("codex runtime home requires an agent name")
 	}
-	path := filepath.Join(root, profileName+".config.toml")
+	runtimeHome := codexAgentRuntimeHome(root, agentName)
+	if info, err := os.Lstat(runtimeHome); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("refuse non-directory codex runtime home %s", runtimeHome)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect codex runtime home %s: %w", runtimeHome, err)
+	} else if err := os.MkdirAll(runtimeHome, 0o700); err != nil {
+		return fmt.Errorf("create codex runtime home %s: %w", runtimeHome, err)
+	}
+	if err := os.Chmod(runtimeHome, 0o700); err != nil {
+		return fmt.Errorf("chmod codex runtime home %s: %w", runtimeHome, err)
+	}
+	path := filepath.Join(runtimeHome, "config.toml")
 	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refuse to replace symlinked codex runtime profile %s", path)
+		return fmt.Errorf("refuse to replace symlinked codex runtime config %s", path)
 	} else if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("inspect codex runtime profile %s: %w", path, err)
+		return fmt.Errorf("inspect codex runtime config %s: %w", path, err)
 	}
 	content := "# Managed by tshoot. Used by Studio background codex exec.\n" + body
 	if !strings.HasSuffix(content, "\n") {
 		content += "\n"
 	}
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		return fmt.Errorf("write codex runtime profile %s: %w", path, err)
+		return fmt.Errorf("write codex runtime config %s: %w", path, err)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
-		return fmt.Errorf("chmod codex runtime profile %s: %w", path, err)
+		return fmt.Errorf("chmod codex runtime config %s: %w", path, err)
+	}
+	// Remove the old profile-shaped file after the working runtime config is
+	// durable. It may contain the same plaintext MCP credentials but Codex never
+	// loaded its mcp_servers section.
+	legacyProfile := filepath.Join(root, "tshoot-"+agentName+".config.toml")
+	if info, err := os.Lstat(legacyProfile); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("refuse to remove unmanaged legacy Codex profile %s", legacyProfile)
+		}
+		if err := os.Remove(legacyProfile); err != nil {
+			return fmt.Errorf("remove legacy Codex profile %s: %w", legacyProfile, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect legacy Codex profile %s: %w", legacyProfile, err)
 	}
 	return nil
 }

@@ -24,7 +24,7 @@ import (
 //   - codex        → ~/.codex/agents/<name>.toml(TOML subagent 定义,
 //     https://developers.openai.com/codex/subagents) + ~/.codex/skills/<name>/
 //   - ~/.codex/scripts/<name>/。MCP 同时写入 agent toml 内联段和
-//     ~/.codex/tshoot-<name>.config.toml；后者供 Studio 后台 `codex exec --profile` 使用。
+//     ~/.codex/tshoot-runtimes/<name>/config.toml；后者作为 Studio 后台隔离 CODEX_HOME 使用。
 //
 // 凭证收集策略:
 //   - openclaw   :走 InstallNativeOpenclaw,凭证写到 ~/.openclaw/<id>-creds.json + 注入 MCP env
@@ -76,7 +76,7 @@ func runInstall(args []string) error {
 				*target, t.DirName())
 		}
 		if t == agent.TargetCodex {
-			fmt.Println("    · MCP 服务器写入 agent toml 内联段，并生成 tshoot-<name>.config.toml；交互式 subagent 与 Studio 后台任务共用同一组能力")
+			fmt.Println("    · MCP 服务器写入 agent toml 内联段，并生成 tshoot-runtimes/<name>/config.toml；交互式 subagent 与 Studio 后台任务共用同一组能力")
 		} else {
 			fmt.Printf("    · MCP 服务器写到 %s (--env-file 提供凭证才注入)\n",
 				t.MCPConfigDisplay())

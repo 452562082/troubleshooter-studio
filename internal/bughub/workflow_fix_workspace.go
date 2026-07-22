@@ -270,6 +270,13 @@ func remediationFixRepositories(result InvestigationResult) []string {
 	return callChainRepositories
 }
 
+// RemediationFixRepositories exposes the host-owned repository scope selected
+// by an investigation result without exposing repository paths or allowing a
+// UI caller to expand that scope.
+func RemediationFixRepositories(result InvestigationResult) []string {
+	return remediationFixRepositories(result)
+}
+
 func resolveRemediationFixSourceBaselines(botPath, environment string, inputJSON []byte, result InvestigationResult) (map[string]string, error) {
 	repositories := remediationFixRepositories(result)
 	if len(repositories) == 0 {

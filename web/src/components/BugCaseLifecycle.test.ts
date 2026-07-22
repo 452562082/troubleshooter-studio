@@ -419,10 +419,12 @@ describe('BugCaseLifecycle', () => {
     snapshot.case.version = 7
     snapshot.case.current_attempt_id = 'investigation-7'
     snapshot.attempts = [{ id: 'investigation-7', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', confidence: 'high', gaps: [], call_chain: [{ repo: 'admin-web' }] }, parent_attempt_id: '', started_at: '2026-07-11T10:00:00Z', error_code: '', error_message: '', usage: {} }]
-    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    const loadFixBranches = vi.fn().mockResolvedValue({ 'admin-web': ['main', 'feature/new-navigation'] })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot, loadFixBranches } })
 
     await wrapper.find('.primary-action').trigger('click')
-    const baselineInputs = wrapper.findAll('.source-baseline-row input')
+    await flushPromises()
+    const baselineInputs = wrapper.findAll('.source-baseline-row select')
     expect(wrapper.get('.source-repository-value').text()).toBe('admin-web')
     expect(baselineInputs).toHaveLength(1)
     await baselineInputs[0].setValue('feature/new-navigation')
@@ -430,6 +432,7 @@ describe('BugCaseLifecycle', () => {
     await wrapper.find('[data-confirm]').trigger('click')
 
     expect(wrapper.emitted('primary')?.[0]).toEqual([{ kind: 'approve_fix', rootCauseAttemptID: 'investigation-7', caseVersion: 7, sourceBaselines: { 'admin-web': 'feature/new-navigation' } }])
+    expect(loadFixBranches).toHaveBeenCalledWith('case-1', 'investigation-7')
   })
 
   it('uses only the repository selected by the remediation instead of every call-chain repository', async () => {
@@ -444,14 +447,17 @@ describe('BugCaseLifecycle', () => {
       },
       parent_attempt_id: '', started_at: '2026-07-22T07:45:50Z', error_code: '', error_message: '', usage: {},
     }]
-    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot, loadFixBranches: vi.fn().mockResolvedValue({ 'base-backend': ['base-test', 'main'] }) } })
 
     await wrapper.find('.primary-action').trigger('click')
+    await flushPromises()
 
     expect(wrapper.findAll('.source-repository-value').map(item => item.text())).toEqual(['base-backend'])
     expect(wrapper.get('[role="dialog"]').text()).not.toContain('base-frontend')
     expect(wrapper.findAll('button').some(button => button.text().includes('添加仓库'))).toBe(false)
     expect(wrapper.findAll('button').some(button => button.text() === '移除')).toBe(false)
+    expect(wrapper.find('#fix-baseline-0').element.tagName).toBe('SELECT')
+    expect(wrapper.findAll('#fix-baseline-0 option').map(option => option.text())).toEqual(['当前环境分支（默认）', 'base-test', 'main'])
     await wrapper.get('#fix-baseline-0').setValue('base-test')
     await wrapper.get('[data-confirm]').trigger('click')
     expect(wrapper.emitted('primary')?.[0]).toEqual([{

@@ -254,6 +254,10 @@ export function ListIncidentCases() {
   return window['go']['main']['App']['ListIncidentCases']();
 }
 
+export function ListIncidentFixBranches(arg1, arg2) {
+  return window['go']['main']['App']['ListIncidentFixBranches'](arg1, arg2);
+}
+
 export function ListLokiLabelValues(arg1, arg2, arg3) {
   return window['go']['main']['App']['ListLokiLabelValues'](arg1, arg2, arg3);
 }

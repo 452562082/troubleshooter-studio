@@ -17,6 +17,7 @@ import {
   getIncidentBrowserRuntimeStatus,
   getIncidentCase,
   listBugs,
+  listIncidentFixBranches,
   listIncidentCases,
   matchBugBots,
   notifyIncidentDeployed,
@@ -1162,6 +1163,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         :pending="incidentWorkflow.pending.value || starting"
         :error="incidentWorkflow.error.value"
         :phase-events="incidentWorkflow.phaseEvents.value[displayedDetail.case.current_attempt_id] || []"
+        :load-fix-branches="listIncidentFixBranches"
         @refresh="refreshIncidentWorkflow"
         @primary="handleIncidentPrimary"
         @browser="handleIncidentBrowser"

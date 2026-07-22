@@ -226,6 +226,16 @@ export async function getIncidentCase(caseID: string): Promise<IncidentCaseDetai
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeDetail(await App.GetIncidentCase(caseID))
 }
+export async function listIncidentFixBranches(caseID: string, rootCauseAttemptID: string): Promise<Record<string, string[]>> {
+  if (!isDesktop()) return {}
+  const raw = record(await App.ListIncidentFixBranches(caseID, rootCauseAttemptID))
+  const result: Record<string, string[]> = {}
+  for (const [repo, branches] of Object.entries(raw)) {
+    if (!repo.trim() || !Array.isArray(branches)) continue
+    result[repo] = [...new Set(branches.map(branch => typeof branch === 'string' ? branch.trim() : '').filter(Boolean))]
+  }
+  return result
+}
 
 export async function startIncidentCase(input: StartIncidentCaseInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)

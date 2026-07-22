@@ -9,6 +9,7 @@ import {
   completeIncidentRemediation,
   getIncidentArtifactPreview,
   getIncidentCase,
+  listIncidentFixBranches,
   listIncidentCases,
   listPendingIncidentWorkflowReminders,
   notifyIncidentDeployed,
@@ -80,8 +81,23 @@ describe('incident workflow bridge', () => {
 
   it('returns an empty list in browser preview', async () => {
     await expect(listIncidentCases()).resolves.toEqual([])
+    await expect(listIncidentFixBranches('case-1', 'attempt-1')).resolves.toEqual({})
     await expect(listPendingIncidentWorkflowReminders()).resolves.toEqual([])
     await expect(ackIncidentWorkflowReminder({ case_id: 'case-1', reservation_key: 'slot-1', delivery_attempt: 1, actor_id: 'desktop-root' })).rejects.toThrow(/桌面 app/)
+  })
+
+  it('normalizes selectable fix branches without exposing repository paths', async () => {
+    const list = vi.fn().mockResolvedValue({
+      'base-backend': ['main', 'feature/fix', 'main', '', 42],
+      '': ['ignored'],
+      invalid: 'not-an-array',
+    })
+    ;(window as any).go = { main: { App: { ListIncidentFixBranches: list } } }
+
+    await expect(listIncidentFixBranches('case-1', 'attempt-1')).resolves.toEqual({
+      'base-backend': ['main', 'feature/fix'],
+    })
+    expect(list).toHaveBeenCalledWith('case-1', 'attempt-1')
   })
 
   it('forwards durable reminder pull and acknowledgement', async () => {

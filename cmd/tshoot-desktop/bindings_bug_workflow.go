@@ -12,6 +12,7 @@ import (
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
 	"github.com/xiaolong/troubleshooter-studio/internal/browserverify"
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
@@ -1096,6 +1097,51 @@ func (a *App) ApproveIncidentFix(input ApproveIncidentFixInput) (bughub.Incident
 	incident, err := orchestrator.ApproveFix(a.workflowCommandContext(), bughub.ApproveFixCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), RootCauseAttemptID: strings.TrimSpace(input.RootCauseAttemptID), Bug: bug, Bot: bot, InputJSON: inputJSON})
 	a.emitIncidentResult(incident, err)
 	return incident, err
+}
+
+// ListIncidentFixBranches returns only branch names for the repositories in
+// the approved remediation scope. Repository paths stay host-private.
+func (a *App) ListIncidentFixBranches(caseID, rootCauseAttemptID string) (map[string][]string, error) {
+	caseID, rootCauseAttemptID = strings.TrimSpace(caseID), strings.TrimSpace(rootCauseAttemptID)
+	if caseID == "" || rootCauseAttemptID == "" {
+		return nil, errors.New("case_id and root_cause_attempt_id are required")
+	}
+	store, _, err := a.workflowComponents()
+	if err != nil {
+		return nil, err
+	}
+	ctx := a.workflowCommandContext()
+	incident, err := store.GetCase(ctx, caseID)
+	if err != nil {
+		return nil, err
+	}
+	if incident.Status != bughub.CaseWaitingFixApproval || incident.CurrentAttemptID != rootCauseAttemptID {
+		return nil, bughub.ErrApprovalScope
+	}
+	attempt, err := store.GetAttempt(ctx, rootCauseAttemptID)
+	if err != nil || attempt.CaseID != caseID || attempt.Phase != bughub.PhaseInvestigation || attempt.Status != bughub.AttemptStatusSucceeded {
+		return nil, bughub.ErrApprovalScope
+	}
+	result, err := bughub.ParseInvestigationResult(attempt.OutputJSON)
+	if err != nil || result.InvestigationStatus != "root_cause_ready" || !result.UsesCodeFixWorkflow() {
+		return nil, bughub.ErrApprovalScope
+	}
+	repositories := bughub.RemediationFixRepositories(result)
+	paths := userconfig.GetRepoPathsForSystem(incident.SystemID)
+	branches := make(map[string][]string, len(repositories))
+	for _, repo := range repositories {
+		path := strings.TrimSpace(paths[repo])
+		if path == "" {
+			branches[repo] = []string{}
+			continue
+		}
+		items := analyzer.ListBranches(filepath.Clean(path))
+		if items == nil {
+			items = []string{}
+		}
+		branches[repo] = items
+	}
+	return branches, nil
 }
 
 func (a *App) ReconsiderIncidentRemediation(input ReconsiderIncidentRemediationInput) (bughub.IncidentCase, error) {

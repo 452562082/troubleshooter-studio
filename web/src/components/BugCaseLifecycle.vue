@@ -63,6 +63,7 @@ const props = defineProps<{
   pending?: boolean
   error?: string
   phaseEvents?: IncidentPhaseEvent[]
+  loadFixBranches?: (caseID: string, rootCauseAttemptID: string) => Promise<Record<string, string[]>>
 }>()
 const emit = defineEmits<{
   refresh: []
@@ -83,6 +84,10 @@ const actionTrigger = ref<HTMLElement | null>(null)
 const dialogCaseVersion = ref<number>()
 const dialogRootCauseAttemptID = ref('')
 const dialogSourceBaselines = ref<Array<{ repo: string; branch: string; locked: boolean }>>([])
+const dialogBranchOptions = ref<Record<string, string[]>>({})
+const dialogBranchOptionsLoading = ref(false)
+const dialogBranchOptionsError = ref('')
+let dialogBranchLoadGeneration = 0
 const currentCase = computed(() => props.detail?.case)
 const TIMELINE_PREVIEW_COUNT = 3
 const timelineExpanded = ref(false)
@@ -154,6 +159,28 @@ function fixRepositoriesFromRootCause(output: Record<string, unknown> | undefine
     ? callChainRepositories.filter(repo => target.includes(repo.toLocaleLowerCase()))
     : []
   return matched.length > 0 ? matched : callChainRepositories
+}
+
+async function loadDialogFixBranches(caseID: string, rootCauseAttemptID: string) {
+  const generation = ++dialogBranchLoadGeneration
+  dialogBranchOptions.value = {}
+  dialogBranchOptionsError.value = ''
+  dialogBranchOptionsLoading.value = false
+  if (!props.loadFixBranches) return
+  dialogBranchOptionsLoading.value = true
+  try {
+    const raw = await props.loadFixBranches(caseID, rootCauseAttemptID)
+    if (generation !== dialogBranchLoadGeneration || !dialogOpen.value || dialogRootCauseAttemptID.value !== rootCauseAttemptID) return
+    const allowed = new Set(dialogSourceBaselines.value.map(item => item.repo))
+    dialogBranchOptions.value = Object.fromEntries(Object.entries(raw || {})
+      .filter(([repo, branches]) => allowed.has(repo) && Array.isArray(branches))
+      .map(([repo, branches]) => [repo, [...new Set(branches.map(branch => branch.trim()).filter(Boolean))]]))
+  } catch {
+    if (generation !== dialogBranchLoadGeneration || !dialogOpen.value) return
+    dialogBranchOptionsError.value = '分支列表加载失败，当前仅可使用环境默认分支。'
+  } finally {
+    if (generation === dialogBranchLoadGeneration) dialogBranchOptionsLoading.value = false
+  }
 }
 
 const latestRootCauseAttempt = computed(() => [...(props.detail?.attempts || [])].reverse().find(attempt =>
@@ -273,6 +300,7 @@ async function openAction(event: MouseEvent) {
     dialogSourceBaselines.value = repos.length > 0
       ? repos.map(repo => ({ repo, branch: '', locked: true }))
       : [{ repo: '', branch: '', locked: false }]
+    void loadDialogFixBranches(props.detail?.case.id || '', dialogRootCauseAttemptID.value)
   } else if (action.value.kind === 'complete_remediation') {
     dialogCaseVersion.value = props.detail?.case.version
     dialogRootCauseAttemptID.value = latestRootCauseAttempt.value?.id || ''
@@ -288,8 +316,8 @@ async function openAction(event: MouseEvent) {
   dialogImageError.value = ''
   dialogOpen.value = true
   await nextTick()
-  if (action.value.kind === 'approve_fix' && !sourceBaselinesValid.value) {
-    const firstEmpty = [...(dialogElement.value?.querySelectorAll<HTMLInputElement>('.source-baseline-row input') || [])].find(input => !input.value.trim())
+  if (action.value.kind === 'approve_fix' && (!sourceBaselinesValid.value || dialogBranchOptionsLoading.value)) {
+    const firstEmpty = [...(dialogElement.value?.querySelectorAll<HTMLInputElement | HTMLSelectElement>('.source-baseline-row input, .source-baseline-row select') || [])].find(input => !input.value.trim())
     setTimeout(() => firstEmpty?.focus(), 0)
   } else {
     confirmButton.value?.focus()
@@ -316,6 +344,8 @@ async function openRemediationReassessment(event: MouseEvent) {
 
 function closeDialog() {
   if (props.pending) return
+  dialogBranchLoadGeneration++
+  dialogBranchOptionsLoading.value = false
   dialogOpen.value = false
   nextTick(() => actionTrigger.value?.focus())
 }
@@ -326,7 +356,7 @@ function confirmAction() {
   if (dialogAction.value.kind === 'approve_fix') {
     payload.rootCauseAttemptID = dialogRootCauseAttemptID.value
     payload.caseVersion = dialogCaseVersion.value
-    payload.sourceBaselines = Object.fromEntries(dialogSourceBaselines.value.map(item => [item.repo.trim(), item.branch.trim()]).filter(([repo]) => repo))
+    payload.sourceBaselines = Object.fromEntries(dialogSourceBaselines.value.map(item => [item.repo.trim(), typeof item.branch === 'string' ? item.branch.trim() : '']).filter(([repo]) => repo))
   }
   if (dialogAction.value.kind === 'reconsider_remediation') {
     payload.rootCauseAttemptID = dialogRootCauseAttemptID.value
@@ -344,6 +374,8 @@ function confirmAction() {
     payload.images = dialogImages.value.map(({ name, mime_type, base64_data }) => ({ name, mime_type, base64_data }))
   }
   emit('primary', payload)
+  dialogBranchLoadGeneration++
+  dialogBranchOptionsLoading.value = false
   dialogOpen.value = false
   nextTick(() => actionTrigger.value?.focus())
 }
@@ -564,8 +596,13 @@ function dialogTitle(): string {
               <span v-if="item.locked" class="source-repository-value">{{ item.repo }}</span>
               <input v-else :id="`fix-repo-${index}`" v-model="item.repo" autocomplete="off" aria-label="代码仓库（历史修复建议未明确）" placeholder="历史修复建议未明确，请填写仓库" />
               <label :for="`fix-baseline-${index}`">开发基线分支</label>
-              <input :id="`fix-baseline-${index}`" v-model="item.branch" autocomplete="off" placeholder="留空则使用当前环境分支" />
+              <select :id="`fix-baseline-${index}`" v-model="item.branch" :aria-busy="dialogBranchOptionsLoading">
+                <option value="">当前环境分支（默认）</option>
+                <option v-for="branch in dialogBranchOptions[item.repo] || []" :key="branch" :value="branch">{{ branch }}</option>
+              </select>
             </div>
+            <small v-if="dialogBranchOptionsLoading" class="branch-options-status" role="status">正在加载可选分支…</small>
+            <small v-else-if="dialogBranchOptionsError" class="branch-options-error" role="alert">{{ dialogBranchOptionsError }}</small>
           </div>
         </template>
         <template v-else-if="dialogAction.kind === 'reconsider_remediation'">
@@ -626,7 +663,7 @@ function dialogTitle(): string {
         </section>
         <footer>
           <button class="btn" type="button" :disabled="pending" @click="closeDialog">取消</button>
-          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (dialogAction.kind === 'approve_fix' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (dialogAction.kind === 'reconsider_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim())) || (dialogAction.kind === 'complete_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim() || !dialogEvidence.trim())) || evidenceSupplementMissing" @click="confirmAction">{{ dialogAction.kind === 'reconsider_remediation' ? '提交并重新评估' : dialogAction.kind === 'complete_remediation' ? '确认并开始回归' : dialogAction.kind === 'supply_evidence' ? '保存证据并重试' : '确认' }}</button>
+          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (dialogAction.kind === 'approve_fix' && (dialogBranchOptionsLoading || !dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (dialogAction.kind === 'reconsider_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim())) || (dialogAction.kind === 'complete_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim() || !dialogEvidence.trim())) || evidenceSupplementMissing" @click="confirmAction">{{ dialogAction.kind === 'reconsider_remediation' ? '提交并重新评估' : dialogAction.kind === 'complete_remediation' ? '确认并开始回归' : dialogAction.kind === 'supply_evidence' ? '保存证据并重试' : '确认' }}</button>
         </footer>
       </section>
     </div>
@@ -688,7 +725,11 @@ h2, h3, p { margin: 0; }
 .source-baseline-row { display: grid; grid-template-columns: minmax(120px, .8fr) minmax(180px, 1fr); gap: 6px var(--sp-2); align-items: end; padding: var(--sp-2); border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); }
 .source-baseline-row label, .source-baseline-label { grid-row: 1; color: var(--c-muted); font-size: var(--fs-xs); }
 .source-baseline-row input { min-width: 0; min-height: 40px; padding: 8px 10px; border: 1px solid var(--c-line-2); border-radius: var(--r-sm); background: var(--c-surf); color: var(--c-text); font: inherit; }
+.source-baseline-row select { width: 100%; min-width: 0; }
 .source-repository-value { min-width: 0; min-height: 40px; display: flex; align-items: center; padding: 8px 10px; box-sizing: border-box; border: 1px solid var(--c-line); border-radius: var(--r-sm); background: var(--c-surf-3); color: var(--c-ink); font-weight: 600; overflow-wrap: anywhere; }
+.branch-options-status, .branch-options-error { font-size: var(--fs-xs); line-height: 1.5; }
+.branch-options-status { color: var(--c-muted); }
+.branch-options-error { color: var(--c-danger); }
 .timeline-heading { min-width: 0; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-3); }
 .timeline-heading > div { min-width: 0; display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px; }
 .timeline-heading h3 { margin: 0; color: var(--c-ink); font-size: var(--fs-base); }

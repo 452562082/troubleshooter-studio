@@ -21,6 +21,7 @@ vi.mock('./lib/bridge', () => ({
   fetchBugByID: vi.fn(),
   getIncidentCase: vi.fn(),
   listBugs: vi.fn(),
+  listIncidentFixBranches: vi.fn().mockResolvedValue({}),
   listIncidentCases: vi.fn(),
   listPendingIncidentWorkflowReminders: vi.fn().mockResolvedValue([]),
   matchBugBots: vi.fn().mockResolvedValue([]),

@@ -18,6 +18,7 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/browserverify"
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
+	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
 
 func TestLoadBugAndBotMaterializesAndPersistsIncidentEvidence(t *testing.T) {
@@ -918,6 +919,60 @@ func TestApproveIncidentFixRejectsMismatchedDialogScopeBeforeOpeningRuntime(t *t
 	})
 	if err == nil || !strings.Contains(err.Error(), "dialog snapshot scope") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestListIncidentFixBranchesUsesOnlyApprovedRemediationRepositories(t *testing.T) {
+	requireGit(t)
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	backendRepo := filepath.Join(root, "base-backend")
+	frontendRepo := filepath.Join(root, "base-frontend")
+	initGitRepoWithBranch(t, backendRepo, "base-test")
+	initGitRepoWithBranch(t, frontendRepo, "frontend-test")
+	if err := userconfig.SetRepoPathsForSystem("base", map[string]string{"base-backend": backendRepo, "base-frontend": frontendRepo}); err != nil {
+		t.Fatal(err)
+	}
+
+	app, store, _ := newWorkflowBindingApp(t, filepath.Join(root, "cases.db"))
+	ctx := context.Background()
+	incident := bughub.IncidentCase{
+		ID: "case-fix-branches", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test",
+		Status: bughub.CaseWaitingFixApproval, CycleNumber: 1, SelectedBotKey: "base|codex",
+	}
+	if err := store.CreateCase(ctx, incident); err != nil {
+		t.Fatal(err)
+	}
+	rootAttempt := bughub.PhaseAttempt{
+		ID: "root-fix-branches", CaseID: incident.ID, CycleNumber: 1, Phase: bughub.PhaseInvestigation,
+		Status: bughub.AttemptStatusSucceeded, AgentTarget: "codex", BotKey: incident.SelectedBotKey, InputJSON: []byte(`{}`),
+		OutputJSON: []byte(`{"investigation_status":"root_cause_ready","environment":"test","root_cause":"backend field mismatch","confidence":"high","root_cause_type":"code","remediation":{"mode":"code_change","repositories":["base-backend"],"target":"base-backend/service.go","summary":"fix mapping","verification":"run regression"},"call_chain":[{"kind":"frontend","name":"web","repo":"base-frontend","precision":"unavailable"},{"kind":"service","name":"api","repo":"base-backend","precision":"unavailable"}],"evidence":[],"validation_gaps":[],"gaps":[],"unchecked_scopes":[]}`),
+	}
+	if err := store.CreateAttempt(ctx, rootAttempt); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.GetCase(ctx, incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := store.ApplyCaseMutation(ctx, bughub.CaseMutation{
+		CaseID: current.ID, ExpectedVersion: current.Version, IdempotencyKey: "bind-fix-branches", RequestJSON: []byte(`{}`),
+		Snapshot: bughub.CaseSnapshotUpdate{CurrentAttemptID: stringPointer(rootAttempt.ID)},
+		Steps:    []bughub.CaseMutationStep{{To: bughub.CaseWaitingFixApproval, AuditOnly: true, Event: bughub.TransitionEvent{ID: "bind-fix-branches-event", EventType: "root_bound", ActorType: "studio", ActorID: "test", PayloadJSON: []byte(`{}`)}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	branches, err := app.ListIncidentFixBranches(bound.Case.ID, rootAttempt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exposed := branches["base-frontend"]; exposed {
+		t.Fatalf("frontend call-chain repository leaked into fix options: %v", branches)
+	}
+	if !reflect.DeepEqual(branches["base-backend"], []string{"base-test", "main"}) {
+		t.Fatalf("branches=%v, want base-backend branches only", branches)
 	}
 }
 

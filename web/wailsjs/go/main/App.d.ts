@@ -141,6 +141,8 @@ export function ListGrafanaDatasources(arg1:main.LokiAuthInput):Promise<Array<la
 
 export function ListIncidentCases():Promise<Array<bughub.IncidentCase>>;
 
+export function ListIncidentFixBranches(arg1:string,arg2:string):Promise<{[key: string]: Array<string>}>;
+
 export function ListLokiLabelValues(arg1:main.LokiAuthInput,arg2:string,arg3:string):Promise<labelprobe.ValuesResult>;
 
 export function ListLokiLabels(arg1:main.LokiAuthInput):Promise<labelprobe.LabelsResult>;

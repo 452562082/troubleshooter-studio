@@ -10,6 +10,7 @@ import {
   getIncidentBrowserRuntimeStatus,
   getIncidentCase,
   listBugs,
+  listIncidentFixBranches,
   listIncidentCases,
   matchBugBots,
   notifyIncidentDeployed,
@@ -55,6 +56,7 @@ vi.mock('../lib/bridge', async importOriginal => ({
   getIncidentBrowserRuntimeStatus: vi.fn().mockResolvedValue({ state: 'ready', version: '1.61.1', error_code: '', message: '' }),
   getIncidentCase: vi.fn(),
   listBugs: vi.fn().mockResolvedValue([]),
+  listIncidentFixBranches: vi.fn().mockResolvedValue({ 'admin-web': ['feature/new-navigation'], api: ['feature/work'] }),
   listIncidentCases: vi.fn().mockResolvedValue([]),
   matchBugBots: vi.fn().mockResolvedValue([]),
   notifyIncidentDeployed: vi.fn(),
@@ -178,6 +180,7 @@ afterEach(() => {
   router.push.mockReset()
   runtime.EventsOn.mockClear()
   vi.mocked(listBugs).mockReset().mockResolvedValue([])
+  vi.mocked(listIncidentFixBranches).mockReset().mockResolvedValue({ 'admin-web': ['feature/new-navigation'], api: ['feature/work'] })
   vi.mocked(listIncidentCases).mockReset().mockResolvedValue([])
   vi.mocked(getIncidentCase).mockReset()
   vi.mocked(resolveIncidentFrontendEntry).mockReset().mockResolvedValue({ status: 'selected', selected: { id: 'default-web', name: '默认 Web 入口', url: 'https://app.test/', resolution_source: 'only_candidate' } })

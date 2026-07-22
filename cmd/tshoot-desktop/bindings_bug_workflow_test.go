@@ -269,6 +269,55 @@ gaps: [missing response body]`,
 	}
 }
 
+func TestIncidentPhaseAttemptsRecoversSafelyDowngradedCallChainPrecision(t *testing.T) {
+	root := t.TempDir()
+	legacy := bughub.NewInvestigationStore(root)
+	if err := legacy.Upsert(bughub.InvestigationRun{
+		ID: "attempt-investigation", BugID: "bug-1", Status: bughub.InvestigationFailed,
+		FinalMessage: `investigation_status: insufficient_info
+environment: test
+root_cause: frontend may render the same name twice
+confidence: medium
+call_chain:
+  - kind: service
+    name: user search
+    repo: backend
+    revision: ""
+    file: internal/search.go
+    line: 42
+    precision: source_mapped
+    evidence: current repository candidate
+evidence: []
+validation_gaps: []
+gaps: []
+unchecked_scopes: []`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := incidentPhaseAttempts([]bughub.PhaseAttempt{{
+		ID: "attempt-investigation", CaseID: "case-1", Phase: bughub.PhaseInvestigation,
+		Status: bughub.AttemptStatusFailed, InputJSON: json.RawMessage(`{}`), OutputJSON: json.RawMessage(`{}`),
+		ErrorCode: "invalid_phase_result", ErrorMessage: "investigation call_chain[0] source_mapped precision requires repo, deployed revision, file, line, and evidence",
+	}}, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 || attempts[0].OutputJSON["investigation_status"] != "insufficient_info" {
+		t.Fatalf("attempts = %+v", attempts)
+	}
+	callChain, ok := attempts[0].OutputJSON["call_chain"].([]any)
+	if !ok || len(callChain) != 1 {
+		t.Fatalf("call chain = %#v", attempts[0].OutputJSON["call_chain"])
+	}
+	hop, ok := callChain[0].(map[string]any)
+	if !ok || hop["precision"] != "static_candidate" {
+		t.Fatalf("call chain hop = %#v", callChain[0])
+	}
+	if attempts[0].ErrorCode != "invalid_phase_result" || attempts[0].ErrorMessage == "" {
+		t.Fatalf("durable audit error was modified: %+v", attempts[0])
+	}
+}
+
 func TestReconcileIncidentBugResolutionsRecoversAndIsIdempotent(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)

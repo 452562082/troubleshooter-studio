@@ -37,13 +37,13 @@ describe('BugStageAttemptOutput', () => {
     expect(wrapper.get('summary').attributes('aria-label')).toContain('验证')
   })
 
-  it('hides the obsolete blocking-gaps parser error after its result is safely recovered', () => {
+  it('hides an obsolete parser error after its investigation result is safely recovered', () => {
     const recovered = {
       ...validation,
       phase: 'investigation' as const,
       output_json: { investigation_status: 'insufficient_info', environment: 'test', root_cause: '前端可能重复渲染昵称', confidence: 'medium', gaps: ['缺少响应体'], evidence: [] },
       error_code: 'invalid_phase_result',
-      error_message: 'root_cause_ready must not contain blocking gaps',
+      error_message: 'investigation call_chain[3] source_mapped precision requires repo, deployed revision, file, line, and evidence',
     }
     const wrapper = mount(BugStageAttemptOutput, { props: { attempt: recovered, latest: true } })
 

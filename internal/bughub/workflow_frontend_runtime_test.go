@@ -28,7 +28,7 @@ func TestMaterializeFrontendRuntimeWritesAuditableCascadeManifest(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(prompt, runtimeCodeManifestName) || !strings.Contains(prompt, "never present") || !strings.Contains(prompt, "source map") || !strings.Contains(prompt, "git show") {
+	if !strings.Contains(prompt, runtimeCodeManifestName) || !strings.Contains(prompt, "never present") || !strings.Contains(prompt, "source map") || !strings.Contains(prompt, "git show") || !strings.Contains(prompt, "not automatically a root-cause evidence gap") || !strings.Contains(prompt, "keep `root_cause_ready` with high confidence") {
 		t.Fatalf("prompt does not describe the precision cascade: %q", prompt)
 	}
 	data, err := os.ReadFile(filepath.Join(staging.Path(), frontendRuntimeManifestName))

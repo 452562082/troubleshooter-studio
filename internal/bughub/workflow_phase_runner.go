@@ -1050,6 +1050,8 @@ func buildStructuredInvestigationPrompt(bug Bug, bot BotRef) string {
 	sb.WriteString("证据责任必须分流：先读取 manifest 全部文件；request_facts 是首次浏览器执行从实际请求中自动发现或按白名单冻结的业务参数事实，必须优先用于 trace、日志和数据库关联；response_facts 是首次执行对真实 JSON 响应生成的无原始值结构摘要（字段路径、数组长度、唯一值数量、相等字段对、计数字段与数组长度关系）；已有 response_assertions 则是业务预期字段关系的权威机器判定。response_facts 已覆盖所需字段结构或关系时，不得仅因缺少原始 response body 或预声明 response_assertions 而写 validation_gaps。不得索要或持久化原始 request body；不得索要或持久化原始 response body。只有冻结证据确实缺失、损坏，或验证宿主尚未安全生成业务判断必需且无法由 response_facts 替代的精确断言时才写入 validation_gaps，Studio 才会自动交回验证 Agent 补采。\n")
 	sb.WriteString("在最终输出前，必须根据环境和服务读 routing，并对本问题因果判断真正需要的部署版本、调用链、日志、指标、配置、数据库和 K8s 调用已安装的目标环境 skill / MCP；不得为填满七步而查询与候选根因无关的系统。对数据库，单集群时直接调 `<type>-<env>`；service-to-datastore-source 空映射不代表 MCP 不存在。未真实调用工具及其只读 fallback 前，不得声称“缺少映射后的只读工具”。仅在结论仍为 insufficient_info、该范围会改变候选根因判断且工具实际失败时写 unchecked_scopes；已有等价或更强证据时不得记录重复替代工具、可选观测项或 source map。root_cause_ready 时 unchecked_scopes 必须为 []；gaps 只允许记录必须由用户提供的权限、登录态、测试账号或外部资料。\n")
 	sb.WriteString("最终 YAML 必须显式输出 validation_gaps、gaps、unchecked_scopes 三个数组，无内容时也必须写 []。任何要求用户提供 deployment revision/image digest/rollout、trace/日志/指标、配置、数据库查询结果、K8s 状态或原始 response body 的 gaps 都是无效阶段结果。\n")
+	sb.WriteString("call_chain 精度必须与证据字段一致：source_mapped 必须同时提供 repo、实际部署 revision、file、正数 line 和 evidence；deployed_revision 必须提供 repo、实际部署 revision 和 evidence；runtime_verified 与 static_candidate 必须提供 evidence。缺少任一必填字段时必须主动降级到字段能够证明的更弱精度，绝不能在 revision 为空时输出 source_mapped。\n")
+	sb.WriteString("call_chain 定位精度与根因就绪度必须分开判断。缺少部署 revision、image digest 或匹配 source map 本身只会让对应 hop 降级为 static_candidate/unavailable；当冻结运行时证据与代码逻辑已独立闭合因果链时，不得仅因此降低 confidence、输出 insufficient_info 或写入 validation_gaps/gaps/unchecked_scopes，必须输出 root_cause_ready、confidence: high 和 unchecked_scopes: []。只有该缺失确实会改变候选根因判断时，才保留 insufficient_info 并在 unchecked_scopes 说明。\n")
 	sb.WriteString("只有 confidence: high 且 validation_gaps: [] 且 gaps: [] 时才能输出 investigation_status: root_cause_ready；confidence 为 medium/low、validation_gaps 非空或 gaps 非空时必须输出 investigation_status: insufficient_info。\n")
 	sb.WriteString("执行每一步前，必须单独发送且原样发送对应进度标记（标记不是最终结果）：\n")
 	for index, step := range investigationPhaseSteps {
@@ -1381,6 +1383,9 @@ func ParseInvestigationResult(data []byte) (InvestigationResult, error) {
 	if result.Confidence != "high" && result.Confidence != "medium" && result.Confidence != "low" {
 		return InvestigationResult{}, fmt.Errorf("unsupported investigation confidence %q", result.Confidence)
 	}
+	if normalizeInvestigationCallChainPrecision(result.CallChain) {
+		result.UncheckedScopes = appendUniqueString(result.UncheckedScopes, "Studio conservatively downgraded incomplete call-chain precision because required deployment or source evidence was unavailable.")
+	}
 	if result.InvestigationStatus == "root_cause_ready" {
 		if result.Confidence != "high" || len(result.ValidationGaps) != 0 || len(result.Gaps) != 0 {
 			// A tentative root cause is still useful evidence, but it must not cross
@@ -1446,10 +1451,60 @@ func ParseInvestigationResult(data []byte) (InvestigationResult, error) {
 	return result, nil
 }
 
+// normalizeInvestigationCallChainPrecision preserves useful investigation
+// output without accepting a stronger location claim than its fields prove.
+// Missing evidence always moves precision down; it can never be inferred or
+// filled from a repository's current HEAD.
+func normalizeInvestigationCallChainPrecision(callChain []CallChainHop) bool {
+	downgraded := false
+	for index := range callChain {
+		hop := &callChain[index]
+		switch hop.Precision {
+		case "source_mapped":
+			if strings.TrimSpace(hop.Repo) != "" && strings.TrimSpace(hop.Revision) != "" && strings.TrimSpace(hop.File) != "" && hop.Line > 0 && strings.TrimSpace(hop.Evidence) != "" {
+				continue
+			}
+			if strings.TrimSpace(hop.Repo) != "" && strings.TrimSpace(hop.Revision) != "" && strings.TrimSpace(hop.Evidence) != "" {
+				hop.Precision = "deployed_revision"
+			} else if strings.TrimSpace(hop.Evidence) != "" {
+				hop.Precision = "static_candidate"
+			} else {
+				hop.Precision = "unavailable"
+			}
+			downgraded = true
+		case "deployed_revision":
+			if strings.TrimSpace(hop.Repo) != "" && strings.TrimSpace(hop.Revision) != "" && strings.TrimSpace(hop.Evidence) != "" {
+				continue
+			}
+			if strings.TrimSpace(hop.Evidence) != "" {
+				hop.Precision = "static_candidate"
+			} else {
+				hop.Precision = "unavailable"
+			}
+			downgraded = true
+		case "runtime_verified", "static_candidate":
+			if strings.TrimSpace(hop.Evidence) == "" {
+				hop.Precision = "unavailable"
+				downgraded = true
+			}
+		}
+	}
+	return downgraded
+}
+
+func appendUniqueString(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
 // SafeLegacyInvestigationProjection recovers the useful, structured portion of
-// a runs.json result that an older parser rejected at the readiness gate. It is
-// display-only: callers must never use this projection to change durable Case
-// or attempt state.
+// a runs.json result that phase validation rejected. It is display-only:
+// callers must never use this projection to change durable Case or attempt
+// state.
 func SafeLegacyInvestigationProjection(data []byte) (json.RawMessage, bool) {
 	result, err := ParseInvestigationResult(data)
 	if err != nil || result.InvestigationStatus != "insufficient_info" {

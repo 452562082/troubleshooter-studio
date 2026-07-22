@@ -884,8 +884,7 @@ func incidentPhaseAttempts(items []bughub.PhaseAttempt, legacy *bughub.Investiga
 
 func incidentLegacyInvestigationOutput(item bughub.PhaseAttempt, legacy *bughub.InvestigationStore) json.RawMessage {
 	if legacy == nil || item.Phase != bughub.PhaseInvestigation || item.Status != bughub.AttemptStatusFailed ||
-		strings.TrimSpace(item.ErrorCode) != "invalid_phase_result" ||
-		strings.TrimSpace(item.ErrorMessage) != "root_cause_ready must not contain blocking gaps" {
+		strings.TrimSpace(item.ErrorCode) != "invalid_phase_result" {
 		return item.OutputJSON
 	}
 	run, err := legacy.Get(item.ID)

@@ -7,10 +7,9 @@ const props = defineProps<{ attempt: PhaseAttempt; latest: boolean }>()
 const view = computed(() => presentStageAttempt(props.attempt))
 const showAttemptError = computed(() => {
   if (!props.attempt.error_message) return false
-  const recoveredLegacyGapFailure = props.attempt.phase === 'investigation' && props.attempt.status === 'failed' &&
-    props.attempt.error_code === 'invalid_phase_result' && props.attempt.output_json?.investigation_status === 'insufficient_info' &&
-    props.attempt.error_message.trim() === 'root_cause_ready must not contain blocking gaps'
-  return !recoveredLegacyGapFailure
+  const recoveredInvestigationResult = props.attempt.phase === 'investigation' && props.attempt.status === 'failed' &&
+    props.attempt.error_code === 'invalid_phase_result' && props.attempt.output_json?.investigation_status === 'insufficient_info'
+  return !recoveredInvestigationResult
 })
 
 const evidenceTypeLabels: Record<string, string> = {

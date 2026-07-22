@@ -452,6 +452,108 @@ gaps: []
 	}
 }
 
+func TestParseInvestigationResultConservativelyDowngradesIncompleteCallChainPrecision(t *testing.T) {
+	result, err := ParseInvestigationResult([]byte(`
+investigation_status: insufficient_info
+environment: test
+confidence: medium
+call_chain:
+  - kind: service
+    name: source without deployed revision
+    repo: backend
+    revision: ""
+    file: internal/search.go
+    line: 42
+    precision: source_mapped
+    evidence: current repository candidate
+  - kind: service
+    name: deployed revision without exact source line
+    repo: backend
+    revision: abc123
+    line: 0
+    precision: source_mapped
+    evidence: deployment annotation
+  - kind: service
+    name: source claim without evidence
+    repo: backend
+    revision: abc123
+    file: internal/search.go
+    line: 42
+    precision: source_mapped
+    evidence: ""
+  - kind: gateway
+    name: runtime claim without evidence
+    precision: runtime_verified
+    evidence: ""
+evidence: []
+validation_gaps: []
+gaps: []
+unchecked_scopes: []
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"static_candidate", "deployed_revision", "unavailable", "unavailable"}
+	if len(result.CallChain) != len(want) {
+		t.Fatalf("call chain = %+v", result.CallChain)
+	}
+	for index, precision := range want {
+		if result.CallChain[index].Precision != precision {
+			t.Errorf("call_chain[%d].precision = %q, want %q", index, result.CallChain[index].Precision, precision)
+		}
+	}
+	if len(result.UncheckedScopes) != 1 || !strings.Contains(result.UncheckedScopes[0], "downgraded") {
+		t.Fatalf("unchecked scopes = %+v", result.UncheckedScopes)
+	}
+}
+
+func TestParsePhaseResultDowngradesLocationPrecisionWithoutBlockingReadyRootCause(t *testing.T) {
+	parsed, err := ParsePhaseResult(PhaseAttempt{Phase: PhaseInvestigation}, []byte(`
+investigation_status: root_cause_ready
+environment: test
+root_cause: frontend renders the same name twice
+confidence: high
+root_cause_type: code
+remediation:
+  mode: code_change
+  target: frontend search card
+  summary: suppress the duplicate fallback field
+  verification: rerun the original search
+call_chain:
+  - kind: frontend
+    name: search card
+    repo: frontend
+    revision: ""
+    file: src/search-card.tsx
+    line: 42
+    precision: source_mapped
+    evidence: current repository candidate
+evidence: []
+validation_gaps: []
+gaps: []
+unchecked_scopes: []
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Outcome != PhaseOutcomeRootCauseReady {
+		t.Fatalf("outcome = %q", parsed.Outcome)
+	}
+	var result InvestigationResult
+	if err := json.Unmarshal(parsed.OutputJSON, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.InvestigationStatus != "root_cause_ready" || result.Confidence != "high" {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(result.CallChain) != 1 || result.CallChain[0].Precision != "static_candidate" {
+		t.Fatalf("call chain = %+v", result.CallChain)
+	}
+	if len(result.UncheckedScopes) != 0 {
+		t.Fatalf("ready result retained optional precision limitation: %+v", result.UncheckedScopes)
+	}
+}
+
 func TestParsePhaseResultRootCauseReadyDropsNonBlockingUncheckedScopes(t *testing.T) {
 	parsed, err := ParsePhaseResult(PhaseAttempt{Phase: PhaseInvestigation}, []byte(`
 investigation_status: root_cause_ready
@@ -596,6 +698,10 @@ func TestStructuredInvestigationPromptExplainsRootCauseReadinessGate(t *testing.
 		"最终 YAML 必须显式输出 validation_gaps、gaps、unchecked_scopes",
 		"deployment revision/image digest/rollout",
 		"investigation_status: insufficient_info",
+		"source_mapped 必须同时提供 repo、实际部署 revision、file、正数 line 和 evidence",
+		"绝不能在 revision 为空时输出 source_mapped",
+		"call_chain 定位精度与根因就绪度必须分开判断",
+		"不得仅因此降低 confidence、输出 insufficient_info",
 	} {
 		if !strings.Contains(prompt, rule) {
 			t.Fatalf("prompt does not contain %q", rule)

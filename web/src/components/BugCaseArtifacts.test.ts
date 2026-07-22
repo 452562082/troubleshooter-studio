@@ -78,11 +78,17 @@ describe('BugCaseArtifacts', () => {
     const wrapper = mount(BugCaseArtifacts, { props: { detail: { ...detail, attempts } } })
 
     const card = wrapper.get('[aria-labelledby="cause-title"]')
+    expect(card.classes()).toContain('root-cause-card')
+    expect(card.get('.root-cause-copy').element.tagName).toBe('P')
     expect(card.text()).toContain('建议修复方向')
     expect(card.text()).toContain('代码修复')
     expect(card.text()).toContain('src/user-card.tsx')
     expect(card.text()).toContain('标题只渲染 nick_name')
     expect(card.text()).toContain('回归搜索结果同名次数')
+    expect(artifactSource).toContain('.root-cause-card h3, .remediation-plan h4')
+    expect(artifactSource).toMatch(/\.root-cause-copy \{[^}]*font-size: var\(--fs-base\);[^}]*line-height: 1\.7;/)
+    expect(artifactSource).toMatch(/\.remediation-plan dt \{[^}]*font-size: var\(--fs-sm\);[^}]*font-weight: 600;/)
+    expect(artifactSource).toMatch(/\.remediation-plan dd \{[^}]*font-size: var\(--fs-base\);[^}]*font-weight: 400;/)
   })
 
   it('renders an ordered structured call chain with explicit location precision', () => {

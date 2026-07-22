@@ -957,7 +957,14 @@ func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand
 	if incident.Status != CaseWaitingFixApproval {
 		return IncidentCase{}, ErrApprovalNotReady
 	}
-	sourceBaselines, err := resolveFixSourceBaselines(cmd.Bot.Path, incident.Environment, cmd.InputJSON)
+	rootCauseResult, err := validatedRootCauseResult(ctx, o.store, incident, cmd.RootCauseAttemptID)
+	if err != nil {
+		return IncidentCase{}, err
+	}
+	if !rootCauseResult.UsesCodeFixWorkflow() {
+		return IncidentCase{}, ErrApprovalScope
+	}
+	sourceBaselines, err := resolveRemediationFixSourceBaselines(cmd.Bot.Path, incident.Environment, cmd.InputJSON, rootCauseResult)
 	if err != nil {
 		return IncidentCase{}, fmt.Errorf("invalid fix source baseline approval: %w", err)
 	}
@@ -971,9 +978,6 @@ func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand
 		} else if replay {
 			return o.replayFixApproval(ctx, cmd)
 		}
-	}
-	if err := validateFixApprovalRootCause(ctx, o.store, incident, cmd.RootCauseAttemptID); err != nil {
-		return IncidentCase{}, err
 	}
 	attempt, request := buildFixApprovalMutation(cmd, incident.CycleNumber, sourceBaselines)
 	mutation, err := o.store.ApplyCaseMutation(ctx, request)
@@ -1012,7 +1016,11 @@ func (o *CaseOrchestrator) replayFixApproval(ctx context.Context, cmd ApproveFix
 	if incidentErr != nil {
 		return IncidentCase{}, incidentErr
 	}
-	sourceBaselines, parseErr := resolveFixSourceBaselines(cmd.Bot.Path, incident.Environment, cmd.InputJSON)
+	rootCauseResult, parseErr := ParseInvestigationResult(root.OutputJSON)
+	if parseErr != nil || !rootCauseResult.UsesCodeFixWorkflow() {
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	sourceBaselines, parseErr := resolveRemediationFixSourceBaselines(cmd.Bot.Path, incident.Environment, cmd.InputJSON, rootCauseResult)
 	if parseErr != nil {
 		return IncidentCase{}, ErrIdempotencyConflict
 	}

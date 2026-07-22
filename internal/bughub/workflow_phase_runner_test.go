@@ -702,6 +702,8 @@ func TestStructuredInvestigationPromptExplainsRootCauseReadinessGate(t *testing.
 		"绝不能在 revision 为空时输出 source_mapped",
 		"call_chain 定位精度与根因就绪度必须分开判断",
 		"不得仅因此降低 confidence、输出 insufficient_info",
+		"repositories 必须只列出修复建议实际要求修改的代码仓库",
+		"repositories: [] # code_change 时列出实际需要修改的仓库",
 	} {
 		if !strings.Contains(prompt, rule) {
 			t.Fatalf("prompt does not contain %q", rule)

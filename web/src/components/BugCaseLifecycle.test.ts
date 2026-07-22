@@ -423,12 +423,40 @@ describe('BugCaseLifecycle', () => {
 
     await wrapper.find('.primary-action').trigger('click')
     const baselineInputs = wrapper.findAll('.source-baseline-row input')
-    expect((baselineInputs[0].element as HTMLInputElement).value).toBe('admin-web')
-    await baselineInputs[1].setValue('feature/new-navigation')
+    expect(wrapper.get('.source-repository-value').text()).toBe('admin-web')
+    expect(baselineInputs).toHaveLength(1)
+    await baselineInputs[0].setValue('feature/new-navigation')
     await wrapper.setProps({ detail: { ...snapshot, case: { ...snapshot.case, version: 8 } } })
     await wrapper.find('[data-confirm]').trigger('click')
 
     expect(wrapper.emitted('primary')?.[0]).toEqual([{ kind: 'approve_fix', rootCauseAttemptID: 'investigation-7', caseVersion: 7, sourceBaselines: { 'admin-web': 'feature/new-navigation' } }])
+  })
+
+  it('uses only the repository selected by the remediation instead of every call-chain repository', async () => {
+    const snapshot = detail('waiting_fix_approval')
+    snapshot.case.current_attempt_id = 'investigation-backend-fix'
+    snapshot.attempts = [{
+      id: 'investigation-backend-fix', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {},
+      output_json: {
+        investigation_status: 'root_cause_ready', confidence: 'high', gaps: [],
+        remediation: { mode: 'code_change', target: 'base-backend/base/internal/application/user/service/s2s_logic.go', summary: '修正后端字段映射' },
+        call_chain: [{ repo: 'base-frontend' }, { repo: 'base-backend' }],
+      },
+      parent_attempt_id: '', started_at: '2026-07-22T07:45:50Z', error_code: '', error_message: '', usage: {},
+    }]
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+
+    await wrapper.find('.primary-action').trigger('click')
+
+    expect(wrapper.findAll('.source-repository-value').map(item => item.text())).toEqual(['base-backend'])
+    expect(wrapper.get('[role="dialog"]').text()).not.toContain('base-frontend')
+    expect(wrapper.findAll('button').some(button => button.text().includes('添加仓库'))).toBe(false)
+    expect(wrapper.findAll('button').some(button => button.text() === '移除')).toBe(false)
+    await wrapper.get('#fix-baseline-0').setValue('base-test')
+    await wrapper.get('[data-confirm]').trigger('click')
+    expect(wrapper.emitted('primary')?.[0]).toEqual([{
+      kind: 'approve_fix', rootCauseAttemptID: 'investigation-backend-fix', caseVersion: 2, sourceBaselines: { 'base-backend': 'base-test' },
+    }])
   })
 
   it('submits a user remediation proposal for reassessment without authorizing a fix', async () => {

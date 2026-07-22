@@ -227,6 +227,84 @@ func parseFixSourceBaselines(inputJSON []byte) (map[string]string, error) {
 	return result, nil
 }
 
+// remediationFixRepositories returns the repositories the approved plan will
+// actually modify. New results provide the structured list directly. For
+// durable results created before that field existed, match the remediation
+// target against the evidence-backed call chain and conservatively fall back
+// to its repository scope.
+func remediationFixRepositories(result InvestigationResult) []string {
+	unique := func(values []string) []string {
+		seen := make(map[string]struct{}, len(values))
+		out := make([]string, 0, len(values))
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			if _, exists := seen[value]; exists {
+				continue
+			}
+			seen[value] = struct{}{}
+			out = append(out, value)
+		}
+		return out
+	}
+	if repositories := unique(result.Remediation.Repositories); len(repositories) > 0 {
+		return repositories
+	}
+	callChainRepositories := make([]string, 0, len(result.CallChain))
+	for _, hop := range result.CallChain {
+		callChainRepositories = append(callChainRepositories, hop.Repo)
+	}
+	callChainRepositories = unique(callChainRepositories)
+	target := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(result.Remediation.Target), "\\", "/"))
+	matched := make([]string, 0, len(callChainRepositories))
+	for _, repo := range callChainRepositories {
+		if target != "" && strings.Contains(target, strings.ToLower(repo)) {
+			matched = append(matched, repo)
+		}
+	}
+	if len(matched) > 0 {
+		return matched
+	}
+	return callChainRepositories
+}
+
+func resolveRemediationFixSourceBaselines(botPath, environment string, inputJSON []byte, result InvestigationResult) (map[string]string, error) {
+	repositories := remediationFixRepositories(result)
+	if len(repositories) == 0 {
+		return resolveFixSourceBaselines(botPath, environment, inputJSON)
+	}
+	requested, err := parseFixSourceBaselines(inputJSON)
+	if err != nil {
+		return nil, err
+	}
+	expected := make(map[string]struct{}, len(repositories))
+	for _, repo := range repositories {
+		expected[repo] = struct{}{}
+	}
+	if len(requested) == 0 {
+		requested = make(map[string]string, len(repositories))
+		for _, repo := range repositories {
+			requested[repo] = ""
+		}
+	} else {
+		if len(requested) != len(expected) {
+			return nil, errors.New("source_baselines must match remediation repositories")
+		}
+		for repo := range requested {
+			if _, ok := expected[repo]; !ok {
+				return nil, fmt.Errorf("repository %q is outside the approved remediation scope", repo)
+			}
+		}
+	}
+	canonicalInput, err := withFixSourceBaselines(inputJSON, requested)
+	if err != nil {
+		return nil, err
+	}
+	return resolveFixSourceBaselines(botPath, environment, canonicalInput)
+}
+
 // resolveFixSourceBaselines applies the product default at the trusted host
 // boundary. A blank branch means "use this repository's branch for the Case
 // environment". An entirely absent mapping selects every repository mapped to

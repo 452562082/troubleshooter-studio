@@ -51,17 +51,6 @@ func StartFixApprovalKey(caseID, rootCauseAttemptID string, caseVersion int64) s
 	return fmt.Sprintf("start-fix:%s:%s:%d", strings.TrimSpace(caseID), strings.TrimSpace(rootCauseAttemptID), caseVersion)
 }
 
-func validateFixApprovalRootCause(ctx context.Context, store *CaseStore, incident IncidentCase, attemptID string) error {
-	result, err := validatedRootCauseResult(ctx, store, incident, attemptID)
-	if err != nil {
-		return err
-	}
-	if !result.UsesCodeFixWorkflow() {
-		return ErrApprovalScope
-	}
-	return nil
-}
-
 func validatedRootCauseResult(ctx context.Context, store *CaseStore, incident IncidentCase, attemptID string) (InvestigationResult, error) {
 	if store == nil || strings.TrimSpace(attemptID) == "" || attemptID != incident.CurrentAttemptID {
 		return InvestigationResult{}, ErrApprovalScope

@@ -86,6 +86,7 @@ const (
 // grants permission to mutate data, configuration, or runtime resources.
 type RemediationPlan struct {
 	Mode         RemediationMode `yaml:"mode,omitempty" json:"mode,omitempty"`
+	Repositories []string        `yaml:"repositories,omitempty" json:"repositories,omitempty"`
 	Target       string          `yaml:"target,omitempty" json:"target,omitempty"`
 	Summary      string          `yaml:"summary,omitempty" json:"summary,omitempty"`
 	Rollback     string          `yaml:"rollback,omitempty" json:"rollback,omitempty"`
@@ -1052,6 +1053,7 @@ func buildStructuredInvestigationPrompt(bug Bug, bot BotRef) string {
 	sb.WriteString("最终 YAML 必须显式输出 validation_gaps、gaps、unchecked_scopes 三个数组，无内容时也必须写 []。任何要求用户提供 deployment revision/image digest/rollout、trace/日志/指标、配置、数据库查询结果、K8s 状态或原始 response body 的 gaps 都是无效阶段结果。\n")
 	sb.WriteString("call_chain 精度必须与证据字段一致：source_mapped 必须同时提供 repo、实际部署 revision、file、正数 line 和 evidence；deployed_revision 必须提供 repo、实际部署 revision 和 evidence；runtime_verified 与 static_candidate 必须提供 evidence。缺少任一必填字段时必须主动降级到字段能够证明的更弱精度，绝不能在 revision 为空时输出 source_mapped。\n")
 	sb.WriteString("call_chain 定位精度与根因就绪度必须分开判断。缺少部署 revision、image digest 或匹配 source map 本身只会让对应 hop 降级为 static_candidate/unavailable；当冻结运行时证据与代码逻辑已独立闭合因果链时，不得仅因此降低 confidence、输出 insufficient_info 或写入 validation_gaps/gaps/unchecked_scopes，必须输出 root_cause_ready、confidence: high 和 unchecked_scopes: []。只有该缺失确实会改变候选根因判断时，才保留 insufficient_info 并在 unchecked_scopes 说明。\n")
+	sb.WriteString("remediation.mode 为 code_change 时，repositories 必须只列出修复建议实际要求修改的代码仓库，不能把仅参与调用链、仅用于定位或只需回归验证的仓库列入；非代码处置时 repositories 必须为 []。\n")
 	sb.WriteString("只有 confidence: high 且 validation_gaps: [] 且 gaps: [] 时才能输出 investigation_status: root_cause_ready；confidence 为 medium/low、validation_gaps 非空或 gaps 非空时必须输出 investigation_status: insufficient_info。\n")
 	sb.WriteString("执行每一步前，必须单独发送且原样发送对应进度标记（标记不是最终结果）：\n")
 	for index, step := range investigationPhaseSteps {
@@ -1059,7 +1061,7 @@ func buildStructuredInvestigationPrompt(bug Bug, bot BotRef) string {
 	}
 	sb.WriteString(GenerateContext(bug, bot))
 	sb.WriteString("\n最终只输出严格 YAML，不得添加字段或解释性段落：\n")
-	sb.WriteString("investigation_status: root_cause_ready | insufficient_info\nenvironment: <env>\nroot_cause: <直接和深层根因；信息不足时为空>\nconfidence: high | medium | low\nroot_cause_type: code | data | configuration | infrastructure | network | external_dependency | transient\nremediation:\n  mode: code_change | operator_action | external_recovery | observe_only\n  target: <需要改动或等待恢复的具体对象>\n  summary: <最小处置建议；排障阶段不得执行写操作>\n  rollback: <operator_action 必填；其它模式可空>\n  verification: <处置后如何用原场景回归>\ncall_chain:\n  - kind: <browser|frontend|gateway|service|queue|datastore|external>\n    name: <节点名称>\n    service: <可空>\n    repo: <可空>\n    revision: <可空；必须是实际部署版本>\n    protocol: <可空>\n    operation: <可空；HTTP method/path、RPC method、topic/queue 等>\n    file: <可空；仓库相对路径>\n    line: 0 # 未知时为 0\n    precision: runtime_verified | source_mapped | deployed_revision | static_candidate | unavailable\n    evidence: <可空；支持该跳的证据摘要>\n    request_id: <可空>\n    trace_id: <可空>\nevidence:\n  - kind: <trace|log|metric|code|config|data|command>\n    path: <Studio staging 目录内的相对路径>\n    captured_at: <RFC3339；仅兼容输出，Studio 以 fstat 为准>\n    environment: <env>\n    version: <可空>\n    request_id: <可空>\n    trace_id: <可空>\n    redaction_status: redacted | not_required # Studio 总会重新扫描\nvalidation_gaps: [] # 仅验证 Agent 应自动补采的冻结证据缺口\ngaps: [] # 仅必须由用户补充的阻塞项\nunchecked_scopes: [] # 非阻塞且未覆盖的范围\n")
+	sb.WriteString("investigation_status: root_cause_ready | insufficient_info\nenvironment: <env>\nroot_cause: <直接和深层根因；信息不足时为空>\nconfidence: high | medium | low\nroot_cause_type: code | data | configuration | infrastructure | network | external_dependency | transient\nremediation:\n  mode: code_change | operator_action | external_recovery | observe_only\n  repositories: [] # code_change 时列出实际需要修改的仓库；其它模式为空\n  target: <需要改动或等待恢复的具体对象>\n  summary: <最小处置建议；排障阶段不得执行写操作>\n  rollback: <operator_action 必填；其它模式可空>\n  verification: <处置后如何用原场景回归>\ncall_chain:\n  - kind: <browser|frontend|gateway|service|queue|datastore|external>\n    name: <节点名称>\n    service: <可空>\n    repo: <可空>\n    revision: <可空；必须是实际部署版本>\n    protocol: <可空>\n    operation: <可空；HTTP method/path、RPC method、topic/queue 等>\n    file: <可空；仓库相对路径>\n    line: 0 # 未知时为 0\n    precision: runtime_verified | source_mapped | deployed_revision | static_candidate | unavailable\n    evidence: <可空；支持该跳的证据摘要>\n    request_id: <可空>\n    trace_id: <可空>\nevidence:\n  - kind: <trace|log|metric|code|config|data|command>\n    path: <Studio staging 目录内的相对路径>\n    captured_at: <RFC3339；仅兼容输出，Studio 以 fstat 为准>\n    environment: <env>\n    version: <可空>\n    request_id: <可空>\n    trace_id: <可空>\n    redaction_status: redacted | not_required # Studio 总会重新扫描\nvalidation_gaps: [] # 仅验证 Agent 应自动补采的冻结证据缺口\ngaps: [] # 仅必须由用户补充的阻塞项\nunchecked_scopes: [] # 非阻塞且未覆盖的范围\n")
 	return sb.String()
 }
 
@@ -1551,6 +1553,23 @@ func validateRemediationPlan(rootCauseType RootCauseType, plan RemediationPlan) 
 	}
 	if len(plan.Rollback) > 2000 {
 		return errors.New("remediation rollback is too large")
+	}
+	seenRepositories := make(map[string]struct{}, len(plan.Repositories))
+	for _, repo := range plan.Repositories {
+		repo = strings.TrimSpace(repo)
+		if repo == "" {
+			return errors.New("remediation repositories require non-empty names")
+		}
+		if _, exists := seenRepositories[repo]; exists {
+			return fmt.Errorf("remediation repositories contains duplicate %q", repo)
+		}
+		seenRepositories[repo] = struct{}{}
+	}
+	if len(plan.Repositories) > 16 {
+		return errors.New("remediation repositories exceeds 16 entries")
+	}
+	if plan.Mode != RemediationCodeChange && len(plan.Repositories) != 0 {
+		return errors.New("non-code remediation must not declare repositories")
 	}
 	return nil
 }

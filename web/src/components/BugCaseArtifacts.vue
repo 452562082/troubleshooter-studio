@@ -291,9 +291,9 @@ watch(
       <img :src="previewURLs[selectedPreview.id]" :alt="`${selectedPreview.environment || '当前环境'}渲染截图原图`">
     </dialog>
 
-    <section class="artifact-card" aria-labelledby="cause-title">
+    <section class="artifact-card root-cause-card" aria-labelledby="cause-title">
       <h3 id="cause-title">根因结论</h3>
-      <pre>{{ rootCause(investigation) }}</pre>
+      <p class="root-cause-copy">{{ rootCause(investigation) }}</p>
       <div v-if="remediation" class="remediation-plan">
         <h4>建议修复方向</h4>
         <dl>
@@ -408,11 +408,15 @@ watch(
 .evidence-card > summary h3 { margin: 0; }
 .evidence-card > summary span { margin-left: auto; color: var(--c-muted); font-size: var(--fs-xs); }
 .evidence-card > summary:focus-visible { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; border-radius: var(--r-md); }
-.remediation-plan { margin-top: var(--sp-3); border-top: 1px solid var(--c-line); padding-top: var(--sp-2); }
-.remediation-plan h4 { margin: 0 0 var(--sp-2); color: var(--c-ink); font-size: var(--fs-sm); }
-.remediation-plan dl { display: grid; gap: 8px; margin: 0; }
-.remediation-plan dl > div { display: grid; grid-template-columns: minmax(76px, auto) minmax(0, 1fr); gap: 10px; }
-.remediation-plan dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
+.root-cause-card h3, .remediation-plan h4 { color: var(--c-ink); font-size: var(--fs-md); font-weight: 700; line-height: 1.4; }
+.root-cause-card h3 { margin-bottom: var(--sp-2); }
+.root-cause-copy { margin: 0; color: var(--c-text); font-size: var(--fs-base); font-weight: 400; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.remediation-plan { margin-top: var(--sp-4); border-top: 1px solid var(--c-line); padding-top: var(--sp-3); }
+.remediation-plan h4 { margin: 0 0 var(--sp-3); }
+.remediation-plan dl { display: grid; gap: 10px; margin: 0; }
+.remediation-plan dl > div { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: var(--sp-3); align-items: start; }
+.remediation-plan dt { color: var(--c-muted); font-size: var(--fs-sm); font-weight: 600; line-height: 1.65; }
+.remediation-plan dd { margin: 0; color: var(--c-text); font-size: var(--fs-base); font-weight: 400; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .call-chain-card { grid-column: 1 / -1; }
 .call-chain-list { display: grid; gap: var(--sp-2); margin: 0; padding: 0; list-style: none; counter-reset: call-chain; }
 .call-chain-hop { counter-increment: call-chain; display: grid; gap: 4px; min-width: 0; padding: 10px 12px; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); }

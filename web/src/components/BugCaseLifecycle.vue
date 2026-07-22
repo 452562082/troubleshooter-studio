@@ -82,7 +82,7 @@ const dialogElement = ref<HTMLElement | null>(null)
 const actionTrigger = ref<HTMLElement | null>(null)
 const dialogCaseVersion = ref<number>()
 const dialogRootCauseAttemptID = ref('')
-const dialogSourceBaselines = ref<Array<{ repo: string; branch: string }>>([])
+const dialogSourceBaselines = ref<Array<{ repo: string; branch: string; locked: boolean }>>([])
 const currentCase = computed(() => props.detail?.case)
 const TIMELINE_PREVIEW_COUNT = 3
 const timelineExpanded = ref(false)
@@ -132,6 +132,29 @@ const mergeApprovalScopes = computed(() => (props.detail?.code_changes || []).ma
   targetBranch: change.target_environment_branch,
   targetHead: change.merge_base_head,
 })))
+
+function uniqueRepositoryNames(values: unknown[]): string[] {
+  return [...new Set(values.map(value => typeof value === 'string' ? value.trim() : '').filter(Boolean))]
+}
+
+function fixRepositoriesFromRootCause(output: Record<string, unknown> | undefined): string[] {
+  const remediation = output?.remediation && typeof output.remediation === 'object'
+    ? output.remediation as Record<string, unknown>
+    : {}
+  const declared = Array.isArray(remediation.repositories) ? uniqueRepositoryNames(remediation.repositories) : []
+  if (declared.length > 0) return declared
+
+  const callChain = Array.isArray(output?.call_chain) ? output.call_chain : []
+  const callChainRepositories = uniqueRepositoryNames(callChain.map(item => {
+    if (!item || typeof item !== 'object') return ''
+    return (item as Record<string, unknown>).repo
+  }))
+  const target = typeof remediation.target === 'string' ? remediation.target.trim().toLocaleLowerCase() : ''
+  const matched = target
+    ? callChainRepositories.filter(repo => target.includes(repo.toLocaleLowerCase()))
+    : []
+  return matched.length > 0 ? matched : callChainRepositories
+}
 
 const latestRootCauseAttempt = computed(() => [...(props.detail?.attempts || [])].reverse().find(attempt =>
   attempt.cycle_number === props.detail?.case.cycle_number && attempt.phase === 'investigation' && attempt.status === 'succeeded',
@@ -246,13 +269,10 @@ async function openAction(event: MouseEvent) {
     const currentAttemptID = props.detail?.case.current_attempt_id || ''
     const rootCause = props.detail?.attempts.find(attempt => attempt.id === currentAttemptID && attempt.phase === 'investigation' && attempt.status === 'succeeded')
     dialogRootCauseAttemptID.value = rootCause?.id || ''
-    const callChain = Array.isArray(rootCause?.output_json?.call_chain) ? rootCause.output_json.call_chain : []
-    const repos = [...new Set(callChain.map(item => {
-      if (!item || typeof item !== 'object') return ''
-      const repo = (item as Record<string, unknown>).repo
-      return typeof repo === 'string' ? repo.trim() : ''
-    }).filter(Boolean))]
-    dialogSourceBaselines.value = (repos.length > 0 ? repos : ['']).map(repo => ({ repo, branch: '' }))
+    const repos = fixRepositoriesFromRootCause(rootCause?.output_json)
+    dialogSourceBaselines.value = repos.length > 0
+      ? repos.map(repo => ({ repo, branch: '', locked: true }))
+      : [{ repo: '', branch: '', locked: false }]
   } else if (action.value.kind === 'complete_remediation') {
     dialogCaseVersion.value = props.detail?.case.version
     dialogRootCauseAttemptID.value = latestRootCauseAttempt.value?.id || ''
@@ -386,15 +406,6 @@ function removeEvidenceImage(index: number) {
 function formatEvidenceImageSize(size: number): string {
   if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`
   return `${(size / 1024 / 1024).toFixed(1)} MB`
-}
-
-function addSourceBaseline() {
-  dialogSourceBaselines.value.push({ repo: '', branch: '' })
-}
-
-function removeSourceBaseline(index: number) {
-  if (dialogSourceBaselines.value.length <= 1) return
-  dialogSourceBaselines.value.splice(index, 1)
 }
 
 const sourceBaselinesValid = computed(() => dialogSourceBaselines.value.length > 0 && dialogSourceBaselines.value.every(item => item.repo.trim()) && new Set(dialogSourceBaselines.value.map(item => item.repo.trim())).size === dialogSourceBaselines.value.length)
@@ -545,17 +556,16 @@ function dialogTitle(): string {
       <section ref="dialogElement" role="dialog" aria-modal="true" aria-labelledby="case-action-dialog-title" class="approval-dialog" @keydown="trapDialogFocus">
         <header><h2 id="case-action-dialog-title">{{ dialogTitle() }}</h2></header>
         <template v-if="dialogAction.kind === 'approve_fix'">
-          <p>将授权修复 Agent 基于当前根因和证据创建最小修复。请为每个受影响仓库确认开发基线；留空时默认使用当前环境对应的分支。修复分支会从确认后的基线创建，后续分别合并并推送到开发基线和环境分支。</p>
+          <p>将授权修复 Agent 基于当前根因和证据创建最小修复。修复仓库由已确认的修复建议确定，你只需确认对应的开发基线；留空时默认使用当前环境对应的分支。修复分支会从确认后的基线创建，后续分别合并并推送到开发基线和环境分支。</p>
           <p>授权范围：Case v{{ dialogCaseVersion }} / {{ dialogRootCauseAttemptID || '未找到根因 attempt' }}。</p>
           <div class="source-baseline-editor">
-            <div v-for="(item, index) in dialogSourceBaselines" :key="index" class="source-baseline-row">
-              <label :for="`fix-repo-${index}`">代码仓库</label>
-              <input :id="`fix-repo-${index}`" v-model="item.repo" autocomplete="off" placeholder="例如 admin-web" />
+            <div v-for="(item, index) in dialogSourceBaselines" :key="`${item.repo}-${index}`" class="source-baseline-row">
+              <span class="source-baseline-label">代码仓库</span>
+              <span v-if="item.locked" class="source-repository-value">{{ item.repo }}</span>
+              <input v-else :id="`fix-repo-${index}`" v-model="item.repo" autocomplete="off" aria-label="代码仓库（历史修复建议未明确）" placeholder="历史修复建议未明确，请填写仓库" />
               <label :for="`fix-baseline-${index}`">开发基线分支</label>
               <input :id="`fix-baseline-${index}`" v-model="item.branch" autocomplete="off" placeholder="留空则使用当前环境分支" />
-              <button class="btn" type="button" :disabled="dialogSourceBaselines.length <= 1" @click="removeSourceBaseline(index)">移除</button>
             </div>
-            <button class="btn" type="button" @click="addSourceBaseline">+ 添加仓库</button>
           </div>
         </template>
         <template v-else-if="dialogAction.kind === 'reconsider_remediation'">
@@ -675,10 +685,10 @@ h2, h3, p { margin: 0; }
 .live-error { min-height: 1.5em; color: var(--c-danger); font-size: var(--fs-sm); }
 .live-error:empty { display: none; }
 .source-baseline-editor { display: grid; gap: var(--sp-2); margin-top: var(--sp-2); }
-.source-baseline-row { display: grid; grid-template-columns: minmax(120px, .8fr) minmax(180px, 1fr) auto; gap: 6px var(--sp-2); align-items: end; padding: var(--sp-2); border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); }
-.source-baseline-row label { grid-row: 1; color: var(--c-muted); font-size: var(--fs-xs); }
+.source-baseline-row { display: grid; grid-template-columns: minmax(120px, .8fr) minmax(180px, 1fr); gap: 6px var(--sp-2); align-items: end; padding: var(--sp-2); border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); }
+.source-baseline-row label, .source-baseline-label { grid-row: 1; color: var(--c-muted); font-size: var(--fs-xs); }
 .source-baseline-row input { min-width: 0; min-height: 40px; padding: 8px 10px; border: 1px solid var(--c-line-2); border-radius: var(--r-sm); background: var(--c-surf); color: var(--c-text); font: inherit; }
-.source-baseline-row .btn { grid-column: 3; grid-row: 1 / span 2; }
+.source-repository-value { min-width: 0; min-height: 40px; display: flex; align-items: center; padding: 8px 10px; box-sizing: border-box; border: 1px solid var(--c-line); border-radius: var(--r-sm); background: var(--c-surf-3); color: var(--c-ink); font-weight: 600; overflow-wrap: anywhere; }
 .timeline-heading { min-width: 0; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--sp-2); margin-bottom: var(--sp-3); }
 .timeline-heading > div { min-width: 0; display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px; }
 .timeline-heading h3 { margin: 0; color: var(--c-ink); font-size: var(--fs-base); }

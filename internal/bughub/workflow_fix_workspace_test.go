@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -137,6 +138,34 @@ func TestFixWorkspaceManagerDefaultsBlankApprovedBaselineToEnvironmentBranch(t *
 	defer func() { _ = lease.Close(context.Background()) }()
 	if len(lease.bindings) != 1 || lease.bindings[0].BaseBranch != "test" {
 		t.Fatalf("bindings=%+v, want blank approval resolved to test", lease.bindings)
+	}
+}
+
+func TestRemediationFixRepositoriesUsesStructuredFixScope(t *testing.T) {
+	result := InvestigationResult{
+		Remediation: RemediationPlan{Repositories: []string{"base-backend"}, Target: "backend adapter"},
+		CallChain:   []CallChainHop{{Repo: "base-frontend"}, {Repo: "base-backend"}},
+	}
+	if got := remediationFixRepositories(result); !reflect.DeepEqual(got, []string{"base-backend"}) {
+		t.Fatalf("repositories=%v, want only base-backend", got)
+	}
+}
+
+func TestRemediationFixRepositoriesMatchesLegacyTargetInsteadOfWholeCallChain(t *testing.T) {
+	result := InvestigationResult{
+		Remediation: RemediationPlan{Target: "base-backend/base/internal/application/user/service/s2s_logic.go"},
+		CallChain:   []CallChainHop{{Repo: "base-frontend"}, {Repo: "base-backend"}},
+	}
+	if got := remediationFixRepositories(result); !reflect.DeepEqual(got, []string{"base-backend"}) {
+		t.Fatalf("repositories=%v, want target-matched base-backend", got)
+	}
+}
+
+func TestResolveRemediationFixSourceBaselinesRejectsRepositoryOutsidePlan(t *testing.T) {
+	result := InvestigationResult{Remediation: RemediationPlan{Repositories: []string{"base-backend"}}}
+	_, err := resolveRemediationFixSourceBaselines("", "test", []byte(`{"source_baselines":{"base-frontend":"test"}}`), result)
+	if err == nil || !strings.Contains(err.Error(), "outside the approved remediation scope") {
+		t.Fatalf("err=%v, want remediation-scope rejection", err)
 	}
 }
 

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import yaml from 'js-yaml'
 import { generateYAML, type ServiceTopologyState, type YAMLGenContext } from './yamlGenerator'
-import { importServiceTopologyOverrides, parseEnvironment } from './yamlImporter'
+import { importServiceTopologyOverrides, parseEnvironment, prepareEnvironmentForWizard } from './yamlImporter'
 
 // 最小可工作 ctx 工厂:测试用 stub。各测试按需 spread + 覆盖具体字段。
 function makeCtx(overrides: Partial<YAMLGenContext> = {}): YAMLGenContext {
@@ -67,6 +67,47 @@ describe('generateYAML', () => {
       id: 'consumer-h5', name: 'C 端 H5', url: 'https://m.test/app', repo: 'web', device_profile: 'mobile',
       aliases: ['C端', '用户端'], product_hints: ['商城'], module_hints: ['搜索'], path_prefixes: ['/search', '/user'],
     }])
+  })
+  it('derives hidden frontend metadata and ignores obsolete web_domain', () => {
+    const parsed = yaml.load(generateYAML(makeCtx({ environments: [{
+      id: 'test', api_domain: 'https://api.test', web_domain: 'https://admin.test', is_prod: false,
+      frontend_entries: [
+        { id: '', name: '管理端', url: 'https://admin.test', repo: '', device_profile: '', aliases: '', product_hints: '', module_hints: '', path_prefixes: '' },
+        { id: '', name: '管理端', url: 'https://ops.test', repo: '', device_profile: '', aliases: '', product_hints: '', module_hints: '', path_prefixes: '' },
+      ],
+    }] }))) as any
+
+    expect(parsed.environments[0].web_domain).toBeUndefined()
+    expect(parsed.environments[0].frontend_entries).toEqual([
+      { id: 'admin', name: '管理端', url: 'https://admin.test', device_profile: 'desktop' },
+      { id: 'admin-2', name: '管理端', url: 'https://ops.test', device_profile: 'desktop' },
+    ])
+  })
+
+  it('drops obsolete web_domain and its previously synthesized Web frontend', () => {
+    expect(parseEnvironment({ id: 'test', web_domain: 'https://legacy.test' }).web_domain).toBe('https://legacy.test')
+    expect(prepareEnvironmentForWizard({ id: 'test', web_domain: 'https://legacy.test' })).toMatchObject({
+      web_domain: '',
+      frontend_entries: [],
+    })
+    expect(prepareEnvironmentForWizard({
+      id: 'test',
+      frontend_entries: [
+        { id: '', name: 'Web 前端', url: 'https://legacy.test' },
+        { id: 'consumer-h5', name: 'C端', url: 'https://consumer.test' },
+      ],
+    })).toMatchObject({
+      web_domain: '',
+      frontend_entries: [{ id: 'consumer-h5', name: 'C端', url: 'https://consumer.test' }],
+    })
+  })
+
+  it('never emits obsolete web_domain without an explicit frontend entry', () => {
+    const parsed = yaml.load(generateYAML(makeCtx({ environments: [{
+      id: 'test', api_domain: 'https://api.test', web_domain: 'https://legacy.test', is_prod: false,
+    }] }))) as any
+    expect(parsed.environments[0].web_domain).toBeUndefined()
+    expect(parsed.environments[0].frontend_entries).toBeUndefined()
   })
   it('round-trips exact HTTP deployment verification values after import restoration', () => {
     const env = parseEnvironment({

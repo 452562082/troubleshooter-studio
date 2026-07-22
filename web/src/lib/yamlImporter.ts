@@ -150,6 +150,18 @@ export function parseEnvironment(e: unknown): ParsedEnv {
   }
 }
 
+/**
+ * 新向导只接受明确分类的 frontend_entries，不再把旧 web_domain 猜成一个
+ * “Web 前端”。旧版向导已经合成过的同名入口也在恢复草稿时清掉，用户重新
+ * 选择 C 端、管理端、运营平台等真实业务类型。
+ */
+export function prepareEnvironmentForWizard(e: unknown): ParsedEnv {
+  const parsed = parseEnvironment(e)
+  parsed.web_domain = ''
+  parsed.frontend_entries = parsed.frontend_entries.filter(entry => entry.name.trim() !== 'Web 前端')
+  return parsed
+}
+
 /** parseRepoCore 提取 yaml repo 字段;_source / _localPath / env_branches 由调用方拼。 */
 export interface ParsedRepoCore {
   name: string
@@ -331,7 +343,7 @@ export async function applyParsedYAMLToWizardState(
 
   // environments
   if (Array.isArray(parsed.environments) && parsed.environments.length) {
-    ctx.environments.splice(0, ctx.environments.length, ...parsed.environments.map(parseEnvironment))
+    ctx.environments.splice(0, ctx.environments.length, ...parsed.environments.map(prepareEnvironmentForWizard))
   }
 
   // repos:同步反填 + 后台 fire-and-forget 拉真实分支

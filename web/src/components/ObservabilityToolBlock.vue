@@ -63,12 +63,11 @@ const emit = defineEmits<{
         <span style="font-size: 12px; color: #6b7280;">访问方式</span>
         <select
           :value="accessMode"
-          class="cc-input"
-          style="height: 28px; padding: 0 6px; font-size: 13px; min-width: 160px;"
+          class="cc-input access-mode-select"
           @change="(e: any) => emit('update:accessMode', e.target.value)"
         >
-          <option value="via_grafana">🔗 通过 Grafana 代理</option>
-          <option value="direct">🔌 直连(自己填 URL)</option>
+          <option value="via_grafana">通过 Grafana 代理</option>
+          <option value="direct">直连（填写 URL）</option>
         </select>
       </span>
       <URLProbeBadge :state="probeState" />
@@ -99,3 +98,9 @@ const emit = defineEmits<{
     <slot />
   </div>
 </template>
+
+<style scoped>
+.access-mode-select {
+  min-width: 190px;
+}
+</style>

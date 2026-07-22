@@ -82,6 +82,23 @@ describe('computeStepErrors', () => {
     expect(errs.has('env.1.id')).toBe(false)
   })
 
+  it('step 4 validates only the simplified frontend kind and URL fields', () => {
+    const errs = computeStepErrors(makeCtx({
+      step: 4,
+      environments: [{
+        id: 'test', api_domain: 'https://api.test',
+        frontend_entries: [
+          { name: '', url: 'https://admin.test' },
+          { name: '运营平台', url: 'https://ops.test/path?debug=1' },
+        ],
+      }],
+    }))
+    expect(errs.has('env.0.frontend.0.name')).toBe(true)
+    expect(errs.has('env.0.frontend.0.url')).toBe(false)
+    expect(errs.has('env.0.frontend.1.url')).toBe(true)
+    expect(labelForErrorKey('env.0.frontend.1.url', [])).toBe('环境 #1 前端入口 #2 URL')
+  })
+
   it('step 5 remote repo requires url(_cloneTarget 改可选,走全局默认 reposRoot)', () => {
     const errs = computeStepErrors(makeCtx({
       step: 5,

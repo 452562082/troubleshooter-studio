@@ -6,7 +6,7 @@ import router from './router'
 import { ackIncidentWorkflowReminder, listPendingIncidentWorkflowReminders } from './lib/bridge'
 import { toast } from './lib/toast'
 
-const runtime = vi.hoisted(() => ({ handlers: {} as Record<string, (payload: any) => void>, unlisten: vi.fn(), EventsOn: vi.fn((name: string, handler: (payload: any) => void) => { runtime.handlers[name] = handler; return runtime.unlisten }) }))
+const runtime = vi.hoisted(() => ({ ready: true, handlers: {} as Record<string, (payload: any) => void>, unlisten: vi.fn(), EventsOn: vi.fn((name: string, handler: (payload: any) => void) => { runtime.handlers[name] = handler; return runtime.unlisten }) }))
 const route = vi.hoisted(() => ({ path: '/', fullPath: '/' }))
 
 vi.mock('../wailsjs/runtime/runtime', () => ({ EventsOn: runtime.EventsOn }))
@@ -14,7 +14,7 @@ vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
   return { ...actual, useRoute: () => route }
 })
-vi.mock('./lib/logStore', () => ({ setupGlobalLogBridges: vi.fn(), useLogStore: () => ({ count: { value: 0 } }), pushLog: vi.fn() }))
+vi.mock('./lib/logStore', () => ({ hasWailsEventRuntime: () => runtime.ready, setupGlobalLogBridges: vi.fn(), useLogStore: () => ({ count: { value: 0 } }), pushLog: vi.fn() }))
 vi.mock('./lib/bridge', () => ({ ackIncidentWorkflowReminder: vi.fn(), listPendingIncidentWorkflowReminders: vi.fn().mockResolvedValue([]) }))
 vi.mock('./lib/toast', () => ({ toast: { info: vi.fn(), error: vi.fn(), success: vi.fn() } }))
 
@@ -34,6 +34,7 @@ function mountApp() {
 }
 
 afterEach(() => {
+  runtime.ready = true
   route.path = '/'; route.fullPath = '/'
   for (const key of Object.keys(runtime.handlers)) delete runtime.handlers[key]
   runtime.EventsOn.mockClear(); runtime.unlisten.mockClear()
@@ -79,6 +80,19 @@ describe('App navigation', () => {
 })
 
 describe('App workflow reminder receiver', () => {
+  it('waits for the Wails event runtime instead of throwing during mounted', async () => {
+    vi.useFakeTimers()
+    runtime.ready = false
+    const wrapper = mountApp()
+    expect(runtime.EventsOn).not.toHaveBeenCalled()
+
+    runtime.ready = true
+    await vi.advanceTimersByTimeAsync(100)
+    expect(runtime.EventsOn).toHaveBeenCalledWith('incident-workflow:reminder', expect.any(Function))
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
   it('acks a live reminder from the persistent root receiver', async () => {
     const wrapper = mountApp()
     await flush()

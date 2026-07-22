@@ -13,6 +13,7 @@ import { isEffectiveObsFieldHidden, resolveObsFieldValue } from './obsConnection
 export { VIA_GRAFANA_ELIGIBLE } from './yamlShared'
 import { VIA_GRAFANA_ELIGIBLE, placeholderName } from './yamlShared'
 import type { ConfigSourceInstance } from './configSourceInstances'
+import { inferFrontendDeviceProfile, resolveFrontendEntryID } from './frontendEntries'
 
 // ── 类型(跟 InitPage 现有 reactive 形状对齐) ────────────────────────
 
@@ -244,18 +245,21 @@ export function generateYAML(ctx: YAMLGenContext): string {
   for (const env of ctx.environments) {
     lines.push(`  - id: ${env.id || 'env'}`)
     const apiD = ctx.normalizeDomain(env.api_domain)
-    const webD = ctx.normalizeDomain(env.web_domain)
     if (apiD) lines.push(`    api_domain: ${yamlStr(apiD)}     # 后端接口(带 http/https 前缀更明确;不带视为 https)`)
-    if (webD) lines.push(`    web_domain: ${yamlStr(webD)}     # 前端入口(同上)`)
     const frontendEntries = Array.isArray(env.frontend_entries) ? env.frontend_entries : []
     if (frontendEntries.length > 0) {
       lines.push('    frontend_entries:')
-      for (const entry of frontendEntries) {
-        lines.push(`      - id: ${entry.id || 'frontend'}`)
-        lines.push(`        name: ${yamlStr(entry.name || entry.id || '前端入口')}`)
+      const usedEntryIDs = new Set<string>()
+      for (let entryIndex = 0; entryIndex < frontendEntries.length; entryIndex++) {
+        const entry = frontendEntries[entryIndex]
+        const entryID = resolveFrontendEntryID(entry.id, entry.name, usedEntryIDs)
+        const entryName = entry.name.trim() || `前端应用 ${entryIndex + 1}`
+        const deviceProfile = entry.device_profile.trim() || inferFrontendDeviceProfile(entryName)
+        lines.push(`      - id: ${entryID}`)
+        lines.push(`        name: ${yamlStr(entryName)}`)
         lines.push(`        url: ${yamlStr(entry.url.trim())}`)
         if (entry.repo.trim()) lines.push(`        repo: ${yamlStr(entry.repo.trim())}`)
-        if (entry.device_profile.trim()) lines.push(`        device_profile: ${entry.device_profile.trim()}`)
+        if (deviceProfile) lines.push(`        device_profile: ${deviceProfile}`)
         for (const [key, value] of [['aliases', entry.aliases], ['product_hints', entry.product_hints], ['module_hints', entry.module_hints], ['path_prefixes', entry.path_prefixes]] as const) {
           const values = value.split(',').map(item => item.trim()).filter(Boolean)
           if (values.length > 0) lines.push(`        ${key}: [${values.map(yamlStr).join(', ')}]`)

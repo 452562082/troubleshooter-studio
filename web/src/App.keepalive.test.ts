@@ -34,6 +34,7 @@ vi.mock('./lib/toast', () => ({
   toastError: vi.fn(),
 }))
 vi.mock('./lib/logStore', () => ({
+  hasWailsEventRuntime: () => true,
   setupGlobalLogBridges: vi.fn(),
   useLogStore: () => ({ count: { value: 0 } }),
   pushLog: vi.fn(),

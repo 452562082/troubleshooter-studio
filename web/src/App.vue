@@ -4,7 +4,7 @@ import { useRoute } from 'vue-router'
 import { EventsOn } from '../wailsjs/runtime/runtime'
 import ToastContainer from './components/ToastContainer.vue'
 import { ackIncidentWorkflowReminder, listPendingIncidentWorkflowReminders, type WorkflowReminder } from './lib/bridge'
-import { setupGlobalLogBridges, useLogStore, pushLog } from './lib/logStore'
+import { hasWailsEventRuntime, setupGlobalLogBridges, useLogStore, pushLog } from './lib/logStore'
 import { toast } from './lib/toast'
 // Vite URL import:assets/app-icon.svg 会被打进 bundle,<img src> 直接用。
 // 用 app-icon(方形,1024×1024 viewBox) 而不是 logo.svg(宽 780×220)当侧边栏品牌
@@ -17,6 +17,8 @@ const currentPath = computed(() => route.path)
 // 全局日志收集:install:log / analyze:log 等事件桥接进 logStore,所有页面都能往里塞,
 // LogsPage 统一展示。App 启动挂一次。
 let unlistenWorkflowReminders: (() => void) | undefined
+let workflowReminderInitTimer: ReturnType<typeof setTimeout> | undefined
+let appUnmounted = false
 const handledWorkflowReminders = new Set<string>()
 
 async function handleWorkflowReminder(reminder: WorkflowReminder) {
@@ -37,17 +39,44 @@ async function handleWorkflowReminder(reminder: WorkflowReminder) {
   }
 }
 
-onMounted(async () => {
+async function initializeWorkflowReminders(attempt = 0) {
+  if (appUnmounted || unlistenWorkflowReminders) return
+  // Wails 的 window.runtime 由宿主注入；WKWebView 冷启动时可能晚于 Vue mounted。
+  // 直接 EventsOn 会抛一个被 WebKit 脱敏成 "Script error" 的异常，并被 Vue 记为
+  // runtime-m。等待注入完成再订阅，浏览器预览则安静跳过。
+  if (!hasWailsEventRuntime()) {
+    if (attempt < 20) {
+      workflowReminderInitTimer = setTimeout(() => { void initializeWorkflowReminders(attempt + 1) }, 100)
+    }
+    return
+  }
+  // runtime 就绪后重试一次可能在冷启动阶段跳过/失败的全局日志订阅。
   setupGlobalLogBridges()
-  unlistenWorkflowReminders = EventsOn('incident-workflow:reminder', (reminder: WorkflowReminder) => { void handleWorkflowReminder(reminder) })
+  try {
+    unlistenWorkflowReminders = EventsOn('incident-workflow:reminder', (reminder: WorkflowReminder) => { void handleWorkflowReminder(reminder) })
+  } catch (error) {
+    pushLog('system', 'warn', `故障闭环提醒订阅失败: ${error instanceof Error ? error.message : String(error)}`)
+    if (attempt < 20) {
+      workflowReminderInitTimer = setTimeout(() => { void initializeWorkflowReminders(attempt + 1) }, 100)
+    }
+    return
+  }
   try {
     for (const reminder of await listPendingIncidentWorkflowReminders()) await handleWorkflowReminder(reminder)
   } catch (error) {
     pushLog('system', 'warn', `读取待确认故障闭环提醒失败: ${error instanceof Error ? error.message : String(error)}`)
   }
+}
+
+onMounted(() => {
+  setupGlobalLogBridges()
+  void initializeWorkflowReminders()
 })
 
 onUnmounted(() => {
+  appUnmounted = true
+  if (workflowReminderInitTimer) clearTimeout(workflowReminderInitTimer)
+  workflowReminderInitTimer = undefined
   unlistenWorkflowReminders?.()
   unlistenWorkflowReminders = undefined
 })

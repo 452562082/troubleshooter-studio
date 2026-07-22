@@ -36,6 +36,7 @@ import SystemBasicInfoStep from '../components/SystemBasicInfoStep.vue'
 import YamlPreviewStep from '../components/YamlPreviewStep.vue'
 import OneClickDeployStep from '../components/OneClickDeployStep.vue'
 import EnvListStep from '../components/EnvListStep.vue'
+import FrontendRepoBindings from '../components/FrontendRepoBindings.vue'
 import GlobalReposRootBlock from '../components/GlobalReposRootBlock.vue'
 import {
   generateYAML as libGenerateYAML,
@@ -44,7 +45,7 @@ import {
   type YAMLGenContext,
 } from '../lib/yamlGenerator'
 import { computeStepErrors as libComputeStepErrors, labelForErrorKey as libLabelForErrorKey, type ValidatorContext } from '../lib/yamlValidator'
-import { parseEnvironment, type ApplyImportContext } from '../lib/yamlImporter'
+import { prepareEnvironmentForWizard, type ApplyImportContext } from '../lib/yamlImporter'
 import { copyToClipboard } from '../lib/clipboard'
 import { useOpenClawDetect } from '../lib/useOpenClawDetect'
 import { useURLProbe } from '../lib/useURLProbe'
@@ -332,7 +333,7 @@ interface EnvItem {
 
 const environments = reactive<EnvItem[]>(
   Array.isArray(saved?.environments) && saved.environments.length
-    ? saved.environments.map(parseEnvironment)
+    ? saved.environments.map(prepareEnvironmentForWizard)
     : [
         { id: 'dev', api_domain: '', web_domain: '', frontend_entries: [], is_prod: false },
         { id: 'prod', api_domain: '', web_domain: '', frontend_entries: [], is_prod: true },
@@ -647,8 +648,16 @@ function onRepoNameInput(r: RepoItem) {
         cascadeCount++
       }
     }
+    for (const env of environments) {
+      for (const entry of env.frontend_entries) {
+        if ((entry.repo || '').trim() === oldName) {
+          entry.repo = newName
+          cascadeCount++
+        }
+      }
+    }
     if (cascadeCount > 0) {
-      toast.info(`${oldName} → ${newName}:已同步更新 ${cascadeCount} 个子模块的 parent_repo 引用`)
+      toast.info(`${oldName} → ${newName}:已同步更新 ${cascadeCount} 个仓库引用`)
     }
   }
   previousRepoNames.set(r, newName)
@@ -719,6 +728,11 @@ function removeRepo(idx: number) {
   if (childCount > 0) {
     toast.error(`先删除 ${target.name} 的 ${childCount} 个子模块行,才能删 umbrella`)
     return
+  }
+  for (const env of environments) {
+    for (const entry of env.frontend_entries) {
+      if ((entry.repo || '').trim() === target.name.trim()) entry.repo = ''
+    }
   }
   repos.splice(idx, 1)
 }
@@ -3182,7 +3196,12 @@ function computeStepErrors(): Set<string> {
     system, agent,
     enabledTargets, targetModels,
     anyTargetSelected: anyTargetSelected.value,
-    environments: environments.map(e => ({ id: e.id, api_domain: e.api_domain, is_prod: e.is_prod })),
+    environments: environments.map(e => ({
+      id: e.id,
+      api_domain: e.api_domain,
+      frontend_entries: e.frontend_entries.map(entry => ({ name: entry.name, url: entry.url })),
+      is_prod: e.is_prod,
+    })),
     repos: repos.map(r => ({
       name: r.name, url: r.url, stack: r.stack, service_names: r.service_names,
       _source: r._source, _localPath: r._localPath, _cloneTarget: r._cloneTarget,
@@ -3712,6 +3731,7 @@ provide(WizardStoreKey, {
         @add-service-name="(r, idx) => addServiceName(r, idx)"
       />
       <button class="btn" @click="addRepo">+ 添加仓库</button>
+      <FrontendRepoBindings :environments="environments" :repos="repos" />
       <CodeIntelligenceToggle v-model="codeIntelligence.enabled" />
       <ServiceTopologyPanel
         v-if="showServiceTopology"
@@ -4354,9 +4374,13 @@ input.path-readonly {
   font-size: 11px; font-weight: 600; color: #334155;
   display: flex; align-items: center; gap: 6px;
 }
-.target-card .target-field select,
+.target-card .target-field select {
+  padding: 0 40px 0 12px; border: 1px solid #cbd5e1; border-radius: 8px;
+  font-size: 12px;
+}
 .target-card .target-field input {
-  padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 4px;
+  min-height: 40px; padding: 0 12px;
+  border: 1px solid #cbd5e1; border-radius: 8px;
   font-size: 12px;
 }
 .target-card .target-field select:focus,
@@ -4582,6 +4606,12 @@ input.path-readonly {
   letter-spacing: 0;
 }
 .cc-input:focus { outline: none; border-color: #3b82f6; }
+select.cc-input {
+  height: 40px; line-height: 20px;
+  padding: 0 40px 0 12px;
+  border-radius: 8px;
+  font-size: 13px; font-family: inherit;
+}
 
 /* Step 3 域名连通性徽章 —— 跟在 label 后面,跟字段输入框水平对齐 */
 .url-probe-badge {
@@ -4785,15 +4815,16 @@ input.path-readonly {
   white-space: nowrap;
 }
 .cc-map-select {
-  flex: 1; padding: 6px 8px;
-  border: 1px solid #cbd5e1; border-radius: 6px;
-  font-size: 13px; font-family: monospace;
-  background: #fff; color: #1e293b;
+  flex: 1; height: 40px;
+  padding: 0 40px 0 12px;
+  border: 1px solid #cbd5e1; border-radius: 8px;
+  font-size: 13px; font-family: inherit;
+  background-color: #fff; color: #1e293b;
 }
 .cc-map-select:focus { outline: none; border-color: #3b82f6; }
-.cc-map-select.error { border-color: #dc2626; background: #fef2f2; }
+.cc-map-select.error { border-color: #dc2626; background-color: #fef2f2; }
 .cc-map-select.cc-map-select-none {
-  background: #f8fafc; color: #64748b; font-style: italic; border-color: #cbd5e1;
+  background-color: #f8fafc; color: #64748b; font-style: italic; border-color: #cbd5e1;
 }
 .cc-map-select-svc { flex: 1; }
 
@@ -4958,13 +4989,13 @@ input.path-readonly {
 }
 .cc-map-select-kuboard {
   width: 100%;
-  padding: 4px 8px;
+  padding: 0 40px 0 12px;
   font-size: 12px;
   border: 1px solid #cbd5e1;
-  border-radius: 4px;
-  background: #fff;
+  border-radius: 8px;
+  background-color: #fff;
 }
-.cc-map-select-kuboard:disabled { background: #f1f5f9; color: #94a3b8; cursor: not-allowed; }
+.cc-map-select-kuboard:disabled { background-color: #f1f5f9; color: #94a3b8; cursor: not-allowed; }
 .cc-map-group-tag {
   font-size: 10px; font-family: monospace;
   color: #0369a1; background: #e0f2fe;
@@ -5052,18 +5083,14 @@ input.path-readonly {
 }
 .stack-display.empty { color: #94a3b8; }
 
-/* 角色下拉:跟普通 input 同尺寸,但加上下拉箭头 */
+/* 角色下拉:箭头和交互状态由 design.css 的统一 select 规则提供。 */
 .role-select {
   width: 100%;
-  padding: 8px 12px; padding-right: 32px;
-  background: #fff;
+  padding: 9px 40px 9px 12px;
+  background-color: #fff;
   border: 1px solid #cbd5e1;
-  border-radius: 6px;
+  border-radius: 8px;
   font-size: 13px;
-  appearance: none;
-  background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 12 12"><path fill="%2364748b" d="M2 4l4 4 4-4z"/></svg>');
-  background-repeat: no-repeat;
-  background-position: right 10px center;
 }
 .role-select:focus { outline: none; border-color: #2563eb; }
 
@@ -5292,10 +5319,12 @@ input.path-readonly {
   display: flex; align-items: center; gap: 8px;
 }
 .branch-select, .branch-input {
-  flex: 1; padding: 6px 8px; border: 1px solid #cbd5e1;
-  border-radius: 6px; font-size: 13px; font-family: monospace;
-  background: #fff;
+  flex: 1; height: 40px; border: 1px solid #cbd5e1;
+  border-radius: 8px; font-size: 13px; font-family: monospace;
+  background-color: #fff;
 }
+.branch-select { padding: 0 40px 0 12px; }
+.branch-input { padding: 0 12px; }
 .branch-select:focus, .branch-input:focus {
   outline: none; border-color: #3b82f6;
 }

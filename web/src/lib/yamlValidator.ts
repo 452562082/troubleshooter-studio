@@ -23,6 +23,7 @@ import { sourceStateKey, type ConfigSourceInstance } from './configSourceInstanc
 export interface ValidatorEnvironment {
   id: string
   api_domain: string
+  frontend_entries?: Array<{ name: string; url: string }>
   is_prod?: boolean
 }
 
@@ -145,6 +146,22 @@ export function computeStepErrors(ctx: ValidatorContext): Set<string> {
     ctx.environments.forEach((e, i) => {
       if (!e.id.trim()) errs.add(`env.${i}.id`)
       if (!e.api_domain.trim()) errs.add(`env.${i}.api_domain`)
+      for (const [entryIndex, entry] of (e.frontend_entries || []).entries()) {
+        if (!entry.name.trim()) errs.add(`env.${i}.frontend.${entryIndex}.name`)
+        const rawURL = entry.url.trim()
+        if (!rawURL) {
+          errs.add(`env.${i}.frontend.${entryIndex}.url`)
+          continue
+        }
+        try {
+          const url = new URL(rawURL)
+          if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+            errs.add(`env.${i}.frontend.${entryIndex}.url`)
+          }
+        } catch {
+          errs.add(`env.${i}.frontend.${entryIndex}.url`)
+        }
+      }
     })
     return errs
   }
@@ -398,7 +415,10 @@ const STATIC_LABELS: Record<string, string> = {
 export function labelForErrorKey(k: string, repos: ValidatorRepo[]): string {
   if (STATIC_LABELS[k]) return STATIC_LABELS[k]
   if (k.startsWith('env.')) {
-    const [, i, field] = k.split('.')
+    const [, i, field, entryIndex, entryField] = k.split('.')
+    if (field === 'frontend') {
+      return `环境 #${Number(i) + 1} 前端入口 #${Number(entryIndex) + 1} ${entryField === 'name' ? '端类型' : 'URL'}`
+    }
     return `环境 #${Number(i) + 1} ${field === 'id' ? 'ID' : 'API 域名'}`
   }
   if (k.startsWith('repo.')) {

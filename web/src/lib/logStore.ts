@@ -159,21 +159,34 @@ export function useLogStore() {
 /** 挂全局 Wails event 桥接 —— App.vue 启动时调一次。
  *  install:log / analyze:log 是 Go 侧每行 stdout 发一次的,这里复制一份进日志库;
  *  原页面的 EventsOn 继续存在(它们还要做本地 UI 滚动 / 状态切换)。 */
-export function setupGlobalLogBridges(): void {
-	if (bridgesInstalled) return
+export function setupGlobalLogBridges(): boolean {
+	if (bridgesInstalled) return true
 	// Vite/browser preview 没有 Wails 注入的 window.runtime。wailsjs/runtime 里的
 	// EventsOn 会直接访问 window.runtime.EventsOnMultiple,不 guard 会导致整页白屏。
-	if (!hasWailsEventRuntime()) return
-	bridgesInstalled = true
-	EventsOn('install:log', (line: string) => {
-		pushLog('install', detectLevel(line), line)
-  })
-  EventsOn('analyze:log', (line: string) => {
-    pushLog('analyze', detectLevel(line), line)
-	})
+	if (!hasWailsEventRuntime()) return false
+	const unlisteners: Array<() => void> = []
+	try {
+		unlisteners.push(EventsOn('install:log', (line: string) => {
+			pushLog('install', detectLevel(line), line)
+		}))
+		unlisteners.push(EventsOn('analyze:log', (line: string) => {
+			pushLog('analyze', detectLevel(line), line)
+		}))
+		bridgesInstalled = true
+		return true
+	} catch (error) {
+		// runtime 已出现但事件总线可能还未完全就绪。回滚半注册监听并允许稍后重试；
+		// 绝不能让辅助日志订阅打断 App mounted。
+		for (const unlisten of unlisteners) {
+			try { unlisten() } catch { /* best effort rollback */ }
+		}
+		bridgesInstalled = false
+		pushLog('system', 'warn', `全局日志订阅暂不可用: ${error instanceof Error ? error.message : String(error)}`)
+		return false
+	}
 }
 
-function hasWailsEventRuntime(): boolean {
+export function hasWailsEventRuntime(): boolean {
 	if (typeof window === 'undefined') return false
 	const rt = (window as any).runtime
 	return !!rt && typeof rt.EventsOnMultiple === 'function'

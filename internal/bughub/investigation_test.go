@@ -434,6 +434,45 @@ func TestBuildCodexExecCommandUsesSafeWorkspace(t *testing.T) {
 	}
 }
 
+func TestBuildCodexExecCommandAllowsOnlySSHHostVerificationFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.Mkdir(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	knownHosts := filepath.Join(sshDir, "known_hosts")
+	knownHosts2 := filepath.Join(sshDir, "known_hosts2")
+	sshConfig := filepath.Join(sshDir, "config")
+	privateKey := filepath.Join(sshDir, "id_ed25519")
+	for path, content := range map[string]string{
+		knownHosts:  "git.example.test ssh-ed25519 AAAA\n",
+		knownHosts2: "legacy.example.test ssh-ed25519 AAAA\n",
+		sshConfig:   "Host *\n  IdentitiesOnly yes\n",
+		privateKey:  "PRIVATE KEY MUST NOT BE EXPOSED\n",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	workspace := t.TempDir()
+	cmd, err := BuildCodexExecCommand("codex", workspace, "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(cmd.Args, "\n")
+	for _, path := range []string{knownHosts, knownHosts2} {
+		if !strings.Contains(joined, strconv.Quote(path)+`="read"`) {
+			t.Fatalf("Codex permission profile omitted SSH host verification file %s:\n%s", path, joined)
+		}
+	}
+	for _, path := range []string{sshDir, sshConfig, privateKey} {
+		if strings.Contains(joined, strconv.Quote(path)+`="read"`) {
+			t.Fatalf("Codex permission profile exposed SSH credential path %s:\n%s", path, joined)
+		}
+	}
+}
+
 func TestBuildCodexBotExecCommandLoadsManagedAgentRuntimeHome(t *testing.T) {
 	codexHome := t.TempDir()
 	agentID := "base-troubleshooter"

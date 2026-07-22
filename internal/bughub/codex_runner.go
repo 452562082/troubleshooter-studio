@@ -725,6 +725,7 @@ func processEnvValue(values []string, key string) string {
 
 func codexFilesystemPermissionConfig(workspace, prompt string, imagePaths []string) (string, error) {
 	roots := map[string]string{filepath.Clean(workspace): "write"}
+	addCodexSSHHostVerificationFiles(roots)
 	staging := codexStagingPathFromPrompt(prompt)
 	if staging != "" {
 		if !filepath.IsAbs(staging) {
@@ -797,6 +798,26 @@ func codexFilesystemPermissionConfig(workspace, prompt string, imagePaths []stri
 	}
 	config.WriteByte('}')
 	return config.String(), nil
+}
+
+func addCodexSSHHostVerificationFiles(roots map[string]string) {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return
+	}
+	sshDir := filepath.Join(filepath.Clean(home), ".ssh")
+	for _, name := range []string{"known_hosts", "known_hosts2"} {
+		path := filepath.Join(sshDir, name)
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if roots[path] != "write" {
+			// Host verification data is public server identity metadata. Grant the
+			// exact regular file only; never expose ~/.ssh, config, or private keys.
+			roots[path] = "read"
+		}
+	}
 }
 
 func codexStagingPathFromPrompt(prompt string) string {

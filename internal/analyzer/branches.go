@@ -40,7 +40,7 @@ func GetRemoteURL(repoPath string) string {
 // ListBranches 列出 repoPath 下 git 仓库所有本地 + 远端分支(去重、去 HEAD 别名、
 // 按字母序)。用于 InitPage Step 4 的 env_branches 下拉,让用户不用手敲分支名。
 //
-// 实现:调 `git for-each-ref --format=%(refname:short) refs/heads refs/remotes`,
+// 实现:调 `git for-each-ref --format=%(refname) refs/heads refs/remotes`,
 // 比 `git branch -a` 解析起来干净(branch -a 带缩进 / HEAD 箭头 / current 星号)。
 //
 // 错误处理:repoPath 不存在 / 不是 git 仓库 / git CLI 没装 / exec 失败
@@ -57,20 +57,26 @@ func ListBranches(repoPath string) []string {
 	defer cancel()
 	// 先列 remote 名字,用于过滤 "refs/remotes/<remote>" 本身这种奇怪 ref
 	// (某些 shallow clone + submodule 操作组合会留下裸 refs/remotes/origin)
-	remoteNames := map[string]bool{}
+	var remoteNames []string
 	remoteCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "remote")
 	var remoteBuf bytes.Buffer
 	remoteCmd.Stdout = &remoteBuf
 	if err := remoteCmd.Run(); err == nil {
 		for _, raw := range strings.Split(remoteBuf.String(), "\n") {
 			if n := strings.TrimSpace(raw); n != "" {
-				remoteNames[n] = true
+				remoteNames = append(remoteNames, n)
 			}
 		}
 	}
+	sort.Slice(remoteNames, func(i, j int) bool {
+		if len(remoteNames[i]) != len(remoteNames[j]) {
+			return len(remoteNames[i]) > len(remoteNames[j])
+		}
+		return remoteNames[i] < remoteNames[j]
+	})
 
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "for-each-ref",
-		"--format=%(refname:short)",
+		"--format=%(refname)",
 		"refs/heads", "refs/remotes")
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
@@ -80,35 +86,34 @@ func ListBranches(repoPath string) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, raw := range strings.Split(buf.String(), "\n") {
-		name := strings.TrimSpace(raw)
-		if name == "" {
+		ref := strings.TrimSpace(raw)
+		if ref == "" {
 			continue
 		}
-		// 过滤 origin/HEAD 这类 alias + 裸 "origin"(某些 shallow+submodule
-		// 操作后会出现的空 remote-root ref,不是真实分支)
-		if strings.HasSuffix(name, "/HEAD") || name == "HEAD" {
+		name, ok := normalizeBranchRef(ref, remoteNames)
+		if !ok || seen[name] {
 			continue
 		}
-		if remoteNames[name] {
-			continue // 纯 remote 名(没 / 分隔),不是分支
-		}
-		// 去 remote 前缀再去重:"main" 和 "origin/main" 只保留一个;优先保留短名。
-		short := name
-		if idx := strings.Index(name, "/"); idx > 0 {
-			// 判断是不是 remote 前缀(origin/xxx 这种) vs 带斜杠的分支名(feature/foo)
-			// 简单判:如果前缀跟本地分支同名,认为是 remote 别名。这里放宽:统一把
-			// 形如 <anything>/<rest> 的都试着剥一次 remote 前缀用 rest 去重。
-			cand := name[idx+1:]
-			if cand != "" {
-				short = cand
-			}
-		}
-		if seen[short] {
-			continue
-		}
-		seen[short] = true
-		out = append(out, short)
+		seen[name] = true
+		out = append(out, name)
 	}
 	sort.Strings(out)
 	return out
+}
+
+func normalizeBranchRef(ref string, remoteNames []string) (string, bool) {
+	if name, ok := strings.CutPrefix(ref, "refs/heads/"); ok {
+		return name, name != ""
+	}
+	remoteRef, ok := strings.CutPrefix(ref, "refs/remotes/")
+	if !ok {
+		return "", false
+	}
+	for _, remote := range remoteNames {
+		name, matched := strings.CutPrefix(remoteRef, remote+"/")
+		if matched && name != "" && name != "HEAD" {
+			return name, true
+		}
+	}
+	return "", false
 }

@@ -928,7 +928,7 @@ func TestListIncidentFixBranchesUsesOnlyApprovedRemediationRepositories(t *testi
 	t.Setenv("HOME", root)
 	backendRepo := filepath.Join(root, "base-backend")
 	frontendRepo := filepath.Join(root, "base-frontend")
-	initGitRepoWithBranch(t, backendRepo, "base-test")
+	initGitRepoWithBranch(t, backendRepo, "feature/xiaolong_v1.4")
 	initGitRepoWithBranch(t, frontendRepo, "frontend-test")
 	if err := userconfig.SetRepoPathsForSystem("base", map[string]string{"base-backend": backendRepo, "base-frontend": frontendRepo}); err != nil {
 		t.Fatal(err)
@@ -971,7 +971,7 @@ func TestListIncidentFixBranchesUsesOnlyApprovedRemediationRepositories(t *testi
 	if _, exposed := branches["base-frontend"]; exposed {
 		t.Fatalf("frontend call-chain repository leaked into fix options: %v", branches)
 	}
-	if !reflect.DeepEqual(branches["base-backend"], []string{"base-test", "main"}) {
+	if !reflect.DeepEqual(branches["base-backend"], []string{"feature/xiaolong_v1.4", "main"}) {
 		t.Fatalf("branches=%v, want base-backend branches only", branches)
 	}
 }

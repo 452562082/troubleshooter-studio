@@ -260,6 +260,129 @@ func TestRegressionRecoveryAppliesStillReproducesIntentWithoutRerunningValidatio
 	}
 }
 
+func TestRegressionRecoveryRepairsLegacyIntentMissingDeterministicBinding(t *testing.T) {
+	store, incident, _, _ := prepareRegressionCase(t, 1)
+	first := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil)
+	attempt, err := first.StartRegression(context.Background(), incident.ID, incident.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, _ := store.GetCase(context.Background(), incident.ID)
+	legacyOutput := mustJSON(ValidationResult{
+		VerificationStatus: "insufficient_info",
+		Environment:        "test",
+		ObservedBehavior:   "页面已不再展示重复名称",
+		ExpectedBehavior:   "每个用户名称只展示一次",
+		Evidence:           []ArtifactReference{{Kind: "screenshot", Path: "browser/final.png", Environment: "test", RedactionStatus: RedactionStatusNotRequired}},
+		Gaps: []string{
+			"回归验证未提供原始场景哈希，无法按要求原样返回。",
+			"回归验证未提供运行版本，无法确认本次证据对应的待验证修复版本。",
+		},
+	})
+	command := CompleteAttemptCommand{
+		CaseID: current.ID, AttemptID: attempt.ID, ExpectedVersion: current.Version,
+		IdempotencyKey: "regression-legacy-missing-binding", ActorID: "validator",
+		Outcome: PhaseOutcomeNeedsEvidence, OutputJSON: legacyOutput,
+	}
+	if err := store.SaveCompletionIntentIfRunning(context.Background(), command); err != nil {
+		t.Fatal(err)
+	}
+
+	recoveryRunner := &recordingPhaseRunner{}
+	restarted := NewCaseOrchestrator(store, recoveryRunner, nil, nil)
+	restarted.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(_ context.Context, incident IncidentCase, attempt PhaseAttempt) (Bug, BotRef, error) {
+		return Bug{ID: incident.BugID}, BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget, Path: "/workspace"}, nil
+	}))
+	if err := restarted.RecoverInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := store.GetCase(context.Background(), incident.ID)
+	if err != nil || recovered.Status != CaseRegressionValidating || recoveryRunner.startCount() != 1 || recovered.CurrentAttemptID == attempt.ID {
+		t.Fatalf("case=%+v starts=%d err=%v", recovered, recoveryRunner.startCount(), err)
+	}
+	finished, err := store.GetAttempt(context.Background(), attempt.ID)
+	if err != nil || finished.Status != AttemptStatusFailed || finished.FinishedAt == nil {
+		t.Fatalf("attempt=%+v err=%v", finished, err)
+	}
+	var input RegressionValidationInput
+	var output ValidationResult
+	if json.Unmarshal(attempt.InputJSON, &input) != nil || json.Unmarshal(finished.OutputJSON, &output) != nil || output.ScenarioHash != input.OriginalScenarioHash || output.Environment != input.TargetEnvironment {
+		t.Fatalf("input=%+v output=%+v", input, output)
+	}
+	retry, err := store.GetAttempt(context.Background(), recovered.CurrentAttemptID)
+	if err != nil || retry.ParentAttemptID != attempt.ID || retry.Phase != PhaseRegression || !reflect.DeepEqual(retry.InputJSON, attempt.InputJSON) {
+		t.Fatalf("retry=%+v err=%v", retry, err)
+	}
+	replayed, err := restarted.CompleteAttempt(context.Background(), command)
+	if err != nil || replayed != recovered {
+		t.Fatalf("replayed=%+v recovered=%+v err=%v", replayed, recovered, err)
+	}
+}
+
+func TestRecoveryRetriesFinalizedRegressionWhoseOnlyGapsAreHostMetadata(t *testing.T) {
+	store, incident, _, _ := prepareRegressionCase(t, 1)
+	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil)
+	attempt, err := o.StartRegression(context.Background(), incident.ID, incident.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input RegressionValidationInput
+	if err := json.Unmarshal(attempt.InputJSON, &input); err != nil {
+		t.Fatal(err)
+	}
+	output := mustJSON(ValidationResult{
+		VerificationStatus: "insufficient_info", Environment: input.TargetEnvironment,
+		ObservedBehavior: "页面已不再展示重复名称", ExpectedBehavior: input.ExpectedBehavior,
+		ScenarioHash: input.OriginalScenarioHash,
+		Evidence:     []ArtifactReference{{Kind: "screenshot", Path: "browser/final.png", Environment: input.TargetEnvironment, RedactionStatus: RedactionStatusNotRequired}},
+		Gaps:         []string{"回归验证未提供运行版本，无法确认本次证据对应的待验证修复版本。"},
+	})
+	current, _ := store.GetCase(context.Background(), incident.ID)
+	finishedAt := time.Now().UTC()
+	attempt.Status = AttemptStatusFailed
+	attempt.OutputJSON = output
+	attempt.FinishedAt = &finishedAt
+	mutation, err := store.ApplyCaseMutation(context.Background(), CaseMutation{
+		CaseID: current.ID, ExpectedVersion: current.Version, IdempotencyKey: "legacy-finalized-host-gap",
+		RequestJSON: output, FinishAttempts: []PhaseAttempt{attempt},
+		Steps: []CaseMutationStep{{To: CaseWaitingEvidence, Event: TransitionEvent{ID: "legacy-finalized-host-gap-event", EventType: "evidence_required", ActorType: "agent", ActorID: "validator", PayloadJSON: output}}},
+	})
+	if err != nil || mutation.Case.Status != CaseWaitingEvidence {
+		t.Fatalf("mutation=%+v err=%v", mutation, err)
+	}
+	runner := &recordingPhaseRunner{}
+	restarted := NewCaseOrchestrator(store, runner, nil, nil)
+	restarted.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(_ context.Context, incident IncidentCase, attempt PhaseAttempt) (Bug, BotRef, error) {
+		return Bug{ID: incident.BugID}, BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget, Path: "/workspace"}, nil
+	}))
+	if err := restarted.RecoverInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := store.GetCase(context.Background(), incident.ID)
+	if err != nil || recovered.Status != CaseRegressionValidating || recovered.CurrentAttemptID == attempt.ID || runner.startCount() != 1 {
+		t.Fatalf("case=%+v starts=%d err=%v", recovered, runner.startCount(), err)
+	}
+	retry, err := store.GetAttempt(context.Background(), recovered.CurrentAttemptID)
+	if err != nil || retry.ParentAttemptID != attempt.ID || !reflect.DeepEqual(retry.InputJSON, attempt.InputJSON) {
+		t.Fatalf("retry=%+v err=%v", retry, err)
+	}
+}
+
+func TestRegressionBindingDoesNotOverwriteConflictingModelIdentity(t *testing.T) {
+	attempt := PhaseAttempt{Phase: PhaseRegression, InputJSON: mustJSON(RegressionValidationInput{
+		OriginalScenarioHash: "expected-scenario", TargetEnvironment: "test",
+	})}
+	for _, result := range []ValidationResult{
+		{Environment: "prod", ScenarioHash: "expected-scenario"},
+		{Environment: "test", ScenarioHash: "different-scenario"},
+	} {
+		candidate := result
+		if err := bindRegressionValidationResult(attempt, &candidate); !errors.Is(err, ErrRegressionBinding) {
+			t.Fatalf("conflicting identity was accepted: result=%+v err=%v", result, err)
+		}
+	}
+}
+
 func TestRegressionStillReproducesCompletionExactReplaySurvivesNextCycle(t *testing.T) {
 	store, incident, _, _ := prepareRegressionCase(t, 1)
 	runner := &recordingPhaseRunner{}

@@ -193,7 +193,7 @@ func codeGraphSelfTestConfig(repoNames ...string) *config.SystemConfig {
 		CodeIntelligence: config.CodeIntelligence{Enabled: true, Provider: config.CodeIntelligenceProviderCodeGraph},
 	}
 	for _, name := range repoNames {
-		cfg.Repos = append(cfg.Repos, config.Repo{Name: name, Analysis: config.RepoAnalysis{Enabled: true}})
+		cfg.Repos = append(cfg.Repos, config.Repo{Name: name, Analysis: config.RepoAnalysis{Enabled: boolPointer(true)}})
 	}
 	return cfg
 }

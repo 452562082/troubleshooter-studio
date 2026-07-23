@@ -660,6 +660,14 @@ func TestBuildCodexExecCommandUsesHostRepositoryAllowlist(t *testing.T) {
 		t.Fatalf("Codex profile granted a repository parent directory:\n%s", joined)
 	}
 	processEnv := strings.Join(cmd.Env, "\n")
+	goEnvCommand := exec.Command("go", "env", "GOROOT")
+	goEnvCommand.Dir = workspace
+	goRootOutput, err := goEnvCommand.Output()
+	if err != nil {
+		t.Fatalf("resolve test GOROOT: %v", err)
+	}
+	goRoot := filepath.Clean(strings.TrimSpace(string(goRootOutput)))
+	goSandboxRoot := filepath.Join(staging, ".tshoot-go")
 	for _, want := range []string{
 		"GIT_CONFIG_GLOBAL=" + os.DevNull,
 		"GIT_CONFIG_NOSYSTEM=1",
@@ -667,9 +675,34 @@ func TestBuildCodexExecCommandUsesHostRepositoryAllowlist(t *testing.T) {
 		"TMPDIR=" + staging,
 		"TMP=" + staging,
 		"TEMP=" + staging,
+		"GOROOT=" + goRoot,
+		"GOCACHE=" + filepath.Join(goSandboxRoot, "build-cache"),
+		"GOPATH=" + filepath.Join(goSandboxRoot, "path"),
+		"GOMODCACHE=" + filepath.Join(goSandboxRoot, "path", "pkg", "mod"),
+		"GOTELEMETRY=off",
+		"GOTELEMETRYDIR=" + filepath.Join(goSandboxRoot, "telemetry"),
+		"GOENV=off",
+		"GOTOOLCHAIN=auto",
+		"GOFLAGS=-modcacherw",
 	} {
 		if !strings.Contains(processEnv, want) {
-			t.Fatalf("Codex process environment missing %q:\n%s", want, processEnv)
+			t.Fatalf("Codex process environment missing %q", want)
+		}
+	}
+	if !strings.Contains(joined, strconv.Quote(goRoot)+`="read"`) {
+		t.Fatalf("Codex permission profile omitted the selected Go SDK %q:\n%s", goRoot, joined)
+	}
+	if got := strings.Split(processEnvValue(cmd.Env, "PATH"), string(os.PathListSeparator))[0]; got != filepath.Join(goRoot, "bin") {
+		t.Fatalf("PATH first entry = %q, want Go SDK bin", got)
+	}
+	for _, directory := range []string{
+		filepath.Join(goSandboxRoot, "build-cache"),
+		filepath.Join(goSandboxRoot, "path", "pkg", "mod"),
+		filepath.Join(goSandboxRoot, "telemetry"),
+	} {
+		info, statErr := os.Stat(directory)
+		if statErr != nil || !info.IsDir() {
+			t.Fatalf("isolated Go directory %q was not prepared: %v", directory, statErr)
 		}
 	}
 }

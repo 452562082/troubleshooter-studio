@@ -90,7 +90,7 @@ repos:
       dev: develop
       prod: main
     # config_source: legacy-nacos    # [legacy optional] 仓库级回退；新配置使用 resource_catalog
-    analysis:                        # [optional] 代码分析控制
+    analysis:                        # [optional] 代码分析控制；省略时默认启用，显式 false 才排除该仓库
       enabled: true
       shallow_depth: 50
       include_paths: []              # 留空=默认扫全部；填则仅扫这些路径

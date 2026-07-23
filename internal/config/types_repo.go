@@ -1,9 +1,17 @@
 package config
 
 type RepoAnalysis struct {
-	Enabled      bool     `yaml:"enabled"`
+	// Enabled is tri-state for backward compatibility: omitted repositories were
+	// historically generated without an analysis block and must remain enabled
+	// when the system explicitly opts in to code intelligence. Only an explicit
+	// false excludes a repository.
+	Enabled      *bool    `yaml:"enabled,omitempty"`
 	ShallowDepth int      `yaml:"shallow_depth"`
 	IncludePaths []string `yaml:"include_paths"`
+}
+
+func (a RepoAnalysis) IsEnabled() bool {
+	return a.Enabled == nil || *a.Enabled
 }
 
 // RepoRole 仓库在系统里担的角色,给 incident-investigator 决定"沿依赖追"的方向 + 范围。

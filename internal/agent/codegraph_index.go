@@ -118,7 +118,7 @@ func BuildCodeGraphRepoTargets(cfg *config.SystemConfig, repoPaths map[string]st
 	targets := make([]CodeGraphRepoTarget, 0, len(cfg.Repos))
 	seenPaths := make(map[string]struct{}, len(cfg.Repos))
 	for _, repo := range cfg.Repos {
-		if !repo.Analysis.Enabled {
+		if !repo.Analysis.IsEnabled() {
 			continue
 		}
 

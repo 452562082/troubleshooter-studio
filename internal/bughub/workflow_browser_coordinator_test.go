@@ -424,6 +424,89 @@ func TestBrowserCoordinatorPlansExecutesAndEvaluatesInOneAttempt(t *testing.T) {
 	}
 }
 
+func TestBrowserCoordinatorRegressionEvaluatorUsesDurableBinding(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Attempt.Phase = PhaseRegression
+	request.Attempt.Mode = AttemptRegression
+	request.Attempt.InputJSON = mustJSON(RegressionValidationInput{
+		OriginalValidationAttemptID: "validation-original",
+		OriginalReproduction:        `{"target_environment":"test"}`,
+		ExpectedBehavior:            "每个用户名称只展示一次",
+		OriginalObservedBehavior:    "同一用户名称展示两次",
+		OriginalScenarioHash:        "original-scenario-sha256",
+		CycleNumber:                 1,
+		ExpectedFixCommits:          map[string]string{"base-backend": "merge-commit"},
+		DeploymentObservationID:     "deployment-observation",
+		DeploymentReservationID:     "deployment-reservation",
+		TargetEnvironment:           "test",
+	})
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: validBrowserPlanYAML()},
+		{FinalYAML: "verification_status: insufficient_info\nenvironment: \"\"\nobserved_behavior: 用户名称只展示一次\nexpected_behavior: 每个用户名称只展示一次\nscenario_hash: \"\"\nevidence: []\ngaps:\n  - 回归验证未提供原始场景哈希，无法按要求原样返回。\n  - 回归验证未提供运行版本，无法确认本次证据对应的待验证修复版本。\n"},
+		{FinalYAML: "verification_status: fixed_verified\nenvironment: \"\"\nobserved_behavior: 用户名称只展示一次\nexpected_behavior: 每个用户名称只展示一次\nscenario_hash: \"\"\nevidence: []\ngaps: []\n"},
+	}}
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: &fakeBrowserVerifier{Results: []BrowserVerificationResult{completedBrowserResult("browser/final.png")}}}).Execute(context.Background(), request)
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(executor.Prompts) != 3 {
+		t.Fatalf("prompts=%d", len(executor.Prompts))
+	}
+	evaluatorPrompt := executor.Prompts[1]
+	for _, required := range []string{
+		`"scenario_hash":"original-scenario-sha256"`,
+		`"target_environment":"test"`,
+		`"observed_deployment_version":""`,
+		"An empty observed_deployment_version is a valid host fact",
+	} {
+		if !strings.Contains(evaluatorPrompt, required) {
+			t.Fatalf("regression evaluator prompt missing %q:\n%s", required, evaluatorPrompt)
+		}
+	}
+	if !strings.Contains(executor.Prompts[2], "system-owned regression metadata") || !strings.Contains(executor.Prompts[2], "Do not ask the user") {
+		t.Fatalf("regression evaluator retry did not correct metadata ownership:\n%s", executor.Prompts[2])
+	}
+	var validation ValidationResult
+	if err := json.Unmarshal([]byte(result.FinalYAML), &validation); err != nil {
+		t.Fatal(err)
+	}
+	if validation.Environment != "test" || validation.ScenarioHash != "original-scenario-sha256" {
+		t.Fatalf("host did not restore durable regression binding: %+v", validation)
+	}
+	if validation.VerificationStatus != "fixed_verified" || len(validation.Gaps) != 0 {
+		t.Fatalf("host metadata gap was still exposed to the user: %+v", validation)
+	}
+}
+
+func TestBrowserCoordinatorRegressionPreservesUserOwnedEvidenceGap(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Attempt.Phase = PhaseRegression
+	request.Attempt.Mode = AttemptRegression
+	request.Attempt.InputJSON = mustJSON(RegressionValidationInput{
+		OriginalValidationAttemptID: "validation-original", OriginalReproduction: `{"target_environment":"test"}`,
+		ExpectedBehavior: "每个用户名称只展示一次", OriginalObservedBehavior: "同一用户名称展示两次",
+		OriginalScenarioHash: "original-scenario-sha256", CycleNumber: 1,
+		ExpectedFixCommits:      map[string]string{"base-backend": "merge-commit"},
+		DeploymentObservationID: "deployment-observation", DeploymentReservationID: "deployment-reservation",
+		TargetEnvironment: "test",
+	})
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: validBrowserPlanYAML()},
+		{FinalYAML: "verification_status: insufficient_info\nenvironment: test\nobserved_behavior: 已打开页面但账号无权查看结果\nexpected_behavior: 每个用户名称只展示一次\nscenario_hash: original-scenario-sha256\nevidence: []\ngaps:\n  - 需要用户提供有权查看搜索结果的测试账号。\n"},
+	}}
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: &fakeBrowserVerifier{Results: []BrowserVerificationResult{completedBrowserResult("browser/final.png")}}}).Execute(context.Background(), request)
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if len(executor.Prompts) != 2 {
+		t.Fatalf("user-owned gap unexpectedly retried: prompts=%d", len(executor.Prompts))
+	}
+	var validation ValidationResult
+	if err := json.Unmarshal([]byte(result.FinalYAML), &validation); err != nil || validation.VerificationStatus != "insufficient_info" || len(validation.Gaps) != 1 {
+		t.Fatalf("validation=%+v err=%v", validation, err)
+	}
+}
+
 func TestBrowserCoordinatorAttachesOriginalBugScreenshotToEvaluator(t *testing.T) {
 	request := browserCoordinatorRequest(t)
 	content := append([]byte("\x89PNG\r\n\x1a\n"), []byte("original-bug-evidence")...)

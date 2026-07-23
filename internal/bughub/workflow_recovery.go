@@ -110,12 +110,58 @@ func (o *CaseOrchestrator) RecoverInterrupted(ctx context.Context) error {
 			continue
 		}
 		if attempt.Status == AttemptStatusSucceeded || attempt.Status == AttemptStatusFailed || attempt.Status == AttemptStatusCancelled || attempt.Status == AttemptStatusInterrupted {
+			if repaired, repairErr := o.recoverFinalizedRegressionHostMetadataGap(ctx, incident, attempt); repairErr != nil {
+				recoveredErr = errors.Join(recoveredErr, repairErr)
+				continue
+			} else if repaired {
+				processedCases[incident.ID] = struct{}{}
+				continue
+			}
 			if reconcileErr := o.reconcileTerminalCurrent(ctx, incident, attempt); reconcileErr != nil {
 				recoveredErr = errors.Join(recoveredErr, reconcileErr)
 			}
 		}
 	}
 	return recoveredErr
+}
+
+func (o *CaseOrchestrator) recoverFinalizedRegressionHostMetadataGap(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) (bool, error) {
+	if incident.Status != CaseWaitingEvidence || incident.CurrentAttemptID != attempt.ID || attempt.Status != AttemptStatusFailed || !regressionCompletionOnlyNeedsHostMetadata(attempt, attempt.OutputJSON) {
+		return false, nil
+	}
+	retryAvailable, err := o.regressionHostMetadataRetryAvailable(ctx, attempt)
+	if err != nil || !retryAvailable {
+		return false, err
+	}
+	bug, bot, err := o.resolveRecoveryContext(ctx, incident, attempt)
+	if err != nil {
+		return false, fmt.Errorf("resolve regression metadata retry context: %w", err)
+	}
+	key := "recovery:" + attempt.ID + ":regression-host-metadata-retry"
+	retry := newAttempt(incident, PhaseRegression, AttemptRegression, key, bot, attempt.InputJSON, attempt.ID)
+	payload := mustJSON(map[string]string{"attempt_id": attempt.ID, "retry_attempt_id": retry.ID, "reason": "regression_host_metadata_gap"})
+	update := CaseSnapshotUpdate{CurrentAttemptID: workflowStringPtr(retry.ID), SelectedBotKey: workflowStringPtr(bot.Key)}
+	mutation, err := o.store.ApplyCaseMutation(ctx, CaseMutation{
+		CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key,
+		RequestJSON: payload, CreateAttempts: []PhaseAttempt{retry}, Snapshot: update,
+		Steps: []CaseMutationStep{{To: CaseRegressionValidating, Event: TransitionEvent{ID: stableID("event", key), EventType: "regression_host_metadata_retry_started", ActorType: "recovery", ActorID: "recovery", PayloadJSON: payload}}},
+	})
+	if err != nil {
+		return false, err
+	}
+	if mutation.Replay {
+		return true, nil
+	}
+	if o.runner == nil {
+		_, scheduleErr := o.phaseScheduleFailure(ctx, mutation.Case, retry, key, errors.New("phase runner is unavailable"))
+		return true, scheduleErr
+	}
+	if err := o.startPhase(retry, bug, bot); err != nil {
+		_, scheduleErr := o.phaseScheduleFailure(ctx, mutation.Case, retry, key, err)
+		return true, scheduleErr
+	}
+	o.markRecoveryStarted(retry.ID)
+	return true, nil
 }
 
 func (o *CaseOrchestrator) preflightRecoveryContexts(ctx context.Context, attempts []PhaseAttempt) (map[string]resolvedRecoveryContext, error) {

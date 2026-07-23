@@ -26,7 +26,16 @@ import (
 const (
 	codexStudioAgentNetworkConfig = "permissions.studio_agent.network.enabled=true"
 	claudeStudioAgentSettings     = `{"sandbox":{"enabled":false}}`
+	codexGoSandboxDirectory       = ".tshoot-go"
 )
+
+type codexGoSandbox struct {
+	goRoot      string
+	buildCache  string
+	goPath      string
+	moduleCache string
+	telemetry   string
+}
 
 type InvestigationEventSink func(run InvestigationRun, event InvestigationEvent)
 
@@ -438,7 +447,11 @@ func buildCodexExecCommandWithProfile(codexBin, workspace, prompt string, imageP
 	if !info.IsDir() {
 		return nil, fmt.Errorf("workspace %q is not a directory", workspace)
 	}
-	filesystemConfig, err := codexFilesystemPermissionConfig(workspace, prompt, imagePaths)
+	goSandbox, err := prepareCodexGoSandbox(workspace, prompt)
+	if err != nil {
+		return nil, err
+	}
+	filesystemConfig, err := codexFilesystemPermissionConfig(workspace, prompt, imagePaths, goSandbox)
 	if err != nil {
 		return nil, err
 	}
@@ -479,7 +492,7 @@ func buildCodexExecCommandWithProfile(codexBin, workspace, prompt string, imageP
 	args = append(args, prompt)
 	cmd := exec.Command(codexBin, args...)
 	cmd.Dir = workspace
-	cmd.Env = codexAgentProcessEnvironment(prompt)
+	cmd.Env = codexAgentProcessEnvironment(prompt, goSandbox)
 	return cmd, nil
 }
 
@@ -656,7 +669,7 @@ var (
 	codexGitBinDir     string
 )
 
-func codexAgentProcessEnvironment(prompt string) []string {
+func codexAgentProcessEnvironment(prompt string, goSandbox *codexGoSandbox) []string {
 	values := os.Environ()
 	staging := codexStagingPathFromPrompt(prompt)
 	if staging == "" || codexRepositoryAccessPhase(staging) != PhaseFix {
@@ -672,6 +685,25 @@ func codexAgentProcessEnvironment(prompt string) []string {
 	} {
 		values = setProcessEnv(values, key, value)
 	}
+	if goSandbox != nil {
+		for key, value := range map[string]string{
+			"GOROOT":         goSandbox.goRoot,
+			"GOCACHE":        goSandbox.buildCache,
+			"GOPATH":         goSandbox.goPath,
+			"GOMODCACHE":     goSandbox.moduleCache,
+			"GOTELEMETRY":    "off",
+			"GOTELEMETRYDIR": goSandbox.telemetry,
+			"GOENV":          "off",
+			"GOTOOLCHAIN":    "auto",
+		} {
+			values = setProcessEnv(values, key, value)
+		}
+		goFlags := strings.TrimSpace(processEnvValue(values, "GOFLAGS"))
+		if !strings.Contains(" "+goFlags+" ", " -modcacherw ") {
+			goFlags = strings.TrimSpace(goFlags + " -modcacherw")
+		}
+		values = setProcessEnv(values, "GOFLAGS", goFlags)
+	}
 	if directory := codexHostGitBinDirectory(); directory != "" {
 		path := processEnvValue(values, "PATH")
 		if path == "" {
@@ -681,7 +713,78 @@ func codexAgentProcessEnvironment(prompt string) []string {
 		}
 		values = setProcessEnv(values, "PATH", path)
 	}
+	if goSandbox != nil {
+		directory := filepath.Join(goSandbox.goRoot, "bin")
+		path := processEnvValue(values, "PATH")
+		if path == "" {
+			path = directory
+		} else {
+			path = directory + string(os.PathListSeparator) + path
+		}
+		values = setProcessEnv(values, "PATH", path)
+	}
 	return values
+}
+
+func prepareCodexGoSandbox(workspace, prompt string) (*codexGoSandbox, error) {
+	staging := codexStagingPathFromPrompt(prompt)
+	if staging == "" || codexRepositoryAccessPhase(staging) != PhaseFix {
+		return nil, nil
+	}
+	goRoot := resolveCodexGoRoot(workspace)
+	if goRoot == "" {
+		// A fix may target JavaScript, Python, or another stack. Absence of a
+		// host Go toolchain must not prevent those Agents from starting.
+		return nil, nil
+	}
+	root := filepath.Join(filepath.Clean(staging), codexGoSandboxDirectory)
+	sandbox := &codexGoSandbox{
+		goRoot:      goRoot,
+		buildCache:  filepath.Join(root, "build-cache"),
+		goPath:      filepath.Join(root, "path"),
+		moduleCache: filepath.Join(root, "path", "pkg", "mod"),
+		telemetry:   filepath.Join(root, "telemetry"),
+	}
+	for _, directory := range []string{root, sandbox.buildCache, sandbox.goPath, sandbox.moduleCache, sandbox.telemetry} {
+		if err := ensureCodexRuntimeDirectory(directory); err != nil {
+			return nil, fmt.Errorf("prepare isolated Codex Go directory: %w", err)
+		}
+	}
+	return sandbox, nil
+}
+
+func resolveCodexGoRoot(workspace string) string {
+	goBinary, err := exec.LookPath("go")
+	if err != nil {
+		return ""
+	}
+	cmd := exec.Command(goBinary, "env", "GOROOT")
+	cmd.Dir = workspace
+	cmd.Env = setProcessEnv(setProcessEnv(os.Environ(), "GOTELEMETRY", "off"), "GOENV", "off")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	goRoot := filepath.Clean(strings.TrimSpace(string(output)))
+	if goRoot == "." || !filepath.IsAbs(goRoot) {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(goRoot); err == nil {
+		goRoot = filepath.Clean(resolved)
+	}
+	info, err := os.Stat(goRoot)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	goExecutable := "go"
+	if runtime.GOOS == "windows" {
+		goExecutable += ".exe"
+	}
+	info, err = os.Stat(filepath.Join(goRoot, "bin", goExecutable))
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return goRoot
 }
 
 func codexRepositoryAccessPhase(staging string) Phase {
@@ -723,9 +826,14 @@ func processEnvValue(values []string, key string) string {
 	return ""
 }
 
-func codexFilesystemPermissionConfig(workspace, prompt string, imagePaths []string) (string, error) {
+func codexFilesystemPermissionConfig(workspace, prompt string, imagePaths []string, goSandbox *codexGoSandbox) (string, error) {
 	roots := map[string]string{filepath.Clean(workspace): "write"}
 	addCodexSSHHostVerificationFiles(roots)
+	if goSandbox != nil && roots[goSandbox.goRoot] != "write" {
+		// Grant the exact selected SDK read-only. Go caches and downloaded
+		// modules stay inside the attempt staging directory below.
+		roots[goSandbox.goRoot] = "read"
+	}
 	staging := codexStagingPathFromPrompt(prompt)
 	if staging != "" {
 		if !filepath.IsAbs(staging) {

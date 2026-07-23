@@ -1844,6 +1844,18 @@ func (o *CaseOrchestrator) CompleteAttempt(ctx context.Context, cmd CompleteAtte
 	if strings.TrimSpace(cmd.IdempotencyKey) == "" {
 		return IncidentCase{}, validateCompletionCommand(cmd)
 	}
+	// Regression environment and scenario identity come from the durable
+	// attempt input. Normalize them before replay identity is calculated so an
+	// old completion intent with omitted model fields can be recovered exactly.
+	var bindingAttempt PhaseAttempt
+	if strings.TrimSpace(cmd.AttemptID) != "" {
+		if persisted, loadErr := o.store.GetAttempt(ctx, cmd.AttemptID); loadErr == nil {
+			bindingAttempt = persisted
+			if err := bindRegressionCompletionCommand(bindingAttempt, &cmd); err != nil {
+				return IncidentCase{}, err
+			}
+		}
+	}
 	release := workflowCommandLocks.acquire("complete-attempt:" + cmd.IdempotencyKey)
 	defer release()
 	if replayed, found, replayErr := o.replayAttemptCompletion(ctx, cmd); found || replayErr != nil {
@@ -1866,8 +1878,13 @@ func (o *CaseOrchestrator) CompleteAttempt(ctx context.Context, cmd CompleteAtte
 	expectedAttemptOutput := CloneRawMessage(attempt.OutputJSON)
 	if intent, found, parseErr := parseCompletionIntent(attempt.OutputJSON); parseErr != nil {
 		return IncidentCase{}, parseErr
-	} else if found && !equivalentCompletionCommands(intent, cmd) {
-		return IncidentCase{}, ErrIdempotencyConflict
+	} else if found {
+		if err := bindRegressionCompletionCommand(attempt, &intent); err != nil {
+			return IncidentCase{}, err
+		}
+		if !equivalentCompletionCommands(intent, cmd) {
+			return IncidentCase{}, ErrIdempotencyConflict
+		}
 	}
 	if err := validateCompletionAttemptPhase(attempt.Phase, cmd); err != nil {
 		return IncidentCase{}, err
@@ -2014,6 +2031,9 @@ func (o *CaseOrchestrator) inspectFixWithRetry(ctx context.Context, request FixI
 			return inspection, ctx.Err()
 		}
 	}
+	if errors.Is(err, ErrFixInspectionUnavailable) {
+		return inspection, err
+	}
 	return inspection, errors.Join(ErrFixInspectionUnavailable, err)
 }
 
@@ -2043,6 +2063,20 @@ func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCa
 	case PhaseOutcomeNotReproduced:
 		add(CaseNotReproduced, "validation_not_reproduced", "agent", actor, cmd.OutputJSON)
 	case PhaseOutcomeNeedsEvidence:
+		if regressionCompletionOnlyNeedsHostMetadata(attempt, cmd.OutputJSON) {
+			retryAvailable, err := o.regressionHostMetadataRetryAvailable(ctx, attempt)
+			if err != nil {
+				return IncidentCase{}, err
+			}
+			if retryAvailable {
+				created := newAttempt(incident, PhaseRegression, AttemptRegression, cmd.IdempotencyKey+":regression-host-metadata-retry", BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget}, attempt.InputJSON, attempt.ID)
+				next = &created
+				update.CurrentAttemptID = workflowStringPtr(created.ID)
+				payload := mustJSON(map[string]string{"attempt_id": attempt.ID, "retry_attempt_id": created.ID, "reason": "regression_host_metadata_gap"})
+				steps = append(steps, CaseMutationStep{To: incident.Status, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", cmd.IdempotencyKey+":regression-host-metadata-retry"), EventType: "regression_host_metadata_retry_started", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: payload}})
+				break
+			}
+		}
 		add(CaseWaitingEvidence, "evidence_required", "agent", actor, cmd.OutputJSON)
 	case PhaseOutcomeValidationEvidenceRequired:
 		result, err := ParseInvestigationResult(cmd.OutputJSON)

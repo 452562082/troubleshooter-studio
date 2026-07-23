@@ -500,6 +500,22 @@ func (g *recordingGitIntegration) ResumePush(_ context.Context, request MergeReq
 	return g.result.Clone(), g.err
 }
 
+func TestInspectFixWithRetryDoesNotDuplicateUnavailableError(t *testing.T) {
+	git := &recordingGitIntegration{err: fmt.Errorf("%w: SSH transport failed", ErrFixInspectionUnavailable)}
+	orchestrator := NewCaseOrchestrator(newOrchestratorStore(t), &recordingPhaseRunner{}, git, &recordingDeploymentVerifier{})
+
+	_, err := orchestrator.inspectFixWithRetry(context.Background(), FixInspectionRequest{CaseID: "case-1"})
+	if !errors.Is(err, ErrFixInspectionUnavailable) {
+		t.Fatalf("err=%v", err)
+	}
+	if count := strings.Count(err.Error(), ErrFixInspectionUnavailable.Error()); count != 1 {
+		t.Fatalf("unavailable error repeated %d times: %v", count, err)
+	}
+	if git.fixCalls != fixInspectionMaxAttempts {
+		t.Fatalf("inspection calls=%d", git.fixCalls)
+	}
+}
+
 type recordingDeploymentVerifier struct {
 	mu       sync.Mutex
 	requests []DeploymentVerificationRequest

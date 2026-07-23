@@ -25,7 +25,9 @@ func TestCaseCodeIntelligenceResolverPreparesIndexesOnStudioHost(t *testing.T) {
 	cfg := &config.SystemConfig{
 		System:           config.System{ID: "base"},
 		CodeIntelligence: config.CodeIntelligence{Enabled: true, Provider: config.CodeIntelligenceProviderCodeGraph},
-		Repos:            []config.Repo{{Name: "api", Analysis: config.RepoAnalysis{Enabled: true}, EnvBranches: map[string]string{"test": "base-test"}}},
+		// The wizard and existing YAML commonly omit repos[].analysis. Global
+		// CodeGraph opt-in must still make that repository analyzable.
+		Repos: []config.Repo{{Name: "api", EnvBranches: map[string]string{"test": "base-test"}}},
 	}
 	app := &App{workflowLoadDeploymentConfig: func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) { return cfg, nil }}
 

@@ -445,6 +445,101 @@ func (o *CaseOrchestrator) validateRegressionCompletion(ctx context.Context, inc
 	return nil
 }
 
+// bindRegressionValidationResult restores workflow-owned identity fields that
+// describe the scheduled regression, not the model's business conclusion.
+// Empty legacy values are repaired, while conflicting non-empty values remain
+// a hard binding failure.
+func bindRegressionValidationResult(attempt PhaseAttempt, result *ValidationResult) error {
+	if attempt.Phase != PhaseRegression || result == nil {
+		return nil
+	}
+	var input RegressionValidationInput
+	if err := json.Unmarshal(attempt.InputJSON, &input); err != nil {
+		return errors.Join(ErrRegressionBinding, err)
+	}
+	expectedEnvironment := strings.TrimSpace(input.TargetEnvironment)
+	expectedScenarioHash := strings.TrimSpace(input.OriginalScenarioHash)
+	if expectedEnvironment == "" || expectedScenarioHash == "" {
+		return ErrRegressionBinding
+	}
+	if environment := strings.TrimSpace(result.Environment); environment != "" && environment != expectedEnvironment {
+		return ErrRegressionBinding
+	}
+	if scenarioHash := strings.TrimSpace(result.ScenarioHash); scenarioHash != "" && scenarioHash != expectedScenarioHash {
+		return ErrRegressionBinding
+	}
+	result.Environment = expectedEnvironment
+	result.ScenarioHash = expectedScenarioHash
+	return nil
+}
+
+// regressionResultOnlyNeedsHostMetadata identifies a legacy evaluator result
+// whose business observation is complete but whose blocking gaps refer only to
+// workflow-owned regression identity. Those values must never be requested
+// from the user: Studio already persisted them when it scheduled the attempt.
+func regressionResultOnlyNeedsHostMetadata(attempt PhaseAttempt, result ValidationResult) bool {
+	if attempt.Phase != PhaseRegression || attempt.Mode != AttemptRegression || result.VerificationStatus != "insufficient_info" || strings.TrimSpace(result.ObservedBehavior) == "" || strings.TrimSpace(result.ExpectedBehavior) == "" || len(result.Gaps) == 0 {
+		return false
+	}
+	for _, gap := range result.Gaps {
+		if !regressionHostMetadataGap(gap) {
+			return false
+		}
+	}
+	return true
+}
+
+func regressionHostMetadataGap(gap string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(gap))
+	if normalized == "" {
+		return false
+	}
+	scenarioHash := strings.Contains(normalized, "scenario_hash") || strings.Contains(normalized, "scenario hash") || strings.Contains(normalized, "场景哈希")
+	deploymentVersion := strings.Contains(normalized, "observed_deployment_version") || strings.Contains(normalized, "deployment version") || strings.Contains(normalized, "runtime version") || strings.Contains(normalized, "运行版本") || strings.Contains(normalized, "部署版本") || strings.Contains(normalized, "修复版本")
+	return scenarioHash || deploymentVersion
+}
+
+func regressionCompletionOnlyNeedsHostMetadata(attempt PhaseAttempt, output json.RawMessage) bool {
+	var result ValidationResult
+	if json.Unmarshal(output, &result) != nil || len(result.Evidence) == 0 {
+		return false
+	}
+	return regressionResultOnlyNeedsHostMetadata(attempt, result)
+}
+
+func (o *CaseOrchestrator) regressionHostMetadataRetryAvailable(ctx context.Context, attempt PhaseAttempt) (bool, error) {
+	if strings.TrimSpace(attempt.ParentAttemptID) == "" {
+		return true, nil
+	}
+	parent, err := o.store.GetAttempt(ctx, attempt.ParentAttemptID)
+	if err != nil {
+		return false, err
+	}
+	if parent.Phase == PhaseRegression && parent.CycleNumber == attempt.CycleNumber && regressionCompletionOnlyNeedsHostMetadata(parent, parent.OutputJSON) {
+		return false, nil
+	}
+	return true, nil
+}
+
+func bindRegressionCompletionCommand(attempt PhaseAttempt, command *CompleteAttemptCommand) error {
+	if attempt.Phase != PhaseRegression || command == nil || command.ErrorCode != "" {
+		return nil
+	}
+	var result ValidationResult
+	if err := json.Unmarshal(command.OutputJSON, &result); err != nil {
+		return err
+	}
+	if err := bindRegressionValidationResult(attempt, &result); err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	command.OutputJSON = encoded
+	return nil
+}
+
 func (o *CaseOrchestrator) validatePersistedRegressionBinding(ctx context.Context, incident IncidentCase, input RegressionValidationInput) error {
 	if input.CycleNumber != incident.CycleNumber || input.TargetEnvironment != incident.Environment {
 		return ErrRegressionBinding

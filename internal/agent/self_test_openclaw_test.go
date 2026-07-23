@@ -109,7 +109,7 @@ func setupCodeGraphSelfTestOpenclaw(t *testing.T, repoPath string) (staging, fak
 	cfg.CodeIntelligence = config.CodeIntelligence{Enabled: true, Provider: config.CodeIntelligenceProviderCodeGraph}
 	cfg.Repos = []config.Repo{{
 		Name: "orders", URL: "https://example.invalid/orders.git", Stack: "go",
-		Analysis: config.RepoAnalysis{Enabled: true},
+		Analysis: config.RepoAnalysis{Enabled: boolPointer(true)},
 	}}
 	staging, fakeHome = setupOpenclawStaging(t, cfg)
 

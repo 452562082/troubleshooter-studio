@@ -177,16 +177,50 @@ func TestGitIntegrationRejectsTargetHeadChangedAfterApproval(t *testing.T) {
 	}
 }
 
-func TestGitIntegrationRejectsDirtyDetachedAndConflict(t *testing.T) {
-	t.Run("dirty", func(t *testing.T) {
-		f := newGitFixture(t)
-		commit := f.makeFix(t, "fix\n")
-		if err := os.WriteFile(filepath.Join(f.repo, "dirty"), []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		_, err := f.service(t).Inspect(context.Background(), f.request(commit))
-		if !errors.Is(err, ErrGitWorktreeDirty) {
-			t.Fatalf("err=%v", err)
+func TestGitIntegrationAllowsDirtySourceAndRejectsDetachedAndConflict(t *testing.T) {
+	t.Run("dirty source repository", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			dirty func(*testing.T, gitFixture)
+		}{
+			{
+				name: "untracked files",
+				dirty: func(t *testing.T, f gitFixture) {
+					if err := os.WriteFile(filepath.Join(f.repo, "untracked.txt"), []byte("leave me alone\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "tracked modifications",
+				dirty: func(t *testing.T, f gitFixture) {
+					if err := os.WriteFile(filepath.Join(f.repo, "app.txt"), []byte("local edit\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newGitFixture(t)
+				commit := f.makeFix(t, "fix\n")
+				tc.dirty(t, f)
+				before := runGitTest(t, f.repo, "status", "--porcelain")
+
+				service := f.service(t)
+				req := f.request(commit)
+				inspection, err := service.Inspect(context.Background(), req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.TargetHeads = map[string]string{"api": inspection.Repositories["api"].TargetHead}
+				result, err := service.MergeAndPush(context.Background(), req)
+				if err != nil || !result.Repositories["api"].Pushed {
+					t.Fatalf("result=%+v err=%v", result, err)
+				}
+				if after := runGitTest(t, f.repo, "status", "--porcelain"); after != before {
+					t.Fatalf("source repository changed:\nbefore:\n%s\nafter:\n%s", before, after)
+				}
+			})
 		}
 	})
 	t.Run("detached", func(t *testing.T) {

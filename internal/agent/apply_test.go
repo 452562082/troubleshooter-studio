@@ -512,8 +512,8 @@ func TestApply_CodeGraphFailureWarnsAndStillDeploys(t *testing.T) {
 	if result == nil || result.CodeGraph == nil {
 		t.Fatalf("Apply() result = %#v, want successful result with CodeGraph fallback report", result)
 	}
-	if result.CodeGraph.Total != 1 {
-		t.Fatalf("CodeGraph total = %d, want 1", result.CodeGraph.Total)
+	if result.CodeGraph.Total != 4 {
+		t.Fatalf("CodeGraph total = %d, want all 4 repositories by default", result.CodeGraph.Total)
 	}
 	joined := strings.Join(logs, "\n")
 	if !strings.Contains(joined, "checksum mismatch") || !strings.Contains(joined, "rg/read fallback") {

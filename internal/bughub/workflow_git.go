@@ -16,7 +16,6 @@ import (
 
 var (
 	ErrMergeApprovalStale       = errors.New("merge approval target HEAD is stale")
-	ErrGitWorktreeDirty         = errors.New("repository worktree is dirty")
 	ErrGitDetachedHEAD          = errors.New("repository is on a detached HEAD")
 	ErrGitRemoteNotSSH          = errors.New("push remote is not SSH")
 	ErrGitMergeConflict         = errors.New("git merge would conflict")
@@ -392,13 +391,9 @@ func (s *GitIntegrationService) validateRepository(ctx context.Context, caseID s
 	if err != nil {
 		return "", "", err
 	}
-	status, err := gitOutput(ctx, path, "status", "--porcelain")
-	if err != nil {
-		return "", "", err
-	}
-	if status != "" {
-		return "", "", ErrGitWorktreeDirty
-	}
+	// The configured checkout is only the Git object store and remote source.
+	// All merges happen in a Studio-owned dedicated worktree, so user edits and
+	// untracked files in this checkout are unrelated and must remain untouched.
 	branch, err := gitOutput(ctx, path, "symbolic-ref", "--short", "HEAD")
 	if err != nil || branch == "" {
 		return "", "", ErrGitDetachedHEAD

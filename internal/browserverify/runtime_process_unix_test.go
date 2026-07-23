@@ -189,7 +189,11 @@ func TestExecCommandRunnerParentCrashTerminatesOwnedProcessGroup(t *testing.T) {
 	deadline := crashedAt.Add(processGroupTerminationGrace + 2*time.Second)
 	for time.Now().Before(deadline) {
 		err := syscall.Kill(-info.WrapperPID, 0)
-		if errors.Is(err, syscall.ESRCH) {
+		// Once the wrapper-owned group is gone, macOS can reuse the numeric
+		// PGID for a process group that this test cannot signal. EPERM therefore
+		// also proves that none of our same-user wrapper descendants remain and
+		// avoids sending the cleanup SIGKILL to an unrelated reused group.
+		if errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM) {
 			cleanupGroup = false
 			break
 		}

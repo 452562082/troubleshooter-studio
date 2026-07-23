@@ -934,6 +934,43 @@ describe('IncidentWorkbenchPage', () => {
     expect(approveIncidentFix).not.toHaveBeenCalled()
   })
 
+  it('submits pushed-fix rework feedback through remediation reassessment', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-rework', 'waiting_merge_approval', '2026-07-23T00:00:00Z', { current_attempt_id: 'fix-current', version: 12 })
+    const snapshot = detail(item, {
+      attempts: [
+        {
+          id: 'root-current', case_id: item.id, cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded',
+          agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', root_cause: '字段语义错配' },
+          parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {},
+        },
+        {
+          id: 'fix-current', case_id: item.id, cycle_number: 1, phase: 'fix', mode: '', status: 'succeeded',
+          agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { fix_status: 'fixed_pushed' },
+          parent_attempt_id: 'root-current', started_at: '', error_code: '', error_message: '', usage: {},
+        },
+      ],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(snapshot)
+    vi.mocked(reconsiderIncidentRemediation).mockResolvedValue({ ...item, status: 'investigating', current_attempt_id: 'reassessment-rework', version: 13 })
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.rework-action').trigger('click')
+    await wrapper.get('#fix-rework-feedback').setValue('不要沿用前端修复，改为后端恢复 signature 并补空值测试')
+    await wrapper.get('[data-confirm]').trigger('click')
+    await flushPromises()
+
+    expect(reconsiderIncidentRemediation).toHaveBeenCalledWith({
+      case_id: item.id, expected_version: 12, root_cause_attempt_id: 'root-current',
+      idempotency_key: `reconsider-remediation:${item.id}:root-current:12`, actor_id: 'desktop-user',
+      proposal: '不要沿用前端修复，改为后端恢复 signature 并补空值测试',
+    })
+    expect(approveIncidentMerge).not.toHaveBeenCalled()
+    expect(approveIncidentFix).not.toHaveBeenCalled()
+  })
+
   it('submits a non-code remediation confirmation and immediately enters regression', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
@@ -1460,6 +1497,7 @@ describe('IncidentWorkbenchPage', () => {
     const item = incident('case-1', 'waiting_merge_approval', '2026-07-13T00:00:00Z')
     const snapshot = detail(item, {
       code_changes: [
+        { id: 'old', case_id: 'case-1', attempt_id: 'attempt-old', repo: 'legacy', base_branch: 'main', fix_branch: 'fix/legacy', fix_commit: 'fix-legacy', test_evidence: {}, target_environment_branch: 'test', merge_base_head: 'head-legacy', merge_commit: '', push_remote: 'origin', push_status: 'pushed' },
         { id: 'a', case_id: 'case-1', attempt_id: 'attempt-1', repo: 'api', base_branch: 'main', fix_branch: 'fix/api', fix_commit: 'fix-api', test_evidence: {}, target_environment_branch: 'test', merge_base_head: 'head-api', merge_commit: '', push_remote: 'origin', push_status: 'pushed' },
         { id: 'w', case_id: 'case-1', attempt_id: 'attempt-1', repo: 'web', base_branch: 'main', fix_branch: 'fix/web', fix_commit: 'fix-web', test_evidence: {}, target_environment_branch: 'test', merge_base_head: 'head-web', merge_commit: '', push_remote: 'origin', push_status: 'pushed' },
       ],

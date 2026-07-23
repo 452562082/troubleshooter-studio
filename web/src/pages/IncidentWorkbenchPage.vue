@@ -1009,7 +1009,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
           input_json: { source_baselines: payload.sourceBaselines || {} },
         })
       }
-      if (payload.kind === 'reconsider_remediation') {
+      if (payload.kind === 'reconsider_remediation' || payload.kind === 'redo_fix') {
         if (!payload.rootCauseAttemptID || payload.caseVersion === undefined || !payload.input?.trim()) throw new Error('重新评估缺少用户方案、根因或 Case 版本快照')
         return reconsiderIncidentRemediation({
           ...base,
@@ -1031,11 +1031,12 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         })
       }
       if (payload.kind === 'approve_merge') {
+        const currentChanges = detail.code_changes.filter(change => change.attempt_id === incident.current_attempt_id)
         return approveIncidentMerge({
           ...base,
-          fix_commits: Object.fromEntries(detail.code_changes.map(change => [change.repo, change.fix_commit])),
-          target_branches: Object.fromEntries(detail.code_changes.map(change => [change.repo, change.target_environment_branch])),
-          target_heads: Object.fromEntries(detail.code_changes.map(change => [change.repo, change.merge_base_head])),
+          fix_commits: Object.fromEntries(currentChanges.map(change => [change.repo, change.fix_commit])),
+          target_branches: Object.fromEntries(currentChanges.map(change => [change.repo, change.target_environment_branch])),
+          target_heads: Object.fromEntries(currentChanges.map(change => [change.repo, change.merge_base_head])),
         })
       }
       if (payload.kind === 'notify_deployed') {

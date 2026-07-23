@@ -401,6 +401,39 @@ describe('incident Case controller', () => {
     if (expectedMode) expect(continuation.input_json.mode).toBe(expectedMode)
   })
 
+  it('forces a fresh browser plan when retrying a locator failure', () => {
+    const snapshot = detail(4)
+    snapshot.case.status = 'waiting_evidence'
+    snapshot.case.current_attempt_id = 'validation-locator'
+    snapshot.attempts = [{
+      id: 'validation-locator',
+      case_id: 'case-1',
+      cycle_number: 1,
+      phase: 'validation',
+      mode: 'reproduce',
+      status: 'failed',
+      agent_target: 'codex',
+      bot_key: 'base|codex',
+      input_json: { mode: 'reproduce', target_environment: 'test' },
+      output_json: {},
+      parent_attempt_id: '',
+      started_at: '',
+      error_code: 'browser_locator_failed',
+      error_message: '',
+      usage: {},
+    }]
+
+    expect(continuationForDetail(snapshot, '')).toEqual({
+      phase: 'validation',
+      input_json: {
+        mode: 'reproduce',
+        target_environment: 'test',
+        user_input: '',
+        force_browser_replan: true,
+      },
+    })
+  })
+
   it('rejects waiting evidence without a runnable latest attempt instead of falling back', () => {
     const snapshot = detail(4)
     snapshot.case.status = 'waiting_evidence'

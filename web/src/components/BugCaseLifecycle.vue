@@ -2,9 +2,18 @@
 import type { IncidentCase, IncidentCaseDetail as ActionDetail, IncidentEvidenceImageInput } from '../lib/bridge/bugWorkflow'
 
 export type CasePrimaryAction = {
-  kind: 'start_validation' | 'retry_validation' | 'supply_evidence' | 'approve_fix' | 'reconsider_remediation' | 'complete_remediation' | 'continue_fix' | 'approve_merge' | 'supply_merge_decision' | 'notify_deployed' | 'supply_deployment_proof' | 'cancel_attempt' | 'continue_legacy'
+  kind: 'start_validation' | 'retry_validation' | 'supply_evidence' | 'approve_fix' | 'reconsider_remediation' | 'redo_fix' | 'complete_remediation' | 'continue_fix' | 'approve_merge' | 'supply_merge_decision' | 'notify_deployed' | 'supply_deployment_proof' | 'cancel_attempt' | 'continue_legacy'
   label: string
   approval?: boolean
+}
+
+function isRemediationReassessment(detail: ActionDetail | undefined): boolean {
+  if (!detail) return false
+  const attempt = detail.attempts.find(item => item.id === detail.case.current_attempt_id)
+  const value = attempt?.input_json?.remediation_reassessment
+  return attempt?.phase === 'investigation' && Boolean(
+    value && typeof value === 'object' && (value as Record<string, unknown>).kind === 'user_remediation_proposal',
+  )
 }
 
 export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrimaryAction | undefined {
@@ -45,6 +54,9 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
     if (attempt?.phase === 'investigation' && attempt.output_json?.investigation_status === 'insufficient_info') {
       return { kind: 'supply_evidence', label: '补充权限或外部资料并继续' }
     }
+  }
+  if (incident.status === 'investigating' && isRemediationReassessment(detail)) {
+    return { kind: 'cancel_attempt', label: '停止方案评估' }
   }
   return actions[incident.status]
 }
@@ -107,6 +119,7 @@ watch(() => props.detail?.events.length ?? 0, count => {
 })
 const action = computed(() => props.detail ? primaryActionFor(props.detail) : undefined)
 const currentAttempt = computed(() => props.detail?.attempts.find(item => item.id === props.detail?.case.current_attempt_id) || null)
+const remediationReassessment = computed(() => isRemediationReassessment(props.detail || undefined))
 const validationEvidenceRefresh = computed(() => currentAttempt.value?.phase === 'validation' && typeof currentAttempt.value.input_json?.source_investigation_attempt_id === 'string')
 const validationEvidenceRefreshExhausted = computed(() => {
   const attempt = currentAttempt.value
@@ -130,7 +143,9 @@ const latestDeployment = computed(() => {
 const deploymentVersionSource = computed(() => props.detail?.deployment_verification?.provider || latestDeployment.value?.verification_source || 'manual')
 const automaticDeploymentVerification = computed(() => ['http', 'k8s'].includes(deploymentVersionSource.value))
 const continuedAfterFailedRegression = computed(() => currentCase.value?.status === 'investigating' && currentCase.value.cycle_number > 1 && (props.detail?.events || []).some(event => event.event_type === 'regression_failed'))
-const mergeApprovalScopes = computed(() => (props.detail?.code_changes || []).map(change => ({
+const mergeApprovalScopes = computed(() => (props.detail?.code_changes || [])
+  .filter(change => change.attempt_id === props.detail?.case.current_attempt_id)
+  .map(change => ({
   repo: change.repo,
   fixCommit: change.fix_commit,
   baseBranch: change.base_branch,
@@ -274,6 +289,7 @@ function statusLabel(status: CaseStatus): string {
     fixed_verified: '修复已验证', still_reproduces: '回归仍复现', legacy_archived: '历史归档', reset_archived: '已重置归档',
   }
   if (status === 'validating' && validationEvidenceRefresh.value) return '排障中 · 自动补采'
+  if (status === 'investigating' && remediationReassessment.value) return '修复方案评估中'
   return labels[status] || status
 }
 
@@ -342,6 +358,29 @@ async function openRemediationReassessment(event: MouseEvent) {
   confirmButton.value?.focus()
 }
 
+async function openFixRework(event: MouseEvent) {
+  if (props.pending || props.detail?.case.status !== 'waiting_merge_approval') return
+  const currentAttemptID = props.detail.case.current_attempt_id || ''
+  const fix = props.detail.attempts.find(attempt =>
+    attempt.id === currentAttemptID && attempt.phase === 'fix' && attempt.status === 'succeeded',
+  )
+  const rootCause = props.detail.attempts.find(attempt =>
+    attempt.id === fix?.parent_attempt_id && attempt.phase === 'investigation' && attempt.status === 'succeeded',
+  )
+  actionTrigger.value = event.currentTarget as HTMLElement
+  dialogAction.value = { kind: 'redo_fix', label: '重新修复' }
+  dialogCaseVersion.value = props.detail.case.version
+  dialogRootCauseAttemptID.value = rootCause?.id || ''
+  dialogSourceBaselines.value = []
+  dialogInput.value = ''
+  dialogEvidence.value = ''
+  dialogImages.value = []
+  dialogImageError.value = ''
+  dialogOpen.value = true
+  await nextTick()
+  confirmButton.value?.focus()
+}
+
 function closeDialog() {
   if (props.pending) return
   dialogBranchLoadGeneration++
@@ -358,7 +397,7 @@ function confirmAction() {
     payload.caseVersion = dialogCaseVersion.value
     payload.sourceBaselines = Object.fromEntries(dialogSourceBaselines.value.map(item => [item.repo.trim(), typeof item.branch === 'string' ? item.branch.trim() : '']).filter(([repo]) => repo))
   }
-  if (dialogAction.value.kind === 'reconsider_remediation') {
+  if (dialogAction.value.kind === 'reconsider_remediation' || dialogAction.value.kind === 'redo_fix') {
     payload.rootCauseAttemptID = dialogRootCauseAttemptID.value
     payload.caseVersion = dialogCaseVersion.value
     payload.input = dialogInput.value.trim()
@@ -460,6 +499,7 @@ function trapDialogFocus(event: KeyboardEvent) {
 function dialogTitle(): string {
   if (dialogAction.value?.kind === 'approve_fix') return '确认允许修复'
   if (dialogAction.value?.kind === 'reconsider_remediation') return '提出其他修复方案'
+  if (dialogAction.value?.kind === 'redo_fix') return '提出重修要求'
   if (dialogAction.value?.kind === 'complete_remediation') return '确认非代码处置已完成'
   if (dialogAction.value?.kind === 'approve_merge') return '确认合并基线和环境分支'
   if (dialogAction.value?.kind === 'supply_merge_decision') return '提交合并冲突处理决定'
@@ -490,7 +530,7 @@ function dialogTitle(): string {
         <ol class="stage-progress" :class="{ 'is-remediation': usesNonCodeRemediation }" aria-label="故障处理阶段">
           <li v-for="(stage, index) in stages" :key="stage.key" class="lifecycle-stage" :data-state="stageState(index)">
             <span class="stage-marker" aria-hidden="true">{{ index + 1 }}</span>
-            <span><strong>{{ stage.label }}</strong><small>{{ stageStateLabel(index) }}</small></span>
+            <span><strong>{{ remediationReassessment && stage.key === 'investigation' ? '方案评估' : stage.label }}</strong><small>{{ stageStateLabel(index) }}</small></span>
           </li>
         </ol>
 
@@ -511,6 +551,8 @@ function dialogTitle(): string {
             <p v-else-if="detail.case.status === 'waiting_deployment'">环境分支已推送。人工部署后，Studio 会尝试自动采集运行版本；采集不到也会直接启动回归验证。</p>
             <p v-else-if="detail.case.status === 'waiting_remediation'">根因不需要修改代码。完成数据、配置、运行环境、网络或外部依赖处置后，提交实际结果与证据即可开始回归。</p>
             <p v-else-if="detail.case.status === 'waiting_fix_approval'">可以接受当前建议并授权修复，也可以提出前端、后端或其他修复思路，由排障 Agent 基于既有证据重新评估后再授权。</p>
+            <p v-else-if="detail.case.status === 'waiting_merge_approval'">修复已推送但尚未合并。可以允许合并；如果实现与预期不一致，也可以提出重修要求，旧修复将只保留审计，不会进入后续合并。</p>
+            <p v-else-if="remediationReassessment">复用已确认根因和冻结证据，只重新评估修复路径；不会重新执行七步排障或修改系统。</p>
             <p v-else-if="continuedAfterFailedRegression">第 {{ detail.case.cycle_number }} 轮 · 回归仍复现，Studio 已把本轮新证据和差分带入排障。</p>
             <p v-else-if="validationEvidenceRefreshExhausted">定向验证补采仍未满足结构化证据契约，已停止自动循环。这是系统执行问题，不需要重复补充业务证据。</p>
             <p v-else>第 {{ detail.case.cycle_number }} 轮 · {{ detail.case.environment || '环境未知' }}</p>
@@ -518,6 +560,9 @@ function dialogTitle(): string {
           <div class="current-action-controls">
             <button v-if="detail.case.status === 'waiting_fix_approval'" class="btn reconsider-action" type="button" :disabled="pending" @click="openRemediationReassessment">
               提出其他修复方案
+            </button>
+            <button v-if="detail.case.status === 'waiting_merge_approval'" class="btn reconsider-action rework-action" type="button" :disabled="pending" @click="openFixRework">
+              重新修复
             </button>
             <button v-if="action" class="btn primary primary-action" type="button" :disabled="pending" @click="openAction">
               {{ pending ? '处理中…' : action.label }}
@@ -612,6 +657,13 @@ function dialogTitle(): string {
           <label for="remediation-proposal">你的修复建议</label>
           <textarea id="remediation-proposal" v-model="dialogInput" rows="6" maxlength="4000" placeholder="例如：优先由后端统一字段语义，前端仅保留兼容兜底；请比较两种方案的影响面和回归风险。"></textarea>
         </template>
+        <template v-else-if="dialogAction.kind === 'redo_fix'">
+          <p>说明当前修复哪里与预期不一致，以及你希望如何调整。Studio 会保留已确认根因和证据，只重新评估修复方案。</p>
+          <p>已推送的旧修复分支只保留审计，不会被覆盖或合并。方案重评完成后会再次停在修复授权门，只有你确认新方案和开发基线后，才会从干净基线创建新分支重新修复。</p>
+          <p>重修范围：Case v{{ dialogCaseVersion }} / 根因 {{ dialogRootCauseAttemptID || '未找到' }}。</p>
+          <label for="fix-rework-feedback">重修要求</label>
+          <textarea id="fix-rework-feedback" v-model="dialogInput" rows="6" maxlength="4000" placeholder="例如：当前实现改在前端，但预期是后端恢复 signature 字段；请保留接口兼容并补充空签名测试。"></textarea>
+        </template>
         <template v-else-if="dialogAction.kind === 'approve_merge'">
           <p>将把修复提交分别合并并通过 SSH 推送到已确认的开发基线和环境分支；两者相同时只执行一次。Studio 会重新检查目标 HEAD，任何变化都会使本次授权失效。</p>
           <dl class="deployment-preview">
@@ -663,7 +715,7 @@ function dialogTitle(): string {
         </section>
         <footer>
           <button class="btn" type="button" :disabled="pending" @click="closeDialog">取消</button>
-          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (dialogAction.kind === 'approve_fix' && (dialogBranchOptionsLoading || !dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (dialogAction.kind === 'reconsider_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim())) || (dialogAction.kind === 'complete_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim() || !dialogEvidence.trim())) || evidenceSupplementMissing" @click="confirmAction">{{ dialogAction.kind === 'reconsider_remediation' ? '提交并重新评估' : dialogAction.kind === 'complete_remediation' ? '确认并开始回归' : dialogAction.kind === 'supply_evidence' ? '保存证据并重试' : '确认' }}</button>
+          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (dialogAction.kind === 'approve_fix' && (dialogBranchOptionsLoading || !dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (['reconsider_remediation', 'redo_fix'].includes(dialogAction.kind) && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim())) || (dialogAction.kind === 'complete_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim() || !dialogEvidence.trim())) || evidenceSupplementMissing" @click="confirmAction">{{ dialogAction.kind === 'reconsider_remediation' ? '提交并重新评估' : dialogAction.kind === 'redo_fix' ? '提交重修要求' : dialogAction.kind === 'complete_remediation' ? '确认并开始回归' : dialogAction.kind === 'supply_evidence' ? '保存证据并重试' : '确认' }}</button>
         </footer>
       </section>
     </div>

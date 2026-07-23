@@ -972,6 +972,14 @@ func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand
 	if err != nil {
 		return IncidentCase{}, fmt.Errorf("canonicalize fix source baseline approval: %w", err)
 	}
+	root, err := o.store.GetAttempt(ctx, cmd.RootCauseAttemptID)
+	if err != nil {
+		return IncidentCase{}, err
+	}
+	cmd.InputJSON, err = withApprovedFixReworkContext(cmd.InputJSON, root.InputJSON)
+	if err != nil {
+		return IncidentCase{}, fmt.Errorf("inherit approved fix rework context: %w", err)
+	}
 	if incident.CurrentAttemptID != cmd.RootCauseAttemptID {
 		if replay, replayErr := o.hasEvent(ctx, incident.ID, cmd.IdempotencyKey); replayErr != nil {
 			return IncidentCase{}, replayErr
@@ -998,7 +1006,12 @@ func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand
 
 func buildFixApprovalMutation(cmd ApproveFixCommand, cycleNumber int, sourceBaselines map[string]string) (PhaseAttempt, CaseMutation) {
 	incident := IncidentCase{ID: cmd.CaseID, CycleNumber: cycleNumber}
-	scope, _ := json.Marshal(map[string]any{"root_cause_attempt_id": cmd.RootCauseAttemptID, "source_baselines": sourceBaselines})
+	scopeValue := map[string]any{"root_cause_attempt_id": cmd.RootCauseAttemptID, "source_baselines": sourceBaselines}
+	if rework, ok := fixReworkFromInput(cmd.InputJSON); ok {
+		scopeValue["rework_of_fix_attempt_id"] = rework.SourceFixAttemptID
+		scopeValue["required_fix_branch_suffix"] = rework.RequiredFixBranchSuffix
+	}
+	scope, _ := json.Marshal(scopeValue)
 	approval := Approval{ID: stableID("approval", cmd.IdempotencyKey), CaseID: cmd.CaseID, Kind: ApprovalStartFix, Actor: cmd.ActorID, CaseVersion: cmd.ExpectedVersion, ScopeJSON: scope}
 	attempt := newAttempt(incident, PhaseFix, "", cmd.IdempotencyKey, cmd.Bot, cmd.InputJSON, cmd.RootCauseAttemptID)
 	update := CaseSnapshotUpdate{CurrentAttemptID: workflowStringPtr(attempt.ID), SelectedBotKey: workflowStringPtr(cmd.Bot.Key)}
@@ -1025,6 +1038,10 @@ func (o *CaseOrchestrator) replayFixApproval(ctx context.Context, cmd ApproveFix
 		return IncidentCase{}, ErrIdempotencyConflict
 	}
 	cmd.InputJSON, parseErr = withFixSourceBaselines(cmd.InputJSON, sourceBaselines)
+	if parseErr != nil {
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	cmd.InputJSON, parseErr = withApprovedFixReworkContext(cmd.InputJSON, root.InputJSON)
 	if parseErr != nil {
 		return IncidentCase{}, ErrIdempotencyConflict
 	}
@@ -1887,6 +1904,9 @@ func (o *CaseOrchestrator) CompleteAttempt(ctx context.Context, cmd CompleteAtte
 		}
 	}
 	if err := validateCompletionAttemptPhase(attempt.Phase, cmd); err != nil {
+		return IncidentCase{}, err
+	}
+	if err := validateFixReworkCompletion(attempt, cmd); err != nil {
 		return IncidentCase{}, err
 	}
 	if cmd.Outcome == PhaseOutcomeReproduced {

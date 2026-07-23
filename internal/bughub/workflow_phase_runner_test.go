@@ -1039,6 +1039,68 @@ func TestAgentPhaseRunnerFreezesNestedBrowserExecutionArtifacts(t *testing.T) {
 	}
 }
 
+func TestAgentPhaseRunnerRegressionBrowserFreezeAllowsFreshReplayWithIdenticalBytes(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-browser-identical-replay", CaseRegressionValidating)
+	root := phaseArtifactsRoot(t)
+	previous := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	content := append([]byte("\x89PNG\r\n\x1a\n"), []byte("deterministic-result")...)
+	previousPath := filepath.Join(t.TempDir(), "previous.png")
+	if err := os.WriteFile(previousPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RegisterArtifact(context.Background(), store, ArtifactInput{
+		ArtifactsRoot: root, SourcePath: previousPath, CaseID: incident.ID, AttemptID: previous.ID,
+		Kind: "screenshot", Environment: "test", RedactionStatus: RedactionStatusNotRequired,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	finished := time.Now().UTC()
+	previous.Status = AttemptStatusSucceeded
+	previous.FinishedAt = &finished
+	if err := store.FinishAttempt(context.Background(), previous); err != nil {
+		t.Fatal(err)
+	}
+
+	regression := previous
+	regression.ID = "attempt-browser-identical-replay-regression"
+	regression.Phase, regression.Mode = PhaseRegression, AttemptRegression
+	regression.Status = AttemptStatusRunning
+	regression.StartedAt = time.Now().UTC()
+	regression.FinishedAt = nil
+	if err := store.CreateAttempt(context.Background(), regression); err != nil {
+		t.Fatal(err)
+	}
+	staging, err := openAttemptEvidenceStaging(root, regression.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer staging.Close()
+	defer staging.Cleanup()
+	relativePath := "browser-executions/primary/browser/final.png"
+	stagedPath := filepath.Join(staging.Path(), filepath.FromSlash(relativePath))
+	if err := os.MkdirAll(filepath.Dir(stagedPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stagedPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, root, nil)
+	reference := verifiedBrowserArtifact("screenshot", relativePath, "test", content)
+	frozen, err := runner.freezeBrowserArtifacts(context.Background(), regression, staging, []BrowserArtifactReference{reference})
+	if err != nil {
+		t.Fatalf("fresh browser replay with deterministic bytes was rejected: %v", err)
+	}
+	if err := validateFrozenBrowserArtifacts([]BrowserArtifactReference{reference}, frozen); err != nil {
+		t.Fatalf("validate frozen replay artifacts: %v", err)
+	}
+	artifacts, err := store.ListEvidenceArtifacts(context.Background(), incident.ID)
+	if err != nil || len(artifacts) != 2 {
+		t.Fatalf("artifacts=%+v err=%v, want one artifact per attempt", artifacts, err)
+	}
+}
+
 func TestAgentPhaseRunnerEvaluatesBrowserBusinessStopAndKeepsFailureScreenshot(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-browser-stop", CaseValidating)

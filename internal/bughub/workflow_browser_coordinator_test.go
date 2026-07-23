@@ -354,6 +354,19 @@ func browserCoordinatorRequest(t *testing.T) BrowserCoordinatorRequest {
 	}
 }
 
+func TestValidBrowserExecutionIdentityBoundsRepairSlots(t *testing.T) {
+	for _, execution := range []string{browserObservationExecution, browserRefreshObservationExecution, browserPrimaryExecution, "repair-1", "repair-2", "repair-3"} {
+		if !validBrowserExecutionIdentity(execution) {
+			t.Fatalf("valid execution identity rejected: %q", execution)
+		}
+	}
+	for _, execution := range []string{"", "repair-0", "repair-01", "repair-4", "repair--1", "repair-1/child", "../repair-1"} {
+		if validBrowserExecutionIdentity(execution) {
+			t.Fatalf("unsafe or unbounded execution identity accepted: %q", execution)
+		}
+	}
+}
+
 func TestBrowserCoordinatorDirectorySyncFailurePreventsPlannerAndHost(t *testing.T) {
 	originalSync := browserDurabilitySync
 	browserDurabilitySync = func(string) error { return errors.New("injected browser staging directory fsync failure") }
@@ -1092,6 +1105,25 @@ func TestValidateBrowserRepairAllowsCausalInteractionCorrection(t *testing.T) {
 	}
 }
 
+func TestValidateBrowserRepairAllowsCausalClickToSameOriginGoto(t *testing.T) {
+	original := BrowserPlan{Version: 1, StartURL: "https://app.example.com", Actions: []BrowserAction{
+		{ID: "open-search", Action: "click", Locator: &BrowserLocator{Kind: "label", Value: "打开搜索页"}},
+		{ID: "fill-keyword", Action: "fill", Locator: &BrowserLocator{Kind: "placeholder", Value: "请输入搜索关键词"}, Value: "chengzi"},
+	}, Assertions: []BrowserAssertion{{Kind: "visible_text", Value: "chengzi"}}}
+	repaired := BrowserPlan{Version: 1, StartURL: "https://app.example.com", Actions: []BrowserAction{
+		{ID: "open-search", Action: "goto", URL: "https://app.example.com/search"},
+		{ID: "fill-keyword", Action: "fill", Locator: &BrowserLocator{Kind: "placeholder", Value: "请输入搜索关键词"}, Value: "chengzi"},
+	}, Assertions: []BrowserAssertion{{Kind: "visible_text", Value: "chengzi"}}}
+
+	if err := validateBrowserRepair(original, "fill-keyword", repaired); err != nil {
+		t.Fatalf("same-origin navigation repair was rejected: %v", err)
+	}
+	repaired.Actions[0].URL = "https://evil.example/search"
+	if err := validateBrowserRepair(original, "fill-keyword", repaired); err == nil {
+		t.Fatal("cross-origin navigation repair was accepted")
+	}
+}
+
 func TestBrowserRepairPromptExplainsSemanticSubmissionRecovery(t *testing.T) {
 	original := BrowserPlan{Version: 1, StartURL: "https://app.example.com", Actions: []BrowserAction{
 		{ID: "fill-keyword", Action: "fill", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索"}, Value: "chengzi"},
@@ -1403,6 +1435,131 @@ func TestBrowserCoordinatorRepairsLocatorOnlyOnce(t *testing.T) {
 	}
 }
 
+func TestBrowserCoordinatorRepairsDifferentFailedActionsWithinBoundedReplay(t *testing.T) {
+	primaryPlan := validBrowserPlanYAML()
+	firstRepair := repairedRemainingPlanYAML()
+	secondRepair := `version: 1
+start_url: https://app.example.com/users
+actions:
+  - id: open-users
+    action: click
+    locator:
+      kind: role
+      value: tab
+      name: 用户管理
+    screenshot_after: true
+  - id: wait-results
+    action: wait_for
+    locator:
+      kind: text
+      value: 用户搜索结果
+    screenshot_after: true
+assertions:
+  - kind: visible_text
+    value: 汤圆
+`
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: primaryPlan},
+		{FinalYAML: firstRepair},
+		{FinalYAML: secondRepair},
+		{FinalYAML: reproducedValidationYAML("browser/final.png")},
+	}}
+	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{
+		{Status: "locator_failed", ErrorCode: "locator_ambiguous", FailedActionID: "open-users", FinalURL: "https://app.example.com"},
+		{Status: "locator_failed", ErrorCode: "locator_not_found", FailedActionID: "wait-results", FinalURL: "https://app.example.com/users"},
+		completedBrowserResult("browser/final.png"),
+	}}
+	recipes := &memoryValidationRecipeStore{}
+	request := browserCoordinatorRequest(t)
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier, Recipes: recipes}).Execute(context.Background(), request)
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if executor.Calls != 4 || verifier.Calls != 3 || result.RepairCount != 2 {
+		t.Fatalf("agent=%d browser=%d result=%+v", executor.Calls, verifier.Calls, result)
+	}
+	if got := filepath.ToSlash(verifier.Requests[2].StagingDir); !strings.HasSuffix(got, "/browser-executions/repair-2") {
+		t.Fatalf("second repair staging = %q", got)
+	}
+	if !strings.HasPrefix(result.BrowserResult.FinalScreenshotPath, "browser-executions/repair-2/browser/") {
+		t.Fatalf("final screenshot was not rebound to second repair: %+v", result.BrowserResult)
+	}
+	if prompt := executor.Prompts[2]; !strings.Contains(prompt, `"failed_action_id":"wait-results"`) || !strings.Contains(prompt, `"name":"用户管理"`) {
+		t.Fatalf("second repair did not consume the latest repaired plan and failure: %s", prompt)
+	}
+	stored, found := recipes.recipes[request.Attempt.CaseID]
+	if !found || !reflect.DeepEqual(stored.Plan, verifier.Requests[2].Plan) {
+		t.Fatalf("latest successful repair was not frozen for future replay: found=%v stored=%+v", found, stored)
+	}
+}
+
+func TestBrowserCoordinatorReobservesBeforeSecondRepairOfSameAction(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	scenarioSHA, err := browserValidationRecipeScenarioSHA256(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primaryPlan, err := ParseBrowserPlan([]byte(validBrowserPlanYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipes := &memoryValidationRecipeStore{recipes: map[string]ValidationRecipe{
+		request.Attempt.CaseID: {
+			CaseID: request.Attempt.CaseID, ScenarioSHA256: scenarioSHA, Plan: primaryPlan,
+		},
+	}}
+	secondRepair := `version: 1
+start_url: https://app.example.com/users
+actions:
+  - id: open-users
+    action: goto
+    url: https://app.example.com/search
+    screenshot_after: true
+  - id: wait-results
+    action: wait_for
+    locator:
+      kind: text
+      value: 搜索结果
+    screenshot_after: true
+assertions:
+  - kind: visible_text
+    value: 汤圆
+`
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: repairedRemainingPlanYAML()},
+		{FinalYAML: secondRepair},
+		{FinalYAML: reproducedValidationYAML("browser/final.png")},
+	}}
+	verifier := &observingBrowserVerifier{
+		fakeBrowserVerifier: fakeBrowserVerifier{Results: []BrowserVerificationResult{
+			failedBrowserResult("locator_failed", "wait-results", "browser/primary-failure.png"),
+			failedBrowserResult("locator_failed", "wait-results", "browser/repair-1-failure.png"),
+			completedBrowserResult("browser/final.png"),
+		}},
+		Observation: BrowserVerificationResult{
+			Status: "completed", FinalURL: "https://app.example.com/users",
+			AccessibilitySummary: []BrowserAccessibilityNode{
+				{Role: "link", Name: "打开搜索页", LocatorKind: "label", Href: "https://app.example.com/search", Visible: false},
+			},
+		},
+	}
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier, Recipes: recipes}).Execute(context.Background(), request)
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if result.RepairCount != 2 || verifier.Calls != 3 || verifier.ObserveCalls != 1 || executor.Calls != 3 {
+		t.Fatalf("result=%+v execute=%d observe=%d agent=%d", result, verifier.Calls, verifier.ObserveCalls, executor.Calls)
+	}
+	if got := verifier.Requests[2].Plan.Actions[0]; got.Action != "goto" || got.URL != "https://app.example.com/search" {
+		t.Fatalf("second repair did not use observed same-origin navigation: %+v", got)
+	}
+	if prompt := executor.Prompts[1]; !strings.Contains(prompt, `"href":"https://app.example.com/search"`) || !strings.Contains(prompt, "same-origin href") {
+		t.Fatalf("second repair prompt lacks refreshed navigation evidence: %s", prompt)
+	}
+}
+
 func TestBrowserCoordinatorReplaysCompletedNavigationBeforeRepairedSuffix(t *testing.T) {
 	originalYAML := `version: 1
 start_url: https://app.example.com
@@ -1570,6 +1727,45 @@ func TestBrowserCoordinatorReusesFrozenRecipeAcrossAttemptsWithoutPlanner(t *tes
 	}
 	if len(events) == 0 || events[0].Type != "browser_recipe_replayed" {
 		t.Fatalf("events=%+v", events)
+	}
+}
+
+func TestBrowserCoordinatorForceReplanSkipsFrozenRecipe(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Attempt.InputJSON = []byte(`{"mode":"reproduce","target_environment":"test","force_browser_replan":true}`)
+	scenarioSHA, err := browserValidationRecipeScenarioSHA256(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale, err := ParseBrowserPlan([]byte(repairedRemainingPlanYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipes := &memoryValidationRecipeStore{recipes: map[string]ValidationRecipe{
+		request.Attempt.CaseID: {CaseID: request.Attempt.CaseID, ScenarioSHA256: scenarioSHA, Plan: stale},
+	}}
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: validBrowserPlanYAML()},
+		{FinalYAML: reproducedValidationYAML("browser/final.png")},
+	}}
+	verifier := &observingBrowserVerifier{
+		fakeBrowserVerifier: fakeBrowserVerifier{Results: []BrowserVerificationResult{completedBrowserResult("browser/final.png")}},
+		Observation:         BrowserVerificationResult{Status: "completed", FinalURL: "https://app.example.com/users"},
+	}
+	events := make([]InvestigationEvent, 0)
+	request.Emit = func(event InvestigationEvent) { events = append(events, event) }
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier, Recipes: recipes}).Execute(context.Background(), request)
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if executor.Calls != 2 || verifier.ObserveCalls != 1 || verifier.Calls != 1 {
+		t.Fatalf("agent=%d observe=%d execute=%d", executor.Calls, verifier.ObserveCalls, verifier.Calls)
+	}
+	for _, event := range events {
+		if event.Type == "browser_recipe_replayed" {
+			t.Fatalf("force replan still replayed the stale recipe: %+v", events)
+		}
 	}
 }
 

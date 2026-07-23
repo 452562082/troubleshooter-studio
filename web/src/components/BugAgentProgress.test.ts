@@ -68,4 +68,27 @@ describe('BugAgentProgress', () => {
     expect(wrapper.text()).toContain('kubectl get pods')
     expect(wrapper.text()).not.toContain('untrusted label')
   })
+
+  it('shows remediation reassessment without restarting seven-step investigation progress', () => {
+    const reassessment = attempt()
+    reassessment.input_json = {
+      remediation_reassessment: {
+        kind: 'user_remediation_proposal',
+        proposal: 'repair the backend mapping',
+        source_root_cause_attempt_id: 'root-1',
+      },
+    }
+    const wrapper = mount(BugAgentProgress, { props: {
+      attempt: reassessment,
+      events: [{ at: '2026-07-18T10:00:00Z', type: 'turn_started', message: '开始评估', meta: {} }],
+    } })
+
+    expect(wrapper.text()).toContain('修复方案评估 Agent 正在执行')
+    expect(wrapper.get('.remediation-reassessment-progress').text()).toContain('复用已确认根因')
+    expect(wrapper.get('.remediation-reassessment-progress').text()).toContain('只重新评估修复路径')
+    expect(wrapper.text()).toContain('修复方案评估任务已开始')
+    expect(wrapper.find('.investigation-step-progress').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('七步排障进度')
+    expect(wrapper.text()).not.toContain('第 1/7')
+  })
 })

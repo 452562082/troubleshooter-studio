@@ -76,6 +76,7 @@ type BrowserAccessibilityNode struct {
 	Role        string `json:"role"`
 	Name        string `json:"name"`
 	LocatorKind string `json:"locator_kind,omitempty"`
+	Href        string `json:"href,omitempty"`
 	Visible     bool   `json:"visible"`
 	Disabled    bool   `json:"disabled"`
 }

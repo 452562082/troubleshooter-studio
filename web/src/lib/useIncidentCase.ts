@@ -55,6 +55,7 @@ export function continuationForDetail(detail: IncidentCaseDetail, evidence: stri
   const input: Record<string, unknown> = { ...(latest.input_json || {}), user_input: evidence }
   if (phase === 'validation') input.mode = 'reproduce'
   if (phase === 'regression') input.mode = 'regression'
+  if (phase === 'validation' && latest.error_code === 'browser_locator_failed') input.force_browser_replan = true
   if (phase === 'investigation' || phase === 'fix') delete input.mode
   return { phase, input_json: input }
 }

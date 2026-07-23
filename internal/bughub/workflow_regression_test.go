@@ -368,6 +368,87 @@ func TestRecoveryRetriesFinalizedRegressionWhoseOnlyGapsAreHostMetadata(t *testi
 	}
 }
 
+func TestRecoveryRetriesFinalizedRegressionBrowserArtifactFreezeFailure(t *testing.T) {
+	store, incident, _, _ := prepareRegressionCase(t, 1)
+	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil)
+	attempt, err := o.StartRegression(context.Background(), incident.ID, incident.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := mustJSON(map[string]any{
+		"error_code":     "browser_artifact_freeze_failed",
+		"error_message":  "验证证据发布失败",
+		"system_failure": true,
+	})
+	current, _ := store.GetCase(context.Background(), incident.ID)
+	finishedAt := time.Now().UTC()
+	attempt.Status = AttemptStatusFailed
+	attempt.ErrorCode = "browser_artifact_freeze_failed"
+	attempt.ErrorMessage = "验证证据发布失败"
+	attempt.OutputJSON = output
+	attempt.FinishedAt = &finishedAt
+	mutation, err := store.ApplyCaseMutation(context.Background(), CaseMutation{
+		CaseID: current.ID, ExpectedVersion: current.Version, IdempotencyKey: "legacy-browser-artifact-freeze-failure",
+		RequestJSON: output, FinishAttempts: []PhaseAttempt{attempt},
+		Steps: []CaseMutationStep{{To: CaseWaitingEvidence, Event: TransitionEvent{
+			ID: "legacy-browser-artifact-freeze-failure-event", EventType: "phase_system_failed",
+			ActorType: "studio", ActorID: "orchestrator", PayloadJSON: output,
+		}}},
+	})
+	if err != nil || mutation.Case.Status != CaseWaitingEvidence {
+		t.Fatalf("mutation=%+v err=%v", mutation, err)
+	}
+
+	runner := &recordingPhaseRunner{}
+	restarted := NewCaseOrchestrator(store, runner, nil, nil)
+	restarted.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(_ context.Context, incident IncidentCase, attempt PhaseAttempt) (Bug, BotRef, error) {
+		return Bug{ID: incident.BugID}, BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget, Path: "/workspace"}, nil
+	}))
+	if err := restarted.RecoverInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := store.GetCase(context.Background(), incident.ID)
+	if err != nil || recovered.Status != CaseRegressionValidating || recovered.CurrentAttemptID == attempt.ID || runner.startCount() != 1 {
+		t.Fatalf("case=%+v starts=%d err=%v", recovered, runner.startCount(), err)
+	}
+	retry, err := store.GetAttempt(context.Background(), recovered.CurrentAttemptID)
+	if err != nil || retry.ParentAttemptID != attempt.ID || !reflect.DeepEqual(retry.InputJSON, attempt.InputJSON) {
+		t.Fatalf("retry=%+v err=%v", retry, err)
+	}
+	if err := restarted.RecoverInterrupted(context.Background()); err != nil || runner.startCount() != 1 {
+		t.Fatalf("duplicate recovery starts=%d err=%v", runner.startCount(), err)
+	}
+
+	retry.Status = AttemptStatusFailed
+	retry.ErrorCode = "browser_artifact_freeze_failed"
+	retry.ErrorMessage = "验证证据发布失败"
+	retry.OutputJSON = output
+	retry.FinishedAt = &finishedAt
+	recovered, _ = store.GetCase(context.Background(), incident.ID)
+	if _, err := store.ApplyCaseMutation(context.Background(), CaseMutation{
+		CaseID: recovered.ID, ExpectedVersion: recovered.Version, IdempotencyKey: "second-browser-artifact-freeze-failure",
+		RequestJSON: output, FinishAttempts: []PhaseAttempt{retry},
+		Steps: []CaseMutationStep{{To: CaseWaitingEvidence, Event: TransitionEvent{
+			ID: "second-browser-artifact-freeze-failure-event", EventType: "phase_system_failed",
+			ActorType: "studio", ActorID: "orchestrator", PayloadJSON: output,
+		}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	boundedRunner := &recordingPhaseRunner{}
+	boundedRestart := NewCaseOrchestrator(store, boundedRunner, nil, nil)
+	boundedRestart.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(_ context.Context, incident IncidentCase, attempt PhaseAttempt) (Bug, BotRef, error) {
+		return Bug{ID: incident.BugID}, BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget, Path: "/workspace"}, nil
+	}))
+	if err := boundedRestart.RecoverInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	bounded, err := store.GetCase(context.Background(), incident.ID)
+	if err != nil || bounded.Status != CaseWaitingEvidence || bounded.CurrentAttemptID != retry.ID || boundedRunner.startCount() != 0 {
+		t.Fatalf("bounded case=%+v starts=%d err=%v", bounded, boundedRunner.startCount(), err)
+	}
+}
+
 func TestRegressionBindingDoesNotOverwriteConflictingModelIdentity(t *testing.T) {
 	attempt := PhaseAttempt{Phase: PhaseRegression, InputJSON: mustJSON(RegressionValidationInput{
 		OriginalScenarioHash: "expected-scenario", TargetEnvironment: "test",

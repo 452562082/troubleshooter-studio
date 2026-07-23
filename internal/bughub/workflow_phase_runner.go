@@ -311,6 +311,7 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	if err != nil {
 		return fail(err)
 	}
+	remediationReassessment := isRemediationReassessmentAttempt(attempt)
 	openStaging := r.openStaging
 	if openStaging == nil {
 		if attempt.Phase == PhaseValidation || attempt.Phase == PhaseRegression {
@@ -323,16 +324,18 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	if err != nil {
 		return fail(fmt.Errorf("create Studio evidence staging: %w", err))
 	}
-	handoffPrompt, err := r.materializeInvestigationEvidence(ctx, attempt, staging)
-	if err != nil {
-		return fail(releaseUntransferredStaging(staging, fmt.Errorf("prepare validation evidence handoff: %w", err)))
+	if !remediationReassessment {
+		handoffPrompt, handoffErr := r.materializeInvestigationEvidence(ctx, attempt, staging)
+		if handoffErr != nil {
+			return fail(releaseUntransferredStaging(staging, fmt.Errorf("prepare validation evidence handoff: %w", handoffErr)))
+		}
+		prompt += handoffPrompt
+		frontendPrompt, frontendErr := r.materializeFrontendRuntime(ctx, attempt, incident, staging, frontendRuntimeResolver)
+		if frontendErr != nil {
+			return fail(releaseUntransferredStaging(staging, fmt.Errorf("prepare frontend runtime handoff: %w", frontendErr)))
+		}
+		prompt += frontendPrompt
 	}
-	prompt += handoffPrompt
-	frontendPrompt, err := r.materializeFrontendRuntime(ctx, attempt, incident, staging, frontendRuntimeResolver)
-	if err != nil {
-		return fail(releaseUntransferredStaging(staging, fmt.Errorf("prepare frontend runtime handoff: %w", err)))
-	}
-	prompt += frontendPrompt
 	checkpoint := (*FixCheckpoint)(nil)
 	if attempt.Phase == PhaseFix {
 		checkpoint = &FixCheckpoint{AttemptID: attempt.ID, CaseID: attempt.CaseID, StagingLocator: fixCheckpointLocator(staging)}
@@ -374,17 +377,19 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 		}
 		prompt += fixWorkspace.Prompt()
 	}
-	repositoryPrompt, err := r.materializeRepositoryAccess(ctx, attempt, incident, staging, repositoryAccessResolver, fixWorkspace)
-	if err != nil {
-		releaseClaim()
-		releaseReservation()
-		if fixWorkspace != nil {
-			_ = fixWorkspace.Close(context.Background())
+	if !remediationReassessment {
+		repositoryPrompt, repositoryErr := r.materializeRepositoryAccess(ctx, attempt, incident, staging, repositoryAccessResolver, fixWorkspace)
+		if repositoryErr != nil {
+			releaseClaim()
+			releaseReservation()
+			if fixWorkspace != nil {
+				_ = fixWorkspace.Close(context.Background())
+			}
+			return releaseUntransferredStaging(staging, fmt.Errorf("prepare repository access boundary: %w", repositoryErr))
 		}
-		return releaseUntransferredStaging(staging, fmt.Errorf("prepare repository access boundary: %w", err))
+		prompt += repositoryPrompt
+		prompt += evidenceStagingPrompt(staging.Path())
 	}
-	prompt += repositoryPrompt
-	prompt += evidenceStagingPrompt(staging.Path())
 	if attempt.Phase == PhaseFix {
 		prompt += "\n## Durable fix checkpoint (mandatory)\n\nBefore the first repository push, atomically write `" + fixCheckpointManifestName + "` in the Studio staging directory (write a temporary sibling, fsync, then rename) with state=`prepared`; include every planned repository commit/branch/remote/test. After all pushes succeed, atomically replace it with the same manifest and state=`pushed` before reporting completion. JSON fields: kind=`" + fixCheckpointManifestKind + "`, version=1, case_id=`" + attempt.CaseID + "`, attempt_id=`" + attempt.ID + "`, state=`prepared|pushed`, result=<the exact structured FixResult also returned as final YAML>. Never include credentials. Recovery treats the SSH remote branch as truth, so a crash after push but before the state update remains recoverable while a pre-push crash cannot be misreported.\n"
 	}
@@ -574,17 +579,23 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 		releaseClaim()
 		return
 	}
-	codeIntelligence, codeIntelligencePrompt, codeIntelligenceErr := r.materializeCodeIntelligence(ctx, attempt, incident, staging, codeIntelligenceResolver)
-	if codeIntelligenceErr == nil {
-		prompt += codeIntelligencePrompt
-		if attempt.Phase == PhaseInvestigation {
-			state := "fallback"
-			message := "CodeGraph 未就绪，代码取证将使用 rg/Read"
-			if codeIntelligence.HasReadyRepository() {
-				state = "ready"
-				message = fmt.Sprintf("CodeGraph %d/%d 个仓库已由 Studio 准备完成", codeIntelligence.Ready, codeIntelligence.Total)
+	remediationReassessment := isRemediationReassessmentAttempt(attempt)
+	codeIntelligence := CodeIntelligenceManifest{}
+	var codeIntelligenceErr error
+	if !remediationReassessment {
+		var codeIntelligencePrompt string
+		codeIntelligence, codeIntelligencePrompt, codeIntelligenceErr = r.materializeCodeIntelligence(ctx, attempt, incident, staging, codeIntelligenceResolver)
+		if codeIntelligenceErr == nil {
+			prompt += codeIntelligencePrompt
+			if attempt.Phase == PhaseInvestigation {
+				state := "fallback"
+				message := "CodeGraph 未就绪，代码取证将使用 rg/Read"
+				if codeIntelligence.HasReadyRepository() {
+					state = "ready"
+					message = fmt.Sprintf("CodeGraph %d/%d 个仓库已由 Studio 准备完成", codeIntelligence.Ready, codeIntelligence.Total)
+				}
+				emit(InvestigationEvent{Type: "code_intelligence", Message: message, Meta: map[string]any{"state": state, "ready": codeIntelligence.Ready, "total": codeIntelligence.Total}})
 			}
-			emit(InvestigationEvent{Type: "code_intelligence", Message: message, Meta: map[string]any{"state": state, "ready": codeIntelligence.Ready, "total": codeIntelligence.Total}})
 		}
 	}
 	var result PhaseExecutionResult
@@ -644,7 +655,7 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 		result.Usage.InputTokens += firstUsage.InputTokens
 		result.Usage.OutputTokens += firstUsage.OutputTokens
 	}
-	if runErr == nil && coordinated == nil && attempt.Phase == PhaseInvestigation && strings.EqualFold(strings.TrimSpace(bot.Target), "codex") && investigationInputRequiresDatastoreRead(attempt.InputJSON) && !hasDatastoreRead() && ctx.Err() == nil {
+	if runErr == nil && coordinated == nil && attempt.Phase == PhaseInvestigation && !remediationReassessment && strings.EqualFold(strings.TrimSpace(bot.Target), "codex") && investigationInputRequiresDatastoreRead(attempt.InputJSON) && !hasDatastoreRead() && ctx.Err() == nil {
 		r.projectEvent(attempt, InvestigationEvent{Type: "retry", Message: "排障缺少数据层只读查询，正在自动补齐"})
 		firstUsage := result.Usage
 		retryPrompt := prompt + "\n\n## Mandatory datastore evidence retry\nThe frozen validation input contains request_facts with business parameters. Before returning YAML, you MUST resolve the target environment datastore from routing and execute the configured read-only mongodb/mysql/postgresql/doris/redis/elasticsearch MCP tool as applicable. Use request_facts values as the query filter, record collection/table, filter, row count, and compared fields in evidence. Do not ask the user to query it.\n"
@@ -655,7 +666,7 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 			runErr = errors.New("configured datastore evidence was not queried")
 		}
 	}
-	if runErr == nil && coordinated == nil && attempt.Phase == PhaseInvestigation && codeIntelligence.HasReadyRepository() && investigationResultRequiresCodeGraph(result.FinalYAML) && !hasCodeGraphQuery() && ctx.Err() == nil {
+	if runErr == nil && coordinated == nil && attempt.Phase == PhaseInvestigation && !remediationReassessment && codeIntelligence.HasReadyRepository() && investigationResultRequiresCodeGraph(result.FinalYAML) && !hasCodeGraphQuery() && ctx.Err() == nil {
 		r.projectEvent(attempt, InvestigationEvent{Type: "retry", Message: "代码根因缺少 CodeGraph 查询，正在自动补齐"})
 		firstUsage := result.Usage
 		retryPrompt := prompt + "\n\n## Mandatory CodeGraph evidence retry\nThe proposed result is a code root cause, but no completed `codegraph_explore` MCP receipt was observed. Read `" + codeIntelligenceManifestName + "`, call `codegraph_explore` for the implicated ready repository using its exact `project_path` and `maxFiles=4`, then corroborate graph inferences with runtime evidence and deployed-revision source. Do not execute the CodeGraph CLI.\n"
@@ -899,12 +910,10 @@ func (r *AgentPhaseRunner) promptForAttempt(attempt PhaseAttempt, bug Bug, bot B
 		}
 		return BuildRegressionValidationPrompt(bug, bot, input), nil
 	case PhaseInvestigation:
-		prompt := buildStructuredInvestigationPrompt(bug, bot)
 		if reassessment, ok := remediationReassessmentFromInput(attempt.InputJSON); ok {
-			prompt += "\n## 用户修复方案重新评估\n\n"
-			prompt += "用户没有授权任何修复操作，只要求重新评估修复路径。必须保留已经验证的事实和根因，除非既有证据明确支持修正；不得为了迎合用户方案而改写证据。对用户方案与当前建议做只读比较，至少评估前端、后端、配置/数据/运行处置中与该根因实际相关的可选路径，比较影响面、风险、回滚和回归方式，并在标准 remediation 字段中输出最终推荐。若用户方案可行，可采纳或收敛；若不可行，仍输出证据支持的更安全方案。不得启动修复 Agent、修改代码、配置、数据或运行资源。\n"
-			prompt += "本次重新评估绑定的原根因 Attempt：" + reassessment.SourceRootCauseAttemptID + "。原根因结构和用户方案均在 Studio structured investigation input 中。\n"
+			return buildRemediationReassessmentPrompt(reassessment)
 		}
+		prompt := buildStructuredInvestigationPrompt(bug, bot)
 		if len(attempt.InputJSON) != 0 && string(attempt.InputJSON) != "{}" {
 			prompt += "\n## Studio structured investigation input\n\n```json\n" + string(attempt.InputJSON) + "\n```\n"
 		}
@@ -918,6 +927,18 @@ func (r *AgentPhaseRunner) promptForAttempt(attempt PhaseAttempt, bug Bug, bot B
 		prompt += "\n## 已批准的排障交接\n\n下列根因与修复方向已通过 Studio 授权关口。先在锁定工作区核对实际代码，再做最小修复；不得忽略或自行替换该交接。\n\n```json\n" + string(handoff) + "\n```\n"
 		if len(attempt.InputJSON) != 0 && string(attempt.InputJSON) != "{}" {
 			prompt += "\n## 已授权结构化阶段输入\n\n```json\n" + string(attempt.InputJSON) + "\n```\n"
+		}
+		if rework, ok := fixReworkFromInput(attempt.InputJSON); ok {
+			prompt += fmt.Sprintf(`
+## 重新修复约束
+
+这是对已推送修复 %s 的全新修复 Attempt，不是继续修改旧分支。
+
+- 用户反馈必须作为已批准修复方案的实施约束：%s
+- 旧修复结果仅供比较，不得 checkout、amend、force-push 或复用其中的修复分支。
+- 必须从 Studio 提供的干净锁定基线重新实施，并为每个新修复分支使用精确后缀：%s
+- 若用户反馈与已锁定根因或本次授权仓库范围冲突，输出 blocked，不得自行扩大范围。
+`, rework.SourceFixAttemptID, rework.UserFeedback, rework.RequiredFixBranchSuffix)
 		}
 		return prompt, nil
 	default:
@@ -1186,18 +1207,6 @@ func (r *AgentPhaseRunner) registerArtifacts(ctx context.Context, attempt PhaseA
 }
 
 func (r *AgentPhaseRunner) freezeBrowserArtifacts(ctx context.Context, attempt PhaseAttempt, staging attemptEvidenceStaging, references []BrowserArtifactReference) ([]browserFrozenArtifact, error) {
-	registered, err := r.store.ListEvidenceArtifacts(ctx, attempt.CaseID)
-	if err != nil {
-		return nil, err
-	}
-	priorDigests := make([]string, 0, len(registered))
-	if attempt.Phase == PhaseRegression {
-		for _, artifact := range registered {
-			if artifact.AttemptID != attempt.ID {
-				priorDigests = append(priorDigests, artifact.SHA256)
-			}
-		}
-	}
 	frozen := make([]browserFrozenArtifact, 0, len(references))
 	for _, reference := range references {
 		if strings.TrimSpace(reference.Path) == "" || strings.TrimSpace(reference.Kind) == "" || strings.TrimSpace(reference.Environment) == "" || len(reference.SHA256) != sha256.Size*2 || reference.SHA256 != strings.ToLower(reference.SHA256) || reference.Size < 0 {
@@ -1213,7 +1222,14 @@ func (r *AgentPhaseRunner) freezeBrowserArtifacts(ctx context.Context, attempt P
 		if captured.SHA256 != reference.SHA256 || int64(len(captured.Content)) != reference.Size {
 			return nil, errors.New("verified browser artifact changed before registration")
 		}
-		artifact, err := registerCapturedArtifact(ctx, r.store, ArtifactInput{ArtifactsRoot: r.artifactsRoot, SourcePath: filepath.Join(staging.Path(), reference.Path), CaseID: attempt.CaseID, AttemptID: attempt.ID, Kind: reference.Kind, CapturedAt: captured.CapturedAt, Environment: reference.Environment, Version: reference.Version, RequestID: reference.RequestID, TraceID: reference.TraceID, RedactionStatus: RedactionStatusNotRequired, RejectSHA256: priorDigests, RejectSensitive: true}, captured)
+		// These references come from the HostVerifier's current browser execution
+		// and are bound to this attempt's private staging directory. Deterministic
+		// pages may legitimately produce byte-identical screenshots or facts on a
+		// fresh replay, so freshness is established by this execution boundary and
+		// the verified digest/size above rather than by requiring changed content.
+		// Agent-reported artifacts still use registerArtifacts, which rejects
+		// digests registered by earlier attempts.
+		artifact, err := registerCapturedArtifact(ctx, r.store, ArtifactInput{ArtifactsRoot: r.artifactsRoot, SourcePath: filepath.Join(staging.Path(), reference.Path), CaseID: attempt.CaseID, AttemptID: attempt.ID, Kind: reference.Kind, CapturedAt: captured.CapturedAt, Environment: reference.Environment, Version: reference.Version, RequestID: reference.RequestID, TraceID: reference.TraceID, RedactionStatus: RedactionStatusNotRequired, RejectSensitive: true}, captured)
 		if err != nil {
 			return nil, err
 		}
@@ -1672,6 +1688,9 @@ func ParsePhaseResult(attempt PhaseAttempt, data []byte) (PhaseResult, error) {
 		if attempt.Mode != "" {
 			return PhaseResult{}, fmt.Errorf("investigation does not accept mode %q", attempt.Mode)
 		}
+		if isRemediationReassessmentAttempt(attempt) {
+			return parseRemediationReassessmentResult(attempt, data)
+		}
 		result, err := ParseInvestigationResult(data)
 		if err != nil {
 			return PhaseResult{}, err
@@ -1692,6 +1711,9 @@ func ParsePhaseResult(attempt PhaseAttempt, data []byte) (PhaseResult, error) {
 		}
 		result, err := ParseFixResult(data)
 		if err != nil {
+			return PhaseResult{}, err
+		}
+		if err := validateFixReworkResult(attempt.InputJSON, result); err != nil {
 			return PhaseResult{}, err
 		}
 		outcome := PhaseOutcomeFixFailed

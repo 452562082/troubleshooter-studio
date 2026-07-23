@@ -107,9 +107,9 @@ func (s *CaseStore) SaveCompletionIntentIfRunning(ctx context.Context, command C
 		return fmt.Errorf("begin completion intent save: %w", err)
 	}
 	defer tx.Rollback()
-	var caseID, status, existing string
+	var caseID, status, existing, inputJSON string
 	var phase Phase
-	if err := tx.QueryRowContext(ctx, `SELECT case_id,status,output_json,phase FROM phase_attempts WHERE id=?`, command.AttemptID).Scan(&caseID, &status, &existing, &phase); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT case_id,status,output_json,phase,input_json FROM phase_attempts WHERE id=?`, command.AttemptID).Scan(&caseID, &status, &existing, &phase, &inputJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrCaseNotFound
 		}
@@ -119,6 +119,9 @@ func (s *CaseStore) SaveCompletionIntentIfRunning(ctx context.Context, command C
 		return errors.New("completion intent attempt belongs to a different Case")
 	}
 	if err := validateCompletionAttemptPhase(phase, command); err != nil {
+		return err
+	}
+	if err := validateFixReworkCompletion(PhaseAttempt{Phase: phase, InputJSON: []byte(inputJSON)}, command); err != nil {
 		return err
 	}
 	if AttemptStatus(status) != AttemptStatusQueued && AttemptStatus(status) != AttemptStatusRunning {

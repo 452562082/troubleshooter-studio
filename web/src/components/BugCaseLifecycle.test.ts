@@ -45,6 +45,27 @@ describe('BugCaseLifecycle', () => {
     expect(primaryActionFor(incident('fixed_verified'))).toBeUndefined()
   })
 
+  it('labels a remediation reassessment as a bounded assessment instead of a restarted investigation', () => {
+    const snapshot = detail('investigating')
+    snapshot.case.current_attempt_id = 'reassessment-1'
+    snapshot.attempts = [{
+      id: 'reassessment-1', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'running',
+      agent_target: 'codex', bot_key: 'base|codex', parent_attempt_id: 'root-1', started_at: '', error_code: '', error_message: '', usage: {},
+      input_json: { remediation_reassessment: { kind: 'user_remediation_proposal', proposal: '修复后端映射', source_root_cause_attempt_id: 'root-1' } },
+      output_json: {},
+    }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'cancel_attempt', label: '停止方案评估' })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(wrapper.get('.status-pill').text()).toBe('修复方案评估中')
+    expect(wrapper.get('.current-action-card').text()).toContain('修复方案评估中')
+    expect(wrapper.get('.current-action-card').text()).toContain('复用已确认根因和冻结证据')
+    expect(wrapper.findAll('.lifecycle-stage')[1].text()).toContain('方案评估')
+    expect(wrapper.get('.primary-action').text()).toBe('停止方案评估')
+    expect(wrapper.text()).toContain('复用已确认根因')
+    expect(wrapper.text()).not.toContain('七步排障进度')
+  })
+
   it('uses a four-stage remediation flow and requires an audited action before regression', async () => {
     const snapshot = detail('waiting_remediation')
     snapshot.case.current_attempt_id = 'root-config'
@@ -412,6 +433,57 @@ describe('BugCaseLifecycle', () => {
     await dialog.find('[data-confirm]').trigger('click')
 
     expect(wrapper.emitted('primary')?.[0]).toEqual([{ kind: 'approve_merge' }])
+  })
+
+  it('offers a bounded rework flow for the current pushed fix and excludes old attempts from merge', async () => {
+    const snapshot = detail('waiting_merge_approval')
+    snapshot.case.version = 12
+    snapshot.case.current_attempt_id = 'fix-current'
+    snapshot.attempts = [
+      {
+        id: 'root-current', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded',
+        agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready' },
+        parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {},
+      },
+      {
+        id: 'fix-current', case_id: 'case-1', cycle_number: 1, phase: 'fix', mode: '', status: 'succeeded',
+        agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { fix_status: 'fixed_pushed' },
+        parent_attempt_id: 'root-current', started_at: '', error_code: '', error_message: '', usage: {},
+      },
+    ]
+    snapshot.code_changes = [
+      { id: 'old', case_id: 'case-1', attempt_id: 'fix-old', repo: 'old-repo', base_branch: 'main', fix_branch: 'fix/old', fix_commit: 'old111', test_evidence: {}, target_environment_branch: 'test', merge_base_head: 'old-head', merge_commit: '', push_remote: 'origin', push_status: 'pushed' },
+      { id: 'current', case_id: 'case-1', attempt_id: 'fix-current', repo: 'backend', base_branch: 'feature/work', fix_branch: 'fix/current', fix_commit: 'new111', test_evidence: {}, target_environment_branch: 'test', merge_base_head: 'new-head', merge_commit: '', push_remote: 'origin', push_status: 'pushed' },
+    ]
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+
+    expect(wrapper.get('.current-action-card').text()).toContain('旧修复将只保留审计')
+    expect(wrapper.get('.primary-action').text()).toBe('允许合并基线和环境分支')
+    expect(wrapper.get('.rework-action').text()).toBe('重新修复')
+
+    await wrapper.get('.primary-action').trigger('click')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('backend')
+    expect(wrapper.get('[role="dialog"]').text()).not.toContain('old-repo')
+    await wrapper.get('[role="dialog"] footer .btn:not(.primary)').trigger('click')
+
+    await wrapper.get('.rework-action').trigger('click')
+    const dialog = wrapper.get('[role="dialog"]')
+    expect(dialog.text()).toContain('旧修复分支只保留审计')
+    expect(dialog.text()).toContain('再次停在修复授权门')
+    const confirm = wrapper.get<HTMLButtonElement>('[data-confirm]')
+    expect(confirm.element.disabled).toBe(true)
+    await wrapper.get('#fix-rework-feedback').setValue('当前改在前端不符合预期，请改为后端恢复 signature 并补契约测试')
+    await wrapper.setProps({ detail: { ...snapshot, case: { ...snapshot.case, version: 13 } } })
+    expect(confirm.element.disabled).toBe(false)
+    await confirm.trigger('click')
+
+    const emitted = wrapper.emitted('primary') || []
+    expect(emitted[emitted.length - 1]).toEqual([{
+      kind: 'redo_fix',
+      rootCauseAttemptID: 'root-current',
+      caseVersion: 12,
+      input: '当前改在前端不符合预期，请改为后端恢复 signature 并补契约测试',
+    }])
   })
 
   it('emits the root-cause attempt and Case version captured when the fix dialog opens', async () => {

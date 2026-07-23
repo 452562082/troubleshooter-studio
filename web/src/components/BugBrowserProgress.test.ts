@@ -106,7 +106,7 @@ describe('BugBrowserProgress', () => {
     expect(quota.find('[data-browser-action]').exists()).toBe(false)
 
     const locator = mount(BugBrowserProgress, { props: { attempt: attempt('browser_locator_failed'), events: [], systemID: 'base', environment: 'test' } })
-    expect(locator.text()).toContain('一次现场修复均失败')
+    expect(locator.text()).toContain('有限次现场修复仍失败')
     expect(locator.text()).toContain('无需补充业务证据')
     expect(locator.find('[data-browser-action="repair-runtime"]').exists()).toBe(false)
 

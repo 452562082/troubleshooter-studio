@@ -105,6 +105,31 @@ test('accessibilitySummary infers native search inputs as searchable text contro
   assert.deepEqual(summary[1], { role: 'searchbox', name: '请输入搜索关键字', locator_kind: 'placeholder', visible: true, disabled: false });
 });
 
+test('accessibilitySummary preserves hidden same-origin navigation targets without making them clickable', async () => {
+  const attributes = { role: '', type: '', 'aria-label': '打开搜索页', placeholder: '', href: '/search' };
+  const node = {
+    isVisible: async () => false,
+    getAttribute: async (name) => attributes[name] || '',
+    textContent: async () => '',
+    isDisabled: async () => false,
+  };
+  const page = {
+    url: () => 'https://app.test/home',
+    locator: (selector) => selector === 'body'
+      ? { innerText: async () => '首页' }
+      : { count: async () => 1, nth: () => node },
+  };
+  const summary = await accessibilitySummary(page);
+  assert.deepEqual(summary[1], {
+    role: 'link',
+    name: '打开搜索页',
+    locator_kind: 'label',
+    href: 'https://app.test/search',
+    visible: false,
+    disabled: false,
+  });
+});
+
 test('accessibilitySummary bounds multibyte document text by the host UTF-8 byte contract', async () => {
   const page = {
     locator: (selector) => selector === 'body'

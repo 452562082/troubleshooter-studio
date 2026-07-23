@@ -16,7 +16,7 @@ var allowedCaseTransitions = map[CaseStatus]map[CaseStatus]struct{}{
 	CaseFixing:               {CaseFixPushed: {}, CaseFixFailed: {}, CaseResetArchived: {}},
 	CaseFixFailed:            {CaseFixing: {}, CaseResetArchived: {}},
 	CaseFixPushed:            {CaseWaitingMergeApproval: {}, CaseResetArchived: {}},
-	CaseWaitingMergeApproval: {CaseMerging: {}, CaseResetArchived: {}},
+	CaseWaitingMergeApproval: {CaseInvestigating: {}, CaseMerging: {}, CaseResetArchived: {}},
 	CaseMerging:              {CaseWaitingDeployment: {}, CaseMergeConflict: {}, CaseWaitingMergeApproval: {}, CaseResetArchived: {}},
 	CaseMergeConflict:        {CaseWaitingMergeApproval: {}, CaseResetArchived: {}},
 	CaseWaitingDeployment:    {CaseDeploymentVerified: {}, CaseDeploymentUnverified: {}, CaseResetArchived: {}},

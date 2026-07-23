@@ -19,8 +19,17 @@ const investigationSteps = [
   { key: 'knowledge_sink', label: '结果沉淀' },
 ] as const
 
+const remediationReassessment = computed(() => {
+  const value = props.attempt?.input_json?.remediation_reassessment
+  return props.attempt?.phase === 'investigation' && Boolean(
+    value && typeof value === 'object' && (value as Record<string, unknown>).kind === 'user_remediation_proposal',
+  )
+})
 const active = computed(() => Boolean(props.attempt?.status === 'running' && visiblePhases.has(props.attempt.phase)))
-const phaseLabel = computed(() => props.attempt?.phase === 'fix' ? '修复' : '排障')
+const phaseLabel = computed(() => {
+  if (props.attempt?.phase === 'fix') return '修复'
+  return remediationReassessment.value ? '修复方案评估' : '排障'
+})
 const targetLabel = computed(() => props.attempt?.agent_target?.trim() || 'Agent')
 const currentInvestigationStep = computed(() => {
   if (props.attempt?.phase !== 'investigation') return 0
@@ -87,7 +96,12 @@ function fmtTime(value: string): string {
       <div class="agent-running-state"><i aria-hidden="true"></i><span>{{ targetLabel }} · 实时更新</span></div>
     </header>
 
-    <div v-if="attempt?.phase === 'investigation'" class="investigation-step-progress" role="status" aria-live="polite">
+    <div v-if="remediationReassessment" class="remediation-reassessment-progress" role="status" aria-live="polite">
+      <strong>复用已确认根因</strong>
+      <span>只重新评估修复路径，不会重新执行七步排障或修改系统。</span>
+    </div>
+
+    <div v-else-if="attempt?.phase === 'investigation'" class="investigation-step-progress" role="status" aria-live="polite">
       <div class="step-progress-heading">
         <strong>七步排障进度</strong>
         <span>{{ progressSummary }}</span>
@@ -136,6 +150,9 @@ function fmtTime(value: string): string {
 .agent-progress h3 { margin: 2px 0 0; color: var(--c-ink); font-size: var(--fs-base); }
 .agent-running-state { display: inline-flex; align-items: center; gap: 7px; padding: 5px 9px; border-radius: 999px; background: #dbeafe; }
 .agent-running-state i { width: 8px; height: 8px; border-radius: 50%; background: #2563eb; box-shadow: 0 0 0 4px rgba(37, 99, 235, .12); animation: agent-pulse 1.6s ease-in-out infinite; }
+.remediation-reassessment-progress { display: grid; gap: 4px; padding: 12px; border: 1px solid #dbeafe; border-radius: var(--r-md); background: #fff; }
+.remediation-reassessment-progress strong { color: var(--c-ink); font-size: var(--fs-sm); }
+.remediation-reassessment-progress span { color: var(--c-muted); font-size: var(--fs-xs); line-height: 1.5; }
 .investigation-step-progress { display: grid; gap: 10px; padding: 12px; border: 1px solid #dbeafe; border-radius: var(--r-md); background: #fff; }
 .step-progress-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: var(--sp-2); }
 .step-progress-heading strong { color: var(--c-ink); font-size: var(--fs-sm); }

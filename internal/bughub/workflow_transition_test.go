@@ -33,6 +33,7 @@ func TestCanTransition(t *testing.T) {
 		{CaseFixing, CaseFixFailed},
 		{CaseFixFailed, CaseFixing},
 		{CaseFixPushed, CaseWaitingMergeApproval},
+		{CaseWaitingMergeApproval, CaseInvestigating},
 		{CaseWaitingMergeApproval, CaseMerging},
 		{CaseMerging, CaseWaitingDeployment},
 		{CaseMerging, CaseMergeConflict},

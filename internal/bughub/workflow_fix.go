@@ -245,6 +245,20 @@ func validateFixCompletionPayload(command CompleteAttemptCommand) error {
 	return nil
 }
 
+func validateFixReworkCompletion(attempt PhaseAttempt, command CompleteAttemptCommand) error {
+	if attempt.Phase != PhaseFix || command.Outcome != PhaseOutcomeFixPushed {
+		return nil
+	}
+	result, err := ParseFixResult(command.OutputJSON)
+	if err != nil {
+		return fmt.Errorf("validate reworked fix output: %w", err)
+	}
+	if err := validateFixReworkResult(attempt.InputJSON, result); err != nil {
+		return fmt.Errorf("validate reworked fix branch scope: %w", err)
+	}
+	return nil
+}
+
 func validateCompletionAttemptPhase(phase Phase, command CompleteAttemptCommand) error {
 	if command.Outcome == PhaseOutcomeValidationEvidenceRequired && phase != PhaseInvestigation {
 		return errors.New("validation-evidence-required completion requires an investigation attempt")

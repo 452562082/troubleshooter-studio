@@ -16,7 +16,7 @@ import {
   stat,
 } from 'node:fs/promises';
 
-import { boundedUTF8, redactConsoleText, safeResponseRecord } from './sanitize.mjs';
+import { boundedUTF8, redactConsoleText, safeResponseRecord, sanitizeURL } from './sanitize.mjs';
 
 const PROGRESS_PREFIX = 'TSHOOT_BROWSER_PROGRESS ';
 const ALLOWED_ACTIONS = new Set(['goto', 'click', 'fill', 'press', 'select', 'wait_for', 'screenshot']);
@@ -2465,12 +2465,22 @@ export async function accessibilitySummary(page) {
   for (let index = 0; index < count; index += 1) {
     const node = nodes.nth(index);
     const visible = await node.isVisible().catch(() => false);
-    if (!visible) continue;
     const explicitRole = await node.getAttribute('role').catch(() => '');
-    const href = await node.getAttribute('href').catch(() => '');
+    const rawHref = await node.getAttribute('href').catch(() => '');
     const placeholder = await node.getAttribute('placeholder').catch(() => '');
     const ariaLabel = await node.getAttribute('aria-label').catch(() => '');
     const inputType = ((await node.getAttribute('type').catch(() => '')) || '').toLowerCase();
+    let href = '';
+    if (rawHref && typeof page.url === 'function') {
+      try {
+        const pageURL = new URL(page.url());
+        const target = new URL(rawHref, pageURL);
+        if (['http:', 'https:'].includes(target.protocol) && target.origin === pageURL.origin) href = target.href;
+      } catch {
+        href = '';
+      }
+    }
+    if (!visible && !href) continue;
     let role = explicitRole || 'element';
     if (!explicitRole) {
       if (href) role = 'link';
@@ -2480,14 +2490,17 @@ export async function accessibilitySummary(page) {
       || placeholder
       || (await node.textContent().catch(() => ''))
       || '';
+    if (!visible && !name.trim()) continue;
     const locatorKind = explicitRole && name ? 'role' : ariaLabel ? 'label' : placeholder ? 'placeholder' : name ? 'text' : '';
-    result.push({
+    const entry = {
       role: boundedUTF8(redactConsoleText(role), 128),
       name: boundedUTF8(redactConsoleText(name.trim()), 2048),
       locator_kind: locatorKind,
-      visible: true,
+      visible,
       disabled: await node.isDisabled().catch(() => false),
-    });
+    };
+    if (href) entry.href = boundedUTF8(sanitizeURL(href), 2048);
+    result.push(entry);
   }
   return result;
 }

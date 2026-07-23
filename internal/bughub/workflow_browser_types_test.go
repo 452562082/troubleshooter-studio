@@ -42,6 +42,10 @@ func TestParseBrowserPlanAcceptsExactActionMatrix(t *testing.T) {
     action: select
     locator: {kind: label, value: 角色}
     value: admin`,
+		"upload_file": `  - id: upload-sheet
+    action: upload_file
+    locator: {kind: css, value: "input[type=file]"}
+    file_ref: file-123`,
 		"wait_for": `  - id: wait-results
     action: wait_for
     locator: {kind: text, value: 搜索结果}
@@ -331,6 +335,18 @@ func TestParseBrowserPlanRejectsInvalidActionFields(t *testing.T) {
     locator: {kind: label, value: 角色}
     value: admin
     url: users`,
+		"upload missing file_ref": `  - id: step
+    action: upload_file
+    locator: {kind: css, value: "input[type=file]"}`,
+		"upload value forbidden": `  - id: step
+    action: upload_file
+    locator: {kind: css, value: "input[type=file]"}
+    file_ref: file-123
+    value: /tmp/arbitrary.xlsx`,
+		"click file_ref forbidden": `  - id: step
+    action: click
+    locator: {kind: text, value: 用户}
+    file_ref: file-123`,
 		"wait_for missing locator": `  - id: step
     action: wait_for`,
 		"wait_for key forbidden": `  - id: step

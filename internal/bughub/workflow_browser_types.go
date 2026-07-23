@@ -39,6 +39,7 @@ type BrowserAction struct {
 	URL             string          `yaml:"url,omitempty" json:"url,omitempty"`
 	Value           string          `yaml:"value,omitempty" json:"value,omitempty"`
 	Key             string          `yaml:"key,omitempty" json:"key,omitempty"`
+	FileRef         string          `yaml:"file_ref,omitempty" json:"file_ref,omitempty"`
 	ScreenshotAfter bool            `yaml:"screenshot_after,omitempty" json:"screenshot_after,omitempty"`
 }
 
@@ -90,8 +91,19 @@ type BrowserVerificationRequest struct {
 	Version     string
 	Policy      BrowserSecurityPolicy
 	Plan        BrowserPlan
+	UploadFiles []BrowserUploadFile
 	StagingDir  string
 	Emit        func(BrowserProgress)
+}
+
+// BrowserUploadFile is a host-owned, Case-bound input file. BrowserPlan refers
+// to it only by ID; the model never sees or controls a local filesystem path.
+type BrowserUploadFile struct {
+	ID       string
+	Name     string
+	MIMEType string
+	Content  []byte
+	SHA256   string
 }
 
 type BrowserSecurityPolicy struct {
@@ -169,6 +181,7 @@ type browserActionYAML struct {
 	URL             yaml.Node `yaml:"url,omitempty"`
 	Value           yaml.Node `yaml:"value,omitempty"`
 	Key             yaml.Node `yaml:"key,omitempty"`
+	FileRef         yaml.Node `yaml:"file_ref,omitempty"`
 	ScreenshotAfter yaml.Node `yaml:"screenshot_after,omitempty"`
 }
 
@@ -385,6 +398,7 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 	urlPresent := browserYAMLFieldPresent(raw.URL)
 	valuePresent := browserYAMLFieldPresent(raw.Value)
 	keyPresent := browserYAMLFieldPresent(raw.Key)
+	fileRefPresent := browserYAMLFieldPresent(raw.FileRef)
 	screenshotAfterPresent := browserYAMLFieldPresent(raw.ScreenshotAfter)
 
 	require := func(field string, present bool) error {
@@ -417,6 +431,7 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 			browserActionFieldPresence{"locator", locatorPresent},
 			browserActionFieldPresence{"value", valuePresent},
 			browserActionFieldPresence{"key", keyPresent},
+			browserActionFieldPresence{"file_ref", fileRefPresent},
 		); err != nil {
 			return BrowserAction{}, err
 		}
@@ -428,6 +443,7 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 			browserActionFieldPresence{"url", urlPresent},
 			browserActionFieldPresence{"value", valuePresent},
 			browserActionFieldPresence{"key", keyPresent},
+			browserActionFieldPresence{"file_ref", fileRefPresent},
 		); err != nil {
 			return BrowserAction{}, err
 		}
@@ -441,6 +457,7 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 		if err := forbidFields(
 			browserActionFieldPresence{"url", urlPresent},
 			browserActionFieldPresence{"key", keyPresent},
+			browserActionFieldPresence{"file_ref", fileRefPresent},
 		); err != nil {
 			return BrowserAction{}, err
 		}
@@ -454,6 +471,21 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 		if err := forbidFields(
 			browserActionFieldPresence{"url", urlPresent},
 			browserActionFieldPresence{"value", valuePresent},
+			browserActionFieldPresence{"file_ref", fileRefPresent},
+		); err != nil {
+			return BrowserAction{}, err
+		}
+	case "upload_file":
+		if err := require("locator", locatorPresent); err != nil {
+			return BrowserAction{}, err
+		}
+		if err := require("file_ref", fileRefPresent); err != nil {
+			return BrowserAction{}, err
+		}
+		if err := forbidFields(
+			browserActionFieldPresence{"url", urlPresent},
+			browserActionFieldPresence{"value", valuePresent},
+			browserActionFieldPresence{"key", keyPresent},
 		); err != nil {
 			return BrowserAction{}, err
 		}
@@ -463,6 +495,7 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 			browserActionFieldPresence{"url", urlPresent},
 			browserActionFieldPresence{"value", valuePresent},
 			browserActionFieldPresence{"key", keyPresent},
+			browserActionFieldPresence{"file_ref", fileRefPresent},
 		); err != nil {
 			return BrowserAction{}, err
 		}
@@ -486,6 +519,10 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 	if err != nil {
 		return BrowserAction{}, err
 	}
+	fileRef, err := decodeBrowserPlanYAMLString(prefix+".file_ref", raw.FileRef, raw.Action == "upload_file")
+	if err != nil {
+		return BrowserAction{}, err
+	}
 	screenshotAfter, err := decodeBrowserPlanYAMLBool(prefix+".screenshot_after", raw.ScreenshotAfter)
 	if err != nil {
 		return BrowserAction{}, err
@@ -501,6 +538,7 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 		URL:             urlValue,
 		Value:           value,
 		Key:             key,
+		FileRef:         fileRef,
 		ScreenshotAfter: screenshotAfter,
 	}, nil
 }

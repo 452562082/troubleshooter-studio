@@ -3150,6 +3150,40 @@ export namespace main {
 	        this.base64_data = source["base64_data"];
 	    }
 	}
+	export class IncidentEvidenceFile {
+	    artifact_id: string;
+	    name: string;
+	    mime_type: string;
+	    size: number;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentEvidenceFile(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.artifact_id = source["artifact_id"];
+	        this.name = source["name"];
+	        this.mime_type = source["mime_type"];
+	        this.size = source["size"];
+	    }
+	}
+	export class IncidentEvidenceFileInput {
+	    name: string;
+	    mime_type: string;
+	    base64_data: string;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentEvidenceFileInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.mime_type = source["mime_type"];
+	        this.base64_data = source["base64_data"];
+	    }
+	}
 
 
 	export class InfraCredBatchInput {
@@ -4197,6 +4231,37 @@ export namespace main {
 		            for (const key of Object.keys(a)) {
 		                a[key] = new classs(a[key]);
 		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class UploadIncidentEvidenceFilesInput {
+	    case_id: string;
+	    attempt_id: string;
+	    expected_version: number;
+	    files: IncidentEvidenceFileInput[];
+
+	    static createFrom(source: any = {}) {
+	        return new UploadIncidentEvidenceFilesInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.attempt_id = source["attempt_id"];
+	        this.expected_version = source["expected_version"];
+	        this.files = this.convertValues(source["files"], IncidentEvidenceFileInput);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) return a;
+		    if (a.slice && a.map) return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) a[key] = new classs(a[key]);
 		            return a;
 		        }
 		        return new classs(a);

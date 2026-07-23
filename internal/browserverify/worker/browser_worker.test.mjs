@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createServer as createHTTPServer, request as httpRequest } from 'node:http';
 import { connect as connectTCP, createServer as createTCPServer } from 'node:net';
@@ -38,6 +38,7 @@ import {
   evaluateAutomaticResponseFactPayload,
   evaluateRequestCapturesForRequest,
   evaluateResponseAssertionsForResponse,
+  executeAction,
   launchPinnedBrowser,
   resolvePinnedTarget,
   saveLoginStorageState,
@@ -625,19 +626,26 @@ test('worker forbids API and identity-provider origins from owning execute or lo
   }
 });
 
-test('browser worker accepts exactly seven actions and six locator kinds', () => {
+test('browser worker accepts exactly eight actions and six locator kinds', () => {
+  const uploadDir = mkdtempSync(join(tmpdir(), 'browser-upload-worker-'));
+  const lexicalUploadPath = join(uploadDir, 'fixture.xlsx');
+  writeFileSync(lexicalUploadPath, Buffer.from('xlsx-fixture'));
+  const uploadPath = realpathSync(lexicalUploadPath);
+  test.after(() => rmSync(uploadDir, { recursive: true, force: true }));
   const actions = [
     { id: 'goto', action: 'goto', url: 'https://app.test/next' },
     { id: 'click', action: 'click', locator: { kind: 'role', value: 'button', name: 'Search' } },
     { id: 'fill', action: 'fill', locator: { kind: 'label', value: 'Keyword' }, value: 'soup' },
     { id: 'press', action: 'press', locator: { kind: 'text', value: 'Search' }, key: 'Enter' },
     { id: 'select', action: 'select', locator: { kind: 'placeholder', value: 'Status' }, value: 'open' },
+    { id: 'upload', action: 'upload_file', locator: { kind: 'css', value: 'input[type="file"]' }, file_ref: 'fixture' },
     { id: 'wait', action: 'wait_for', locator: { kind: 'test_id', value: 'results' } },
     { id: 'shot', action: 'screenshot' },
     { id: 'css', action: 'wait_for', locator: { kind: 'css', value: '.rendered' } },
   ];
   const request = baseRequest();
   request.plan.actions = actions;
+  request.upload_files = { fixture: uploadPath };
   assert.doesNotThrow(() => validateWorkerRequest(request));
 
   for (const action of ['evaluate', 'upload', 'shell', 'xpath']) {
@@ -653,7 +661,7 @@ test('browser worker accepts exactly seven actions and six locator kinds', () =>
 });
 
 test('browser worker rejects production interaction before browser launch', () => {
-  for (const action of ['click', 'fill', 'press', 'select']) {
+  for (const action of ['click', 'fill', 'press', 'select', 'upload_file']) {
     const request = baseRequest();
     request.policy.is_prod = true;
     request.plan.actions = [{
@@ -662,9 +670,56 @@ test('browser worker rejects production interaction before browser launch', () =
       locator: { kind: 'text', value: 'Submit' },
       ...(action === 'fill' || action === 'select' ? { value: 'x' } : {}),
       ...(action === 'press' ? { key: 'Enter' } : {}),
+      ...(action === 'upload_file' ? { file_ref: 'fixture' } : {}),
     }];
     assert.throws(() => validateWorkerRequest(request), /production/);
   }
+});
+
+test('upload_file accepts only a host-controlled file reference and uses its resolved path', async () => {
+  const uploadDir = mkdtempSync(join(tmpdir(), 'browser-upload-action-'));
+  const lexicalUploadPath = join(uploadDir, 'fixture.xlsx');
+  writeFileSync(lexicalUploadPath, Buffer.from('xlsx-fixture'));
+  const uploadPath = realpathSync(lexicalUploadPath);
+  test.after(() => rmSync(uploadDir, { recursive: true, force: true }));
+
+  const request = baseRequest();
+  request.upload_files = { fixture: uploadPath };
+  request.plan.actions = [{
+    id: 'upload',
+    action: 'upload_file',
+    locator: { kind: 'css', value: 'input[type="file"]' },
+    file_ref: 'fixture',
+  }];
+  assert.doesNotThrow(() => validateWorkerRequest(request));
+
+  const received = [];
+  const locator = {
+    count: async () => 1,
+    nth: () => locator,
+    isVisible: async () => true,
+    setInputFiles: async (value) => received.push(value),
+  };
+  const page = { locator: () => locator };
+  const captureScreenshot = async () => ({ loginRequired: false, path: '' });
+  await executeAction(
+    page,
+    request.plan.actions[0],
+    request,
+    0,
+    captureScreenshot,
+    null,
+    null,
+  );
+  assert.deepEqual(received, [uploadPath]);
+
+  const missing = baseRequest();
+  missing.plan.actions = request.plan.actions;
+  assert.throws(() => validateWorkerRequest(missing), /host-controlled/);
+
+  const arbitraryPath = structuredClone(request);
+  arbitraryPath.plan.actions[0].file_ref = uploadPath;
+  assert.throws(() => validateWorkerRequest(arbitraryPath), /host-controlled/);
 });
 
 test('assertAllowedURL re-resolves every navigation and request', async () => {
@@ -3156,12 +3211,11 @@ test('bounded evidence collector reserves space for its safe marker at the byte 
   assert.ok(Buffer.byteLength(JSON.stringify(records), 'utf8') <= 256);
 });
 
-test('worker source has no arbitrary script, upload, HAR, trace, body, or raw-header escape hatch', () => {
+test('worker source has no arbitrary script, upload path, HAR, trace, body, or raw-header escape hatch', () => {
   const workerPath = fileURLToPath(new URL('./browser_worker.mjs', import.meta.url));
   const source = readFileSync(workerPath, 'utf8');
   for (const forbidden of [
     '.evaluate(',
-    'setInputFiles',
     'addScriptTag',
     'recordHar',
     'tracing.start',
@@ -3171,6 +3225,10 @@ test('worker source has no arbitrary script, upload, HAR, trace, body, or raw-he
   ]) {
     assert.equal(source.includes(forbidden), false, forbidden);
   }
+  assert.equal((source.match(/setInputFiles/g) ?? []).length, 1);
+  assert.equal(source.includes('locator.setInputFiles(request.upload_files[action.file_ref])'), true);
+  assert.equal(source.includes('setInputFiles(action.value)'), false);
+  assert.equal(source.includes('setInputFiles(action.path)'), false);
   assert.equal((source.match(/import\('playwright'\)/g) ?? []).length, 3);
   assert.equal(source.includes("from 'playwright'"), false);
   assert.equal(source.includes("context.route('**/*'"), true);

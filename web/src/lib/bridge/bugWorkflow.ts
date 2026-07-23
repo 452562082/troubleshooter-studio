@@ -183,6 +183,9 @@ export interface ContinueIncidentCaseInput extends WorkflowCommandInput { phase:
 export interface IncidentEvidenceImageInput { name: string; mime_type: 'image/png' | 'image/jpeg'; base64_data: string }
 export interface UploadIncidentEvidenceImagesInput { case_id: string; attempt_id: string; expected_version: number; images: IncidentEvidenceImageInput[] }
 export interface IncidentEvidenceImage { artifact_id: string; name: string; mime_type: 'image/png'; size: number }
+export interface IncidentEvidenceFileInput { name: string; mime_type: string; base64_data: string }
+export interface UploadIncidentEvidenceFilesInput { case_id: string; attempt_id: string; expected_version: number; files: IncidentEvidenceFileInput[] }
+export interface IncidentEvidenceFile { artifact_id: string; name: string; mime_type: string; size: number }
 export interface ApproveIncidentFixInput extends WorkflowCommandInput { root_cause_attempt_id: string; input_json?: Record<string, unknown> }
 export interface ReconsiderIncidentRemediationInput extends WorkflowCommandInput { root_cause_attempt_id: string; proposal: string }
 export interface DisputeIncidentRootCauseInput extends WorkflowCommandInput { root_cause_attempt_id: string; reason: string; evidence_artifact_ids?: string[] }
@@ -284,6 +287,19 @@ export async function uploadIncidentEvidenceImages(input: UploadIncidentEvidence
       throw new Error('补充证据上传返回了无效图片')
     }
     return { artifact_id: value.artifact_id, name: value.name, mime_type: 'image/png', size }
+  })
+}
+export async function uploadIncidentEvidenceFiles(input: UploadIncidentEvidenceFilesInput): Promise<IncidentEvidenceFile[]> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  const raw = await App.UploadIncidentEvidenceFiles(new WailsMain.UploadIncidentEvidenceFilesInput(input))
+  if (!Array.isArray(raw)) throw new Error('测试文件上传返回了无效结果')
+  return raw.map(item => {
+    const value = record(item)
+    const size = value.size
+    if (typeof value.artifact_id !== 'string' || !value.artifact_id || typeof value.name !== 'string' || !value.name || typeof value.mime_type !== 'string' || typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0) {
+      throw new Error('测试文件上传返回了无效文件')
+    }
+    return { artifact_id: value.artifact_id, name: value.name, mime_type: value.mime_type, size }
   })
 }
 export async function approveIncidentFix(input: ApproveIncidentFixInput): Promise<IncidentCase> {

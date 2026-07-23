@@ -64,6 +64,7 @@ type workerRequest struct {
 	Plan             bughub.BrowserPlan           `json:"plan"`
 	Policy           bughub.BrowserSecurityPolicy `json:"policy"`
 	StagingDir       string                       `json:"staging_dir"`
+	UploadFiles      map[string]string            `json:"upload_files,omitempty"`
 	StorageStatePath string                       `json:"storage_state_path,omitempty"`
 	Headless         bool                         `json:"headless"`
 }
@@ -307,22 +308,30 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 		}
 	}
 
-	workerOutput, err := v.runWorkerWithSession(ctx, runtimePaths, workerRequest{
-		Mode:       "execute",
-		Plan:       request.Plan,
-		Policy:     request.Policy,
-		StagingDir: browserDir,
-		Headless:   true,
-	}, request.Emit, sessionKey, sessionState, hasSession)
+	uploadPaths, cleanupUploads, err := prepareBrowserUploadInputs(request.UploadFiles)
 	if err != nil {
-		if errors.Is(err, errPlaintextSessionCleanup) {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_upload_file_invalid", cause: err}
+	}
+	workerOutput, runErr := v.runWorkerWithSession(ctx, runtimePaths, workerRequest{
+		Mode:        "execute",
+		Plan:        request.Plan,
+		Policy:      request.Policy,
+		StagingDir:  browserDir,
+		UploadFiles: uploadPaths,
+		Headless:    true,
+	}, request.Emit, sessionKey, sessionState, hasSession)
+	if cleanupErr := cleanupUploads(); cleanupErr != nil {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_upload_cleanup_failed", cause: cleanupErr}
+	}
+	if runErr != nil {
+		if errors.Is(runErr, errPlaintextSessionCleanup) {
 			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_session_cleanup_failed", cause: errPlaintextSessionCleanup}
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_interrupted", cause: ctxErr}
 		}
-		if errors.Is(err, ErrBrowserWorkerOutputTooLarge) {
-			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_output_too_large", cause: err}
+		if errors.Is(runErr, ErrBrowserWorkerOutputTooLarge) {
+			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_output_too_large", cause: runErr}
 		}
 		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_failed", cause: errors.New("browser worker exited before producing a result")}
 	}
@@ -714,7 +723,104 @@ func validateVerificationRequest(ctx context.Context, resolver IPResolver, reque
 	if err := validateWorkerPlanShape(request.Plan); err != nil {
 		return &verifierError{code: "browser_plan_invalid", cause: err}
 	}
+	if err := validateBrowserUploadFiles(request.Plan, request.UploadFiles); err != nil {
+		return &verifierError{code: "browser_upload_file_invalid", cause: err}
+	}
 	return ValidatePlan(ctx, resolver, request.Policy, request.Plan)
+}
+
+func validateBrowserUploadFiles(plan bughub.BrowserPlan, files []bughub.BrowserUploadFile) error {
+	if len(files) > 4 {
+		return errors.New("browser upload files exceed the fixed limit")
+	}
+	available := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		id := strings.TrimSpace(file.ID)
+		if id == "" || id != file.ID || len(id) > 256 || strings.ContainsAny(id, "/\\\x00\r\n") {
+			return errors.New("browser upload file ID is invalid")
+		}
+		if _, duplicate := available[id]; duplicate {
+			return errors.New("browser upload file IDs must be unique")
+		}
+		available[id] = struct{}{}
+		if _, err := bughub.NormalizeBrowserUploadFileName(file.Name, file.MIMEType); err != nil {
+			return err
+		}
+		if len(file.Content) == 0 || len(file.Content) > maxBrowserArtifactBytes {
+			return errors.New("browser upload file content is empty or too large")
+		}
+		digest := sha256.Sum256(file.Content)
+		if hex.EncodeToString(digest[:]) != strings.ToLower(strings.TrimSpace(file.SHA256)) {
+			return errors.New("browser upload file digest does not match")
+		}
+	}
+	for _, action := range plan.Actions {
+		if action.Action != "upload_file" {
+			continue
+		}
+		if _, ok := available[action.FileRef]; !ok {
+			return errors.New("browser upload action references an unavailable controlled file")
+		}
+	}
+	return nil
+}
+
+func prepareBrowserUploadInputs(files []bughub.BrowserUploadFile) (map[string]string, func() error, error) {
+	if len(files) == 0 {
+		return nil, func() error { return nil }, nil
+	}
+	lexicalDirectory, err := os.MkdirTemp("", ".tshoot-browser-upload-")
+	if err != nil {
+		return nil, nil, err
+	}
+	directory, err := filepath.EvalSymlinks(lexicalDirectory)
+	if err != nil {
+		return nil, nil, errors.Join(err, os.Remove(lexicalDirectory))
+	}
+	paths := make([]string, 0, len(files))
+	cleanup := func() error {
+		var cleanupErr error
+		for index := len(paths) - 1; index >= 0; index-- {
+			if err := os.Remove(paths[index]); err != nil && !errors.Is(err, os.ErrNotExist) {
+				cleanupErr = errors.Join(cleanupErr, err)
+			}
+		}
+		if err := os.Remove(directory); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+		return cleanupErr
+	}
+	fail := func(cause error) (map[string]string, func() error, error) {
+		return nil, nil, errors.Join(cause, cleanup())
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		return fail(err)
+	}
+	inputs := make(map[string]string, len(files))
+	for index, file := range files {
+		name, err := bughub.NormalizeBrowserUploadFileName(file.Name, file.MIMEType)
+		if err != nil {
+			return fail(err)
+		}
+		path := filepath.Join(directory, fmt.Sprintf("%02d-%s", index+1, name))
+		output, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fail(err)
+		}
+		paths = append(paths, path)
+		writeErr := writeAll(output, file.Content)
+		syncErr := output.Sync()
+		closeErr := output.Close()
+		if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+			return fail(err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() != int64(len(file.Content)) {
+			return fail(errors.New("browser upload staging file is unsafe"))
+		}
+		inputs[file.ID] = path
+	}
+	return inputs, cleanup, nil
 }
 
 func validateWorkerPlanShape(plan bughub.BrowserPlan) error {
@@ -727,7 +833,7 @@ func validateWorkerPlanShape(plan bughub.BrowserPlan) error {
 	if plan.Version == bughub.BrowserPlanLegacyVersion && (plan.DeviceProfile != "" || len(plan.ResponseAssertions) != 0) {
 		return errors.New("browser response extensions require plan version 2")
 	}
-	actions := map[string]struct{}{"goto": {}, "click": {}, "fill": {}, "press": {}, "select": {}, "wait_for": {}, "screenshot": {}}
+	actions := map[string]struct{}{"goto": {}, "click": {}, "fill": {}, "press": {}, "select": {}, "upload_file": {}, "wait_for": {}, "screenshot": {}}
 	locators := map[string]struct{}{"role": {}, "label": {}, "text": {}, "placeholder": {}, "test_id": {}, "css": {}}
 	seen := make(map[string]string, len(plan.Actions))
 	for _, action := range plan.Actions {
@@ -740,6 +846,12 @@ func validateWorkerPlanShape(plan bughub.BrowserPlan) error {
 		seen[action.ID] = action.Action
 		if _, allowed := actions[action.Action]; !allowed {
 			return fmt.Errorf("browser action %q is not supported", action.Action)
+		}
+		if action.Action == "upload_file" && (action.Locator == nil || strings.TrimSpace(action.FileRef) == "") {
+			return errors.New("browser upload action is invalid")
+		}
+		if action.Action != "upload_file" && action.FileRef != "" {
+			return errors.New("browser controlled file reference is invalid")
 		}
 		if action.Locator != nil {
 			if _, allowed := locators[action.Locator.Kind]; !allowed || strings.TrimSpace(action.Locator.Value) == "" {

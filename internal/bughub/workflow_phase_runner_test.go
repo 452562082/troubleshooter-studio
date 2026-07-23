@@ -2759,6 +2759,13 @@ func TestAgentPhaseRunnerCarriesUploadedScreenshotsIntoValidationRetry(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
+	fileArtifact, err := RegisterArtifactBytes(context.Background(), store, ArtifactInput{
+		ArtifactsRoot: root, CaseID: incident.ID, AttemptID: blocked.ID,
+		Kind: "user_browser_file_xlsx", Environment: "test", RedactionStatus: RedactionStatusNotRequired,
+	}, []byte("xlsx-fixture"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	retry := PhaseAttempt{
 		ID: "attempt-validation-retry", CaseID: incident.ID, CycleNumber: incident.CycleNumber,
 		Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusRunning,
@@ -2770,8 +2777,20 @@ func TestAgentPhaseRunnerCarriesUploadedScreenshotsIntoValidationRetry(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Attachments) != 1 || got.Attachments[0].ID != artifact.ID || got.Attachments[0].Type != "image/png" || got.Attachments[0].LocalPath != artifact.PathOrReference {
+	if len(got.Attachments) != 2 {
 		t.Fatalf("attachments = %+v", got.Attachments)
+	}
+	byID := make(map[string]Attachment, len(got.Attachments))
+	for _, attachment := range got.Attachments {
+		byID[attachment.ID] = attachment
+	}
+	if byID[artifact.ID].Type != "image/png" || byID[artifact.ID].LocalPath != artifact.PathOrReference {
+		t.Fatalf("screenshot attachment = %+v", byID[artifact.ID])
+	}
+	if byID[fileArtifact.ID].Type != "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+		!strings.HasSuffix(byID[fileArtifact.ID].Name, ".xlsx") ||
+		byID[fileArtifact.ID].LocalPath != fileArtifact.PathOrReference {
+		t.Fatalf("file attachment = %+v", byID[fileArtifact.ID])
 	}
 }
 

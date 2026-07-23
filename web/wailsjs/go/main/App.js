@@ -474,6 +474,10 @@ export function UploadIncidentEvidenceImages(arg1) {
   return window['go']['main']['App']['UploadIncidentEvidenceImages'](arg1);
 }
 
+export function UploadIncidentEvidenceFiles(arg1) {
+  return window['go']['main']['App']['UploadIncidentEvidenceFiles'](arg1);
+}
+
 export function Validate(arg1) {
   return window['go']['main']['App']['Validate'](arg1);
 }

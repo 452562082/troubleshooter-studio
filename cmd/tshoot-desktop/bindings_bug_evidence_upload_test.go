@@ -107,3 +107,59 @@ func TestDecodeIncidentEvidenceImageRejectsDeclaredTypeMismatch(t *testing.T) {
 		t.Fatal("test PNG is empty")
 	}
 }
+
+func TestUploadIncidentEvidenceFilesRegistersCurrentValidationInput(t *testing.T) {
+	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "file-upload.db"))
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.workflowRoot = root
+	incident := bughub.IncidentCase{
+		ID: "case-file-upload", BugID: "bug-file-upload", Source: "zentao", SystemID: "base", Environment: "test",
+		Status: bughub.CaseWaitingEvidence, CycleNumber: 1, CurrentAttemptID: "attempt-file-upload", SelectedBotKey: "base|codex",
+	}
+	if err := store.CreateCase(context.Background(), incident); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateAttempt(context.Background(), bughub.PhaseAttempt{
+		ID: incident.CurrentAttemptID, CaseID: incident.ID, CycleNumber: 1, Phase: bughub.PhaseValidation,
+		Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusFailed,
+		AgentTarget: "codex", BotKey: "base|codex", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.GetCase(context.Background(), incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("xlsx-fixture")
+	got, err := app.UploadIncidentEvidenceFiles(UploadIncidentEvidenceFilesInput{
+		CaseID: incident.ID, AttemptID: incident.CurrentAttemptID, ExpectedVersion: current.Version,
+		Files: []IncidentEvidenceFileInput{{
+			Name:       "导入模板.xlsx",
+			MIMEType:   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+			Base64Data: base64.StdEncoding.EncodeToString(content),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ArtifactID == "" || got[0].Name != "导入模板.xlsx" || got[0].Size != int64(len(content)) {
+		t.Fatalf("uploaded = %+v", got)
+	}
+	registered, err := store.ListEvidenceArtifacts(context.Background(), incident.ID)
+	if err != nil || len(registered) != 1 || registered[0].Kind != "user_browser_file_xlsx" {
+		t.Fatalf("registered=%+v err=%v", registered, err)
+	}
+}
+
+func TestDecodeIncidentEvidenceFileRejectsExecutable(t *testing.T) {
+	_, err := decodeIncidentEvidenceFile(IncidentEvidenceFileInput{
+		Name: "payload.sh", MIMEType: "text/plain",
+		Base64Data: base64.StdEncoding.EncodeToString([]byte("echo unsafe")),
+	})
+	if err == nil {
+		t.Fatal("executable validation input was accepted")
+	}
+}

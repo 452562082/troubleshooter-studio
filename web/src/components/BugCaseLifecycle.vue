@@ -1,5 +1,5 @@
 <script lang="ts">
-import type { IncidentCase, IncidentCaseDetail as ActionDetail, IncidentEvidenceImageInput } from '../lib/bridge/bugWorkflow'
+import type { IncidentCase, IncidentCaseDetail as ActionDetail, IncidentEvidenceFileInput, IncidentEvidenceImageInput } from '../lib/bridge/bugWorkflow'
 
 export type CasePrimaryAction = {
   kind: 'start_validation' | 'retry_validation' | 'retry_regression' | 'supply_evidence' | 'approve_fix' | 'reconsider_remediation' | 'dispute_root_cause' | 'redo_fix' | 'complete_remediation' | 'continue_fix' | 'approve_merge' | 'supply_merge_decision' | 'notify_deployed' | 'supply_deployment_proof' | 'cancel_attempt' | 'continue_legacy'
@@ -120,7 +120,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   refresh: []
-  primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; images?: IncidentEvidenceImageInput[]; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }]
+  primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; images?: IncidentEvidenceImageInput[]; files?: IncidentEvidenceFileInput[]; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }]
   browser: [action: 'login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url']
 }>()
 
@@ -131,6 +131,9 @@ const dialogEvidence = ref('')
 type PendingEvidenceImage = IncidentEvidenceImageInput & { size: number; preview: string }
 const dialogImages = ref<PendingEvidenceImage[]>([])
 const dialogImageError = ref('')
+type PendingEvidenceFile = IncidentEvidenceFileInput & { size: number }
+const dialogFiles = ref<PendingEvidenceFile[]>([])
+const dialogFileError = ref('')
 const confirmButton = ref<HTMLButtonElement | null>(null)
 const dialogElement = ref<HTMLElement | null>(null)
 const actionTrigger = ref<HTMLElement | null>(null)
@@ -376,6 +379,8 @@ async function openAction(event: MouseEvent) {
   dialogEvidence.value = ''
   dialogImages.value = []
   dialogImageError.value = ''
+  dialogFiles.value = []
+  dialogFileError.value = ''
   dialogOpen.value = true
   await nextTick()
   if (action.value.kind === 'approve_fix' && (!sourceBaselinesValid.value || dialogBranchOptionsLoading.value)) {
@@ -399,6 +404,8 @@ async function openRemediationReassessment(event: MouseEvent) {
   dialogEvidence.value = ''
   dialogImages.value = []
   dialogImageError.value = ''
+  dialogFiles.value = []
+  dialogFileError.value = ''
   dialogOpen.value = true
   await nextTick()
   confirmButton.value?.focus()
@@ -417,6 +424,8 @@ async function openRootCauseDispute(event: MouseEvent) {
   dialogEvidence.value = ''
   dialogImages.value = []
   dialogImageError.value = ''
+  dialogFiles.value = []
+  dialogFileError.value = ''
   dialogOpen.value = true
   await nextTick()
   confirmButton.value?.focus()
@@ -440,6 +449,8 @@ async function openFixRework(event: MouseEvent) {
   dialogEvidence.value = ''
   dialogImages.value = []
   dialogImageError.value = ''
+  dialogFiles.value = []
+  dialogFileError.value = ''
   dialogOpen.value = true
   await nextTick()
   confirmButton.value?.focus()
@@ -455,7 +466,7 @@ function closeDialog() {
 
 function confirmAction() {
   if (!dialogAction.value) return
-  const payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; images?: IncidentEvidenceImageInput[]; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> } = { kind: dialogAction.value.kind }
+  const payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; images?: IncidentEvidenceImageInput[]; files?: IncidentEvidenceFileInput[]; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> } = { kind: dialogAction.value.kind }
   if (dialogAction.value.kind === 'approve_fix') {
     payload.rootCauseAttemptID = dialogRootCauseAttemptID.value
     payload.caseVersion = dialogCaseVersion.value
@@ -479,6 +490,9 @@ function confirmAction() {
   if (dialogAction.value.kind === 'supply_evidence' && dialogImages.value.length > 0) {
     payload.images = dialogImages.value.map(({ name, mime_type, base64_data }) => ({ name, mime_type, base64_data }))
   }
+  if (dialogAction.value.kind === 'supply_evidence' && dialogFiles.value.length > 0) {
+    payload.files = dialogFiles.value.map(({ name, mime_type, base64_data }) => ({ name, mime_type, base64_data }))
+  }
   emit('primary', payload)
   dialogBranchLoadGeneration++
   dialogBranchOptionsLoading.value = false
@@ -488,7 +502,7 @@ function confirmAction() {
 
 const evidenceSupplementMissing = computed(() => {
   if (!dialogAction.value || !['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(dialogAction.value.kind)) return false
-  if (dialogAction.value.kind === 'supply_evidence') return !dialogInput.value.trim() && dialogImages.value.length === 0
+  if (dialogAction.value.kind === 'supply_evidence') return !dialogInput.value.trim() && dialogImages.value.length === 0 && dialogFiles.value.length === 0
   return !dialogInput.value.trim()
 })
 
@@ -544,6 +558,61 @@ function removeEvidenceImage(index: number) {
 function formatEvidenceImageSize(size: number): string {
   if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`
   return `${(size / 1024 / 1024).toFixed(1)} MB`
+}
+
+const evidenceFileExtensions = new Set([
+  'csv', 'tsv', 'txt', 'json', 'xml', 'pdf', 'xls', 'xlsx', 'doc', 'docx', 'ppt', 'pptx',
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'mp3', 'wav', 'm4a', 'mp4', 'mov', 'webm',
+])
+
+function readEvidenceFile(file: File): Promise<PendingEvidenceFile> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('读取测试文件失败'))
+    reader.onload = () => {
+      const encoded = typeof reader.result === 'string' ? reader.result : ''
+      const separator = encoded.indexOf(',')
+      const base64Data = separator >= 0 ? encoded.slice(separator + 1) : ''
+      if (!base64Data) {
+        reject(new Error('测试文件内容为空'))
+        return
+      }
+      resolve({ name: file.name, mime_type: file.type || 'application/octet-stream', base64_data: base64Data, size: file.size })
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
+async function selectEvidenceFiles(event: Event) {
+  const input = event.currentTarget as HTMLInputElement
+  const files = Array.from(input.files || [])
+  input.value = ''
+  dialogFileError.value = ''
+  if (dialogFiles.value.length + files.length > 4) {
+    dialogFileError.value = '最多上传 4 个测试文件。'
+    return
+  }
+  for (const file of files) {
+    const extension = file.name.split('.').pop()?.toLowerCase() || ''
+    if (!evidenceFileExtensions.has(extension)) {
+      dialogFileError.value = `不支持 ${file.name} 的文件类型。`
+      return
+    }
+    if (file.size <= 0 || file.size > 16 * 1024 * 1024) {
+      dialogFileError.value = '每个测试文件必须小于 16 MB。'
+      return
+    }
+  }
+  try {
+    dialogFiles.value.push(...await Promise.all(files.map(readEvidenceFile)))
+  } catch (error) {
+    dialogFileError.value = error instanceof Error ? error.message : '读取测试文件失败。'
+  }
+}
+
+function removeEvidenceFile(index: number) {
+  dialogFiles.value.splice(index, 1)
+  dialogFileError.value = ''
 }
 
 const sourceBaselinesValid = computed(() => dialogSourceBaselines.value.length > 0 && dialogSourceBaselines.value.every(item => item.repo.trim()) && new Set(dialogSourceBaselines.value.map(item => item.repo.trim())).size === dialogSourceBaselines.value.length)
@@ -799,6 +868,23 @@ function dialogTitle(): string {
             </li>
           </ul>
         </section>
+        <section v-if="dialogAction.kind === 'supply_evidence'" class="evidence-image-upload">
+          <div class="evidence-image-heading">
+            <div>
+              <strong>补充复现测试文件</strong>
+              <small>用于“选择文件 / 上传 / 导入”类验证；单个不超过 16 MB，最多 4 个。文件只绑定当前 Case，Agent 无法指定本地路径。</small>
+            </div>
+            <input id="case-evidence-files" type="file" accept=".csv,.tsv,.txt,.json,.xml,.pdf,.xls,.xlsx,.doc,.docx,.ppt,.pptx,.png,.jpg,.jpeg,.gif,.webp,.mp3,.wav,.m4a,.mp4,.mov,.webm" multiple @change="selectEvidenceFiles">
+            <label class="btn evidence-image-picker" for="case-evidence-files">选择文件</label>
+          </div>
+          <p v-if="dialogFileError" class="evidence-image-error" role="alert">{{ dialogFileError }}</p>
+          <ul v-if="dialogFiles.length" class="evidence-image-list evidence-file-list" aria-label="待上传测试文件">
+            <li v-for="(file, index) in dialogFiles" :key="`${file.name}-${index}`">
+              <span><strong>{{ file.name }}</strong><small>{{ formatEvidenceImageSize(file.size) }}</small></span>
+              <button type="button" class="evidence-image-remove" :aria-label="`移除 ${file.name}`" @click="removeEvidenceFile(index)">×</button>
+            </li>
+          </ul>
+        </section>
         <footer>
           <button class="btn" type="button" :disabled="pending" @click="closeDialog">取消</button>
           <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (dialogAction.kind === 'approve_fix' && (dialogBranchOptionsLoading || Boolean(dialogBranchOptionsError) || !dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (['reconsider_remediation', 'dispute_root_cause', 'redo_fix'].includes(dialogAction.kind) && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim())) || (dialogAction.kind === 'complete_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim() || !dialogEvidence.trim())) || evidenceSupplementMissing" @click="confirmAction">{{ dialogAction.kind === 'reconsider_remediation' ? '提交并重新评估' : dialogAction.kind === 'dispute_root_cause' ? '提交并重新排障' : dialogAction.kind === 'redo_fix' ? '提交重修要求' : dialogAction.kind === 'complete_remediation' ? '确认并开始回归' : dialogAction.kind === 'supply_evidence' ? '保存证据并重试' : '确认' }}</button>
@@ -907,10 +993,12 @@ h2, h3, p { margin: 0; }
 .evidence-image-heading small { color: var(--c-muted); font-size: var(--fs-xs); line-height: 1.45; }
 .evidence-image-picker { flex: 0 0 auto; min-height: 40px; cursor: pointer; }
 #case-evidence-images { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-#case-evidence-images:focus-visible + .evidence-image-picker { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; }
+#case-evidence-files { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+#case-evidence-images:focus-visible + .evidence-image-picker, #case-evidence-files:focus-visible + .evidence-image-picker { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; }
 .evidence-image-error { color: var(--c-danger) !important; font-size: var(--fs-xs) !important; }
 .evidence-image-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2); margin: 0; padding: 0; list-style: none; }
 .evidence-image-list li { min-width: 0; display: grid; grid-template-columns: 52px minmax(0, 1fr) 32px; align-items: center; gap: var(--sp-2); padding: 6px; border: 1px solid var(--c-line); border-radius: var(--r-sm); background: var(--c-surf); }
+.evidence-file-list li { grid-template-columns: minmax(0, 1fr) 32px; }
 .evidence-image-list img { width: 52px; height: 42px; border-radius: 5px; object-fit: cover; background: var(--c-surf-3); }
 .evidence-image-list span { min-width: 0; display: grid; gap: 2px; }
 .evidence-image-list span strong { overflow: hidden; color: var(--c-text); font-size: var(--fs-xs); text-overflow: ellipsis; white-space: nowrap; }

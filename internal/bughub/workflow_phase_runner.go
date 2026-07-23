@@ -428,7 +428,7 @@ func (r *AgentPhaseRunner) withSupplementalValidationScreenshots(ctx context.Con
 	}
 	candidates := make([]EvidenceArtifact, 0)
 	for _, artifact := range registered {
-		if artifact.Kind != "user_screenshot" {
+		if artifact.Kind != "user_screenshot" && !strings.HasPrefix(artifact.Kind, "user_browser_file_") {
 			continue
 		}
 		if _, belongs := ancestorIDs[artifact.AttemptID]; belongs {
@@ -441,21 +441,38 @@ func (r *AgentPhaseRunner) withSupplementalValidationScreenshots(ctx context.Con
 		}
 		return candidates[left].CapturedAt.After(candidates[right].CapturedAt)
 	})
-	if len(candidates) > maxPhaseAttachments {
-		candidates = candidates[:maxPhaseAttachments]
+	if len(candidates) > maxPhaseAttachments*2 {
+		candidates = candidates[:maxPhaseAttachments*2]
 	}
-	for index, candidate := range candidates {
+	screenshotIndex := 0
+	fileIndex := 0
+	for _, candidate := range candidates {
 		content, err := ReadEvidenceArtifactFromRoot(ctx, r.store, r.artifactsRoot, attempt.CaseID, candidate.ID)
 		if err != nil {
 			return Bug{}, err
 		}
-		if !bytes.HasPrefix(content.Content, browserPNGSignature) {
-			return Bug{}, errors.New("supplemental validation screenshot is not a PNG image")
+		if candidate.Kind == "user_screenshot" {
+			if !bytes.HasPrefix(content.Content, browserPNGSignature) {
+				return Bug{}, errors.New("supplemental validation screenshot is not a PNG image")
+			}
+			screenshotIndex++
+			bug.Attachments = append(bug.Attachments, Attachment{
+				ID:        candidate.ID,
+				Name:      fmt.Sprintf("用户补充证据-%d.png", screenshotIndex),
+				Type:      "image/png",
+				LocalPath: content.Artifact.PathOrReference,
+			})
+			continue
 		}
+		extension := strings.TrimPrefix(candidate.Kind, "user_browser_file_")
+		if _, ok := browserUploadMIMETypes["."+extension]; !ok {
+			return Bug{}, errors.New("supplemental validation input file type is invalid")
+		}
+		fileIndex++
 		bug.Attachments = append(bug.Attachments, Attachment{
 			ID:        candidate.ID,
-			Name:      fmt.Sprintf("用户补充证据-%d.png", index+1),
-			Type:      "image/png",
+			Name:      fmt.Sprintf("用户补充测试文件-%d.%s", fileIndex, extension),
+			Type:      browserUploadMIMETypeForExtension("." + extension),
 			LocalPath: content.Artifact.PathOrReference,
 		})
 	}

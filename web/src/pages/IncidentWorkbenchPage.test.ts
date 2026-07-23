@@ -24,6 +24,7 @@ import {
   resetIncidentCaseWithWarnings,
   saveBugSelectedBot,
   startIncidentCase,
+  uploadIncidentEvidenceFiles,
   uploadIncidentEvidenceImages,
   type CaseStatus,
   type IncidentCase,
@@ -70,6 +71,7 @@ vi.mock('../lib/bridge', async importOriginal => ({
   resetIncidentCaseWithWarnings: vi.fn(),
   saveBugSelectedBot: vi.fn(),
   startIncidentCase: vi.fn(),
+  uploadIncidentEvidenceFiles: vi.fn(),
   uploadIncidentEvidenceImages: vi.fn(),
 }))
 vi.mock('../lib/toast', () => ({
@@ -190,6 +192,7 @@ afterEach(() => {
   vi.mocked(matchBugBots).mockReset().mockResolvedValue([botMatch])
   vi.mocked(saveBugSelectedBot).mockReset().mockResolvedValue(bugA as any)
   vi.mocked(startIncidentCase).mockReset()
+  vi.mocked(uploadIncidentEvidenceFiles).mockReset()
   vi.mocked(uploadIncidentEvidenceImages).mockReset()
   vi.mocked(continueIncidentCase).mockReset()
   vi.mocked(disputeIncidentRootCause).mockReset()
@@ -1948,6 +1951,57 @@ describe('IncidentWorkbenchPage', () => {
       }),
     }))
     expect(vi.mocked(uploadIncidentEvidenceImages).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(continueIncidentCase).mock.invocationCallOrder[0])
+  })
+
+  it('uploads a Case-bound business input file before retrying validation', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-file-evidence', 'waiting_evidence', '2026-07-15T10:00:00Z', { current_attempt_id: 'attempt-validation', version: 7 })
+    const snapshot = detail(item, {
+      attempts: [{ id: 'attempt-validation', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'reproduce', target_environment: 'test' }, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(snapshot)
+    vi.mocked(uploadIncidentEvidenceFiles).mockResolvedValue([{
+      artifact_id: 'artifact-file-1',
+      name: 'fixture.xlsx',
+      mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      size: 128,
+    }])
+    vi.mocked(continueIncidentCase).mockResolvedValue({ ...item, status: 'validating', version: 8 })
+    const wrapper = await mountedPage()
+
+    wrapper.getComponent(BugCaseLifecycle).vm.$emit('primary', {
+      kind: 'supply_evidence',
+      input: '',
+      files: [{
+        name: 'fixture.xlsx',
+        mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        base64_data: 'eGxzeC1maXh0dXJl',
+      }],
+    })
+    await flushPromises()
+    await flushPromises()
+
+    expect(uploadIncidentEvidenceFiles).toHaveBeenCalledWith({
+      case_id: item.id,
+      attempt_id: 'attempt-validation',
+      expected_version: 7,
+      files: [{
+        name: 'fixture.xlsx',
+        mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        base64_data: 'eGxzeC1maXh0dXJl',
+      }],
+    })
+    expect(continueIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
+      case_id: item.id,
+      expected_version: 7,
+      phase: 'validation',
+      input_json: expect.objectContaining({
+        user_input: expect.stringContaining('artifact-file-1'),
+      }),
+    }))
+    expect(vi.mocked(uploadIncidentEvidenceFiles).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(continueIncidentCase).mock.invocationCallOrder[0])
   })
 
   it('regenerates an invalid browser plan in the current Case instead of resetting the workflow', async () => {

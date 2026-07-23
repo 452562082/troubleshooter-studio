@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { lookup as dnsLookup } from 'node:dns/promises';
-import { realpathSync } from 'node:fs';
+import { lstatSync, realpathSync } from 'node:fs';
 import { Agent as HTTPAgent, createServer, request as createHTTPRequest } from 'node:http';
 import { connect as createNetworkConnection, isIP } from 'node:net';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -19,7 +19,7 @@ import {
 import { boundedUTF8, redactConsoleText, safeResponseRecord, sanitizeURL } from './sanitize.mjs';
 
 const PROGRESS_PREFIX = 'TSHOOT_BROWSER_PROGRESS ';
-const ALLOWED_ACTIONS = new Set(['goto', 'click', 'fill', 'press', 'select', 'wait_for', 'screenshot']);
+const ALLOWED_ACTIONS = new Set(['goto', 'click', 'fill', 'press', 'select', 'upload_file', 'wait_for', 'screenshot']);
 const ALLOWED_LOCATORS = new Set(['role', 'label', 'text', 'placeholder', 'test_id', 'css']);
 const ALLOWED_ASSERTIONS = new Set(['visible_text', 'not_visible_text', 'page_loaded']);
 const ALLOWED_RESPONSE_ASSERTIONS = new Set(['json_fields_not_equal', 'json_fields_equal']);
@@ -120,7 +120,7 @@ const AUTOMATIC_RESPONSE_FACT_MAX_PAIRS = 64;
 const AUTOMATIC_RESPONSE_FACT_MAX_ARRAYS = 32;
 const AUTOMATIC_RESPONSE_FACT_MAX_COUNT_RELATIONS = 32;
 const SENSITIVE_BUSINESS_FIELD = /(?:password|passwd|secret|token|authorization|auth|cookie|session|api[_-]?key|private[_-]?key|access[_-]?key|captcha|otp)/i;
-const AUTH_ATTRIBUTED_ACTIONS = new Set(['click', 'fill', 'press', 'select']);
+const AUTH_ATTRIBUTED_ACTIONS = new Set(['click', 'fill', 'press', 'select', 'upload_file']);
 const NETWORK_PROTOCOLS = new Set(['http:', 'https:', 'ws:', 'wss:']);
 const BROWSER_LAUNCH_ARGS = Object.freeze([
   '--disable-quic',
@@ -288,7 +288,7 @@ function validateLocator(locator, label) {
 
 export function validateWorkerRequest(request) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('worker request must be an object');
-  ownKeys(request, new Set(['mode', 'plan', 'policy', 'staging_dir', 'storage_state_path', 'headless']), 'request');
+  ownKeys(request, new Set(['mode', 'plan', 'policy', 'staging_dir', 'upload_files', 'storage_state_path', 'headless']), 'request');
 
   if (request.mode !== 'execute' && request.mode !== 'login') throw new Error('worker request mode is not supported');
   if (typeof request.headless !== 'boolean') throw new Error('headless must be boolean');
@@ -311,6 +311,7 @@ export function validateWorkerRequest(request) {
     if (!isAbsolute(requiredString(request.storage_state_path, 'storage_state_path'))) throw new Error('storage_state_path must be absolute');
     if (!Array.isArray(plan.actions) || plan.actions.length !== 0) throw new Error('login plan actions are forbidden');
     if (!Array.isArray(plan.assertions) || plan.assertions.length !== 0) throw new Error('login plan assertions are forbidden');
+    if (request.upload_files !== undefined) throw new Error('login upload files are forbidden');
     if (start.hash) throw new Error('login application URL fragment is forbidden');
     for (const [name, value] of start.searchParams) {
       if (/(?:token|password|secret|code|session|auth|cookie|key)/i.test(name) || redactConsoleText(value) === '[REDACTED]') {
@@ -332,11 +333,24 @@ export function validateWorkerRequest(request) {
   if (plan.request_captures !== undefined && !Array.isArray(plan.request_captures)) throw new Error('plan request_captures must be an array');
   if (plan.response_assertions !== undefined && !Array.isArray(plan.response_assertions)) throw new Error('plan response_assertions must be an array');
   if (plan.assertions.length < 1 && (plan.response_assertions?.length ?? 0) < 1) throw new Error('plan UI or response assertions are required');
+  if (request.upload_files !== undefined && (!request.upload_files || typeof request.upload_files !== 'object' || Array.isArray(request.upload_files))) {
+    throw new Error('upload_files must be an object');
+  }
+  const uploadFiles = request.upload_files ?? {};
+  if (Object.keys(uploadFiles).length > 4) throw new Error('upload_files exceed the fixed limit');
+  for (const [fileRef, rawPath] of Object.entries(uploadFiles)) {
+    requiredString(fileRef, 'upload file reference', 256);
+    if (/[\/\\\0\r\n]/.test(fileRef)) throw new Error('upload file reference is invalid');
+    const path = requiredString(rawPath, 'upload file path');
+    if (!isAbsolute(path) || resolve(path) !== path || realpathSync(path) !== path) throw new Error('upload file path is invalid');
+    const info = lstatSync(path);
+    if (!info.isFile() || info.isSymbolicLink() || info.size < 1 || info.size > SCREENSHOT_MAX_BYTES) throw new Error('upload file is unsafe');
+  }
 
   const ids = new Map();
   for (const action of plan.actions) {
     if (!action || typeof action !== 'object' || Array.isArray(action)) throw new Error('browser action must be an object');
-    ownKeys(action, new Set(['id', 'action', 'locator', 'url', 'value', 'key', 'screenshot_after']), 'action');
+    ownKeys(action, new Set(['id', 'action', 'locator', 'url', 'value', 'key', 'file_ref', 'screenshot_after']), 'action');
     requiredString(action.id, 'action id', 256);
     if (ids.has(action.id)) throw new Error('action id is duplicated');
     ids.set(action.id, action.action);
@@ -345,7 +359,7 @@ export function validateWorkerRequest(request) {
     if (action.screenshot_after !== undefined && typeof action.screenshot_after !== 'boolean') throw new Error('screenshot_after must be boolean');
     if (action.action === 'screenshot' && action.screenshot_after === true) throw new Error('screenshot_after is forbidden for screenshot action');
 
-    const locatorActions = new Set(['click', 'fill', 'press', 'select', 'wait_for']);
+    const locatorActions = new Set(['click', 'fill', 'press', 'select', 'upload_file', 'wait_for']);
     if (locatorActions.has(action.action)) validateLocator(action.locator, action.id);
     else if (action.locator !== undefined) throw new Error(`${action.action} locator is forbidden`);
     if (action.action === 'goto') parseHTTPURL(action.url);
@@ -354,6 +368,10 @@ export function validateWorkerRequest(request) {
     else if (action.value !== undefined) throw new Error(`${action.action} value is forbidden`);
     if (action.action === 'press') requiredString(action.key, 'press key', 128);
     else if (action.key !== undefined) throw new Error(`${action.action} key is forbidden`);
+    if (action.action === 'upload_file') {
+      const fileRef = requiredString(action.file_ref, 'upload file_ref', 256);
+      if (!Object.hasOwn(uploadFiles, fileRef)) throw new Error('upload file_ref is not host-controlled');
+    } else if (action.file_ref !== undefined) throw new Error(`${action.action} file_ref is forbidden`);
   }
   for (const assertion of plan.assertions) {
     if (!assertion || typeof assertion !== 'object' || Array.isArray(assertion)) throw new Error('assertion must be an object');
@@ -2681,6 +2699,7 @@ export async function executeAction(page, action, request, index, captureScreens
             }
           } else if (action.action === 'press') await locator.press(canonicalPressKey(action.key));
           else if (action.action === 'select') await locator.selectOption(action.value);
+          else if (action.action === 'upload_file') await locator.setInputFiles(request.upload_files[action.file_ref]);
         };
         try {
           await applyInteraction();
@@ -2708,7 +2727,7 @@ export async function waitForApplicationReady(page, maximumWaitMs = 3_000) {
 }
 
 export async function settleBrowserInteraction(page, action, delayMs = 150, interactionState = null, index = -1) {
-  if (!['click', 'fill', 'press', 'select'].includes(action?.action)) return;
+  if (!['click', 'fill', 'press', 'select', 'upload_file'].includes(action?.action)) return;
   await page.waitForTimeout(delayMs);
   const binding = interactionState?.last;
   if (action.action !== 'fill' || !binding || binding.index !== index || typeof binding.locator?.inputValue !== 'function') return;

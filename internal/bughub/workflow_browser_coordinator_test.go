@@ -221,6 +221,30 @@ func TestBrowserPlannerPromptIncludesBoundedLiveInitialObservation(t *testing.T)
 	}
 }
 
+func TestBrowserCoordinatorRequestsMissingControlledUploadBeforePlanning(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Bug.Steps = "1. 打开媒资创建页\n2. 选择 XLSX 文件\n3. 点击上传"
+	executor := &scriptedPhaseExecutor{}
+	verifier := &fakeBrowserVerifier{}
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executor.Calls != 0 || verifier.Calls != 0 {
+		t.Fatalf("planner calls=%d verifier calls=%d", executor.Calls, verifier.Calls)
+	}
+	var validation ValidationResult
+	if err := json.Unmarshal([]byte(result.FinalYAML), &validation); err != nil {
+		t.Fatalf("decode result: %v\n%s", err, result.FinalYAML)
+	}
+	if validation.VerificationStatus != "insufficient_info" ||
+		!strings.Contains(validation.ObservedBehavior, "受控测试文件") ||
+		len(validation.Gaps) != 1 ||
+		!strings.Contains(validation.Gaps[0], "补充信息") {
+		t.Fatalf("validation = %+v", validation)
+	}
+}
+
 func TestNormalizeBrowserOutcomeWaitsTurnsMissingAssertionTargetIntoScreenshot(t *testing.T) {
 	plan, err := ParseBrowserPlan([]byte(`version: 1
 start_url: https://app.example.com
@@ -434,6 +458,67 @@ func TestBrowserCoordinatorPlansExecutesAndEvaluatesInOneAttempt(t *testing.T) {
 	}
 	if len(parsed.ArtifactInputs) != 2 || parsed.ArtifactInputs[0].Environment != "test" || parsed.ArtifactInputs[0].Version != "" {
 		t.Fatalf("host artifacts were not authoritative: %+v", parsed.ArtifactInputs)
+	}
+}
+
+func TestBrowserCoordinatorPassesCaseBoundUploadToVerifier(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Bug.Steps = "1. 打开媒资创建页\n2. 选择 XLSX 文件\n3. 点击上传"
+	request.Bug.Expected = "未填写分集信息时阻止上传"
+	request.Bug.Actual = "未填写分集信息仍上传成功"
+	uploadPath := filepath.Join(t.TempDir(), "fixture.xlsx")
+	if err := os.WriteFile(uploadPath, []byte("xlsx-fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request.Bug.Attachments = []Attachment{{
+		ID: "sheet-1", Name: "fixture.xlsx",
+		Type:      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		LocalPath: uploadPath,
+	}}
+	plan := `version: 1
+start_url: https://app.example.com/users
+actions:
+  - id: upload-sheet
+    action: upload_file
+    locator:
+      kind: css
+      value: input[type="file"][accept*=".xlsx"]
+    file_ref: sheet-1
+    screenshot_after: true
+  - id: submit-upload
+    action: click
+    locator:
+      kind: text
+      value: 上传
+      exact: true
+    screenshot_after: true
+  - id: capture-result
+    action: screenshot
+assertions:
+  - kind: visible_text
+    value: 上传成功
+`
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: plan},
+		{FinalYAML: reproducedValidationYAML("browser/final.png")},
+	}}
+	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{completedBrowserResult("browser/final.png")}}
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), request)
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if verifier.Calls != 1 || len(verifier.Requests) != 1 || len(verifier.Requests[0].UploadFiles) != 1 {
+		t.Fatalf("verifier requests = %+v", verifier.Requests)
+	}
+	got := verifier.Requests[0].UploadFiles[0]
+	if got.ID != "sheet-1" || got.Name != "fixture.xlsx" || string(got.Content) != "xlsx-fixture" || got.SHA256 == "" {
+		t.Fatalf("controlled upload = %+v", got)
+	}
+	if len(executor.Prompts) < 1 ||
+		!strings.Contains(executor.Prompts[0], "controlled_upload_files") ||
+		!strings.Contains(executor.Prompts[0], `"id":"sheet-1"`) ||
+		strings.Contains(executor.Prompts[0], uploadPath) {
+		t.Fatalf("planner prompt did not expose only the controlled manifest:\n%s", executor.Prompts[0])
 	}
 }
 

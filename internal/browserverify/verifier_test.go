@@ -3,8 +3,10 @@ package browserverify
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -137,6 +139,77 @@ func completedWorkerResult() workerResult {
 			{Kind: "screenshot", Path: "browser/final.png"},
 			{Kind: "network", Path: "browser/network.json", RequestID: "req-1", TraceID: "trace-1"},
 		},
+	}
+}
+
+func TestHostVerifierStagesControlledUploadOnlyForWorkerLifetime(t *testing.T) {
+	request := validBrowserRequest(t)
+	content := []byte("xlsx-fixture")
+	digest := sha256.Sum256(content)
+	request.Plan.Actions = []bughub.BrowserAction{{
+		ID: "upload-sheet", Action: "upload_file",
+		Locator: &bughub.BrowserLocator{Kind: "css", Value: "input[type=file]"},
+		FileRef: "fixture",
+	}}
+	request.UploadFiles = []bughub.BrowserUploadFile{{
+		ID: "fixture", Name: "fixture.xlsx",
+		MIMEType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		Content:  content, SHA256: fmt.Sprintf("%x", digest),
+	}}
+	var stagedPath string
+	worker := &fakeWorker{Result: completedWorkerResult()}
+	worker.Inspect = func(_ context.Context, got workerRequest) error {
+		if len(got.UploadFiles) != 1 {
+			t.Fatalf("worker upload files = %+v", got.UploadFiles)
+		}
+		stagedPath = got.UploadFiles["fixture"]
+		if stagedPath == "" || !filepath.IsAbs(stagedPath) {
+			t.Fatalf("worker upload path = %q", stagedPath)
+		}
+		canonical, err := filepath.EvalSymlinks(stagedPath)
+		if err != nil || canonical != stagedPath {
+			t.Fatalf("worker upload path is not canonical: path=%q canonical=%q err=%v", stagedPath, canonical, err)
+		}
+		if mode := mustFileMode(t, stagedPath); mode != 0o600 {
+			t.Fatalf("upload mode = %o", mode)
+		}
+		staged, err := os.ReadFile(stagedPath)
+		if err != nil || !bytes.Equal(staged, content) {
+			t.Fatalf("staged upload=%q err=%v", staged, err)
+		}
+		return nil
+	}
+	result, err := newTestHostVerifier(t, worker).Execute(context.Background(), request)
+	if err != nil || result.Status != "completed" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if stagedPath == "" {
+		t.Fatal("worker did not receive a staged upload")
+	}
+	if _, err := os.Stat(stagedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("staged upload remains after Execute: %v", err)
+	}
+}
+
+func TestHostVerifierRejectsUncontrolledOrMutatedUpload(t *testing.T) {
+	request := validBrowserRequest(t)
+	request.Plan.Actions = []bughub.BrowserAction{{
+		ID: "upload-sheet", Action: "upload_file",
+		Locator: &bughub.BrowserLocator{Kind: "css", Value: "input[type=file]"},
+		FileRef: "fixture",
+	}}
+	request.UploadFiles = []bughub.BrowserUploadFile{{
+		ID: "fixture", Name: "fixture.xlsx",
+		MIMEType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		Content:  []byte("xlsx-fixture"), SHA256: strings.Repeat("0", 64),
+	}}
+	worker := &fakeWorker{Result: completedWorkerResult()}
+	_, err := newTestHostVerifier(t, worker).Execute(context.Background(), request)
+	if err == nil || !strings.Contains(err.Error(), "browser_upload_file_invalid") {
+		t.Fatalf("mutated upload error = %v", err)
+	}
+	if worker.Calls != 0 {
+		t.Fatalf("worker calls = %d", worker.Calls)
 	}
 }
 

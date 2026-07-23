@@ -22,6 +22,7 @@ import {
   isIncidentWorkflowConflict,
   saveIncidentArtifact,
   startIncidentCase,
+  uploadIncidentEvidenceFiles,
 } from './bugWorkflow'
 
 afterEach(() => {
@@ -84,6 +85,34 @@ describe('incident workflow bridge', () => {
     await expect(listIncidentFixBranches('case-1', 'attempt-1')).resolves.toEqual({})
     await expect(listPendingIncidentWorkflowReminders()).resolves.toEqual([])
     await expect(ackIncidentWorkflowReminder({ case_id: 'case-1', reservation_key: 'slot-1', delivery_attempt: 1, actor_id: 'desktop-root' })).rejects.toThrow(/桌面 app/)
+  })
+
+  it('validates and forwards Case-bound browser upload files', async () => {
+    const upload = vi.fn().mockResolvedValue([{
+      artifact_id: 'file-1',
+      name: 'fixture.xlsx',
+      mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      size: 12,
+    }])
+    ;(window as any).go = { main: { App: { UploadIncidentEvidenceFiles: upload } } }
+    const input = {
+      case_id: 'case-1',
+      attempt_id: 'attempt-1',
+      expected_version: 7,
+      files: [{
+        name: 'fixture.xlsx',
+        mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        base64_data: 'eGxzeC1maXh0dXJl',
+      }],
+    }
+
+    await expect(uploadIncidentEvidenceFiles(input)).resolves.toEqual([{
+      artifact_id: 'file-1',
+      name: 'fixture.xlsx',
+      mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      size: 12,
+    }])
+    expect(upload).toHaveBeenCalledOnce()
   })
 
   it('normalizes selectable fix branches without exposing repository paths', async () => {

@@ -31,12 +31,14 @@ import {
   resetIncidentCaseWithWarnings,
   saveBugSelectedBot,
   startIncidentCase,
+  uploadIncidentEvidenceFiles,
   uploadIncidentEvidenceImages,
   type BotMatch,
   type BotRef,
   type BugRecord,
   type IncidentBrowserRuntimeStatus,
   type IncidentCase,
+  type IncidentEvidenceFileInput,
   type IncidentEvidenceImageInput,
   type FrontendEntryResolution,
 } from '../lib/bridge'
@@ -969,7 +971,7 @@ async function handleIncidentBrowser(action: IncidentBrowserAction) {
   }
 }
 
-async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; images?: IncidentEvidenceImageInput[]; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }) {
+async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; images?: IncidentEvidenceImageInput[]; files?: IncidentEvidenceFileInput[]; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }) {
   const detail = displayedDetail.value
   if (!detail) return
   const incident = detail.case
@@ -1013,6 +1015,18 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
           })
           const imageEvidence = `用户补充了 ${uploaded.length} 张页面截图（EvidenceArtifact: ${uploaded.map(item => item.artifact_id).join(', ')}），重试时必须结合图片核对复现步骤和页面状态。`
           supplemental = [supplemental, imageEvidence].filter(Boolean).join('\n')
+        }
+        if (payload.kind === 'supply_evidence' && payload.files?.length) {
+          const attemptID = incident.current_attempt_id
+          if (!attemptID) throw new Error('当前 Case 没有可绑定测试文件的验证 Attempt')
+          const uploaded = await uploadIncidentEvidenceFiles({
+            case_id: incident.id,
+            attempt_id: attemptID,
+            expected_version: incident.version,
+            files: payload.files,
+          })
+          const fileEvidence = `用户补充了 ${uploaded.length} 个复现测试文件（EvidenceArtifact: ${uploaded.map(item => item.artifact_id).join(', ')}）；浏览器计划必须通过受控 file_ref 使用，不得猜测本地路径。`
+          supplemental = [supplemental, fileEvidence].filter(Boolean).join('\n')
         }
         return continueIncidentCase({ ...base, ...continuationForDetail(detail, supplemental) })
       }

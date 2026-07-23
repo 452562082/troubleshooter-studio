@@ -251,6 +251,8 @@ export function UninstallBot(arg1:string,arg2:string):Promise<main.UninstallBotR
 
 export function UploadIncidentEvidenceImages(arg1:main.UploadIncidentEvidenceImagesInput):Promise<Array<main.IncidentEvidenceImage>>;
 
+export function UploadIncidentEvidenceFiles(arg1:main.UploadIncidentEvidenceFilesInput):Promise<Array<main.IncidentEvidenceFile>>;
+
 export function Validate(arg1:string):Promise<main.ValidateResult>;
 
 export function Version():Promise<string>;

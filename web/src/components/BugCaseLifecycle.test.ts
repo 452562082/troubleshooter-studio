@@ -209,6 +209,68 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.find('#case-supplement').exists()).toBe(false)
   })
 
+  it('asks for the exact missing information when validation is inconclusive', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-insufficient'
+    snapshot.attempts = [{
+      id: 'validation-insufficient', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'reproduce' },
+      output_json: {
+        verification_status: 'insufficient_info',
+        gaps: ['需要测试账号的权限范围', '缺少该页面的业务期望'],
+      },
+      parent_attempt_id: '', started_at: '', error_code: 'needs_evidence', error_message: '', usage: {},
+    }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'supply_evidence', label: '补充信息并重试验证' })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(wrapper.get('.primary-action').text()).toBe('补充信息并重试验证')
+    await wrapper.get('.primary-action').trigger('click')
+
+    expect(wrapper.get('.evidence-gap-summary').text()).toContain('需要测试账号的权限范围')
+    expect(wrapper.get('.evidence-gap-summary').text()).toContain('缺少该页面的业务期望')
+    expect(wrapper.get('#case-supplement').attributes('placeholder')).toContain('上面的缺失项')
+    await wrapper.get('#case-supplement').setValue('账号已具备内容管理权限；未填写字段时应阻止提交。')
+    await wrapper.get('[data-confirm]').trigger('click')
+    expect(wrapper.emitted('primary')).toEqual([[{
+      kind: 'supply_evidence',
+      input: '账号已具备内容管理权限；未填写字段时应阻止提交。',
+    }]])
+  })
+
+  it('asks for missing business evidence before retrying an inconclusive regression', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'regression-insufficient'
+    snapshot.attempts = [{
+      id: 'regression-insufficient', case_id: 'case-1', cycle_number: 1, phase: 'regression', mode: 'regression', status: 'failed',
+      agent_target: 'claude-code', bot_key: 'base|claude-code',
+      input_json: { mode: 'regression', regression_binding: { validation_attempt_id: 'validation-1' } },
+      output_json: { verification_status: 'insufficient_info', gaps: ['无法确认提交后的成功提示文案'] },
+      parent_attempt_id: 'deployment-1', started_at: '', error_code: 'needs_evidence', error_message: '', usage: {},
+    }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'supply_evidence', label: '补充信息并重试回归' })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    await wrapper.get('.primary-action').trigger('click')
+    expect(wrapper.get('.evidence-gap-summary').text()).toContain('无法确认提交后的成功提示文案')
+    expect(wrapper.get('[data-confirm]').text()).toBe('保存证据并重试')
+  })
+
+  it.each([
+    ['validation', 'retry_validation', '重试当前验证'],
+    ['regression', 'retry_regression', '重试当前回归'],
+  ] as const)('treats malformed %s insufficient-info output without gaps as a retryable system result', (phase, kind, label) => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = `${phase}-malformed`
+    snapshot.attempts = [{
+      id: `${phase}-malformed`, case_id: 'case-1', cycle_number: 1, phase, mode: phase === 'regression' ? 'regression' : 'reproduce', status: 'failed',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { verification_status: 'insufficient_info', gaps: [] },
+      parent_attempt_id: '', started_at: '', error_code: 'invalid_phase_result', error_message: '', usage: {},
+    }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind, label })
+  })
+
   it.each([
     ['browser_validator_timeout', 'process'],
     ['browser_validator_attachment_failed', 'attachment'],

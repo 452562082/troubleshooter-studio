@@ -25,6 +25,24 @@ function isRootCauseDispute(detail: ActionDetail | undefined): boolean {
   )
 }
 
+function structuredEvidenceGaps(output: Record<string, unknown> | undefined): string[] {
+  if (!Array.isArray(output?.gaps)) return []
+  return [...new Set(output.gaps
+    .map(value => typeof value === 'string' ? value.trim() : '')
+    .filter(Boolean))]
+    .slice(0, 8)
+    .map(value => value.slice(0, 500))
+}
+
+function verificationNeedsUserEvidence(attempt: ActionDetail['attempts'][number] | undefined): boolean {
+  return Boolean(
+    attempt &&
+    ['validation', 'regression'].includes(attempt.phase) &&
+    attempt.output_json?.verification_status === 'insufficient_info' &&
+    structuredEvidenceGaps(attempt.output_json).length > 0,
+  )
+}
+
 export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrimaryAction | undefined {
   const detail = 'case' in subject ? subject : undefined
   const incident = detail?.case || subject as IncidentCase
@@ -53,6 +71,7 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
     if (attempt?.phase === 'regression' && ['failed', 'interrupted', 'cancelled'].includes(attempt.status)) {
       if (code === 'browser_login_required' || code === 'browser_runtime_broken' || code === 'browser_url_required' || code === 'validator_not_installed') return undefined
       if (code === 'browser_assertion_failed') return { kind: 'supply_evidence', label: '补充业务预期并重试' }
+      if (verificationNeedsUserEvidence(attempt)) return { kind: 'supply_evidence', label: '补充信息并重试回归' }
       return { kind: 'retry_regression', label: '重试当前回归' }
     }
     if (code === 'browser_validator_plan_invalid' || code === 'browser_locator_repair_plan_invalid') return { kind: 'retry_validation', label: '重新生成验证计划并重试' }
@@ -66,6 +85,7 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
     if (browserGapLabels[code]) return { kind: 'supply_evidence', label: browserGapLabels[code] }
     if (code === 'validator_not_installed' || ['browser_login_required', 'browser_runtime_broken', 'browser_url_required'].includes(code)) return undefined
     if (attempt?.phase === 'validation' && ['failed', 'interrupted', 'cancelled'].includes(attempt.status)) {
+      if (verificationNeedsUserEvidence(attempt)) return { kind: 'supply_evidence', label: '补充信息并重试验证' }
       return { kind: 'retry_validation', label: '重试当前验证' }
     }
     if (code.startsWith('browser_')) return undefined
@@ -140,6 +160,9 @@ watch(() => props.detail?.events.length ?? 0, count => {
 })
 const action = computed(() => props.detail ? primaryActionFor(props.detail) : undefined)
 const currentAttempt = computed(() => props.detail?.attempts.find(item => item.id === props.detail?.case.current_attempt_id) || null)
+const evidenceGaps = computed(() => dialogAction.value?.kind === 'supply_evidence'
+  ? structuredEvidenceGaps(currentAttempt.value?.output_json)
+  : [])
 const remediationReassessment = computed(() => isRemediationReassessment(props.detail || undefined))
 const rootCauseDispute = computed(() => isRootCauseDispute(props.detail || undefined))
 const validationEvidenceRefresh = computed(() => currentAttempt.value?.phase === 'validation' && typeof currentAttempt.value.input_json?.source_investigation_attempt_id === 'string')
@@ -749,8 +772,15 @@ function dialogTitle(): string {
         </dl>
         <p v-if="dialogAction.kind === 'notify_deployed' && automaticDeploymentVerification">无需手工填写版本号或 commit。只有明确检测到运行版本与本次修复不一致时，流程才会停下。</p>
         <p v-else-if="dialogAction.kind === 'notify_deployed'">无需填写版本号或 commit；本次只记录部署确认，最终以回归结果为准。</p>
+        <section v-if="dialogAction.kind === 'supply_evidence' && evidenceGaps.length" class="evidence-gap-summary" aria-labelledby="evidence-gap-title">
+          <h3 id="evidence-gap-title">Agent 还缺少以下信息</h3>
+          <ul>
+            <li v-for="gap in evidenceGaps" :key="gap">{{ gap }}</li>
+          </ul>
+          <p>请只补充与这些缺失项相关的信息或截图；提交后会在当前阶段继续，不会重建 Case。</p>
+        </section>
         <label v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(dialogAction.kind)" for="case-supplement">补充信息</label>
-        <textarea v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(dialogAction.kind)" id="case-supplement" v-model="dialogInput" rows="5" :placeholder="dialogAction.kind === 'supply_evidence' ? '描述图片中的页面状态、操作位置或业务预期（可选）' : '输入新证据、处理决定或测试信息'"></textarea>
+        <textarea v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(dialogAction.kind)" id="case-supplement" v-model="dialogInput" rows="5" :placeholder="dialogAction.kind === 'supply_evidence' ? (evidenceGaps.length ? '根据上面的缺失项补充账号权限、操作条件、业务预期或外部资料' : '描述图片中的页面状态、操作位置或业务预期（可选）') : '输入新证据、处理决定或测试信息'"></textarea>
         <section v-if="dialogAction.kind === 'supply_evidence' || dialogAction.kind === 'dispute_root_cause'" class="evidence-image-upload">
           <div class="evidence-image-heading">
             <div>
@@ -866,6 +896,10 @@ h2, h3, p { margin: 0; }
 .deployment-preview dd { min-width: 0; margin: 0; color: var(--c-ink); font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .deployment-preview code { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .approval-dialog input, .approval-dialog textarea { min-height: 44px; }
+.evidence-gap-summary { display: grid; gap: var(--sp-2); padding: var(--sp-3); border: 1px solid #fdba74; border-radius: var(--r-md); background: #fff7ed; }
+.evidence-gap-summary h3 { color: #9a3412; font-size: var(--fs-base); }
+.evidence-gap-summary ul { display: grid; gap: 6px; margin: 0; padding-left: 22px; color: var(--c-text); font-size: var(--fs-sm); line-height: 1.55; }
+.evidence-gap-summary p { color: var(--c-muted); font-size: var(--fs-xs); line-height: 1.5; }
 .evidence-image-upload { display: grid; gap: var(--sp-2); padding: var(--sp-3); border: 1px dashed #93c5fd; border-radius: var(--r-md); background: #f8fbff; }
 .evidence-image-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
 .evidence-image-heading > div { min-width: 0; display: grid; gap: 2px; }

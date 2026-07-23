@@ -43,8 +43,8 @@ type IncidentEvidenceImage struct {
 
 // UploadIncidentEvidenceImages freezes user-selected screenshots into the
 // current Case. It deliberately does not advance the workflow: the caller can
-// retry ContinueIncidentCase if a version conflict occurs without losing the
-// evidence it just uploaded.
+// retry the following evidence continuation or root-cause dispute if a version
+// conflict occurs without losing the evidence it just uploaded.
 func (a *App) UploadIncidentEvidenceImages(input UploadIncidentEvidenceImagesInput) ([]IncidentEvidenceImage, error) {
 	caseID := strings.TrimSpace(input.CaseID)
 	attemptID := strings.TrimSpace(input.AttemptID)
@@ -72,15 +72,24 @@ func (a *App) UploadIncidentEvidenceImages(input UploadIncidentEvidenceImagesInp
 	if incident.CurrentAttemptID != attemptID {
 		return nil, errors.New("evidence attempt is not the current Case attempt")
 	}
-	if incident.Status != bughub.CaseWaitingEvidence && incident.Status != bughub.CaseNotReproduced {
-		return nil, errors.New("current Case status does not accept validation evidence")
-	}
 	attempt, err := store.GetAttempt(ctx, attemptID)
 	if err != nil {
 		return nil, err
 	}
-	if attempt.CaseID != incident.ID || attempt.CycleNumber != incident.CycleNumber || (attempt.Phase != bughub.PhaseValidation && attempt.Phase != bughub.PhaseRegression) {
-		return nil, errors.New("evidence attempt is not a validation attempt for the current Case cycle")
+	if attempt.CaseID != incident.ID || attempt.CycleNumber != incident.CycleNumber {
+		return nil, errors.New("evidence attempt does not belong to the current Case cycle")
+	}
+	switch incident.Status {
+	case bughub.CaseWaitingEvidence, bughub.CaseNotReproduced:
+		if attempt.Phase != bughub.PhaseValidation && attempt.Phase != bughub.PhaseRegression {
+			return nil, errors.New("evidence attempt is not a validation attempt for the current Case cycle")
+		}
+	case bughub.CaseWaitingFixApproval, bughub.CaseWaitingRemediation:
+		if attempt.Phase != bughub.PhaseInvestigation || attempt.Status != bughub.AttemptStatusSucceeded {
+			return nil, errors.New("evidence attempt is not the confirmed root cause for the current Case cycle")
+		}
+	default:
+		return nil, errors.New("current Case status does not accept user evidence")
 	}
 
 	prepared := make([]struct {

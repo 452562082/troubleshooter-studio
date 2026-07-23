@@ -2,7 +2,7 @@
 import type { IncidentCase, IncidentCaseDetail as ActionDetail, IncidentEvidenceImageInput } from '../lib/bridge/bugWorkflow'
 
 export type CasePrimaryAction = {
-  kind: 'start_validation' | 'retry_validation' | 'supply_evidence' | 'approve_fix' | 'reconsider_remediation' | 'redo_fix' | 'complete_remediation' | 'continue_fix' | 'approve_merge' | 'supply_merge_decision' | 'notify_deployed' | 'supply_deployment_proof' | 'cancel_attempt' | 'continue_legacy'
+  kind: 'start_validation' | 'retry_validation' | 'supply_evidence' | 'approve_fix' | 'reconsider_remediation' | 'dispute_root_cause' | 'redo_fix' | 'complete_remediation' | 'continue_fix' | 'approve_merge' | 'supply_merge_decision' | 'notify_deployed' | 'supply_deployment_proof' | 'cancel_attempt' | 'continue_legacy'
   label: string
   approval?: boolean
 }
@@ -13,6 +13,15 @@ function isRemediationReassessment(detail: ActionDetail | undefined): boolean {
   const value = attempt?.input_json?.remediation_reassessment
   return attempt?.phase === 'investigation' && Boolean(
     value && typeof value === 'object' && (value as Record<string, unknown>).kind === 'user_remediation_proposal',
+  )
+}
+
+function isRootCauseDispute(detail: ActionDetail | undefined): boolean {
+  if (!detail) return false
+  const attempt = detail.attempts.find(item => item.id === detail.case.current_attempt_id)
+  const value = attempt?.input_json?.root_cause_dispute
+  return attempt?.phase === 'investigation' && Boolean(
+    value && typeof value === 'object' && (value as Record<string, unknown>).kind === 'user_root_cause_dispute',
   )
 }
 
@@ -57,6 +66,9 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
   }
   if (incident.status === 'investigating' && isRemediationReassessment(detail)) {
     return { kind: 'cancel_attempt', label: '停止方案评估' }
+  }
+  if (incident.status === 'investigating' && isRootCauseDispute(detail)) {
+    return { kind: 'cancel_attempt', label: '停止重新排障' }
   }
   return actions[incident.status]
 }
@@ -120,6 +132,7 @@ watch(() => props.detail?.events.length ?? 0, count => {
 const action = computed(() => props.detail ? primaryActionFor(props.detail) : undefined)
 const currentAttempt = computed(() => props.detail?.attempts.find(item => item.id === props.detail?.case.current_attempt_id) || null)
 const remediationReassessment = computed(() => isRemediationReassessment(props.detail || undefined))
+const rootCauseDispute = computed(() => isRootCauseDispute(props.detail || undefined))
 const validationEvidenceRefresh = computed(() => currentAttempt.value?.phase === 'validation' && typeof currentAttempt.value.input_json?.source_investigation_attempt_id === 'string')
 const validationEvidenceRefreshExhausted = computed(() => {
   const attempt = currentAttempt.value
@@ -359,6 +372,24 @@ async function openRemediationReassessment(event: MouseEvent) {
   confirmButton.value?.focus()
 }
 
+async function openRootCauseDispute(event: MouseEvent) {
+  if (props.pending || !['waiting_fix_approval', 'waiting_remediation'].includes(props.detail?.case.status || '')) return
+  actionTrigger.value = event.currentTarget as HTMLElement
+  dialogAction.value = { kind: 'dispute_root_cause', label: '根因不认可，重新排障' }
+  dialogCaseVersion.value = props.detail!.case.version
+  const currentAttemptID = props.detail!.case.current_attempt_id || ''
+  const rootCause = props.detail!.attempts.find(attempt => attempt.id === currentAttemptID && attempt.phase === 'investigation' && attempt.status === 'succeeded')
+  dialogRootCauseAttemptID.value = rootCause?.id || ''
+  dialogSourceBaselines.value = []
+  dialogInput.value = ''
+  dialogEvidence.value = ''
+  dialogImages.value = []
+  dialogImageError.value = ''
+  dialogOpen.value = true
+  await nextTick()
+  confirmButton.value?.focus()
+}
+
 async function openFixRework(event: MouseEvent) {
   if (props.pending || props.detail?.case.status !== 'waiting_merge_approval') return
   const currentAttemptID = props.detail.case.current_attempt_id || ''
@@ -398,10 +429,13 @@ function confirmAction() {
     payload.caseVersion = dialogCaseVersion.value
     payload.sourceBaselines = Object.fromEntries(dialogSourceBaselines.value.map(item => [item.repo.trim(), typeof item.branch === 'string' ? item.branch.trim() : '']).filter(([repo]) => repo))
   }
-  if (dialogAction.value.kind === 'reconsider_remediation' || dialogAction.value.kind === 'redo_fix') {
+  if (dialogAction.value.kind === 'reconsider_remediation' || dialogAction.value.kind === 'dispute_root_cause' || dialogAction.value.kind === 'redo_fix') {
     payload.rootCauseAttemptID = dialogRootCauseAttemptID.value
     payload.caseVersion = dialogCaseVersion.value
     payload.input = dialogInput.value.trim()
+  }
+  if (dialogAction.value.kind === 'dispute_root_cause' && dialogImages.value.length > 0) {
+    payload.images = dialogImages.value.map(({ name, mime_type, base64_data }) => ({ name, mime_type, base64_data }))
   }
   if (dialogAction.value.kind === 'complete_remediation') {
     payload.rootCauseAttemptID = dialogRootCauseAttemptID.value
@@ -500,6 +534,7 @@ function trapDialogFocus(event: KeyboardEvent) {
 function dialogTitle(): string {
   if (dialogAction.value?.kind === 'approve_fix') return '确认允许修复'
   if (dialogAction.value?.kind === 'reconsider_remediation') return '提出其他修复方案'
+  if (dialogAction.value?.kind === 'dispute_root_cause') return '根因不认可，重新排障'
   if (dialogAction.value?.kind === 'redo_fix') return '提出重修要求'
   if (dialogAction.value?.kind === 'complete_remediation') return '确认非代码处置已完成'
   if (dialogAction.value?.kind === 'approve_merge') return '确认合并基线和环境分支'
@@ -531,7 +566,7 @@ function dialogTitle(): string {
         <ol class="stage-progress" :class="{ 'is-remediation': usesNonCodeRemediation }" aria-label="故障处理阶段">
           <li v-for="(stage, index) in stages" :key="stage.key" class="lifecycle-stage" :data-state="stageState(index)">
             <span class="stage-marker" aria-hidden="true">{{ index + 1 }}</span>
-            <span><strong>{{ remediationReassessment && stage.key === 'investigation' ? '方案评估' : stage.label }}</strong><small>{{ stageStateLabel(index) }}</small></span>
+            <span><strong>{{ remediationReassessment && stage.key === 'investigation' ? '方案评估' : rootCauseDispute && stage.key === 'investigation' ? '重新排障' : stage.label }}</strong><small>{{ stageStateLabel(index) }}</small></span>
           </li>
         </ol>
 
@@ -550,15 +585,19 @@ function dialogTitle(): string {
             <p v-if="detail.case.status === 'legacy_archived'">历史记录只读；继续时会通过 CreateAndStart 创建新的 Case，不修改归档 attempt。</p>
             <p v-else-if="detail.case.status === 'reset_archived'">历史记录只读；重置后的新 Case 已保留原闭环的证据和审计关系。</p>
             <p v-else-if="detail.case.status === 'waiting_deployment'">环境分支已推送。人工部署后，Studio 会尝试自动采集运行版本；采集不到也会直接启动回归验证。</p>
-            <p v-else-if="detail.case.status === 'waiting_remediation'">根因不需要修改代码。完成数据、配置、运行环境、网络或外部依赖处置后，提交实际结果与证据即可开始回归。</p>
-            <p v-else-if="detail.case.status === 'waiting_fix_approval'">可以接受当前建议并授权修复，也可以提出前端、后端或其他修复思路，由排障 Agent 基于既有证据重新评估后再授权。</p>
+            <p v-else-if="detail.case.status === 'waiting_remediation'">根因不需要修改代码。可以确认处置，也可以质疑当前根因并基于已有验证证据重新排障。</p>
+            <p v-else-if="detail.case.status === 'waiting_fix_approval'">可以接受当前建议并授权修复，也可以提出前端、后端或其他修复思路；如果不认可原因判断，可以基于已有验证证据重新排障。</p>
             <p v-else-if="detail.case.status === 'waiting_merge_approval'">修复已推送但尚未合并。可以允许合并；如果实现与预期不一致，也可以提出重修要求，旧修复将只保留审计，不会进入后续合并。</p>
             <p v-else-if="remediationReassessment">复用已确认根因和冻结证据，只重新评估修复路径；不会重新执行七步排障或修改系统。</p>
+            <p v-else-if="rootCauseDispute">保留原验证证据和历史根因，正在结合你的质疑重新查询源码、CodeGraph 与运行时证据。</p>
             <p v-else-if="continuedAfterFailedRegression">第 {{ detail.case.cycle_number }} 轮 · 回归仍复现，Studio 已把本轮新证据和差分带入排障。</p>
             <p v-else-if="validationEvidenceRefreshExhausted">定向验证补采仍未满足结构化证据契约，已停止自动循环。这是系统执行问题，不需要重复补充业务证据。</p>
             <p v-else>第 {{ detail.case.cycle_number }} 轮 · {{ detail.case.environment || '环境未知' }}</p>
           </div>
           <div class="current-action-controls">
+            <button v-if="['waiting_fix_approval', 'waiting_remediation'].includes(detail.case.status)" class="btn dispute-action" type="button" :disabled="pending" @click="openRootCauseDispute">
+              根因不认可
+            </button>
             <button v-if="detail.case.status === 'waiting_fix_approval'" class="btn reconsider-action" type="button" :disabled="pending" @click="openRemediationReassessment">
               提出其他修复方案
             </button>
@@ -658,6 +697,13 @@ function dialogTitle(): string {
           <label for="remediation-proposal">你的修复建议</label>
           <textarea id="remediation-proposal" v-model="dialogInput" rows="6" maxlength="4000" placeholder="例如：优先由后端统一字段语义，前端仅保留兼容兜底；请比较两种方案的影响面和回归风险。"></textarea>
         </template>
+        <template v-else-if="dialogAction.kind === 'dispute_root_cause'">
+          <p>当前根因不会被删除，而会标记为已质疑。Studio 将保留原验证步骤和冻结证据，在同一 Case、同一轮次内创建新的排障 Attempt。</p>
+          <p>排障 Agent 会重新查询源码、CodeGraph、日志和运行时证据；如果复现证据确实不足，只会发起定向补证，不会从第一步完整重跑。</p>
+          <p>重新排障范围：Case v{{ dialogCaseVersion }} / 原根因 {{ dialogRootCauseAttemptID || '未找到' }}。</p>
+          <label for="root-cause-dispute-reason">不认可的原因</label>
+          <textarea id="root-cause-dispute-reason" v-model="dialogInput" rows="6" maxlength="4000" placeholder="例如：该字段在运行时响应中已有独立值，现有结论只依据静态代码，没有解释这条 Network 证据。"></textarea>
+        </template>
         <template v-else-if="dialogAction.kind === 'redo_fix'">
           <p>说明当前修复哪里与预期不一致，以及你希望如何调整。Studio 会保留已确认根因和证据，只重新评估修复方案。</p>
           <p>已推送的旧修复分支只保留审计，不会被覆盖或合并。方案重评完成后会再次停在修复授权门，只有你确认新方案和开发基线后，才会从干净基线创建新分支重新修复。</p>
@@ -696,11 +742,11 @@ function dialogTitle(): string {
         <p v-else-if="dialogAction.kind === 'notify_deployed'">无需填写版本号或 commit；本次只记录部署确认，最终以回归结果为准。</p>
         <label v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(dialogAction.kind)" for="case-supplement">补充信息</label>
         <textarea v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(dialogAction.kind)" id="case-supplement" v-model="dialogInput" rows="5" :placeholder="dialogAction.kind === 'supply_evidence' ? '描述图片中的页面状态、操作位置或业务预期（可选）' : '输入新证据、处理决定或测试信息'"></textarea>
-        <section v-if="dialogAction.kind === 'supply_evidence'" class="evidence-image-upload">
+        <section v-if="dialogAction.kind === 'supply_evidence' || dialogAction.kind === 'dispute_root_cause'" class="evidence-image-upload">
           <div class="evidence-image-heading">
             <div>
               <strong>补充截图</strong>
-              <small>PNG / JPEG，单张不超过 16 MB，最多 4 张；重试时会直接交给验证 Agent。</small>
+              <small>PNG / JPEG，单张不超过 16 MB，最多 4 张；{{ dialogAction.kind === 'dispute_root_cause' ? '将作为反证直接交给排障 Agent。' : '重试时会直接交给验证 Agent。' }}</small>
             </div>
             <input id="case-evidence-images" type="file" accept="image/png,image/jpeg" multiple @change="selectEvidenceImages">
             <label class="btn evidence-image-picker" for="case-evidence-images">选择图片</label>
@@ -716,7 +762,7 @@ function dialogTitle(): string {
         </section>
         <footer>
           <button class="btn" type="button" :disabled="pending" @click="closeDialog">取消</button>
-          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (dialogAction.kind === 'approve_fix' && (dialogBranchOptionsLoading || Boolean(dialogBranchOptionsError) || !dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (['reconsider_remediation', 'redo_fix'].includes(dialogAction.kind) && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim())) || (dialogAction.kind === 'complete_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim() || !dialogEvidence.trim())) || evidenceSupplementMissing" @click="confirmAction">{{ dialogAction.kind === 'reconsider_remediation' ? '提交并重新评估' : dialogAction.kind === 'redo_fix' ? '提交重修要求' : dialogAction.kind === 'complete_remediation' ? '确认并开始回归' : dialogAction.kind === 'supply_evidence' ? '保存证据并重试' : '确认' }}</button>
+          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (dialogAction.kind === 'approve_fix' && (dialogBranchOptionsLoading || Boolean(dialogBranchOptionsError) || !dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (['reconsider_remediation', 'dispute_root_cause', 'redo_fix'].includes(dialogAction.kind) && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim())) || (dialogAction.kind === 'complete_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim() || !dialogEvidence.trim())) || evidenceSupplementMissing" @click="confirmAction">{{ dialogAction.kind === 'reconsider_remediation' ? '提交并重新评估' : dialogAction.kind === 'dispute_root_cause' ? '提交并重新排障' : dialogAction.kind === 'redo_fix' ? '提交重修要求' : dialogAction.kind === 'complete_remediation' ? '确认并开始回归' : dialogAction.kind === 'supply_evidence' ? '保存证据并重试' : '确认' }}</button>
         </footer>
       </section>
     </div>
@@ -769,7 +815,7 @@ h2, h3, p { margin: 0; }
 .current-action-card h3 { margin: 3px 0; color: var(--c-ink); font-size: var(--fs-lg); }
 .current-action-card p { max-width: 62ch; color: var(--c-muted); font-size: var(--fs-sm); line-height: 1.55; }
 .primary-action { min-height: 44px; flex: 0 0 auto; }
-.reconsider-action { min-height: 44px; flex: 0 0 auto; }
+.reconsider-action, .dispute-action { min-height: 44px; flex: 0 0 auto; }
 .current-action-controls { min-width: 0; display: flex; align-items: stretch; justify-content: flex-end; gap: var(--sp-2); flex: 0 0 auto; }
 .terminal-copy { padding: 8px 0; font-weight: 600; }
 .live-error { min-height: 1.5em; color: var(--c-danger); font-size: var(--fs-sm); }
@@ -833,7 +879,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
 @media (max-width: 899px) {
   .current-action-card { align-items: stretch; flex-direction: column; }
   .current-action-controls { width: 100%; flex-direction: column; }
-  .primary-action, .reconsider-action { width: 100%; justify-content: center; }
+  .primary-action, .reconsider-action, .dispute-action { width: 100%; justify-content: center; }
 }
 @media (max-width: 560px) {
   .stage-progress { grid-template-columns: repeat(2, minmax(0, 1fr)); }

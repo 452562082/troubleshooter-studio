@@ -5,7 +5,18 @@ import BugStageAttemptOutput from './BugStageAttemptOutput.vue'
 
 const props = defineProps<{ detail: IncidentCaseDetail }>()
 
-const investigation = computed(() => [...props.detail.attempts].reverse().find(item => item.phase === 'investigation'))
+const investigation = computed(() => {
+  const attempts = [...props.detail.attempts].reverse().filter(item => item.phase === 'investigation')
+  return attempts.find(item => item.output_json?.investigation_status === 'root_cause_ready') || attempts[0]
+})
+const rootCauseUnderDispute = computed(() => {
+  const attemptID = investigation.value?.id
+  if (!attemptID) return false
+  return [...props.detail.events].reverse().some(event =>
+    event.event_type === 'root_cause_disputed' &&
+    event.payload_json?.source_root_cause_attempt_id === attemptID,
+  )
+})
 type DisplayCallChainHop = {
   kind: string
   name: string
@@ -293,6 +304,7 @@ watch(
 
     <section class="artifact-card root-cause-card" aria-labelledby="cause-title">
       <h3 id="cause-title">根因结论</h3>
+      <p v-if="rootCauseUnderDispute" class="root-cause-disputed">该结论已被用户质疑，当前正在重新排障；保留在此仅用于审计和对比。</p>
       <p class="root-cause-copy">{{ rootCause(investigation) }}</p>
       <div v-if="remediation" class="remediation-plan">
         <h4>建议修复方向</h4>
@@ -410,6 +422,7 @@ watch(
 .evidence-card > summary:focus-visible { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; border-radius: var(--r-md); }
 .root-cause-card h3, .remediation-plan h4 { color: var(--c-ink); font-size: var(--fs-md); font-weight: 700; line-height: 1.4; }
 .root-cause-card h3 { margin-bottom: var(--sp-2); }
+.root-cause-disputed { margin: 0 0 var(--sp-2); padding: 7px 9px; border-left: 3px solid #d97706; background: #fffbeb; color: #92400e; font-size: var(--fs-xs); line-height: 1.55; }
 .root-cause-copy { margin: 0; color: var(--c-text); font-size: var(--fs-base); font-weight: 400; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
 .remediation-plan { margin-top: var(--sp-4); border-top: 1px solid var(--c-line); padding-top: var(--sp-3); }
 .remediation-plan h4 { margin: 0 0 var(--sp-3); }

@@ -7,8 +7,10 @@ import (
 	"fmt"
 	stdhtml "html"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -105,27 +107,28 @@ func (s zenDisplayString) String() string {
 }
 
 type ZentaoBug struct {
-	ID           zenString        `json:"id"`
-	Title        zenString        `json:"title"`
-	Status       zenString        `json:"status"`
-	AssignedTo   zenString        `json:"assignedTo"`
-	OpenedBy     zenString        `json:"openedBy"`
-	Severity     zenString        `json:"severity"`
-	Pri          zenString        `json:"pri"`
-	Product      zenDisplayString `json:"product"`
-	Module       zenDisplayString `json:"module"`
-	Type         zenString        `json:"type"`
-	OS           zenString        `json:"os"`
-	Steps        zenString        `json:"steps"`
-	Keywords     zenString        `json:"keywords"`
-	Browser      zenString        `json:"browser"`
-	ResolvedBy   zenString        `json:"resolvedBy"`
-	OpenedDate   zenString        `json:"openedDate"`
-	EditedDate   zenString        `json:"editedDate"`
-	ResolvedDate zenString        `json:"resolvedDate"`
-	Files        zentaoFiles      `json:"files"`
-	Attachments  zentaoFiles      `json:"attachments"`
-	Actions      []zentaoAction   `json:"actions"`
+	ID            zenString        `json:"id"`
+	Title         zenString        `json:"title"`
+	Status        zenString        `json:"status"`
+	AssignedTo    zenString        `json:"assignedTo"`
+	OpenedBy      zenString        `json:"openedBy"`
+	Severity      zenString        `json:"severity"`
+	Pri           zenString        `json:"pri"`
+	Product       zenDisplayString `json:"product"`
+	Module        zenDisplayString `json:"module"`
+	Type          zenString        `json:"type"`
+	OS            zenString        `json:"os"`
+	Steps         zenString        `json:"steps"`
+	Keywords      zenString        `json:"keywords"`
+	Browser       zenString        `json:"browser"`
+	ResolvedBy    zenString        `json:"resolvedBy"`
+	OpenedDate    zenString        `json:"openedDate"`
+	EditedDate    zenString        `json:"editedDate"`
+	ResolvedDate  zenString        `json:"resolvedDate"`
+	ActivatedDate zenString        `json:"activatedDate"`
+	Files         zentaoFiles      `json:"files"`
+	Attachments   zentaoFiles      `json:"attachments"`
+	Actions       []zentaoAction   `json:"actions"`
 }
 
 type zentaoFile struct {
@@ -227,6 +230,15 @@ func IsZentaoUnauthorized(err error) bool {
 func NormalizeZentaoBug(raw ZentaoBug) Bug {
 	id := raw.ID.String()
 	env, frontend, hints := parseZentaoKeywords(raw.Keywords.String())
+	updatedAt := latestTime(
+		parseZentaoTime(raw.EditedDate.String()),
+		parseZentaoTime(raw.ActivatedDate.String()),
+		parseZentaoTime(raw.ResolvedDate.String()),
+		parseZentaoTime(raw.OpenedDate.String()),
+	)
+	if updatedAt.IsZero() {
+		updatedAt = time.Now().UTC()
+	}
 	return Bug{
 		ID:           "zentao-" + id,
 		Source:       "zentao",
@@ -249,7 +261,7 @@ func NormalizeZentaoBug(raw ZentaoBug) Bug {
 		ServiceHints: hints,
 		Attachments:  normalizeZentaoAttachments(raw.Files, raw.Attachments, zentaoActionCommentFiles(raw.Actions), zentaoImageFilesFromHTML(raw.Steps.String())),
 		CreatedAt:    parseZentaoTime(raw.OpenedDate.String()),
-		UpdatedAt:    firstTime(parseZentaoTime(raw.EditedDate.String()), parseZentaoTime(raw.ResolvedDate.String()), time.Now().UTC()),
+		UpdatedAt:    updatedAt,
 		RawPreview:   raw.Title.String(),
 	}
 }
@@ -470,6 +482,10 @@ func (c ZentaoClient) FetchAssigned(account string) ([]Bug, error) {
 func (c ZentaoClient) FetchAssignedWithStats(account string) (ZentaoAssignedResult, error) {
 	if strings.TrimSpace(c.BaseURL) == "" {
 		return ZentaoAssignedResult{}, fmt.Errorf("zentao base url is required")
+	}
+	account = strings.TrimSpace(account)
+	if account == "" {
+		return ZentaoAssignedResult{}, fmt.Errorf("zentao account is required")
 	}
 	base := strings.TrimRight(c.BaseURL, "/")
 	u, err := url.Parse(base + "/api.php/v1/bugs")
@@ -1023,8 +1039,10 @@ func (c ZentaoClient) FetchAttachment(att Attachment) ([]byte, string, error) {
 			continue
 		}
 		contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
-		if contentType == "" {
-			contentType = http.DetectContentType(data)
+		contentType, contentErr := ValidateAttachmentContent(att, data, contentType)
+		if contentErr != nil {
+			lastErr = fmt.Errorf("zentao attachment %s from %s %w", att.Name, rawURL, contentErr)
+			continue
 		}
 		return data, contentType, nil
 	}
@@ -1052,15 +1070,73 @@ func zentaoAttachmentURLs(baseURL string, att Attachment) []string {
 		}
 		out = append(out, base+"/"+raw)
 	}
-	add(att.RemoteURL)
 	if id := strings.TrimSpace(att.ID); id != "" {
 		escaped := url.PathEscape(id)
 		add("/api.php/v1/files/" + escaped + "/download")
 		add("/api.php/v1/files/" + escaped)
+	}
+	add(att.RemoteURL)
+	if id := strings.TrimSpace(att.ID); id != "" {
+		escaped := url.PathEscape(id)
 		add("/file-read-" + escaped + ".html")
 		add("/file-download-" + escaped + ".html")
 	}
 	return cleanStrings(out)
+}
+
+// ValidateAttachmentContent verifies the response bytes instead of trusting a
+// successful HTTP status, URL suffix, or upstream Content-Type. ZenTao legacy
+// file routes may return the authenticated application shell with HTTP 200.
+func ValidateAttachmentContent(att Attachment, data []byte, contentType string) (string, error) {
+	if len(data) == 0 {
+		return "", errors.New("returned an empty body")
+	}
+	headerType := normalizedMediaType(contentType)
+	detectedType := normalizedMediaType(http.DetectContentType(data))
+	expectedType := normalizedMediaType(att.Type)
+	if expectedType == "" {
+		expectedType = normalizedMediaType(mime.TypeByExtension(strings.ToLower(filepath.Ext(att.Name))))
+	}
+
+	if detectedType == "text/html" && expectedType != "text/html" {
+		return "", errors.New("returned text/html instead of attachment bytes")
+	}
+	if strings.HasPrefix(expectedType, "image/") {
+		if !strings.HasPrefix(detectedType, "image/") {
+			return "", fmt.Errorf("returned %s instead of image bytes", firstNonEmpty(detectedType, headerType, "unknown content"))
+		}
+		return canonicalImageMediaType(detectedType), nil
+	}
+	if headerType == "" || headerType == "application/octet-stream" {
+		return detectedType, nil
+	}
+	if headerType == "text/html" && detectedType != "text/html" {
+		return "", errors.New("returned an HTML content type for non-HTML attachment bytes")
+	}
+	return headerType, nil
+}
+
+func normalizedMediaType(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if parsed, _, err := mime.ParseMediaType(value); err == nil {
+		return strings.ToLower(strings.TrimSpace(parsed))
+	}
+	if before, _, ok := strings.Cut(value, ";"); ok {
+		value = before
+	}
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func canonicalImageMediaType(value string) string {
+	switch normalizedMediaType(value) {
+	case "image/jpg", "image/pjpeg":
+		return "image/jpeg"
+	default:
+		return normalizedMediaType(value)
+	}
 }
 
 func (c ZentaoClient) applyAuth(req *http.Request, client *http.Client) error {
@@ -1234,4 +1310,14 @@ func firstTime(items ...time.Time) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+func latestTime(items ...time.Time) time.Time {
+	var latest time.Time
+	for _, item := range items {
+		if item.After(latest) {
+			latest = item
+		}
+	}
+	return latest
 }

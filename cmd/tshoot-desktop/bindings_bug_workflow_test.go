@@ -357,7 +357,8 @@ func TestReconcileIncidentBugResolutionsRecoversAndIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
+	dbPath := filepath.Join(t.TempDir(), "cases.db")
+	app, store, _ := newWorkflowBindingApp(t, dbPath)
 	incident := bughub.IncidentCase{
 		ID: "case-fixed-reconcile", BugID: "zentao-840", Source: "zentao", SystemID: "base",
 		Environment: "test", Status: bughub.CaseFixedVerified, CycleNumber: 2,
@@ -374,6 +375,83 @@ func TestReconcileIncidentBugResolutionsRecoversAndIsIdempotent(t *testing.T) {
 	stored, found, err := bugStore().Get("zentao-840")
 	if err != nil || !found || stored.Status != "resolved" || stored.InboxState != bughub.BugInboxHistory || stored.ArchivedAt == nil {
 		t.Fatalf("stored Bug = %+v found=%v err=%v", stored, found, err)
+	}
+
+	if err := app.closeIncidentWorkflow(); err != nil {
+		t.Fatal(err)
+	}
+	reopenedApp, _, _ := newWorkflowBindingApp(t, dbPath)
+	remoteStatus = "active"
+	if err := bugStore().Upsert(bughub.Bug{
+		ID: "zentao-840", Source: "zentao", SourceID: "840", PlatformID: platform.ID,
+		Title: "搜索结果不完整", Status: "active", UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reopenedApp.reconcileIncidentBugResolutions(context.Background())
+	if postCount != 1 {
+		t.Fatalf("reopened Studio resolved a reopened Bug from an old Case: POST count = %d, want 1", postCount)
+	}
+}
+
+func TestReconcileIncidentBugResolutionSkipsSourceChangedAfterRegression(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	postCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"bug":{"id":"840","title":"搜索结果不完整","status":"active","openedDate":"2026-07-18T06:58:00Z","activatedDate":"2026-07-23T06:58:09Z"}}`))
+		case http.MethodPost:
+			postCount++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"result":"success"}`))
+		}
+	}))
+	defer srv.Close()
+	platform, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
+		ID: "zentao-main", Name: "Zentao", Type: "zentao", BaseURL: srv.URL,
+		AuthMode: "api_token", Token: "secret", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bugStore().Upsert(bughub.Bug{
+		ID: "zentao-840", Source: "zentao", SourceID: "840", PlatformID: platform.ID,
+		Title: "搜索结果不完整", Status: "active",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
+	closedAt := time.Date(2026, 7, 23, 5, 4, 59, 0, time.UTC)
+	incident := bughub.IncidentCase{
+		ID: "case-fixed-reopened", BugID: "zentao-840", Source: "zentao", SystemID: "base",
+		Environment: "test", Status: bughub.CaseFixedVerified, CycleNumber: 1,
+		CreatedAt: closedAt.Add(-time.Hour), UpdatedAt: closedAt, ClosedAt: &closedAt,
+	}
+	if err := store.CreateCase(context.Background(), incident); err != nil {
+		t.Fatal(err)
+	}
+
+	app.reconcileIncidentBugResolutions(context.Background())
+	app.reconcileIncidentBugResolutions(context.Background())
+	if postCount != 0 {
+		t.Fatalf("source changed after regression triggered %d resolve POSTs", postCount)
+	}
+	events, err := store.ListEvents(context.Background(), incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundSkip := false
+	for _, event := range events {
+		if event.EventType == "bug_ticket_resolution_skipped_source_changed" {
+			foundSkip = true
+		}
+	}
+	if !foundSkip {
+		t.Fatalf("events = %+v, want durable source-changed skip marker", events)
 	}
 }
 
@@ -1074,6 +1152,69 @@ func TestReconsiderIncidentRemediationUsesPersistedBotAndStartsInvestigation(t *
 		t.Fatal(err)
 	}
 	if updated.Status != bughub.CaseInvestigating || runner.count() != 1 {
+		t.Fatalf("updated=%+v starts=%d", updated, runner.count())
+	}
+	if got := runner.lastBot(); got.Key != incident.SelectedBotKey || got.Env != "test" {
+		t.Fatalf("runner bot=%+v", got)
+	}
+}
+
+func TestDisputeIncidentRootCauseRejectsMismatchedDialogScopeBeforeOpeningRuntime(t *testing.T) {
+	rootFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(rootFile, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (&App{workflowRoot: rootFile}).DisputeIncidentRootCause(DisputeIncidentRootCauseInput{
+		CaseID: "case-1", ExpectedVersion: 7, IdempotencyKey: "dispute-root-cause:wrong", ActorID: "alice",
+		RootCauseAttemptID: "investigation-7", Reason: "运行响应与结论不一致",
+	})
+	if err == nil || !strings.Contains(err.Error(), "dialog snapshot scope") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestDisputeIncidentRootCauseUsesPersistedBotAndStartsInvestigation(t *testing.T) {
+	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "root-dispute-cases.db"))
+	ctx := context.Background()
+	incident := bughub.IncidentCase{
+		ID: "case-dispute-binding", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test",
+		Status: bughub.CaseWaitingFixApproval, CycleNumber: 1, SelectedBotKey: "base|codex",
+	}
+	if err := store.CreateCase(ctx, incident); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	root := bughub.PhaseAttempt{
+		ID: "root-dispute-binding", CaseID: incident.ID, CycleNumber: 1, Phase: bughub.PhaseInvestigation,
+		Status: bughub.AttemptStatusSucceeded, AgentTarget: "codex", BotKey: incident.SelectedBotKey,
+		InputJSON:  []byte(`{"validation_attempt_id":"validation-1","scenario_hash":"scenario-1","validation_evidence":[{"artifact_id":"artifact-1","kind":"request_facts","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","environment":"test"}]}`),
+		OutputJSON: []byte(`{"investigation_status":"root_cause_ready","environment":"test","root_cause":"field mismatch","confidence":"high","root_cause_type":"code","remediation":{"mode":"code_change","target":"frontend","summary":"deduplicate labels","verification":"run regression"},"call_chain":[],"evidence":[],"validation_gaps":[],"gaps":[],"unchecked_scopes":[]}`),
+		StartedAt:  now.Add(-time.Minute), FinishedAt: &now,
+	}
+	if err := store.CreateAttempt(ctx, root); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.GetCase(ctx, incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := store.ApplyCaseMutation(ctx, bughub.CaseMutation{
+		CaseID: current.ID, ExpectedVersion: current.Version, IdempotencyKey: "bind-dispute-root", RequestJSON: []byte(`{}`),
+		Snapshot: bughub.CaseSnapshotUpdate{CurrentAttemptID: stringPointer(root.ID)},
+		Steps:    []bughub.CaseMutationStep{{To: bughub.CaseWaitingFixApproval, AuditOnly: true, Event: bughub.TransitionEvent{ID: "bind-dispute-root-event", EventType: "root_bound", ActorType: "studio", ActorID: "test", PayloadJSON: []byte(`{}`)}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := bughub.DisputeRootCauseKey(bound.Case.ID, root.ID, bound.Case.Version)
+	updated, err := app.DisputeIncidentRootCause(DisputeIncidentRootCauseInput{
+		CaseID: bound.Case.ID, ExpectedVersion: bound.Case.Version, IdempotencyKey: key, ActorID: "alice",
+		RootCauseAttemptID: root.ID, Reason: "运行响应与静态结论不一致",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != bughub.CaseInvestigating || runner.count() != 1 || updated.CycleNumber != bound.Case.CycleNumber {
 		t.Fatalf("updated=%+v starts=%d", updated, runner.count())
 	}
 	if got := runner.lastBot(); got.Key != incident.SelectedBotKey || got.Env != "test" {

@@ -587,6 +587,53 @@ describe('BugCaseLifecycle', () => {
     }]])
   })
 
+  it('reopens investigation when the user disputes the root cause without resetting validation', async () => {
+    const snapshot = detail('waiting_fix_approval')
+    snapshot.case.version = 9
+    snapshot.case.current_attempt_id = 'investigation-9'
+    snapshot.attempts = [{
+      id: 'investigation-9', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', confidence: 'high', root_cause: '旧根因', gaps: [] },
+      parent_attempt_id: '', started_at: '2026-07-11T10:00:00Z', error_code: '', error_message: '', usage: {},
+    }]
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+
+    await wrapper.get('.dispute-action').trigger('click')
+    const dialog = wrapper.get('[role="dialog"]')
+    expect(dialog.text()).toContain('同一 Case、同一轮次')
+    expect(dialog.text()).toContain('定向补证')
+    expect(wrapper.find('#case-evidence-images').exists()).toBe(true)
+    const confirm = wrapper.get<HTMLButtonElement>('[data-confirm]')
+    expect(confirm.element.disabled).toBe(true)
+    await wrapper.get('#root-cause-dispute-reason').setValue('运行时响应存在独立字段，旧结论没有解释')
+    expect(confirm.element.disabled).toBe(false)
+    await confirm.trigger('click')
+
+    expect(wrapper.emitted('primary')).toEqual([[{
+      kind: 'dispute_root_cause',
+      rootCauseAttemptID: 'investigation-9',
+      caseVersion: 9,
+      input: '运行时响应存在独立字段，旧结论没有解释',
+    }]])
+  })
+
+  it('labels an active root cause dispute as reopened investigation', () => {
+    const snapshot = detail('investigating')
+    snapshot.case.current_attempt_id = 'dispute-1'
+    snapshot.attempts = [{
+      id: 'dispute-1', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'running',
+      agent_target: 'codex', bot_key: 'base|codex', parent_attempt_id: 'root-1', started_at: '', error_code: '', error_message: '', usage: {},
+      input_json: { root_cause_dispute: { kind: 'user_root_cause_dispute', reason: '运行证据不一致', source_root_cause_attempt_id: 'root-1' } },
+      output_json: {},
+    }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'cancel_attempt', label: '停止重新排障' })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(wrapper.findAll('.lifecycle-stage')[1].text()).toContain('重新排障')
+    expect(wrapper.get('.current-action-card').text()).toContain('CodeGraph')
+    expect(wrapper.get('.primary-action').text()).toBe('停止重新排障')
+  })
+
   it('allows an empty baseline and delegates the environment-branch default to the host', async () => {
     const snapshot = detail('waiting_fix_approval')
     snapshot.case.current_attempt_id = 'investigation-default'

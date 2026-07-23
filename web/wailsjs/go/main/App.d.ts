@@ -77,6 +77,8 @@ export function Diff(arg1:string,arg2:string):Promise<generator.Plan>;
 
 export function DiscoverBots(arg1:Array<string>):Promise<Array<discover.DiscoveredAgent>>;
 
+export function DisputeIncidentRootCause(arg1:main.DisputeIncidentRootCauseInput):Promise<bughub.IncidentCase>;
+
 export function Doctor(arg1:string,arg2:string):Promise<doctor.Report>;
 
 export function FetchBugByID(arg1:main.BugFetchInput):Promise<bughub.SyncResult>;
@@ -141,7 +143,7 @@ export function ListGrafanaDatasources(arg1:main.LokiAuthInput):Promise<Array<la
 
 export function ListIncidentCases():Promise<Array<bughub.IncidentCase>>;
 
-export function ListIncidentFixBranches(arg1:string,arg2:string):Promise<{[key: string]: Array<string>}>;
+export function ListIncidentFixBranches(arg1:string,arg2:string):Promise<Record<string, Array<string>>>;
 
 export function ListLokiLabelValues(arg1:main.LokiAuthInput,arg2:string,arg3:string):Promise<labelprobe.ValuesResult>;
 

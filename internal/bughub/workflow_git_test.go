@@ -152,6 +152,16 @@ func TestGitIntegrationCreatesMergeCommit(t *testing.T) {
 	if err != nil || !result.Repositories["api"].Pushed || result.Repositories["api"].MergeCommit == commit {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
+	mergeCommit := result.Repositories["api"].MergeCommit
+	if got := strings.TrimSpace(runGitTest(t, f.repo, "show", "-s", "--format=%an|%ae|%cn|%ce", mergeCommit)); got != "Studio Test|studio@example.test|Studio Test|studio@example.test" {
+		t.Fatalf("merge commit identity = %q, want source repository identity", got)
+	}
+	if got := strings.TrimSpace(runGitTest(t, f.repo, "config", "--local", "--get", "user.name")); got != "Studio Test" {
+		t.Fatalf("source repository user.name changed to %q", got)
+	}
+	if got := strings.TrimSpace(runGitTest(t, f.repo, "config", "--local", "--get", "user.email")); got != "studio@example.test" {
+		t.Fatalf("source repository user.email changed to %q", got)
+	}
 }
 
 func TestGitIntegrationRejectsTargetHeadChangedAfterApproval(t *testing.T) {

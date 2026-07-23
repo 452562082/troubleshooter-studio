@@ -347,13 +347,8 @@ func (s *GitIntegrationService) mergeRepo(ctx context.Context, req MergeRequest,
 	} else if _, gitErr := os.Lstat(filepath.Join(worktree, ".git")); gitErr != nil {
 		return inspection, errors.New("existing Studio worktree is not registered with Git")
 	}
-	if err := gitRun(ctx, worktree, "config", "user.name", "Troubleshooter Studio"); err != nil {
-		return inspection, err
-	}
-	if err := gitRun(ctx, worktree, "config", "user.email", "studio@localhost"); err != nil {
-		return inspection, err
-	}
-	if err := gitRun(ctx, worktree, "merge", "--no-edit", change.FixCommit); err != nil {
+	identity := resolveGitIdentity(ctx, path)
+	if err := gitRunWithIdentity(ctx, worktree, identity, "merge", "--no-edit", change.FixCommit); err != nil {
 		inspection.Conflict = true
 		inspection.Error = err.Error()
 		return inspection, ErrGitMergeConflict
@@ -501,6 +496,41 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+const (
+	fallbackGitUserName  = "Troubleshooter Studio"
+	fallbackGitUserEmail = "studio@localhost"
+)
+
+type gitIdentity struct {
+	Name  string
+	Email string
+}
+
+func resolveGitIdentity(ctx context.Context, sourcePath string) gitIdentity {
+	name, err := gitOutput(ctx, sourcePath, "config", "--get", "user.name")
+	if err != nil || strings.TrimSpace(name) == "" {
+		name = fallbackGitUserName
+	}
+	email, err := gitOutput(ctx, sourcePath, "config", "--get", "user.email")
+	if err != nil || strings.TrimSpace(email) == "" {
+		email = fallbackGitUserEmail
+	}
+	return gitIdentity{Name: strings.TrimSpace(name), Email: strings.TrimSpace(email)}
+}
+
+func configureStandaloneGitIdentity(ctx context.Context, sourcePath, destinationPath string) error {
+	identity := resolveGitIdentity(ctx, sourcePath)
+	if err := gitRun(ctx, destinationPath, "config", "--local", "user.name", identity.Name); err != nil {
+		return err
+	}
+	return gitRun(ctx, destinationPath, "config", "--local", "user.email", identity.Email)
+}
+
+func gitRunWithIdentity(ctx context.Context, dir string, identity gitIdentity, args ...string) error {
+	scopedArgs := []string{"-c", "user.name=" + identity.Name, "-c", "user.email=" + identity.Email}
+	return gitRun(ctx, dir, append(scopedArgs, args...)...)
 }
 
 func gitEnvironment() []string {

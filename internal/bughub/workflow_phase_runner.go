@@ -937,6 +937,13 @@ func (r *AgentPhaseRunner) promptForAttempt(attempt PhaseAttempt, bug Bug, bot B
 			return buildRemediationReassessmentPrompt(reassessment)
 		}
 		prompt := buildStructuredInvestigationPrompt(bug, bot)
+		if dispute, ok := rootCauseDisputeFromInput(attempt.InputJSON); ok {
+			disputePrompt, err := buildRootCauseDisputePrompt(dispute)
+			if err != nil {
+				return "", err
+			}
+			prompt += disputePrompt
+		}
 		if len(attempt.InputJSON) != 0 && string(attempt.InputJSON) != "{}" {
 			prompt += "\n## Studio structured investigation input\n\n```json\n" + string(attempt.InputJSON) + "\n```\n"
 		}

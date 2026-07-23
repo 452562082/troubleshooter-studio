@@ -14,13 +14,14 @@ import (
 const investigationEvidenceManifestName = "validation-evidence-manifest.json"
 
 type InvestigationEvidenceReference struct {
-	ArtifactID  string `json:"artifact_id"`
-	Kind        string `json:"kind"`
-	SHA256      string `json:"sha256"`
-	Environment string `json:"environment"`
-	Version     string `json:"version,omitempty"`
-	RequestID   string `json:"request_id,omitempty"`
-	TraceID     string `json:"trace_id,omitempty"`
+	ArtifactID      string `json:"artifact_id"`
+	Kind            string `json:"kind"`
+	SHA256          string `json:"sha256"`
+	Environment     string `json:"environment"`
+	Version         string `json:"version,omitempty"`
+	RequestID       string `json:"request_id,omitempty"`
+	TraceID         string `json:"trace_id,omitempty"`
+	SourceAttemptID string `json:"source_attempt_id,omitempty"`
 }
 
 // InitialInvestigationInput is the durable handoff from a successful
@@ -178,6 +179,9 @@ func (r *AgentPhaseRunner) materializeInvestigationEvidence(ctx context.Context,
 	if strings.TrimSpace(manifest.SourceAttemptID) == "" {
 		return "", nil
 	}
+	if dispute, ok := rootCauseDisputeFromInput(attempt.InputJSON); ok {
+		manifest.Evidence = append(manifest.Evidence, dispute.UserEvidence...)
+	}
 	if len(manifest.Evidence) == 0 {
 		return "", errors.New("investigation reproduction handoff contains no evidence")
 	}
@@ -191,13 +195,17 @@ func (r *AgentPhaseRunner) materializeInvestigationEvidence(ctx context.Context,
 			return "", fmt.Errorf("read validation evidence %s: %w", reference.ArtifactID, err)
 		}
 		artifact := verified.Artifact
-		if artifact.AttemptID != manifest.SourceAttemptID || artifact.Kind != reference.Kind || artifact.SHA256 != reference.SHA256 || artifact.Environment != reference.Environment || artifact.Version != reference.Version || artifact.RequestID != reference.RequestID || artifact.TraceID != reference.TraceID {
+		sourceAttemptID := strings.TrimSpace(reference.SourceAttemptID)
+		if sourceAttemptID == "" {
+			sourceAttemptID = manifest.SourceAttemptID
+		}
+		if artifact.AttemptID != sourceAttemptID || artifact.Kind != reference.Kind || artifact.SHA256 != reference.SHA256 || artifact.Environment != reference.Environment || artifact.Version != reference.Version || artifact.RequestID != reference.RequestID || artifact.TraceID != reference.TraceID {
 			return "", errors.New("reproduction evidence no longer matches its durable investigation binding")
 		}
 		extension := ".json"
 		if artifact.Kind == "console" {
 			extension = ".jsonl"
-		} else if artifact.Kind == "screenshot" {
+		} else if artifact.Kind == "screenshot" || artifact.Kind == "user_screenshot" {
 			extension = ".png"
 		}
 		name := fmt.Sprintf("%02d-%s-%s%s", index+1, safeEvidenceFilenamePart(artifact.Kind), artifact.SHA256[:12], extension)

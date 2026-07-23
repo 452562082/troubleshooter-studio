@@ -2631,6 +2631,30 @@ export namespace main {
 	        this.fields = source["fields"];
 	    }
 	}
+	export class DisputeIncidentRootCauseInput {
+	    case_id: string;
+	    expected_version: number;
+	    idempotency_key: string;
+	    actor_id: string;
+	    root_cause_attempt_id: string;
+	    reason: string;
+	    evidence_artifact_ids?: string[];
+
+	    static createFrom(source: any = {}) {
+	        return new DisputeIncidentRootCauseInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.expected_version = source["expected_version"];
+	        this.idempotency_key = source["idempotency_key"];
+	        this.actor_id = source["actor_id"];
+	        this.root_cause_attempt_id = source["root_cause_attempt_id"];
+	        this.reason = source["reason"];
+	        this.evidence_artifact_ids = source["evidence_artifact_ids"];
+	    }
+	}
 	export class FileNode {
 	    name: string;
 	    path: string;

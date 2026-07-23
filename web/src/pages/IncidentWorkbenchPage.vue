@@ -13,6 +13,7 @@ import {
   clearIncidentBrowserSession,
   completeIncidentRemediation,
   continueIncidentCase,
+  disputeIncidentRootCause,
   fetchBugByID,
   getIncidentBrowserRuntimeStatus,
   getIncidentCase,
@@ -1017,6 +1018,27 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
           idempotency_key: `reconsider-remediation:${incident.id}:${payload.rootCauseAttemptID}:${payload.caseVersion}`,
           root_cause_attempt_id: payload.rootCauseAttemptID,
           proposal: payload.input.trim(),
+        })
+      }
+      if (payload.kind === 'dispute_root_cause') {
+        if (!payload.rootCauseAttemptID || payload.caseVersion === undefined || !payload.input?.trim()) throw new Error('重新排障缺少质疑理由、根因或 Case 版本快照')
+        let evidenceArtifactIDs: string[] = []
+        if (payload.images?.length) {
+          const uploaded = await uploadIncidentEvidenceImages({
+            case_id: incident.id,
+            attempt_id: payload.rootCauseAttemptID,
+            expected_version: payload.caseVersion,
+            images: payload.images,
+          })
+          evidenceArtifactIDs = uploaded.map(item => item.artifact_id)
+        }
+        return disputeIncidentRootCause({
+          ...base,
+          expected_version: payload.caseVersion,
+          idempotency_key: `dispute-root-cause:${incident.id}:${payload.rootCauseAttemptID}:${payload.caseVersion}`,
+          root_cause_attempt_id: payload.rootCauseAttemptID,
+          reason: payload.input.trim(),
+          evidence_artifact_ids: evidenceArtifactIDs,
         })
       }
       if (payload.kind === 'complete_remediation') {

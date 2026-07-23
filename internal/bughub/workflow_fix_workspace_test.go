@@ -62,6 +62,12 @@ func TestFixWorkspaceManagerLocksExplicitSourceBaselineAndKeepsEnvironmentTarget
 	if remote := strings.TrimSpace(runGitTest(t, binding.Worktree, "remote", "get-url", "origin")); remote != wantRemote {
 		t.Fatalf("fix workspace remote = %q, want %q", remote, wantRemote)
 	}
+	if got := strings.TrimSpace(runGitTest(t, binding.Worktree, "config", "--local", "--get", "user.name")); got != "Studio Test" {
+		t.Fatalf("fix workspace user.name = %q, want source repository identity", got)
+	}
+	if got := strings.TrimSpace(runGitTest(t, binding.Worktree, "config", "--local", "--get", "user.email")); got != "studio@example.test" {
+		t.Fatalf("fix workspace user.email = %q, want source repository identity", got)
+	}
 	if got := strings.TrimSpace(runGitTest(t, fixture.repo, "branch", "--show-current")); got != "feature/wrong-base" {
 		t.Fatalf("source checkout branch changed to %q", got)
 	}
@@ -78,6 +84,9 @@ func TestFixWorkspaceManagerLocksExplicitSourceBaselineAndKeepsEnvironmentTarget
 	runGitTest(t, binding.Worktree, "add", "fix.txt")
 	runGitTest(t, binding.Worktree, "commit", "-m", "fix")
 	fixCommit := strings.TrimSpace(runGitTest(t, binding.Worktree, "rev-parse", "HEAD"))
+	if got := strings.TrimSpace(runGitTest(t, binding.Worktree, "show", "-s", "--format=%an|%ae|%cn|%ce", fixCommit)); got != "Studio Test|studio@example.test|Studio Test|studio@example.test" {
+		t.Fatalf("fix commit identity = %q, want source repository identity", got)
+	}
 	valid := PhaseResult{Outcome: PhaseOutcomeFixPushed, CodeChanges: []CodeChange{{Repo: "api", BaseBranch: "feature/wrong-base", FixCommit: fixCommit, TargetEnvironmentBranch: "test", PushRemote: "origin"}}}
 	if err := lease.ValidateResult(context.Background(), valid); err != nil {
 		t.Fatalf("valid locked-base fix rejected: %v", err)

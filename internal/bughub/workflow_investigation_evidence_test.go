@@ -73,6 +73,97 @@ func TestMaterializeInitialInvestigationEvidenceVerifiesAndStagesFrozenArtifacts
 	}
 }
 
+func TestMaterializeInvestigationEvidenceStagesRootCauseCounterexampleAsPNG(t *testing.T) {
+	ctx := context.Background()
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-root-cause-counterexample", CaseInvestigating)
+	now := time.Now().UTC()
+	finished := now.Add(time.Second)
+	validation := PhaseAttempt{
+		ID: "validation-counterexample", CaseID: incident.ID, CycleNumber: 1,
+		Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusSucceeded,
+		AgentTarget: "codex", BotKey: "bot", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
+		StartedAt: now, FinishedAt: &finished,
+	}
+	root := PhaseAttempt{
+		ID: "root-counterexample", CaseID: incident.ID, CycleNumber: 1,
+		Phase: PhaseInvestigation, Status: AttemptStatusSucceeded,
+		AgentTarget: "codex", BotKey: "bot", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
+		StartedAt: now, FinishedAt: &finished,
+	}
+	for _, attempt := range []PhaseAttempt{validation, root} {
+		if err := store.CreateAttempt(ctx, attempt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	artifactsRoot := filepath.Join(resolvedTempDir(t), "artifacts")
+	network, err := RegisterArtifactBytes(ctx, store, ArtifactInput{
+		ArtifactsRoot: artifactsRoot, CaseID: incident.ID, AttemptID: validation.ID,
+		Kind: "network", Environment: "test", RedactionStatus: RedactionStatusNotRequired,
+	}, []byte(`{"status":200}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageBytes := []byte("\x89PNG\r\n\x1a\ncounterexample")
+	counterexample, err := RegisterArtifactBytes(ctx, store, ArtifactInput{
+		ArtifactsRoot: artifactsRoot, CaseID: incident.ID, AttemptID: root.ID,
+		Kind: "user_screenshot", Environment: "test", RedactionStatus: RedactionStatusNotRequired,
+	}, imageBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := map[string]any{
+		"validation_attempt_id": validation.ID,
+		"validation_evidence": []InvestigationEvidenceReference{{
+			ArtifactID: network.ID, Kind: network.Kind, SHA256: network.SHA256, Environment: network.Environment,
+		}},
+		"root_cause_dispute": rootCauseDisputeInput{
+			Kind: "user_root_cause_dispute", Reason: "截图与旧结论不一致",
+			SourceRootCauseAttemptID: root.ID,
+			PreviousResult:           InvestigationResult{InvestigationStatus: "root_cause_ready"},
+			UserEvidence: []InvestigationEvidenceReference{{
+				ArtifactID: counterexample.ID, Kind: counterexample.Kind, SHA256: counterexample.SHA256,
+				Environment: counterexample.Environment, SourceAttemptID: root.ID,
+			}},
+		},
+	}
+	investigation := PhaseAttempt{
+		ID: "investigation-counterexample", CaseID: incident.ID, CycleNumber: 1,
+		Phase: PhaseInvestigation, Status: AttemptStatusQueued,
+		AgentTarget: "codex", BotKey: "bot", InputJSON: mustJSON(input), OutputJSON: []byte(`{}`),
+		ParentAttemptID: root.ID, StartedAt: finished,
+	}
+	staging, err := openAttemptEvidenceStaging(artifactsRoot, investigation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer staging.Cleanup()
+	defer staging.Close()
+	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, artifactsRoot, nil)
+	if _, err := runner.materializeInvestigationEvidence(ctx, investigation, staging); err != nil {
+		t.Fatal(err)
+	}
+	manifestBytes, err := os.ReadFile(filepath.Join(staging.Path(), investigationEvidenceManifestName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest materializedInvestigationEvidence
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Files) != 2 || manifest.Files[1].ArtifactID != counterexample.ID ||
+		!strings.HasSuffix(manifest.Files[1].Path, ".png") {
+		t.Fatalf("counterexample manifest = %+v", manifest)
+	}
+	staged, err := os.ReadFile(filepath.Join(staging.Path(), filepath.FromSlash(manifest.Files[1].Path)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(staged) != string(imageBytes) {
+		t.Fatal("materialized root-cause counterexample changed")
+	}
+}
+
 func TestMaterializeInitialInvestigationEvidenceRejectsDivergentBinding(t *testing.T) {
 	input := InitialInvestigationInput{ValidationAttemptID: "validation", Evidence: []InvestigationEvidenceReference{{ArtifactID: "missing", Kind: "network", SHA256: strings.Repeat("a", 64), Environment: "test"}}}
 	encoded, _ := json.Marshal(input)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -518,6 +519,63 @@ func TestPreviewBugAttachmentCachesRemoteImage(t *testing.T) {
 	}
 	if got.ContentType != "image/png" || !strings.HasPrefix(got.DataURL, "data:image/png;base64,") {
 		t.Fatalf("cached preview = %+v", got)
+	}
+}
+
+func TestPreviewBugAttachmentReplacesPoisonedImageCache(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	poisonedPath := filepath.Join(root, "screen.jpg")
+	if err := os.WriteFile(poisonedPath, []byte("<!DOCTYPE html><html>zentao shell</html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api.php/v1/files/101" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write([]byte("\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01cached"))
+	}))
+	defer srv.Close()
+	_, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
+		ID: "zentao-main", Name: "禅道", Type: "zentao", BaseURL: srv.URL,
+		AuthMode: "api_token", Token: "secret", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bugStore().Upsert(bughub.Bug{
+		ID: "zentao-718", Source: "zentao", SourceID: "718", PlatformID: "zentao-main", Title: "截图",
+		Attachments: []bughub.Attachment{{
+			ID: "101", Name: "screen.jpg", Type: "image/jpeg", LocalPath: poisonedPath,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := (&App{}).PreviewBugAttachment(BugAttachmentPreviewInput{
+		PlatformID: "zentao-main", BugID: "zentao-718", AttachmentIndex: 0,
+	})
+	if err != nil {
+		t.Fatalf("PreviewBugAttachment: %v", err)
+	}
+	if got.ContentType != "image/jpeg" || !strings.HasPrefix(got.DataURL, "data:image/jpeg;base64,") {
+		t.Fatalf("preview = %+v", got)
+	}
+	stored, found, err := bugStore().Get("zentao-718")
+	if err != nil || !found {
+		t.Fatalf("Get bug found=%v err=%v", found, err)
+	}
+	if stored.Attachments[0].LocalPath == "" || stored.Attachments[0].LocalPath == poisonedPath {
+		t.Fatalf("poisoned cache locator was not replaced: %+v", stored.Attachments[0])
+	}
+	cached, err := os.ReadFile(stored.Attachments[0].LocalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(cached, []byte("\xff\xd8\xff")) {
+		t.Fatalf("replacement cache is not JPEG: %x", cached[:min(len(cached), 16)])
 	}
 }
 

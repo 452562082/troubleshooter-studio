@@ -91,6 +91,57 @@ describe('BugCaseArtifacts', () => {
     expect(artifactSource).toMatch(/\.remediation-plan dd \{[^}]*font-size: var\(--fs-base\);[^}]*font-weight: 400;/)
   })
 
+  it('keeps the disputed root cause visible for audit while a new investigation is running', () => {
+    const previousRoot = {
+      ...detail.attempts[0],
+      id: 'root-old',
+      output_json: {
+        investigation_status: 'root_cause_ready',
+        root_cause: '旧根因：前端重复渲染用户名',
+      },
+    }
+    const reopenedInvestigation = {
+      ...detail.attempts[0],
+      id: 'investigate-new',
+      status: 'running' as const,
+      input_json: {
+        root_cause_dispute: {
+          kind: 'user_root_cause_dispute',
+          source_root_cause_attempt_id: 'root-old',
+        },
+      },
+      output_json: {},
+      parent_attempt_id: 'root-old',
+    }
+    const disputedEvent = {
+      id: 'event-disputed',
+      case_id: detail.case.id,
+      from_status: 'waiting_fix_approval' as const,
+      to_status: 'waiting_fix_approval' as const,
+      event_type: 'root_cause_disputed',
+      actor_type: 'user',
+      actor_id: 'alice',
+      idempotency_key: 'dispute-root',
+      payload_json: { source_root_cause_attempt_id: 'root-old' },
+      created_at: '2026-07-11T13:00:00Z',
+    }
+    const wrapper = mount(BugCaseArtifacts, {
+      props: {
+        detail: {
+          ...detail,
+          case: { ...detail.case, status: 'investigating', current_attempt_id: 'investigate-new' },
+          attempts: [previousRoot, reopenedInvestigation],
+          events: [disputedEvent],
+        },
+      },
+    })
+
+    const card = wrapper.get('[aria-labelledby="cause-title"]')
+    expect(card.text()).toContain('旧根因：前端重复渲染用户名')
+    expect(card.text()).toContain('该结论已被用户质疑')
+    expect(wrapper.findAll('.stage-attempt')).toHaveLength(2)
+  })
+
   it('renders an ordered structured call chain with explicit location precision', () => {
     const attempts = [{ ...detail.attempts[0], output_json: {
       root_cause: '前端请求命中错误后端分支',

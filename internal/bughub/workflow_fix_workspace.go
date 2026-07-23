@@ -168,11 +168,9 @@ func (m *FixWorkspaceManager) prepareRepository(ctx context.Context, root, caseI
 		cleanupWorkspace()
 		return fixWorkspaceBinding{}, fmt.Errorf("bind push remote for %s: %w", repo, err)
 	}
-	for key, value := range map[string]string{"user.name": "Troubleshooter Studio", "user.email": "studio@localhost"} {
-		if err := gitRun(ctx, worktree, "config", "--local", key, value); err != nil {
-			cleanupWorkspace()
-			return fixWorkspaceBinding{}, fmt.Errorf("configure standalone fix workspace for %s: %w", repo, err)
-		}
+	if err := configureStandaloneGitIdentity(ctx, path, worktree); err != nil {
+		cleanupWorkspace()
+		return fixWorkspaceBinding{}, fmt.Errorf("configure standalone fix workspace for %s: %w", repo, err)
 	}
 	if err := gitRun(ctx, worktree, "checkout", "--detach", baseCommit); err != nil {
 		cleanupWorkspace()

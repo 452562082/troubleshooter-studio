@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 )
@@ -50,6 +51,45 @@ func TestUploadIncidentEvidenceImagesRegistersCurrentValidationArtifact(t *testi
 	registered, err := store.ListEvidenceArtifacts(context.Background(), incident.ID)
 	if err != nil || len(registered) != 1 || registered[0].AttemptID != incident.CurrentAttemptID || registered[0].Kind != "user_screenshot" {
 		t.Fatalf("registered = %+v err=%v", registered, err)
+	}
+}
+
+func TestUploadIncidentEvidenceImagesRegistersRootCauseDisputeArtifact(t *testing.T) {
+	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "root-dispute-evidence.db"))
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.workflowRoot = root
+	now := time.Now().UTC()
+	incident := bughub.IncidentCase{
+		ID: "case-root-evidence", BugID: "bug-root-evidence", Source: "zentao", SystemID: "base", Environment: "test",
+		Status: bughub.CaseWaitingFixApproval, CycleNumber: 1, CurrentAttemptID: "root-evidence", SelectedBotKey: "base|codex",
+	}
+	if err := store.CreateCase(context.Background(), incident); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateAttempt(context.Background(), bughub.PhaseAttempt{
+		ID: "root-evidence", CaseID: incident.ID, CycleNumber: 1, Phase: bughub.PhaseInvestigation,
+		Status: bughub.AttemptStatusSucceeded, AgentTarget: "codex", BotKey: "base|codex",
+		InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`), StartedAt: now.Add(-time.Minute), FinishedAt: &now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.GetCase(context.Background(), incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := app.UploadIncidentEvidenceImages(UploadIncidentEvidenceImagesInput{
+		CaseID: incident.ID, AttemptID: incident.CurrentAttemptID, ExpectedVersion: current.Version,
+		Images: []IncidentEvidenceImageInput{{Name: "反证.png", MIMEType: "image/png", Base64Data: onePixelEvidencePNG}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, err := store.ListEvidenceArtifacts(context.Background(), incident.ID)
+	if err != nil || len(got) != 1 || len(registered) != 1 || registered[0].AttemptID != incident.CurrentAttemptID {
+		t.Fatalf("uploaded=%+v registered=%+v err=%v", got, registered, err)
 	}
 }
 

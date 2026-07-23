@@ -44,8 +44,12 @@ func SyncZentaoAssigned(platform PlatformConfig, store *Store, client *http.Clie
 		var err error
 		account, err = zentao.CurrentUserAccount()
 		if err != nil {
-			account = ""
+			return result, fmt.Errorf("determine current user account: %w", err)
 		}
+	}
+	account = strings.TrimSpace(account)
+	if account == "" {
+		return result, fmt.Errorf("determine current user account: account is required")
 	}
 	result.Account = account
 	sync, err := zentao.FetchAssignedWithStats(account)

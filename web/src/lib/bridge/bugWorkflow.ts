@@ -185,6 +185,7 @@ export interface UploadIncidentEvidenceImagesInput { case_id: string; attempt_id
 export interface IncidentEvidenceImage { artifact_id: string; name: string; mime_type: 'image/png'; size: number }
 export interface ApproveIncidentFixInput extends WorkflowCommandInput { root_cause_attempt_id: string; input_json?: Record<string, unknown> }
 export interface ReconsiderIncidentRemediationInput extends WorkflowCommandInput { root_cause_attempt_id: string; proposal: string }
+export interface DisputeIncidentRootCauseInput extends WorkflowCommandInput { root_cause_attempt_id: string; reason: string; evidence_artifact_ids?: string[] }
 export interface CompleteIncidentRemediationInput extends WorkflowCommandInput { root_cause_attempt_id: string; summary: string; evidence: string }
 export interface ApproveIncidentMergeInput extends WorkflowCommandInput { fix_commits: Record<string, string>; target_branches: Record<string, string>; target_heads?: Record<string, string> }
 export interface NotifyIncidentDeployedInput extends WorkflowCommandInput { observed_version?: string; observed_commits?: Record<string, string>; version_source?: string; notification_text?: string; input_json?: Record<string, unknown> }
@@ -292,6 +293,10 @@ export async function approveIncidentFix(input: ApproveIncidentFixInput): Promis
 export async function reconsiderIncidentRemediation(input: ReconsiderIncidentRemediationInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.ReconsiderIncidentRemediation(input))
+}
+export async function disputeIncidentRootCause(input: DisputeIncidentRootCauseInput): Promise<IncidentCase> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  return normalizeCase(await App.DisputeIncidentRootCause(input))
 }
 export async function completeIncidentRemediation(input: CompleteIncidentRemediationInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)

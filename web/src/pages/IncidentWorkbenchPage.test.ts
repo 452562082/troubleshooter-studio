@@ -7,6 +7,7 @@ import {
   clearIncidentBrowserSession,
   completeIncidentRemediation,
   continueIncidentCase,
+  disputeIncidentRootCause,
   getIncidentBrowserRuntimeStatus,
   getIncidentCase,
   listBugs,
@@ -52,6 +53,7 @@ vi.mock('../lib/bridge', async importOriginal => ({
   clearIncidentBrowserSession: vi.fn(),
   completeIncidentRemediation: vi.fn(),
   continueIncidentCase: vi.fn(),
+  disputeIncidentRootCause: vi.fn(),
   fetchBugByID: vi.fn(),
   getIncidentBrowserRuntimeStatus: vi.fn().mockResolvedValue({ state: 'ready', version: '1.61.1', error_code: '', message: '' }),
   getIncidentCase: vi.fn(),
@@ -190,6 +192,7 @@ afterEach(() => {
   vi.mocked(startIncidentCase).mockReset()
   vi.mocked(uploadIncidentEvidenceImages).mockReset()
   vi.mocked(continueIncidentCase).mockReset()
+  vi.mocked(disputeIncidentRootCause).mockReset()
   vi.mocked(approveIncidentFix).mockReset()
   vi.mocked(reconsiderIncidentRemediation).mockReset()
   vi.mocked(approveIncidentMerge).mockReset()
@@ -931,6 +934,38 @@ describe('IncidentWorkbenchPage', () => {
       idempotency_key: 'reconsider-remediation:case-1:attempt-1:7', actor_id: 'desktop-user',
       proposal: '优先由后端统一字段语义，前端只保留兼容兜底',
     })
+    expect(approveIncidentFix).not.toHaveBeenCalled()
+  })
+
+  it('submits a root cause dispute as a new investigation without resetting the Case', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-dispute', 'waiting_fix_approval', '2026-07-13T00:00:00Z', { version: 11, current_attempt_id: 'root-11' })
+    const snapshot = detail(item, {
+      attempts: [{
+        id: 'root-11', case_id: item.id, cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded',
+        agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', root_cause: '字段语义错配' },
+        parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {},
+      }],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(snapshot)
+    vi.mocked(disputeIncidentRootCause).mockResolvedValue({ ...item, status: 'investigating', current_attempt_id: 'dispute-12', version: 12 })
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.dispute-action').trigger('click')
+    await wrapper.get('#root-cause-dispute-reason').setValue('运行时响应有独立 signature，旧结论没有覆盖')
+    await wrapper.get('[data-confirm]').trigger('click')
+    await flushPromises()
+
+    expect(disputeIncidentRootCause).toHaveBeenCalledWith({
+      case_id: item.id, expected_version: 11, root_cause_attempt_id: 'root-11',
+      idempotency_key: `dispute-root-cause:${item.id}:root-11:11`, actor_id: 'desktop-user',
+      reason: '运行时响应有独立 signature，旧结论没有覆盖',
+      evidence_artifact_ids: [],
+    })
+    expect(startIncidentCase).not.toHaveBeenCalled()
+    expect(resetIncidentCaseWithWarnings).not.toHaveBeenCalled()
     expect(approveIncidentFix).not.toHaveBeenCalled()
   })
 

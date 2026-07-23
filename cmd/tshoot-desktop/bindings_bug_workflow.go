@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	incidentCaseEvent             = "incident-case:event"
-	incidentWorkflowReminderEvent = "incident-workflow:reminder"
+	incidentCaseEvent              = "incident-case:event"
+	incidentWorkflowReminderEvent  = "incident-workflow:reminder"
+	bugTicketResolutionEventPrefix = "bug-ticket-resolution:"
 )
 
 var incidentWorkflowReminderPollInterval = time.Minute
@@ -202,6 +203,16 @@ type ReconsiderIncidentRemediationInput struct {
 	ActorID            string `json:"actor_id"`
 	RootCauseAttemptID string `json:"root_cause_attempt_id"`
 	Proposal           string `json:"proposal"`
+}
+
+type DisputeIncidentRootCauseInput struct {
+	CaseID              string   `json:"case_id"`
+	ExpectedVersion     int64    `json:"expected_version"`
+	IdempotencyKey      string   `json:"idempotency_key"`
+	ActorID             string   `json:"actor_id"`
+	RootCauseAttemptID  string   `json:"root_cause_attempt_id"`
+	Reason              string   `json:"reason"`
+	EvidenceArtifactIDs []string `json:"evidence_artifact_ids,omitempty"`
 }
 
 type CompleteIncidentRemediationInput struct {
@@ -469,8 +480,18 @@ func (a *App) syncIncidentBugResolution(ctx context.Context, incident bughub.Inc
 	}
 	a.workflowBugResolutionMu.Lock()
 	defer a.workflowBugResolutionMu.Unlock()
+	if recorded, err := a.incidentBugResolutionRecorded(ctx, incident.ID); err != nil {
+		return err
+	} else if recorded {
+		return nil
+	}
 	if a.workflowResolveBug != nil {
-		return a.workflowResolveBug(ctx, incident)
+		if err := a.workflowResolveBug(ctx, incident); err != nil {
+			return err
+		}
+		return a.recordIncidentBugResolution(ctx, incident.ID, "bug_ticket_resolution_synchronized", map[string]any{
+			"result": "resolved",
+		})
 	}
 
 	store := bugStore()
@@ -479,7 +500,12 @@ func (a *App) syncIncidentBugResolution(ctx context.Context, incident bughub.Inc
 		return err
 	}
 	if zentaoTicketResolutionComplete(bug.Status) {
-		return store.Archive(bug.ID, bughub.BugArchiveSourceResolved)
+		if err := store.Archive(bug.ID, bughub.BugArchiveSourceResolved); err != nil {
+			return err
+		}
+		return a.recordIncidentBugResolution(ctx, incident.ID, "bug_ticket_resolution_synchronized", map[string]any{
+			"result": "already_resolved",
+		})
 	}
 	if !strings.EqualFold(strings.TrimSpace(bug.Source), "zentao") {
 		return nil
@@ -493,13 +519,132 @@ func (a *App) syncIncidentBugResolution(ctx context.Context, incident bughub.Inc
 	if sourceID == "" {
 		sourceID = strings.TrimPrefix(strings.TrimSpace(bug.ID), "zentao-")
 	}
+	current, err := fetchZentaoBugWithSessionRecovery(platform, sourceID)
+	if err != nil {
+		return err
+	}
+	if zentaoTicketResolutionComplete(current.Status) {
+		bug.Status = current.Status
+		bug.UpdatedAt = current.UpdatedAt
+		if err := store.Upsert(bug); err != nil {
+			return err
+		}
+		if err := store.Archive(bug.ID, bughub.BugArchiveSourceResolved); err != nil {
+			return err
+		}
+		return a.recordIncidentBugResolution(ctx, incident.ID, "bug_ticket_resolution_synchronized", map[string]any{
+			"result": "already_resolved",
+		})
+	}
+	if incident.ClosedAt != nil && !current.UpdatedAt.IsZero() && current.UpdatedAt.After(incident.ClosedAt.UTC()) {
+		bug.Status = current.Status
+		bug.UpdatedAt = current.UpdatedAt
+		if err := store.Upsert(bug); err != nil {
+			return err
+		}
+		return a.recordIncidentBugResolution(ctx, incident.ID, "bug_ticket_resolution_skipped_source_changed", map[string]any{
+			"result":            "skipped",
+			"case_closed_at":    incident.ClosedAt.UTC().Format(time.RFC3339Nano),
+			"source_updated_at": current.UpdatedAt.UTC().Format(time.RFC3339Nano),
+			"source_status":     strings.TrimSpace(current.Status),
+		})
+	}
 	resolved, err := resolveZentaoBugWithSessionRecovery(platform, sourceID, comment)
 	if err != nil {
 		return err
 	}
 	bug.Status = resolved.Status
 	bug.UpdatedAt = time.Now().UTC()
-	return store.Upsert(bug)
+	if err := store.Upsert(bug); err != nil {
+		return err
+	}
+	if err := store.Archive(bug.ID, bughub.BugArchiveSourceResolved); err != nil {
+		return err
+	}
+	return a.recordIncidentBugResolution(ctx, incident.ID, "bug_ticket_resolution_synchronized", map[string]any{
+		"result":        "resolved",
+		"source_status": strings.TrimSpace(resolved.Status),
+	})
+}
+
+func (a *App) incidentBugResolutionRecorded(ctx context.Context, caseID string) (bool, error) {
+	a.workflowMu.Lock()
+	store := a.workflowStore
+	a.workflowMu.Unlock()
+	if store == nil {
+		return false, nil
+	}
+	_, found, err := store.GetEventByIdempotencyKey(ctx, bugTicketResolutionEventPrefix+strings.TrimSpace(caseID))
+	return found, err
+}
+
+func (a *App) recordIncidentBugResolution(ctx context.Context, caseID, eventType string, payload map[string]any) error {
+	a.workflowMu.Lock()
+	store := a.workflowStore
+	a.workflowMu.Unlock()
+	if store == nil {
+		return nil
+	}
+	key := bugTicketResolutionEventPrefix + strings.TrimSpace(caseID)
+	if _, found, err := store.GetEventByIdempotencyKey(ctx, key); err != nil || found {
+		return err
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		current, err := store.GetCase(ctx, caseID)
+		if err != nil {
+			return err
+		}
+		if current.Status != bughub.CaseFixedVerified {
+			return nil
+		}
+		_, err = store.ApplyCaseMutation(ctx, bughub.CaseMutation{
+			CaseID:          current.ID,
+			ExpectedVersion: current.Version,
+			IdempotencyKey:  key,
+			RequestJSON:     encoded,
+			Steps: []bughub.CaseMutationStep{{
+				To:        current.Status,
+				AuditOnly: true,
+				Event: bughub.TransitionEvent{
+					ID:          "event-" + key,
+					EventType:   eventType,
+					ActorType:   "studio",
+					ActorID:     "bug-ticket-reconciler",
+					PayloadJSON: encoded,
+				},
+			}},
+		})
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, bughub.ErrCaseVersionConflict) {
+			return err
+		}
+	}
+	return bughub.ErrCaseVersionConflict
+}
+
+func fetchZentaoBugWithSessionRecovery(platform bughub.PlatformConfig, sourceID string) (bughub.Bug, error) {
+	run := func(current bughub.PlatformConfig) (bughub.Bug, error) {
+		return (bughub.ZentaoClient{
+			BaseURL: current.BaseURL, Account: current.Account, AuthMode: current.AuthMode,
+			SessionHeader: current.SessionHeader, Password: current.Password, Token: current.Token,
+		}).FetchByID(sourceID)
+	}
+	current, err := run(platform)
+	if err != nil && shouldRecoverZentaoSession(platform, err) {
+		if refreshed, ok := refreshZentaoSession(platform); ok {
+			current, err = run(refreshed)
+		}
+	}
+	if err != nil && clearExpiredZentaoSession(platform, err) {
+		return bughub.Bug{}, zentaoSessionExpiredError(err)
+	}
+	return current, err
 }
 
 func resolveZentaoBugWithSessionRecovery(platform bughub.PlatformConfig, sourceID string, comment string) (bughub.Bug, error) {
@@ -1173,6 +1318,41 @@ func (a *App) ReconsiderIncidentRemediation(input ReconsiderIncidentRemediationI
 	incident, err := orchestrator.ReconsiderRemediation(a.workflowCommandContext(), bughub.ReconsiderRemediationCommand{
 		CaseID: caseID, ExpectedVersion: input.ExpectedVersion, IdempotencyKey: expectedKey, ActorID: actorID,
 		RootCauseAttemptID: rootCauseAttemptID, Proposal: proposal, Bug: bug, Bot: bot,
+	})
+	a.emitIncidentResult(incident, err)
+	return incident, err
+}
+
+func (a *App) DisputeIncidentRootCause(input DisputeIncidentRootCauseInput) (bughub.IncidentCase, error) {
+	if err := validateWorkflowCommandScalars(input.CaseID, input.ExpectedVersion, input.IdempotencyKey, input.ActorID); err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	caseID := strings.TrimSpace(input.CaseID)
+	actorID := strings.TrimSpace(input.ActorID)
+	rootCauseAttemptID := strings.TrimSpace(input.RootCauseAttemptID)
+	reason := strings.TrimSpace(input.Reason)
+	if rootCauseAttemptID == "" {
+		return bughub.IncidentCase{}, errors.New("root_cause_attempt_id is required")
+	}
+	if reason == "" {
+		return bughub.IncidentCase{}, errors.New("reason is required")
+	}
+	expectedKey := bughub.DisputeRootCauseKey(caseID, rootCauseAttemptID, input.ExpectedVersion)
+	if strings.TrimSpace(input.IdempotencyKey) != expectedKey {
+		return bughub.IncidentCase{}, errors.New("root cause dispute key does not match the dialog snapshot scope")
+	}
+	_, orchestrator, err := a.workflowComponents()
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	bug, bot, err := a.loadIncidentContext(caseID)
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	incident, err := orchestrator.DisputeRootCause(a.workflowCommandContext(), bughub.DisputeRootCauseCommand{
+		CaseID: caseID, ExpectedVersion: input.ExpectedVersion, IdempotencyKey: expectedKey, ActorID: actorID,
+		RootCauseAttemptID: rootCauseAttemptID, Reason: reason,
+		EvidenceArtifactIDs: append([]string(nil), input.EvidenceArtifactIDs...), Bug: bug, Bot: bot,
 	})
 	a.emitIncidentResult(incident, err)
 	return incident, err

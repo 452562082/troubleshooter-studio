@@ -180,14 +180,15 @@ func (a *App) PreviewBugAttachment(input BugAttachmentPreviewInput) (BugAttachme
 func readBugAttachmentPreview(platformID string, bugID string, attachmentIndex int, att bughub.Attachment) ([]byte, string, bughub.Attachment, error) {
 	if strings.TrimSpace(att.LocalPath) != "" {
 		data, err := os.ReadFile(att.LocalPath)
-		if err != nil {
-			return nil, "", att, err
+		if err == nil {
+			contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(att.LocalPath)))
+			if contentType, contentErr := bughub.ValidateAttachmentContent(att, data, contentType); contentErr == nil {
+				return data, contentType, att, nil
+			}
 		}
-		contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(att.LocalPath)))
-		if contentType == "" {
-			contentType = http.DetectContentType(data)
-		}
-		return data, contentType, att, nil
+		// Missing or poisoned caches are recoverable. Clear the locator and let
+		// the authenticated remote fetch replace it with verified bytes.
+		att.LocalPath = ""
 	}
 	platform, err := getBugPlatform(platformID)
 	if err != nil {
@@ -230,6 +231,10 @@ func readBugAttachmentPreview(platformID string, bugID string, attachmentIndex i
 }
 
 func cacheBugAttachment(bugID string, idx int, att bughub.Attachment, data []byte, contentType string) (bughub.Attachment, error) {
+	contentType, err := bughub.ValidateAttachmentContent(att, data, contentType)
+	if err != nil {
+		return att, err
+	}
 	dir := filepath.Join(bughub.DefaultRoot(), "attachments", safePathSegment(bugID))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return att, err

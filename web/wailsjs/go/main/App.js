@@ -126,6 +126,10 @@ export function DiscoverBots(arg1) {
   return window['go']['main']['App']['DiscoverBots'](arg1);
 }
 
+export function DisputeIncidentRootCause(arg1) {
+  return window['go']['main']['App']['DisputeIncidentRootCause'](arg1);
+}
+
 export function Doctor(arg1, arg2) {
   return window['go']['main']['App']['Doctor'](arg1, arg2);
 }

@@ -2075,6 +2075,10 @@ func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCa
 		if err != nil {
 			return IncidentCase{}, err
 		}
+		investigationInput, err = o.carryRootCauseDisputeAfterValidationRefresh(ctx, attempt, investigationInput)
+		if err != nil {
+			return IncidentCase{}, err
+		}
 		add(CaseReproduced, "validation_reproduced", "agent", actor, cmd.OutputJSON)
 		add(CaseInvestigating, "investigation_started", "studio", "orchestrator", map[string]string{"parent_attempt_id": attempt.ID})
 		created := newAttempt(incident, PhaseInvestigation, "", cmd.IdempotencyKey+":investigation", BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget}, investigationInput, attempt.ID)

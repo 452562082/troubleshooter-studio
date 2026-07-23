@@ -197,7 +197,8 @@ func TestReconsiderCompletedFixCreatesReworkAssessmentAndFreshFixAuthorization(t
 		CaseID: waitingApproval.ID, ExpectedVersion: waitingApproval.Version,
 		IdempotencyKey: StartFixApprovalKey(waitingApproval.ID, reassessmentAttempt.ID, waitingApproval.Version),
 		ActorID:        "alice", RootCauseAttemptID: reassessmentAttempt.ID, Bug: Bug{ID: waitingApproval.BugID},
-		Bot: BotRef{Key: "investigator", Target: "codex"}, InputJSON: []byte(`{"source_baselines":{"backend":"feature/work"}}`),
+		Bot:       BotRef{Key: "investigator", Target: "codex", Path: writeFixWorkspaceBranchMap(t, "test", "backend", "test")},
+		InputJSON: []byte(`{"source_baselines":{"backend":"feature/work"}}`),
 	})
 	if err != nil || approved.Status != CaseFixing || runner.startCount() != 2 {
 		t.Fatalf("case=%+v starts=%d err=%v", approved, runner.startCount(), err)

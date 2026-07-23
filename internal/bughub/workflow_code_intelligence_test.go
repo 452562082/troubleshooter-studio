@@ -108,6 +108,10 @@ unchecked_scopes: []
 		completed <- command
 		return nil
 	})
+	repositoryPath := t.TempDir()
+	runner.SetRepositoryAccessResolver(RepositoryAccessResolverFunc(func(context.Context, IncidentCase) (map[string]string, error) {
+		return map[string]string{"api": repositoryPath}, nil
+	}))
 	runner.SetCodeIntelligenceResolver(CodeIntelligenceResolverFunc(func(context.Context, IncidentCase) (CodeIntelligenceManifest, error) {
 		return CodeIntelligenceManifest{
 			Enabled: true, Provider: "codegraph", Ready: 1, Total: 1,

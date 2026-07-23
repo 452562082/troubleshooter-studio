@@ -190,9 +190,10 @@ async function loadDialogFixBranches(caseID: string, rootCauseAttemptID: string)
     dialogBranchOptions.value = Object.fromEntries(Object.entries(raw || {})
       .filter(([repo, branches]) => allowed.has(repo) && Array.isArray(branches))
       .map(([repo, branches]) => [repo, [...new Set(branches.map(branch => branch.trim()).filter(Boolean))]]))
-  } catch {
+  } catch (error) {
     if (generation !== dialogBranchLoadGeneration || !dialogOpen.value) return
-    dialogBranchOptionsError.value = '分支列表加载失败，当前仅可使用环境默认分支。'
+    const message = error instanceof Error ? error.message.trim() : ''
+    dialogBranchOptionsError.value = message || '分支列表加载失败，请检查修复建议中的代码仓库和本地仓库配置后重试。'
   } finally {
     if (generation === dialogBranchLoadGeneration) dialogBranchOptionsLoading.value = false
   }
@@ -641,7 +642,7 @@ function dialogTitle(): string {
               <span v-if="item.locked" class="source-repository-value">{{ item.repo }}</span>
               <input v-else :id="`fix-repo-${index}`" v-model="item.repo" autocomplete="off" aria-label="代码仓库（历史修复建议未明确）" placeholder="历史修复建议未明确，请填写仓库" />
               <label :for="`fix-baseline-${index}`">开发基线分支</label>
-              <select :id="`fix-baseline-${index}`" v-model="item.branch" :aria-busy="dialogBranchOptionsLoading">
+              <select :id="`fix-baseline-${index}`" v-model="item.branch" :aria-busy="dialogBranchOptionsLoading" :disabled="dialogBranchOptionsLoading || Boolean(dialogBranchOptionsError)">
                 <option value="">当前环境分支（默认）</option>
                 <option v-for="branch in dialogBranchOptions[item.repo] || []" :key="branch" :value="branch">{{ branch }}</option>
               </select>
@@ -715,7 +716,7 @@ function dialogTitle(): string {
         </section>
         <footer>
           <button class="btn" type="button" :disabled="pending" @click="closeDialog">取消</button>
-          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (dialogAction.kind === 'approve_fix' && (dialogBranchOptionsLoading || !dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (['reconsider_remediation', 'redo_fix'].includes(dialogAction.kind) && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim())) || (dialogAction.kind === 'complete_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim() || !dialogEvidence.trim())) || evidenceSupplementMissing" @click="confirmAction">{{ dialogAction.kind === 'reconsider_remediation' ? '提交并重新评估' : dialogAction.kind === 'redo_fix' ? '提交重修要求' : dialogAction.kind === 'complete_remediation' ? '确认并开始回归' : dialogAction.kind === 'supply_evidence' ? '保存证据并重试' : '确认' }}</button>
+          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (dialogAction.kind === 'approve_fix' && (dialogBranchOptionsLoading || Boolean(dialogBranchOptionsError) || !dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (['reconsider_remediation', 'redo_fix'].includes(dialogAction.kind) && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim())) || (dialogAction.kind === 'complete_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim() || !dialogEvidence.trim())) || evidenceSupplementMissing" @click="confirmAction">{{ dialogAction.kind === 'reconsider_remediation' ? '提交并重新评估' : dialogAction.kind === 'redo_fix' ? '提交重修要求' : dialogAction.kind === 'complete_remediation' ? '确认并开始回归' : dialogAction.kind === 'supply_evidence' ? '保存证据并重试' : '确认' }}</button>
         </footer>
       </section>
     </div>

@@ -109,5 +109,42 @@ func (r *AgentPhaseRunner) materializeRepositoryAccess(ctx context.Context, atte
 	if err := writeImmutableInvestigationInput(filepath.Join(staging.Path(), repositoryAccessManifestName), append(encoded, '\n')); err != nil {
 		return "", err
 	}
-	return "\n## Studio repository access boundary (mandatory)\n\nRead `STUDIO_EVIDENCE_STAGING_DIR/" + repositoryAccessManifestName + "` before accessing source code. Only paths in `roots` are approved repository roots, and `access` is the maximum allowed operation. Never enumerate or search `/`, `/Users`, the user home directory, or their ancestors to discover repositories. Never inspect `Library`, Desktop, Documents, Downloads, Pictures, Photos, Movies, Music, or another App's data. If a required repository is absent, report the exact configuration gap; do not run `find`, `fd`, `locate`, globbing, or recursive `ls` outside the approved roots.\n", nil
+	return "\n## Studio repository access boundary (mandatory)\n\nRead `STUDIO_EVIDENCE_STAGING_DIR/" + repositoryAccessManifestName + "` before accessing source code. Only paths in `roots` are approved repository roots, and `access` is the maximum allowed operation. Every `call_chain.repo` and `remediation.repositories` value must use the exact matching `roots[].repo` identifier; service, Deployment, container and image names are not repository identifiers. Never enumerate or search `/`, `/Users`, the user home directory, or their ancestors to discover repositories. Never inspect `Library`, Desktop, Documents, Downloads, Pictures, Photos, Movies, Music, or another App's data. If a required repository is absent, report the exact configuration gap; do not run `find`, `fd`, `locate`, globbing, or recursive `ls` outside the approved roots.\n", nil
+}
+
+func validateInvestigationRemediationRepositories(staging attemptEvidenceStaging, finalYAML string) ([]string, []string, error) {
+	result, err := ParseInvestigationResult([]byte(finalYAML))
+	if err != nil || result.InvestigationStatus != "root_cause_ready" || !result.UsesCodeFixWorkflow() {
+		return nil, nil, nil
+	}
+	data, err := os.ReadFile(filepath.Join(staging.Path(), repositoryAccessManifestName))
+	if err != nil {
+		return nil, nil, fmt.Errorf("read repository access manifest: %w", err)
+	}
+	var manifest repositoryAccessManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, nil, fmt.Errorf("parse repository access manifest: %w", err)
+	}
+	allowedSet := make(map[string]struct{}, len(manifest.Roots))
+	allowed := make([]string, 0, len(manifest.Roots))
+	for _, root := range manifest.Roots {
+		repo := strings.TrimSpace(root.Repo)
+		if repo == "" {
+			continue
+		}
+		if _, exists := allowedSet[repo]; exists {
+			continue
+		}
+		allowedSet[repo] = struct{}{}
+		allowed = append(allowed, repo)
+	}
+	sort.Strings(allowed)
+	unknown := make([]string, 0)
+	for _, repo := range remediationFixRepositories(result) {
+		if _, ok := allowedSet[repo]; !ok {
+			unknown = append(unknown, repo)
+		}
+	}
+	sort.Strings(unknown)
+	return unknown, allowed, nil
 }

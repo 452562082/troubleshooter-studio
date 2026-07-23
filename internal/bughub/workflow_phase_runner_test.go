@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -2593,6 +2594,67 @@ func TestAgentPhaseRunnerInvestigationPromptConsumesFrozenEvidenceAndPublishesSe
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("investigation prompt missing %q:\n%s", required, prompt)
 		}
+	}
+}
+
+func TestAgentPhaseRunnerRetriesUnknownRemediationRepositoryWithConfiguredNames(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-investigation-repository-scope", CaseInvestigating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseInvestigation, "")
+	repositoryPath := t.TempDir()
+	var calls int
+	executor := phaseExecutorFunc(func(_ context.Context, _ string, _ BotRef, prompt string, _ func(InvestigationEvent)) (PhaseExecutionResult, error) {
+		calls++
+		repo := "truss-base"
+		if calls == 2 {
+			if !strings.Contains(prompt, `"base-backend"`) || !strings.Contains(prompt, `"truss-base"`) {
+				t.Fatalf("retry prompt did not identify configured and rejected repositories:\n%s", prompt)
+			}
+			repo = "base-backend"
+		}
+		return PhaseExecutionResult{FinalYAML: fmt.Sprintf(`investigation_status: root_cause_ready
+environment: test
+root_cause: backend response mapper uses the wrong field
+confidence: high
+root_cause_type: code
+remediation:
+  mode: code_change
+  repositories: [%s]
+  target: response mapper
+  summary: map the correct field
+  verification: rerun the original scenario
+call_chain: []
+evidence: []
+validation_gaps: []
+gaps: []
+unchecked_scopes: []
+`, repo)}, nil
+	})
+	completed := make(chan CompleteAttemptCommand, 1)
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(_ context.Context, command CompleteAttemptCommand) error {
+		completed <- command
+		return nil
+	})
+	runner.SetRepositoryAccessResolver(RepositoryAccessResolverFunc(func(context.Context, IncidentCase) (map[string]string, error) {
+		return map[string]string{"base-backend": repositoryPath}, nil
+	}))
+
+	if err := runner.Start(context.Background(), attempt, Bug{ID: incident.BugID}, installedPhaseRunnerBot(t, "bot", "codex")); err != nil {
+		t.Fatal(err)
+	}
+	command := <-completed
+	if calls != 2 {
+		t.Fatalf("executor calls=%d, want one bounded repository correction retry", calls)
+	}
+	if command.Outcome != PhaseOutcomeRootCauseReady || command.ErrorCode != "" {
+		t.Fatalf("completion=%+v", command)
+	}
+	result, err := ParseInvestigationResult(command.OutputJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := remediationFixRepositories(result); !reflect.DeepEqual(got, []string{"base-backend"}) {
+		t.Fatalf("repositories=%v", got)
 	}
 }
 

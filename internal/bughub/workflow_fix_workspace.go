@@ -341,6 +341,15 @@ func resolveRemediationFixSourceBaselines(botPath, environment string, inputJSON
 			}
 		}
 	}
+	targets, err := loadEnvironmentBranches(botPath, environment)
+	if err != nil {
+		return nil, fmt.Errorf("validate remediation repository scope: %w", err)
+	}
+	for _, repo := range repositories {
+		if strings.TrimSpace(targets[repo]) == "" {
+			return nil, fmt.Errorf("remediation repository %q is not configured for environment %q", repo, environment)
+		}
+	}
 	canonicalInput, err := withFixSourceBaselines(inputJSON, requested)
 	if err != nil {
 		return nil, err

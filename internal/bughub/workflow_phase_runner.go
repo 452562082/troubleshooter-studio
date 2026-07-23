@@ -677,6 +677,29 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 			runErr = errors.New("configured CodeGraph was ready but codegraph_explore was not queried")
 		}
 	}
+	if runErr == nil && coordinated == nil && attempt.Phase == PhaseInvestigation && !remediationReassessment && ctx.Err() == nil {
+		unknown, allowed, repositoryErr := validateInvestigationRemediationRepositories(staging, result.FinalYAML)
+		if repositoryErr != nil {
+			runErr = repositoryErr
+		} else if len(unknown) != 0 {
+			r.projectEvent(attempt, InvestigationEvent{Type: "retry", Message: "修复建议引用了未配置仓库，正在按 Studio 仓库清单重新评估"})
+			firstUsage := result.Usage
+			allowedJSON, _ := json.Marshal(allowed)
+			unknownJSON, _ := json.Marshal(unknown)
+			retryPrompt := prompt + "\n\n## Mandatory remediation repository correction\nThe proposed code remediation used repository identifiers " + string(unknownJSON) + " that are not in the Studio repository access manifest. The only exact configured repository identifiers allowed in `remediation.repositories` are " + string(allowedJSON) + ". Re-evaluate the affected code using those exact identifiers. Never substitute a service, Deployment, container, image, directory basename, or inferred alias. If none of the configured repositories can implement the fix, return `insufficient_info` and state the exact repository configuration gap instead of inventing a repository name.\n"
+			result, runErr = r.executor.ExecutePhase(ctx, attempt.ID, bot, retryPrompt, emit)
+			result.Usage.InputTokens += firstUsage.InputTokens
+			result.Usage.OutputTokens += firstUsage.OutputTokens
+			if runErr == nil {
+				remaining, _, checkErr := validateInvestigationRemediationRepositories(staging, result.FinalYAML)
+				if checkErr != nil {
+					runErr = checkErr
+				} else if len(remaining) != 0 {
+					runErr = fmt.Errorf("remediation repositories are not configured for this Case: %s", strings.Join(remaining, ", "))
+				}
+			}
+		}
+	}
 	if ctx.Err() != nil {
 		releaseClaim()
 		cleanupErr := staging.Cleanup()

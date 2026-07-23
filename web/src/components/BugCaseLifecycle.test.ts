@@ -537,6 +537,29 @@ describe('BugCaseLifecycle', () => {
     }])
   })
 
+  it('blocks fix approval and explains an unmapped remediation repository', async () => {
+    const snapshot = detail('waiting_fix_approval')
+    snapshot.case.current_attempt_id = 'investigation-unmapped-repo'
+    snapshot.attempts = [{
+      id: 'investigation-unmapped-repo', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {},
+      output_json: {
+        investigation_status: 'root_cause_ready', confidence: 'high', gaps: [],
+        remediation: { mode: 'code_change', repositories: ['truss-base'], target: 'truss-base mapper', summary: '修正字段映射' },
+        call_chain: [{ repo: 'base-backend' }],
+      },
+      parent_attempt_id: '', started_at: '2026-07-23T13:43:00Z', error_code: '', error_message: '', usage: {},
+    }]
+    const loadFixBranches = vi.fn().mockRejectedValue(new Error('修复建议中的仓库 "truss-base" 未绑定本地代码仓库；请提出其他修复方案，让 Agent 从已配置仓库中重新选择。'))
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot, loadFixBranches } })
+
+    await wrapper.find('.primary-action').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('.branch-options-error').text()).toContain('仓库 "truss-base" 未绑定本地代码仓库')
+    expect(wrapper.get<HTMLSelectElement>('#fix-baseline-0').element.disabled).toBe(true)
+    expect(wrapper.get<HTMLButtonElement>('[data-confirm]').element.disabled).toBe(true)
+  })
+
   it('submits a user remediation proposal for reassessment without authorizing a fix', async () => {
     const snapshot = detail('waiting_fix_approval')
     snapshot.case.version = 7

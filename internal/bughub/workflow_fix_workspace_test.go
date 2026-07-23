@@ -204,6 +204,21 @@ func TestResolveRemediationFixSourceBaselinesRejectsRepositoryOutsidePlan(t *tes
 	}
 }
 
+func TestResolveRemediationFixSourceBaselinesRejectsUnconfiguredRemediationRepository(t *testing.T) {
+	botPath := writeFixWorkspaceBranchMap(t, "test", "base-backend", "base-test")
+	result := InvestigationResult{Remediation: RemediationPlan{Repositories: []string{"truss-base"}}}
+
+	_, err := resolveRemediationFixSourceBaselines(
+		botPath,
+		"test",
+		[]byte(`{"source_baselines":{"truss-base":"feature/fix"}}`),
+		result,
+	)
+	if err == nil || !strings.Contains(err.Error(), `remediation repository "truss-base" is not configured`) {
+		t.Fatalf("err=%v, want configured-repository rejection", err)
+	}
+}
+
 func TestFixWorkspaceLeaseRequiresEveryApprovedRepository(t *testing.T) {
 	lease := &FixWorkspaceLease{bindings: []fixWorkspaceBinding{{Repo: "api"}, {Repo: "web"}}}
 	err := lease.ValidateResult(context.Background(), PhaseResult{Outcome: PhaseOutcomeFixPushed, CodeChanges: []CodeChange{{Repo: "api"}}})

@@ -976,6 +976,49 @@ func TestListIncidentFixBranchesUsesOnlyApprovedRemediationRepositories(t *testi
 	}
 }
 
+func TestListIncidentFixBranchesRejectsUnmappedRemediationRepository(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	if err := userconfig.SetRepoPathsForSystem("base", map[string]string{"base-backend": filepath.Join(root, "base-backend")}); err != nil {
+		t.Fatal(err)
+	}
+
+	app, store, _ := newWorkflowBindingApp(t, filepath.Join(root, "cases.db"))
+	ctx := context.Background()
+	incident := bughub.IncidentCase{
+		ID: "case-fix-branches-unmapped", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test",
+		Status: bughub.CaseWaitingFixApproval, CycleNumber: 1, SelectedBotKey: "base|codex",
+	}
+	if err := store.CreateCase(ctx, incident); err != nil {
+		t.Fatal(err)
+	}
+	rootAttempt := bughub.PhaseAttempt{
+		ID: "root-fix-branches-unmapped", CaseID: incident.ID, CycleNumber: 1, Phase: bughub.PhaseInvestigation,
+		Status: bughub.AttemptStatusSucceeded, AgentTarget: "codex", BotKey: incident.SelectedBotKey, InputJSON: []byte(`{}`),
+		OutputJSON: []byte(`{"investigation_status":"root_cause_ready","environment":"test","root_cause":"service mapping mismatch","confidence":"high","root_cause_type":"code","remediation":{"mode":"code_change","repositories":["truss-base"],"target":"truss-base mapper","summary":"fix mapping","verification":"run regression"},"call_chain":[{"kind":"service","name":"truss-base","repo":"base-backend","precision":"unavailable"}],"evidence":[],"validation_gaps":[],"gaps":[],"unchecked_scopes":[]}`),
+	}
+	if err := store.CreateAttempt(ctx, rootAttempt); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.GetCase(ctx, incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := store.ApplyCaseMutation(ctx, bughub.CaseMutation{
+		CaseID: current.ID, ExpectedVersion: current.Version, IdempotencyKey: "bind-fix-branches-unmapped", RequestJSON: []byte(`{}`),
+		Snapshot: bughub.CaseSnapshotUpdate{CurrentAttemptID: stringPointer(rootAttempt.ID)},
+		Steps:    []bughub.CaseMutationStep{{To: bughub.CaseWaitingFixApproval, AuditOnly: true, Event: bughub.TransitionEvent{ID: "bind-fix-branches-unmapped-event", EventType: "root_bound", ActorType: "studio", ActorID: "test", PayloadJSON: []byte(`{}`)}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = app.ListIncidentFixBranches(bound.Case.ID, rootAttempt.ID)
+	if err == nil || !strings.Contains(err.Error(), `修复建议中的仓库 "truss-base" 未绑定本地代码仓库`) {
+		t.Fatalf("err=%v, want actionable unmapped-repository error", err)
+	}
+}
+
 func TestReconsiderIncidentRemediationRejectsMismatchedDialogScopeBeforeOpeningRuntime(t *testing.T) {
 	rootFile := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(rootFile, []byte("occupied"), 0o600); err != nil {

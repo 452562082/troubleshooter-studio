@@ -1133,12 +1133,11 @@ func (a *App) ListIncidentFixBranches(caseID, rootCauseAttemptID string) (map[st
 	for _, repo := range repositories {
 		path := strings.TrimSpace(paths[repo])
 		if path == "" {
-			branches[repo] = []string{}
-			continue
+			return nil, fmt.Errorf("修复建议中的仓库 %q 未绑定本地代码仓库；请提出其他修复方案，让 Agent 从已配置仓库中重新选择", repo)
 		}
 		items := analyzer.ListBranches(filepath.Clean(path))
-		if items == nil {
-			items = []string{}
+		if len(items) == 0 {
+			return nil, fmt.Errorf("无法从修复建议仓库 %q 的本地代码仓库读取 Git 分支；请检查仓库路径和 Git 状态后重试", repo)
 		}
 		branches[repo] = items
 	}

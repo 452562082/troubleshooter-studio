@@ -40,6 +40,7 @@ import FrontendRepoBindings from '../components/FrontendRepoBindings.vue'
 import GlobalReposRootBlock from '../components/GlobalReposRootBlock.vue'
 import {
   generateYAML as libGenerateYAML,
+  unresolvedYAMLPlaceholders,
   type CodeIntelligenceState,
   type ServiceTopologyState,
   type YAMLGenContext,
@@ -3346,7 +3347,24 @@ async function copyYAML() {
 async function downloadYAML() {
   const filename = 'troubleshooter.yaml'
   try {
-    const path = await exportYAML(filename, yamlOutput.value)
+    // 草稿不持久化明文凭据；导出前从系统钥匙串补齐一次，确保迁移文件拿到最新值。
+    await hydrateInfraSecrets()
+    const portableYAML = generateYAML({ includeSecrets: true })
+    const unresolved = unresolvedYAMLPlaceholders(portableYAML)
+    if (unresolved.length > 0) {
+      toast.error(`还有 ${unresolved.length} 项配置未填写，暂不能导出可直接部署文件：${unresolved.join('、')}`)
+      return
+    }
+    await bridgeValidate(portableYAML)
+    const ok = await confirmDialog({
+      title: '导出可直接部署配置',
+      message: '导出文件将包含当前向导中已填写的明文账号、密码、Token 和连接串。任何拿到文件的人都可以直接导入部署，请仅通过受控渠道传输，且不要提交到版本库。',
+      confirmText: '导出含凭据配置',
+      cancelText: '取消',
+      defaultAction: 'cancel',
+    })
+    if (!ok) return
+    const path = await exportYAML(filename, portableYAML)
     if (!path) {
       // 用户取消(桌面 app 走 SaveYAML 时返回空串)
       return
@@ -5508,6 +5526,13 @@ select.cc-input {
   line-height: 1.6;
   color: #e2e8f0;
   white-space: pre;
+}
+
+.portable-export-note {
+  margin: -4px 0 14px;
+  color: #92400e;
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 /* ── Action bar ── */

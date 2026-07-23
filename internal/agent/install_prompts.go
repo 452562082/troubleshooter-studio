@@ -89,6 +89,19 @@ func DerivePrompts(cfg *config.SystemConfig) []deploy.Prompt {
 	if cfg.UsesOne2All() {
 		addOne2All()
 	}
+	// K8s runtime 可独立于配置中心启用。没有 kuboard 配置源时，仍需为其连接
+	// 信息提供标准 KUBOARD_*_<ENV> 凭据槽；可部署 YAML 会自动 prefill 这些值。
+	if cfg.Infrastructure.Observability.K8sRuntime.Enabled &&
+		!strings.EqualFold(strings.TrimSpace(cfg.Infrastructure.Observability.K8sRuntime.Provider), "one2all") &&
+		!hasConfigCenterType(cfg, "kuboard") {
+		for _, e := range envs {
+			up := strings.ToUpper(e.ID)
+			add("KUBOARD_URL_"+up, "K8s 运行时 Kuboard URL ("+e.ID+") []: ", false)
+			add("KUBOARD_ACCESS_KEY_"+up, "K8s 运行时 Kuboard API 访问凭证 ("+e.ID+",留空走账密): ", true)
+			add("KUBOARD_USER_"+up, "K8s 运行时 Kuboard 用户名 ("+e.ID+") []: ", false)
+			add("KUBOARD_PASS_"+up, "K8s 运行时 Kuboard 密码 ("+e.ID+") []: ", true)
+		}
+	}
 
 	// ── Grafana ──(系统级,不分 source;每个 env 独立凭证)
 	// 鉴权两路:API key(service account token,Grafana 9.1+ 推荐)/ basic auth。
@@ -156,6 +169,15 @@ func DerivePrompts(cfg *config.SystemConfig) []deploy.Prompt {
 	//   }
 
 	return out
+}
+
+func hasConfigCenterType(cfg *config.SystemConfig, ccType string) bool {
+	for _, cc := range cfg.Infrastructure.ConfigCenters {
+		if cc.Type == ccType {
+			return true
+		}
+	}
+	return false
 }
 
 // configCenterLabel 给 prompt 文案用的"源标识"前缀。单源迁移路径不展示前缀

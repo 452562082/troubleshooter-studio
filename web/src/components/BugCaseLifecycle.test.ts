@@ -99,7 +99,7 @@ describe('BugCaseLifecycle', () => {
     }]])
   })
 
-  it.each(['browser_login_required', 'browser_runtime_broken', 'validator_not_installed', 'browser_verifier_failed'])('does not map browser system code %s to the generic evidence textarea', errorCode => {
+  it.each(['browser_login_required', 'browser_runtime_broken', 'validator_not_installed'])('does not map browser recovery code %s to the generic evidence textarea', errorCode => {
     const snapshot = detail('waiting_evidence')
     snapshot.case.current_attempt_id = 'validation-1'
     snapshot.attempts = [{ id: 'validation-1', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: errorCode }, parent_attempt_id: '', started_at: '', error_code: errorCode, error_message: 'private runtime path', usage: {} }]
@@ -107,6 +107,18 @@ describe('BugCaseLifecycle', () => {
     expect(primaryActionFor(snapshot)).toBeUndefined()
     const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
     expect(wrapper.find('.primary-action').exists()).toBe(false)
+    expect(wrapper.find('#case-supplement').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('private runtime path')
+  })
+
+  it('maps a generic browser verifier failure to an explicit retry instead of evidence collection', () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-1'
+    snapshot.attempts = [{ id: 'validation-1', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_verifier_failed' }, parent_attempt_id: '', started_at: '', error_code: 'browser_verifier_failed', error_message: 'private runtime path', usage: {} }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'retry_validation', label: '重试当前验证' })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(wrapper.get('.primary-action').text()).toBe('重试当前验证')
     expect(wrapper.find('#case-supplement').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('private runtime path')
   })
@@ -162,6 +174,39 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.emitted('primary')).toEqual([[{ kind: 'retry_validation' }]])
     expect(wrapper.find('#case-supplement').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('private provider failure')
+  })
+
+  it('offers a direct retry for an unclassified validation system failure', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-network-failed'
+    snapshot.attempts = [{
+      id: 'validation-network-failed', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'reproduce' }, output_json: { error_code: 'network_temporarily_unavailable' },
+      parent_attempt_id: '', started_at: '', error_code: 'network_temporarily_unavailable', error_message: '', usage: {},
+    }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'retry_validation', label: '重试当前验证' })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    await wrapper.get('.primary-action').trigger('click')
+    expect(wrapper.emitted('primary')).toEqual([[{ kind: 'retry_validation' }]])
+    expect(wrapper.find('#case-supplement').exists()).toBe(false)
+  })
+
+  it('offers a direct retry for a failed regression without asking for the original scenario again', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'regression-network-failed'
+    snapshot.attempts = [{
+      id: 'regression-network-failed', case_id: 'case-1', cycle_number: 1, phase: 'regression', mode: 'regression', status: 'failed',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'regression', regression_binding: { validation_attempt_id: 'validation-1' } },
+      output_json: { error_code: 'network_temporarily_unavailable' }, parent_attempt_id: 'deployment-1', started_at: '',
+      error_code: 'network_temporarily_unavailable', error_message: '', usage: {},
+    }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'retry_regression', label: '重试当前回归' })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    await wrapper.get('.primary-action').trigger('click')
+    expect(wrapper.emitted('primary')).toEqual([[{ kind: 'retry_regression' }]])
+    expect(wrapper.find('#case-supplement').exists()).toBe(false)
   })
 
   it.each([

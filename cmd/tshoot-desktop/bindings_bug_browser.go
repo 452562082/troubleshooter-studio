@@ -828,17 +828,20 @@ func incidentBrowserLoginIdentity(attempt bughub.PhaseAttempt) (string, string, 
 		ApplicationOrigin string `json:"application_origin"`
 		LoginOrigin       string `json:"login_origin"`
 	}
-	if json.Unmarshal(attempt.OutputJSON, &output) != nil || output.ErrorCode != "browser_login_required" || strings.TrimSpace(output.LoginOrigin) == "" {
+	if json.Unmarshal(attempt.OutputJSON, &output) != nil || output.ErrorCode != "browser_login_required" {
 		return "", "", "", errors.New("browser login origin is unavailable")
-	}
-	loginOrigin, err := canonicalIncidentBrowserOrigin(strings.TrimSpace(output.LoginOrigin))
-	if err != nil {
-		return "", "", "", err
 	}
 	if strings.TrimSpace(output.ApplicationURL) == "" {
 		applicationOrigin, legacyErr := canonicalIncidentBrowserOrigin(strings.TrimSpace(output.ApplicationOrigin))
-		if legacyErr != nil || applicationOrigin != loginOrigin {
+		if legacyErr != nil {
 			return "", "", "", errors.New("browser login application URL is unavailable")
+		}
+		loginOrigin := applicationOrigin
+		if strings.TrimSpace(output.LoginOrigin) != "" {
+			loginOrigin, legacyErr = canonicalIncidentBrowserOrigin(strings.TrimSpace(output.LoginOrigin))
+			if legacyErr != nil || applicationOrigin != loginOrigin {
+				return "", "", "", errors.New("browser login application URL is unavailable")
+			}
 		}
 		return applicationOrigin, applicationOrigin, loginOrigin, nil
 	}
@@ -850,6 +853,13 @@ func incidentBrowserLoginIdentity(attempt bughub.PhaseAttempt) (string, string, 
 		declaredOrigin, originErr := canonicalIncidentBrowserOrigin(strings.TrimSpace(output.ApplicationOrigin))
 		if originErr != nil || declaredOrigin != applicationOrigin {
 			return "", "", "", errors.New("browser login application identity is inconsistent")
+		}
+	}
+	loginOrigin := applicationOrigin
+	if strings.TrimSpace(output.LoginOrigin) != "" {
+		loginOrigin, err = canonicalIncidentBrowserOrigin(strings.TrimSpace(output.LoginOrigin))
+		if err != nil {
+			return "", "", "", err
 		}
 	}
 	return applicationURL, applicationOrigin, loginOrigin, nil

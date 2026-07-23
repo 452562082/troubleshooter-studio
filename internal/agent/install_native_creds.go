@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
@@ -47,6 +48,10 @@ func WriteCredsFileToHome(homeSubdir string, cfg *config.SystemConfig, get func(
 			needs = true
 			break
 		}
+	}
+	if cfg.Infrastructure.Observability.K8sRuntime.Enabled &&
+		!strings.EqualFold(strings.TrimSpace(cfg.Infrastructure.Observability.K8sRuntime.Provider), "one2all") {
+		needs = true
 	}
 	if !needs {
 		return nil

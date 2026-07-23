@@ -248,7 +248,7 @@ function classForSeverity(s: string): string {
                 {{ editing ? '收起编辑器' : '✎ 编辑配置' }}
               </button>
               <button class="menu-item" @click="emit('closeMenu'); emit('doExport')">
-                {{ editing ? '⇩ 导出草稿' : '⇩ 导出 yaml' }}
+                {{ editing ? '⇩ 导出可部署草稿' : '⇩ 导出可部署配置' }}
               </button>
               <div class="menu-sep"></div>
               <button

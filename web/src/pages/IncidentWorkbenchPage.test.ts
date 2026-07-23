@@ -517,6 +517,64 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.text()).not.toContain(terminal.id)
   })
 
+  it('moves a Bug to history as soon as successful regression resolution is synchronized', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs)
+      .mockResolvedValueOnce([bugA])
+      .mockResolvedValue([{ ...bugA, inbox_state: 'history', status: 'resolved' }])
+    const active = incident('case-live-resolved', 'regression_validating', '2026-07-13T00:00:00Z')
+    vi.mocked(listIncidentCases).mockResolvedValue([active])
+    mockCaseDetails(detail(active))
+    const wrapper = await mountedPage()
+
+    const terminal = { ...active, status: 'fixed_verified' as const, version: active.version + 2, updated_at: '2026-07-13T00:02:00Z' }
+    const eventHandler = runtime.EventsOn.mock.calls.find(call => call[0] === 'incident-case:event')?.[1]
+    eventHandler?.({
+      kind: 'snapshot',
+      case: terminal,
+      snapshot: detail(terminal, { bug_ticket_resolution: { state: 'resolved', source_status: 'resolved' } }),
+    })
+    await flushPromises()
+    await flushPromises()
+
+    expect(listBugs).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[data-ticket-view="active"]').text()).toContain('0')
+    expect(wrapper.get('[data-ticket-view="history"]').text()).toContain('1')
+    expect(wrapper.get('[data-ticket-view="history"]').attributes('aria-selected')).toBe('true')
+    expect(router.replace).toHaveBeenCalledWith({ query: { bug_id: 'bug-a', view: 'history' } })
+    expect(wrapper.get('.workflow-loop-hint').text()).toContain('Bug 工单已转为已解决')
+  })
+
+  it('retries a failed regression with the persisted regression binding', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-regression-retry', 'waiting_evidence', '2026-07-13T00:00:00Z', {
+      current_attempt_id: 'regression-failed',
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(detail(item, {
+      attempts: [{
+        id: 'regression-failed', case_id: item.id, cycle_number: 1, phase: 'regression', mode: 'regression', status: 'failed',
+        agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'regression', regression_binding: { validation_attempt_id: 'validation-1' } },
+        output_json: { error_code: 'network_temporarily_unavailable' }, parent_attempt_id: 'deploy-1', started_at: '',
+        error_code: 'network_temporarily_unavailable', error_message: '', usage: {},
+      }],
+    }))
+    vi.mocked(continueIncidentCase).mockResolvedValue({ ...item, status: 'regression_validating', version: item.version + 1 })
+    const wrapper = await mountedPage()
+
+    expect(wrapper.get('.primary-action').text()).toBe('重试当前回归')
+    await wrapper.get('.primary-action').trigger('click')
+    await flushPromises()
+
+    expect(continueIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
+      case_id: item.id,
+      expected_version: item.version,
+      phase: 'regression',
+      input_json: { decision: 'retry_current_regression' },
+    }))
+  })
+
   it('automatically closes restart confirmation when the active Case becomes terminal', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])

@@ -31,6 +31,8 @@ describe('YamlPreviewStep', () => {
     expect(wrapper.get('.coverage-panel').text()).toContain('生成前汇总')
     expect(wrapper.get('.coverage-panel').text()).toContain('base-backend')
     expect(wrapper.get('.coverage-panel').element.compareDocumentPosition(wrapper.get('.yaml-preview').element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(wrapper.get('.portable-export-note').text()).toContain('导出文件将写入当前凭据')
+    expect(wrapper.get('.action-bar').text()).toContain('导出可部署配置')
     expect(readFileSync('src/components/ObservabilityStep.vue', 'utf8')).not.toContain('ResourceCoveragePanel')
   })
 })

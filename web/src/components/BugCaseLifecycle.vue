@@ -2,7 +2,7 @@
 import type { IncidentCase, IncidentCaseDetail as ActionDetail, IncidentEvidenceImageInput } from '../lib/bridge/bugWorkflow'
 
 export type CasePrimaryAction = {
-  kind: 'start_validation' | 'retry_validation' | 'supply_evidence' | 'approve_fix' | 'reconsider_remediation' | 'dispute_root_cause' | 'redo_fix' | 'complete_remediation' | 'continue_fix' | 'approve_merge' | 'supply_merge_decision' | 'notify_deployed' | 'supply_deployment_proof' | 'cancel_attempt' | 'continue_legacy'
+  kind: 'start_validation' | 'retry_validation' | 'retry_regression' | 'supply_evidence' | 'approve_fix' | 'reconsider_remediation' | 'dispute_root_cause' | 'redo_fix' | 'complete_remediation' | 'continue_fix' | 'approve_merge' | 'supply_merge_decision' | 'notify_deployed' | 'supply_deployment_proof' | 'cancel_attempt' | 'continue_legacy'
   label: string
   approval?: boolean
 }
@@ -50,6 +50,11 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
     const outputCode = typeof attempt?.output_json?.error_code === 'string' ? attempt.output_json.error_code.trim() : ''
     const code = attempt?.error_code?.trim() || outputCode
     if (code === 'validation_evidence_refresh_exhausted') return undefined
+    if (attempt?.phase === 'regression' && ['failed', 'interrupted', 'cancelled'].includes(attempt.status)) {
+      if (code === 'browser_login_required' || code === 'browser_runtime_broken' || code === 'browser_url_required' || code === 'validator_not_installed') return undefined
+      if (code === 'browser_assertion_failed') return { kind: 'supply_evidence', label: '补充业务预期并重试' }
+      return { kind: 'retry_regression', label: '重试当前回归' }
+    }
     if (code === 'browser_validator_plan_invalid' || code === 'browser_locator_repair_plan_invalid') return { kind: 'retry_validation', label: '重新生成验证计划并重试' }
     if (code === 'browser_locator_failed') return { kind: 'retry_validation', label: '重新观察页面并生成验证计划' }
     if (['browser_validator_failed', 'browser_validator_timeout', 'browser_validator_attachment_failed', 'browser_validator_no_output', 'browser_validator_process_failed', 'browser_validator_configuration_invalid', 'browser_worker_protocol_invalid'].includes(code)) {
@@ -59,7 +64,11 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
       browser_assertion_failed: '补充业务预期并重试',
     }
     if (browserGapLabels[code]) return { kind: 'supply_evidence', label: browserGapLabels[code] }
-    if (code === 'validator_not_installed' || code.startsWith('browser_')) return undefined
+    if (code === 'validator_not_installed' || ['browser_login_required', 'browser_runtime_broken', 'browser_url_required'].includes(code)) return undefined
+    if (attempt?.phase === 'validation' && ['failed', 'interrupted', 'cancelled'].includes(attempt.status)) {
+      return { kind: 'retry_validation', label: '重试当前验证' }
+    }
+    if (code.startsWith('browser_')) return undefined
     if (attempt?.phase === 'investigation' && attempt.output_json?.investigation_status === 'insufficient_info') {
       return { kind: 'supply_evidence', label: '补充权限或外部资料并继续' }
     }

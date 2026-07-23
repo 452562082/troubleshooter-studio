@@ -29,6 +29,7 @@ import {
   EVIDENCE_MAX_RECORDS,
   EVIDENCE_TRUNCATION_MARKER,
   hasVisiblePasswordField,
+  loginOriginForResult,
   observeLoginState,
   dialPinnedTarget,
   executeAssertion,
@@ -43,6 +44,12 @@ import {
   startPinnedProxy,
   validateWorkerRequest,
 } from './browser_worker.mjs';
+
+test('login result falls back to the configured application origin when no login page remains open', () => {
+  assert.equal(loginOriginForResult(undefined, 'https://app.test/admin?redirect=%2Fmedia'), 'https://app.test');
+  assert.equal(loginOriginForResult({ url: () => 'https://login.test/sso?state=opaque' }, 'https://app.test/admin'), 'https://login.test');
+  assert.equal(loginOriginForResult(undefined, 'not-a-url'), '');
+});
 
 test('automatic query facts flatten bounded JSON parameters and omit credential fields', () => {
   const fact = evaluateAutomaticQueryRequestFact({

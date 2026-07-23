@@ -89,6 +89,24 @@ func writeCredsByType(creds map[string]any, cfg *config.SystemConfig, get func(s
 			})
 		}
 	}
+
+	// K8s runtime 可以在没有 kuboard 配置源时独立启用。此时也要生成脚本能够
+	// 自动发现的 kuboard.<env> 凭据段，保证导入可部署 YAML 后无需再次填写。
+	if cfg.Infrastructure.Observability.K8sRuntime.Enabled &&
+		!strings.EqualFold(strings.TrimSpace(cfg.Infrastructure.Observability.K8sRuntime.Provider), "one2all") &&
+		!hasConfigCenterType(cfg, "kuboard") {
+		section := map[string]any{}
+		for _, e := range envs {
+			up := strings.ToUpper(e.ID)
+			section[e.ID] = map[string]any{
+				"url":        get("KUBOARD_URL_" + up),
+				"username":   get("KUBOARD_USER_" + up),
+				"password":   get("KUBOARD_PASS_" + up),
+				"access_key": get("KUBOARD_ACCESS_KEY_" + up),
+			}
+		}
+		creds["kuboard"] = section
+	}
 }
 
 // writeCredsSection 把一个源的 (env → fields) 写到 creds[topKey] 下。

@@ -219,6 +219,24 @@ watch(displayedDetail, detail => {
   if (detail?.case.id === pendingEnterCaseID.value) void focusIncidentCase(detail.case.id)
 })
 
+let archivedTicketRefreshKey = ''
+watch(incidentWorkflow.detail, async detail => {
+  if (detail?.case.status !== 'fixed_verified' || detail.bug_ticket_resolution?.state !== 'resolved') return
+  const refreshKey = `${detail.case.id}:${detail.case.version}:${detail.bug_ticket_resolution.source_status || ''}`
+  if (refreshKey === archivedTicketRefreshKey) return
+  archivedTicketRefreshKey = refreshKey
+  try {
+    await tickets.load()
+    const archived = tickets.bugs.value.find(bug => bug.id === detail.case.bug_id)
+    if (!archived || archived.inbox_state !== 'history' || tickets.selectedID.value !== archived.id) return
+    ticketView.value = 'history'
+    await replaceTicketRoute(archived.id, 'history')
+  } catch (error) {
+    archivedTicketRefreshKey = ''
+    toastError('刷新已解决 Bug 工单', error)
+  }
+})
+
 watch(() => [route.path, route.query.bug_id, route.query.view], () => {
   if (route.path === '/incidents') void syncRouteBugSelection(false)
 })
@@ -863,7 +881,8 @@ async function refreshCaseSnapshotIfCurrent(caseID: string, isCurrent: () => boo
 
 async function refreshIncidentWorkflow() {
   try {
-    await incidentWorkflow.refreshCases()
+    await Promise.all([tickets.load(), incidentWorkflow.refreshCases()])
+    await reconcileTicketSelectionAfterLoad()
     await openPreferredCase(true)
   } catch (error) {
     toastError('刷新故障 Case', error)
@@ -977,6 +996,9 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
       }
       if (payload.kind === 'retry_validation') {
         return continueIncidentCase({ ...base, ...continuationForDetail(detail, '') })
+      }
+      if (payload.kind === 'retry_regression') {
+        return continueIncidentCase({ ...base, phase: 'regression', input_json: { decision: 'retry_current_regression' } })
       }
       if (payload.kind === 'supply_evidence' || payload.kind === 'continue_fix') {
         let supplemental = payload.input?.trim() || ''

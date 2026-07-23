@@ -57,10 +57,19 @@ func (a *App) SaveYAML(defaultFilename, yamlText string) (string, error) {
 	if path == "" {
 		return "", nil // user canceled
 	}
-	if err := os.WriteFile(path, []byte(yamlText), 0o644); err != nil {
+	if err := writeExportedYAML(path, []byte(yamlText)); err != nil {
 		return "", fmt.Errorf("write %s: %w", path, err)
 	}
 	return path, nil
+}
+
+// writeExportedYAML 使用仅当前用户可读写的权限。可部署配置可能包含明文凭据；
+// 覆盖已有文件时 WriteFile 不会收紧旧权限，因此写完后必须再 Chmod。
+func writeExportedYAML(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 // pickFileNative 选文件对话框。macOS 用 osascript（Wails v2.12 在 macOS 26 上

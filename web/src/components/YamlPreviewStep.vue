@@ -44,6 +44,9 @@ defineEmits<{
     <div class="yaml-preview">
       <pre><code>{{ yamlOutput }}</code></pre>
     </div>
+    <div class="portable-export-note">
+      页面预览和复制内容会隐藏敏感值；导出文件将写入当前凭据，可由其他人直接导入部署。
+    </div>
     <div class="action-bar">
       <button class="btn primary" :disabled="validateLoading" @click="$emit('validate')">
         {{ validateLoading ? '验证中...' : '✓ 验证' }}
@@ -51,7 +54,7 @@ defineEmits<{
       <button class="btn" @click="$emit('copy')">
         {{ copySuccess ? '已复制 ✓' : '📋 复制到剪贴板' }}
       </button>
-      <button class="btn" @click="$emit('download')">⬇ 导出</button>
+      <button class="btn" @click="$emit('download')">⬇ 导出可部署配置</button>
     </div>
     <div v-if="validateResult" class="validate-result" :class="{ success: validateResult.ok, fail: !validateResult.ok }">
       {{ validateResult.message }}

@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import yaml from 'js-yaml'
-import { generateYAML, type ServiceTopologyState, type YAMLGenContext } from './yamlGenerator'
+import {
+  generateYAML,
+  unresolvedYAMLPlaceholders,
+  type ServiceTopologyState,
+  type YAMLGenContext,
+} from './yamlGenerator'
 import { importServiceTopologyOverrides, parseEnvironment, prepareEnvironmentForWizard } from './yamlImporter'
 
 // 最小可工作 ctx 工厂:测试用 stub。各测试按需 spread + 覆盖具体字段。
@@ -421,6 +426,79 @@ describe('generateYAML', () => {
     expect(out).not.toContain('o2a_secret')
     expect(rt.service_map[0].cluster_id).toBe('1')
     expect(rt.service_map[0].cluster).toBeUndefined()
+  })
+
+  it('exports a portable YAML with config-center, observability, and data-store credentials', () => {
+    const ctx = makeCtx({
+      activeSourceTypes: ['one2all'],
+      sourceCreds: {
+        one2all: { creds: { _shared_: { mcp_url: 'http://one2all/mcp/hash', token: 'source-token' } } },
+      },
+      CC_FIELDS_BY_TYPE: {
+        one2all: [
+          { key: 'mcp_url', label: 'MCP URL', secret: false, envVar: () => 'ONE2ALL_MCP_URL' },
+          { key: 'token', label: 'Token', secret: true, envVar: () => 'ONE2ALL_TOKEN' },
+        ],
+      },
+      enabledObservability: { k8s_runtime: true },
+      OBS_TOOL_SPECS: [{
+        key: 'k8s_runtime',
+        fields: [
+          { key: 'provider', label: 'Provider', secret: false, envVar: () => '', uiOnly: true },
+          { key: 'url', label: 'MCP URL', secret: false, envVar: () => 'ONE2ALL_MCP_URL' },
+          { key: 'api_key', label: 'Token', secret: true, envVar: () => 'ONE2ALL_TOKEN' },
+        ],
+      }],
+      toolInputs: {
+        'obs:k8s_runtime:dev:provider': 'one2all',
+        'obs:k8s_runtime:dev:url': 'http://one2all/mcp/hash',
+        'obs:k8s_runtime:dev:api_key': 'runtime-token',
+      },
+      scannedDS: {
+        dev: {
+          'order-service': {
+            doris: { dsn: 'user:pass@tcp(doris-fe:9030)/warehouse' },
+          },
+        },
+      },
+      toolSpecByKey: (_cat, key) => key === 'doris'
+        ? {
+            key: 'doris',
+            fields: [
+              { key: 'dsn', label: 'DSN', secret: true, envVar: () => 'DORIS_DSN_DEV' },
+            ],
+          }
+        : undefined,
+    })
+
+    const preview = generateYAML(ctx)
+    expect(preview).not.toContain('source-token')
+    expect(preview).not.toContain('runtime-token')
+    expect(preview).not.toContain('user:pass@tcp')
+
+    const portable = generateYAML(ctx, { includeSecrets: true })
+    const parsed = yaml.load(portable) as any
+    expect(parsed.infrastructure.config_centers[0].endpoints[0].token).toBe('source-token')
+    expect(parsed.infrastructure.observability.k8s_runtime.endpoints[0].api_key).toBe('runtime-token')
+    expect(parsed.infrastructure.data_stores[0].endpoints[0].dsn)
+      .toBe('user:pass@tcp(doris-fe:9030)/warehouse')
+    expect(portable).toContain('包含可直接部署的明文凭据')
+    expect(unresolvedYAMLPlaceholders(portable)).toEqual([])
+  })
+
+  it('reports unresolved values and omits empty optional fields from portable YAML', () => {
+    const portable = generateYAML(makeCtx({
+      sourceCreds: { nacos: { creds: { dev: { addr: '' } } } },
+      CC_FIELDS_BY_TYPE: {
+        nacos: [
+          { key: 'addr', label: 'Nacos 地址', secret: false, envVar: () => 'CC_ADDR_DEV' },
+          { key: 'pass', label: '密码', secret: true, optional: true, envVar: () => 'CC_PASS_DEV' },
+        ],
+      },
+    }), { includeSecrets: true })
+
+    expect(unresolvedYAMLPlaceholders(portable)).toEqual(['CC_ADDR_DEV_NACOS'])
+    expect(portable).not.toContain('CC_PASS_DEV')
   })
 
   it('emits the Kuboard config-source connection reused by K8s runtime', () => {

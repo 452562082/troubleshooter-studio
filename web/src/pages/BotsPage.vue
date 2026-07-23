@@ -6,6 +6,7 @@ import {
   doctor as bridgeDoctor,
   exportYAML,
   isDesktop as bridgeIsDesktop,
+  validate as bridgeValidate,
   uninstallBot,
   forgetGhostBot,
 } from '../lib/bridge'
@@ -13,6 +14,8 @@ import { Target } from '../lib/constants'
 import type { ApplyResult, DiscoveredBot } from '../lib/bridge'
 import { toast, toastError } from '../lib/toast'
 import { confirmDialog } from '../lib/confirm'
+import { hydratePortableYAMLFromKeychain } from '../lib/portableYAML'
+import { unresolvedYAMLPlaceholders } from '../lib/yamlGenerator'
 import WorkspaceBrowser from '../components/WorkspaceBrowser.vue'
 import BotCard from '../components/BotCard.vue'
 
@@ -275,8 +278,22 @@ async function doExport(b: DiscoveredBot) {
     if (!yamlText) throw new Error('tshoot.json 里没 troubleshooter_yaml 字段')
     // 用编辑器里的草稿（如果当前在编辑）优先导，否则导存盘版本
     const payload = editingKey.value === k ? editorDraft.value : yamlText
+    const portable = await hydratePortableYAMLFromKeychain(payload)
+    const unresolved = unresolvedYAMLPlaceholders(portable)
+    if (unresolved.length > 0) {
+      throw new Error(`仍有 ${unresolved.length} 项凭据未能从系统钥匙串恢复：${unresolved.join('、')}。请回创建向导补齐后再导出`)
+    }
+    await bridgeValidate(portable)
+    const ok = await confirmDialog({
+      title: '导出可直接部署配置',
+      message: '导出文件将包含明文账号、密码、Token 和连接串。任何拿到文件的人都可以直接导入部署，请仅通过受控渠道传输，且不要提交到版本库。',
+      confirmText: '导出含凭据配置',
+      cancelText: '取消',
+      defaultAction: 'cancel',
+    })
+    if (!ok) return
     const filename = `${b.meta.system_id || 'system'}.yaml`
-    const savedTo = await exportYAML(filename, payload)
+    const savedTo = await exportYAML(filename, portable)
     if (!savedTo) return // 用户取消,不弹 toast
     toast.success(`已导出 ${b.meta.system_id} 到 ${savedTo}`)
   } catch (e) {

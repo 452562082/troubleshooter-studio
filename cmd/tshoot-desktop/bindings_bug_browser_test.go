@@ -412,6 +412,25 @@ func TestOpenIncidentBrowserLoginContinuesOnceAndReplaysWithoutSecondLogin(t *te
 	}
 }
 
+func TestOpenIncidentBrowserLoginFallsBackToApplicationOriginWhenWorkerDidNotObserveLoginPage(t *testing.T) {
+	app, _, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "")
+	input := browserCommandInput(incident, attempt, "browser-login:same-origin-fallback")
+
+	continued, err := app.OpenIncidentBrowserLogin(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logins, _, _ := controller.snapshot()
+	if continued.Status != bughub.CaseValidating || runner.count() != 1 || len(logins) != 1 {
+		t.Fatalf("continued=%+v starts=%d logins=%d", continued, runner.count(), len(logins))
+	}
+	if logins[0].ApplicationURL != "https://app.test/oauth/start?state=opaque" ||
+		logins[0].ApplicationOrigin != "https://app.test" ||
+		logins[0].LoginOrigin != "https://app.test" {
+		t.Fatalf("login request = %+v", logins[0])
+	}
+}
+
 func TestIncidentBrowserLoginIdentityValidatesDurableApplicationURL(t *testing.T) {
 	validOutput, _ := json.Marshal(map[string]any{
 		"error_code": "browser_login_required", "application_url": "https://app.test/oauth/start?state=opaque", "application_origin": "https://app.test", "login_origin": "https://login.test",
@@ -428,8 +447,17 @@ func TestIncidentBrowserLoginIdentityValidatesDurableApplicationURL(t *testing.T
 		t.Fatalf("safe legacy identity url=%q origin=%q err=%v", gotURL, gotOrigin, err)
 	}
 
+	sameOriginWithoutObservedLoginPage, _ := json.Marshal(map[string]any{
+		"error_code": "browser_login_required", "application_url": "https://app.test/login", "application_origin": "https://app.test", "login_origin": "",
+	})
+	if gotURL, gotOrigin, gotLogin, err := incidentBrowserLoginIdentity(bughub.PhaseAttempt{OutputJSON: sameOriginWithoutObservedLoginPage}); err != nil ||
+		gotURL != "https://app.test/login" || gotOrigin != "https://app.test" || gotLogin != gotOrigin {
+		t.Fatalf("same-origin fallback identity url=%q origin=%q login=%q err=%v", gotURL, gotOrigin, gotLogin, err)
+	}
+
 	for _, output := range []map[string]any{
 		{"error_code": "browser_login_required", "application_origin": "https://app.test", "login_origin": "https://login.test"},
+		{"error_code": "browser_login_required"},
 		{"error_code": "browser_login_required", "application_url": "https://user:pass@app.test/start", "login_origin": "https://login.test"},
 		{"error_code": "browser_login_required", "application_url": "https://app.test/start#fragment", "login_origin": "https://login.test"},
 		{"error_code": "browser_login_required", "application_url": "https://app.test/start?token=secret", "login_origin": "https://login.test"},

@@ -2079,6 +2079,15 @@ async function activeLoginPage(pages, policy, authFailure = false) {
   return pages[0];
 }
 
+export function loginOriginForResult(page, applicationURL) {
+  const candidate = page?.url?.() || applicationURL;
+  try {
+    return new URL(candidate).origin;
+  } catch {
+    return '';
+  }
+}
+
 export function createLoginAuthFailureTracker(now = Date.now, quietWindowMs = 1_000) {
   let lastAuthFailureAt = null;
   return {
@@ -3008,7 +3017,7 @@ async function executeWorker(request) {
         error_code: 'browser_login_required',
         final_url: loginPage?.url() || '',
         title: redactConsoleText(await loginPage?.title().catch(() => '') || ''),
-        login_origin: loginPage?.url() ? new URL(loginPage.url()).origin : '',
+        login_origin: loginOriginForResult(loginPage, request.plan.start_url),
         accessibility_summary: loginPage ? await accessibilitySummary(loginPage) : [],
         artifacts,
       };

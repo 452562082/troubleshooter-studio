@@ -188,6 +188,18 @@ export interface YAMLGenContext {
 export interface YAMLGenOptions {
   /** 基础代码扫描不消费人工拓扑决策，避免过期服务关系阻断重新识别。 */
   omitServiceTopology?: boolean
+  /**
+   * 生成可迁移、可直接部署的配置。开启后会把向导当前持有的凭据写入 YAML。
+   * 默认关闭，避免预览、草稿和机器人元数据意外持久化明文凭据。
+   */
+  includeSecrets?: boolean
+}
+
+/** 返回仍待填写的 {{PLACEHOLDER}}，供可部署配置导出前做完整性拦截。 */
+export function unresolvedYAMLPlaceholders(yamlText: string): string[] {
+  const names = new Set<string>()
+  for (const match of yamlText.matchAll(/\{\{\s*([^{}\s]+)\s*\}\}/g)) names.add(match[1])
+  return [...names].sort()
 }
 
 // ── 主函数(对齐原 InitPage::generateYAML) ────────────────────────
@@ -198,6 +210,7 @@ export function generateYAML(ctx: YAMLGenContext, options: YAMLGenOptions = {}):
   // 数据层组件一致。
   ctx.recomputeEnabledDataStoresFromScanned()
   const lines: string[] = []
+  const includeSecrets = options.includeSecrets === true
   const k8sRuntimeProvider = (): string => {
     if (ctx.k8sRuntimeProvider) return ctx.k8sRuntimeProvider
     for (const env of ctx.environments) {
@@ -211,6 +224,9 @@ export function generateYAML(ctx: YAMLGenContext, options: YAMLGenOptions = {}):
   // 顶部导言注释(解析时被忽略,只给用户看)
   lines.push('# 由初始化向导生成，可手工调整。字段说明：schema/troubleshooter.schema.yaml')
   lines.push('# 以下行尾 # 注释仅为提示，YAML 解析时会被忽略。')
+  if (includeSecrets) {
+    lines.push('# 警告：此文件包含可直接部署的明文凭据，请通过受控渠道传输，禁止提交到版本库。')
+  }
 
   // system
   lines.push('system:')
@@ -445,8 +461,7 @@ export function generateYAML(ctx: YAMLGenContext, options: YAMLGenOptions = {}):
   lines.push('')
   lines.push('infrastructure:')
 
-  // config_center / config_centers:connection identity enters YAML; secret
-  // fields are always environment references and never serialized as plaintext.
+  // config_center / config_centers:常规预览只写环境引用；显式导出可部署配置时写入真实凭据。
   const emitSourceBody = (
     out: string[], baseIndent: string, type: string, sourceID: string,
     includeServiceMap: boolean, placeholderSourceID = sourceID,
@@ -468,7 +483,9 @@ export function generateYAML(ctx: YAMLGenContext, options: YAMLGenOptions = {}):
       if (mcpURL || token) {
         out.push(`${baseIndent}endpoints:`)
         out.push(`${baseIndent}  - url: ${mcpURL ? yamlStr(mcpURL) : '"{{ONE2ALL_MCP_URL}}"'}      # MCP server 完整 URL`)
-        out.push(`${baseIndent}    token: "{{ONE2ALL_TOKEN}}"      # 系统钥匙串/部署注入`)
+        out.push(includeSecrets && token
+          ? `${baseIndent}    token: ${yamlStr(token)}      # 可迁移部署凭据`
+          : `${baseIndent}    token: "{{ONE2ALL_TOKEN}}"      # 系统钥匙串/部署注入`)
       }
     } else if (endpointFields.length > 0) {
       out.push(`${baseIndent}endpoints:`)
@@ -481,13 +498,15 @@ export function generateYAML(ctx: YAMLGenContext, options: YAMLGenOptions = {}):
           if (ctx.isFieldHidden(type, env.id, f, (k) => (envCreds[k] || ''))) continue
           const v = (envCreds[f.key] || '').trim()
           if (v) {
-            if (f.secret) {
+            if (f.secret && !includeSecrets) {
               const ph = placeholderName(f.envVar(env.id), placeholderSourceID)
               out.push(`${baseIndent}    ${f.key}: "{{${ph}}}"      # 系统钥匙串/部署注入`)
             } else {
               out.push(`${baseIndent}    ${f.key}: ${yamlStr(v)}`)
             }
           } else {
+            // 可部署导出不为可选字段制造虚假的"仍需填写"占位符。
+            if (includeSecrets && f.optional) continue
             const ph = placeholderName(f.envVar(env.id), placeholderSourceID)
             out.push(`${baseIndent}    ${f.key}: "{{${ph}}}"      # 没填,部署时交互收集`)
           }
@@ -588,7 +607,9 @@ export function generateYAML(ctx: YAMLGenContext, options: YAMLGenOptions = {}):
   const anyObs = Object.values(ctx.enabledObservability).some(Boolean) || hasAnyLokiMapping(lokiDeps)
   if (anyObs) {
     lines.push('')
-    lines.push('  observability:        # secret 字段仅写环境引用,值由系统钥匙串/部署注入')
+    lines.push(includeSecrets
+      ? '  observability:        # 可部署导出包含当前已配置凭据'
+      : '  observability:        # secret 字段仅写环境引用,值由系统钥匙串/部署注入')
     for (const spec of ctx.OBS_TOOL_SPECS) {
       if (!ctx.enabledObservability[spec.key]) continue
       lines.push(`    ${spec.key}:`)
@@ -623,7 +644,7 @@ export function generateYAML(ctx: YAMLGenContext, options: YAMLGenOptions = {}):
             toolKeyFor: ctx.toolKeyFor,
           }, spec.key, env.id, f.key)
           if (v) {
-            if (f.secret) {
+            if (f.secret && !includeSecrets) {
               fieldLines.push(`          ${f.key}: "{{${f.envVar(env.id)}}}"      # 系统钥匙串/部署注入`)
             } else {
               fieldLines.push(`          ${f.key}: ${yamlStr(v)}`)
@@ -707,7 +728,9 @@ export function generateYAML(ctx: YAMLGenContext, options: YAMLGenOptions = {}):
   }
   if (dsInstancesUsed.size > 0) {
     lines.push('')
-    lines.push('  data_stores:          # 从各服务配置自动识别;secret 字段仅写环境引用')
+    lines.push(includeSecrets
+      ? '  data_stores:          # 从各服务配置自动识别;可部署导出包含当前已配置凭据'
+      : '  data_stores:          # 从各服务配置自动识别;secret 字段仅写环境引用')
     for (const dsID of Array.from(dsInstancesUsed).sort()) {
       const dsType = ctx.dataStoreTypes?.[dsID] || dsID
       const spec = ctx.toolSpecByKey('ds', dsType)
@@ -727,7 +750,7 @@ export function generateYAML(ctx: YAMLGenContext, options: YAMLGenOptions = {}):
           for (const [fKey, val] of Object.entries(fields)) {
             if (!val) continue
             const field = spec?.fields.find(f => f.key === fKey)
-            if (field?.secret) {
+            if (field?.secret && !includeSecrets) {
               fieldLines.push(`          ${fKey}: "{{${field.envVar(env.id)}}}"      # 系统钥匙串/部署注入`)
             } else {
               fieldLines.push(`          ${fKey}: ${yamlStr(val)}`)

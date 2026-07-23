@@ -37,6 +37,12 @@ func PrefillCredsFromYAML(cfg *config.SystemConfig) map[string]string {
 	// ── 配置中心:per source × env ──
 	for _, cc := range cfg.Infrastructure.ConfigCenters {
 		for _, ep := range cc.Endpoints {
+			// one2all 是系统级单一 MCP endpoint，按 schema 不带 env。
+			if cc.Type == "one2all" {
+				put("ONE2ALL_MCP_URL", ep.URL)
+				put("ONE2ALL_TOKEN", ep.Token)
+				continue
+			}
 			if ep.Env == "" {
 				continue
 			}
@@ -56,18 +62,22 @@ func PrefillCredsFromYAML(cfg *config.SystemConfig) map[string]string {
 				put(envVar("KUBOARD_ACCESS_KEY", cc.ID, ep.Env), ep.AccessKey)
 				put(envVar("KUBOARD_USER", cc.ID, ep.Env), ep.User)
 				put(envVar("KUBOARD_PASS", cc.ID, ep.Env), ep.Pass)
-			case "one2all":
-				// one2all:单一 streamable-http MCP server,不按 env 分。
-				// ep.URL = MCP server 完整 URL(含路径 hash),ep.Token = Bearer token。
-				put("ONE2ALL_MCP_URL", ep.URL)
-				put("ONE2ALL_TOKEN", ep.Token)
 			}
 		}
 	}
 
 	obs := cfg.Infrastructure.Observability
-	if obs.K8sRuntime.Enabled && strings.EqualFold(strings.TrimSpace(obs.K8sRuntime.Provider), "one2all") {
+	if obs.K8sRuntime.Enabled {
+		one2all := strings.EqualFold(strings.TrimSpace(obs.K8sRuntime.Provider), "one2all")
 		for _, ep := range obs.K8sRuntime.Endpoints {
+			if !one2all {
+				up := strings.ToUpper(ep.Env)
+				put("KUBOARD_URL_"+up, ep.URL)
+				put("KUBOARD_ACCESS_KEY_"+up, ep.AccessKey)
+				put("KUBOARD_USER_"+up, ep.Username)
+				put("KUBOARD_PASS_"+up, ep.Password)
+				continue
+			}
 			put("ONE2ALL_MCP_URL", ep.URL)
 			put("ONE2ALL_TOKEN", ep.APIKey)
 		}

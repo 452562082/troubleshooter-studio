@@ -15,6 +15,15 @@ const (
 	BrowserPlanVersion       = 2
 )
 
+func isSupportedBrowserAction(action string) bool {
+	switch action {
+	case "goto", "click", "fill", "press", "select", "upload_file", "wait_for", "screenshot":
+		return true
+	default:
+		return false
+	}
+}
+
 type BrowserPlan struct {
 	Version            int                        `yaml:"version" json:"version"`
 	DeviceProfile      string                     `yaml:"device_profile,omitempty" json:"device_profile,omitempty"`
@@ -393,6 +402,9 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 	}
 	if err := validateBrowserPlanString(prefix+".action", raw.Action, true); err != nil {
 		return BrowserAction{}, err
+	}
+	if !isSupportedBrowserAction(raw.Action) {
+		return BrowserAction{}, fmt.Errorf("browser plan %s.action %q is not supported", prefix, raw.Action)
 	}
 	locatorPresent := browserYAMLFieldPresent(raw.Locator)
 	urlPresent := browserYAMLFieldPresent(raw.URL)

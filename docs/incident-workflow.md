@@ -2,7 +2,7 @@
 
 本文说明 Troubleshooter Studio 当前持久化故障闭环的产品入口、数据模型、状态流转、各 Agent 的输入输出、人为授权点，以及 Git、部署验证和异常恢复边界。
 
-最后更新：2026-07-16。
+最后更新：2026-07-24。
 
 > 本文描述的是 Studio 如何编排一个完整 Case。排障 Agent 在“排障”阶段内部采用的七步取证法，见[排障链路](troubleshooting-flow.md#7-步主线)。
 
@@ -12,8 +12,8 @@
 - Bug 是外部工单输入，Case 才是故障闭环的持久化状态。
 - SQLite 是 Case、attempt、证据、授权和事件的真源；`CaseOrchestrator` 是唯一状态写入口。
 - Agent 一次只执行一个阶段并返回结构化结果，不能通过自由文本自行跨阶段。
-- 验证、排障、修复和回归由 Agent 执行；合并由 Studio Git service 执行；应用部署由人或外部平台执行。
-- 修复和合并分别需要一次独立用户授权；“已部署”还必须经过只读版本验证，不能只相信按钮或文本通知。
+- 验证、方案评估、代码修复和回归由 Agent 执行；合并由 Studio Git service 执行；应用部署及非代码处置由人或外部平台执行。
+- 代码修复和合并分别需要一次独立用户授权；“已部署”会触发只读部署观察，自动版本信息不可得时记录诊断并继续，只有明确版本不匹配才阻断回归。
 - Web validation / regression 的浏览器由 Studio 宿主持有；validator 只规划受限动作并判断宿主证据，不在 Agent CLI 沙箱中启动 Chromium。
 - 所有外部副作用都以幂等、可恢复和可审计为前提，不能把未知结果当作成功。
 
@@ -52,7 +52,7 @@ flowchart LR
     HostVerifier --> Runtime[固定 Playwright / Chromium]
     HostVerifier --> Staging[Attempt evidence staging]
     Orchestrator --> Git[Studio Git service]
-    Orchestrator --> Verifier[manual / HTTP / K8s verifier]
+    Orchestrator --> Verifier[HTTP / K8s deployment observation]
     Runner --> Orchestrator
     Git --> Orchestrator
     Verifier --> Orchestrator
@@ -70,7 +70,7 @@ flowchart LR
 | Agent CLI adapter | 在选定工作区运行 Codex、Claude Code 或 OpenClaw | 写闭环数据库 |
 | Browser coordinator / HostVerifier | 编排 BrowserPlan、执行宿主 Chromium、脱敏并冻结浏览器证据 | 接收任意脚本、替 Agent 判断业务结论 |
 | Git service | 在隔离 worktree 中合并并推送环境分支 | 部署应用 |
-| Deployment verifier | 只读确认目标环境包含预期 commit | 相信未经验证的“已部署”声明 |
+| Deployment observer | 只读尝试采集目标环境版本；明确不匹配时阻断 | 要求用户手工填写版本，或把不可得误判成不匹配 |
 | SQLite store | 保存快照、attempt、证据、授权、副作用检查点和事件 | 编排业务流程 |
 
 用户选择的基础机器人决定 Agent target。`validation` 和 `regression` 必须通过同一 phase resolver 切换到该安装的 validator 角色和工作区；`investigation` 和 `fix` 保持所选基础机器人。旧安装缺少 validator 时 attempt 以 `validator_not_installed` 失败并提示重新部署，不能静默退回排障工作区伪装验证。
@@ -148,7 +148,9 @@ validator 规划 BrowserPlan
   → validator 基于截图/Network/console 给出 ValidationResult
 ```
 
-BrowserPlan 只允许 `goto`、`click`、`fill`、`press`、`select`、`wait_for` 和 `screenshot`，文本断言只允许 `visible_text` 与 `not_visible_text`；后者由宿主确认匹配文本均不可见。禁止任意 JavaScript、XPath、文件上传、Cookie、Authorization 和凭据输入。HostVerifier 按正式配置校验 origin、DNS/IP 和生产限制；`is_prod=true` 只允许导航、等待和截图。宿主 artifact 在最终 evaluator 调用前冻结，evaluator 只能解释证据，不能改写路径。最终 PNG 不是只以路径写进 prompt：Codex 通过 `--image` 接收，Claude Code 通过只读目录和 Read 能力接收，OpenClaw 通过工作区内的短期只读 PNG 触发原生 prompt image load；调用结束即清除临时视图。临时绝对路径不得写入 `ValidationResult` 或 Case。Web 结论要推进为 `reproduced`、`not_reproduced`、`fixed_verified` 或 `still_reproduces`，必须存在 HostVerifier 确认的最终 PNG 渲染截图。BrowserPlan 结构校验失败停在 `waiting_evidence` 时，Studio 提供当前 Case 内的计划重试，不要求重置闭环。
+BrowserPlan 只允许 `goto`、`click`、`fill`、`press`、`select`、`upload_file`、`wait_for` 和 `screenshot`，文本断言只允许 `visible_text` 与 `not_visible_text`；后者由宿主确认匹配文本均不可见。`upload_file` 只接受 locator 和当前 Case 的不透明 `file_ref`：来源只能是工单原始非图片业务附件，或用户在“补充信息”中显式上传的测试文件。Agent 不接触本地路径；HostVerifier 校验文件名、扩展名、MIME、大小和 SHA256，将内容放入一次 Worker 生命周期内的受限临时目录，执行后立即清除。场景需要文件但 Case 没有受控输入时返回 `insufficient_info`，不得跳过前置上传步骤。
+
+任意 JavaScript、XPath、宿主路径、Cookie、Authorization、凭据输入、登录模式上传和生产写交互仍然禁止。HostVerifier 按正式配置校验 origin、DNS/IP 和生产限制；`is_prod=true` 只允许导航、等待和截图。宿主 artifact 在最终 evaluator 调用前冻结，evaluator 只能解释证据，不能改写路径。最终 PNG 不是只以路径写进 prompt：Codex 通过 `--image` 接收，Claude Code 通过只读目录和 Read 能力接收，OpenClaw 通过工作区内的短期只读 PNG 触发原生 prompt image load；调用结束即清除临时视图。临时绝对路径不得写入 `ValidationResult` 或 Case。Web 结论要推进为 `reproduced`、`not_reproduced`、`fixed_verified` 或 `still_reproduces`，必须存在 HostVerifier 确认的最终 PNG 渲染截图。BrowserPlan 结构校验失败停在 `waiting_evidence` 时，Studio 提供当前 Case 内的计划重试，不要求重置闭环。
 
 检测到 auth origin、password 输入、关键 401/403 或已知登录 route 时，当前 attempt 以 `browser_login_required` 进入 `waiting_evidence`，且不截登录表单。用户点击“打开验证浏览器完成登录”，在 Studio 打开的可见浏览器中自行完成 SSO/MFA；Studio 加密保存 `storageState` 后创建同 Case / cycle、父链明确的新 attempt。账号、密码、Cookie 和 storageState 不进入 Case 输入或 artifact。
 
@@ -187,13 +189,21 @@ flowchart TD
     NEXT --> I
 ```
 
-主成功状态路径是：
+代码根因的主成功状态路径是：
 
 ```text
 pending_validation -> validating -> reproduced -> investigating
 -> root_cause_ready -> waiting_fix_approval -> fixing -> fix_pushed
 -> waiting_merge_approval -> merging -> waiting_deployment
 -> deployment_verified -> regression_validating -> fixed_verified
+```
+
+非代码根因的主成功状态路径是：
+
+```text
+pending_validation -> validating -> reproduced -> investigating
+-> root_cause_ready -> waiting_remediation -> remediation_applied
+-> regression_validating -> fixed_verified
 ```
 
 `reproduced`、`root_cause_ready`、`fix_pushed`、`deployment_verified` 和 `still_reproduces` 多为编排器内部的短暂状态，满足条件后会自动创建下一阶段 attempt 或进入下一等待门。
@@ -203,7 +213,7 @@ pending_validation -> validating -> reproduced -> investigating
 | 逻辑角色 | 启动条件 | 允许做的事 | 结构化结果决定 |
 |---|---|---|---|
 | 验证 Agent | Case 开启或用户补证重试 | 复现、采集证据 | 是否进入排障 |
-| 排障 Agent | 已复现，或上一轮回归仍复现 | 只读取证和根因分析 | 是否开放修复授权 |
+| 方案评估 Agent | 已复现、上一轮回归仍复现，或用户对根因/方案提出异议 | 只读取证、根因分析和处置方案评估 | 进入代码修复授权或非代码处置确认 |
 | 修复 Agent | 用户批准根因对应的修复 | 改代码、测试、提交、推修复分支 | 是否开放合并授权 |
 | 回归验证 Agent | 外部部署已确认；运行版本若可自动采集则作为附加证据 | 按原场景重新验证并采集新证据 | 关闭 Case 或进入下一 cycle |
 
@@ -268,12 +278,17 @@ pending_validation -> validating -> reproduced -> investigating
 | `investigation_status` | `root_cause_ready` 或 `insufficient_info` |
 | `root_cause` | 唯一、可操作的根因结论 |
 | `confidence` | `high`、`medium` 或 `low` |
+| `root_cause_type` | `code`、`data`、`configuration`、`infrastructure`、`network`、`external_dependency` 或 `transient` |
+| `remediation` | 与根因类型匹配的 `code_change`、`operator_action`、`external_recovery` 或 `observe_only` |
+| `call_chain[]` | 运行时/源码调用链及每一跳的证据精度 |
 | `evidence[]` | 支撑结论的证据 |
-| `gaps[]` | 无法闭合的证据缺口 |
+| `validation_gaps[]` | 应由验证宿主自动补采的冻结证据缺口 |
+| `gaps[]` | 必须由用户提供的权限、登录态或外部资料 |
+| `unchecked_scopes[]` | 不阻塞当前结论但尚未覆盖的范围 |
 
-只有根因明确、置信度为 `high` 且没有阻断修复的关键缺口，才进入“等待允许修复”；否则回到等待证据。
+只有根因明确、置信度为 `high` 且没有关键缺口，才能离开方案评估。`code + code_change` 进入“等待允许修复”；其它合法组合进入“等待处置确认”。验证宿主能够自动补采的 `validation_gaps` 不转嫁给用户；可选部署 revision、source map 或未覆盖范围也不能伪装成用户缺口。
 
-### 5.3 修复 Agent：最小修复并推送
+### 5.3 代码修复 Agent：最小修复并推送
 
 阶段标识：`fix`。
 
@@ -308,7 +323,13 @@ pending_validation -> validating -> reproduced -> investigating
 - 临时网络或 SSH 不可用时保留 attempt 和 checkpoint 做有界恢复，不重新执行 Agent。
 - 远端可读但 ref 缺失或漂移时进入 `fix_failed`。
 
-### 5.4 回归验证 Agent：验证已部署修复
+### 5.4 非代码处置：人工执行并登记
+
+数据、配置、基础设施和网络问题使用 `operator_action`；外部依赖问题使用 `external_recovery`；瞬时恢复使用 `observe_only`。Studio 和方案评估 Agent 只给出目标、最小建议、回滚方式与回归方法，不自动写数据库/配置、不重启工作负载、不修改网络或外部系统。
+
+操作人完成处置后，在绑定当前 Case version、cycle 和 root-cause attempt 的确认框中填写实际执行摘要与证据。Studio 在一个事务中保存处置 approval、remediation binding、部署观察和回归 reservation，然后用原始业务场景启动新鲜回归。没有代码 commit 不代表可以跳过回归；只有回归通过才能关闭 Case。
+
+### 5.5 回归验证 Agent：验证已部署修复或处置
 
 阶段标识：`regression`；attempt mode：`regression`。
 
@@ -333,7 +354,7 @@ Web 回归使用与首次验证完全相同的 validator → HostVerifier → ev
 - `still_reproduces`：保存本轮部署版本和新证据，`cycle_number + 1`，自动创建新的排障 attempt；仍使用同一个 Case。
 - `insufficient_info`：回到等待证据，补证后继续当前回归绑定。
 
-### 5.5 Agent 与阶段之间的上下文传递
+### 5.6 Agent 与阶段之间的上下文传递
 
 闭环不依赖 Agent 自己记住上一次对话，跨阶段上下文都由 Studio 结构化保存并重新组装：
 
@@ -341,6 +362,7 @@ Web 回归使用与首次验证完全相同的 validator → HostVerifier → ev
 |---|---|
 | 验证 → 排障 | 环境、复现场景、实际/预期表现、`scenario_hash`、当前证据引用 |
 | 排障 → 修复 | 高置信根因、根因 attempt ID、证据和用户修复授权范围 |
+| 排障 → 非代码处置 | 根因类型、处置目标、最小建议、回滚方式、回归方式和确认范围 |
 | 修复 → 合并 | 每个仓库的修复分支、精确 commit、目标环境分支和测试结果 |
 | 合并 → 部署验证 | merge approval scope、每个仓库的 merge commit 和目标分支 |
 | 部署确认 → 回归 | 原始复现场景、预期 commit、部署观察、目标环境，以及可选的自动采集版本 |
@@ -386,6 +408,8 @@ HTTP verifier 默认禁用系统代理，并拒绝 loopback、RFC1918/ULA、link
 | `investigating` | 排障 Agent 运行中 | 停止当前排障 |
 | `root_cause_ready` | 根因结构化结果已就绪 | 自动进入等待修复授权 |
 | `waiting_fix_approval` | 等待第一次用户授权 | 允许修复 |
+| `waiting_remediation` | 非代码根因等待操作人处置 | 确认处置完成并填写摘要、证据 |
+| `remediation_applied` | 非代码处置已确认并登记 | 自动启动新鲜回归 |
 | `fixing` | 修复 Agent 运行中 | 停止当前修复 |
 | `fix_failed` | 修复失败或受阻 | 补充信息并继续修复 |
 | `fix_pushed` | 修复分支已远端确认 | 自动进入等待合并授权 |
@@ -409,10 +433,16 @@ HTTP verifier 默认禁用系统代理，并拒绝 loopback、RFC1918/ULA、link
 |---|---|---|---|
 | 开启故障闭环 / 开始验证 | `StartIncidentCase` | `CreateAndStartCase` 或 `StartCase` | 创建 validation attempt 并进入 `validating` |
 | 补充证据并继续 | `ContinueIncidentCase` | `ContinueWithEvidence` | Agent 阶段创建父链 attempt；合并/部署补充返回对应 gate |
+| 重试当前验证/回归 | `ContinueIncidentCase` | `ContinueWithEvidence` | 系统或网络类失败不要求补业务证据；创建父链 attempt 并保持原场景绑定 |
+| 重新观察页面并生成验证计划 | `ContinueIncidentCase` | `ContinueWithEvidence` | 设置 `force_browser_replan`，重新观察当前页面后生成新计划 |
 | 打开验证浏览器完成登录 | `OpenIncidentBrowserLogin` | 持久化 browser recovery operation 后继续原阶段 | 可见浏览器手动登录并创建父链 continuation attempt |
 | 清除此环境登录态 | `ClearIncidentBrowserSession` | HostVerifier session clear | 清除当前 system / environment / application origin 的 session |
 | 修复浏览器环境并重试 | `RepairIncidentBrowserRuntime` | 固定 runtime repair + probe 后继续原阶段 | 仅在 `browser_runtime_broken` 下创建 continuation attempt |
+| 对根因提出异议 | `DisputeIncidentRootCause` | `DisputeRootCause` | 回到方案评估并携带原证据与用户异议，不从验证阶段重新开始 |
+| 提出其他修复方案 | `ReconsiderIncidentRemediation` | `ReconsiderRemediation` | 只读重评修复目标、风险、回滚与回归方式；再次停在授权门 |
+| 确认非代码处置完成并回归 | `CompleteIncidentRemediation` | `CompleteRemediation` | 保存执行摘要和证据，绑定当前根因后启动回归 |
 | 允许修复 | `ApproveIncidentFix` | `ApproveFix` | 保存第一次授权并启动 fix attempt |
+| 重新修复 | `ReconsiderIncidentRemediation` | `ReconsiderRemediation` | 已推送但未合并的旧实现只保留审计，从干净确认基线生成带后缀的新修复分支 |
 | 允许合并环境分支 | `ApproveIncidentMerge` | `ApproveMerge` | 保存第二次授权并由 Git service 合并 |
 | 已部署，开始验证 | `NotifyIncidentDeployed` | `NotifyDeployed` | 保存部署 reservation，运行只读 verifier |
 | 停止当前阶段 | `CancelIncidentAttempt` | `CancelAttempt` | 取消当前 attempt 并进入对应等待/失败状态 |
@@ -421,13 +451,31 @@ HTTP verifier 默认禁用系统代理，并拒绝 loopback、RFC1918/ULA、link
 
 所有写动作都由前端生成稳定幂等键，并携带页面看到的 Case version。版本冲突时页面应刷新最新快照，让用户基于新状态重新确认，不能静默覆盖。
 
-## 8. 补证、停止与重新开始
+## 8. 补证、重试、重评、停止与重新开始
 
 ### 补充证据
 
 补证不会创建一个脱离上下文的新任务。编排器根据等待前的阶段，把新 attempt 接回 validation、investigation、fix 或 regression，并用 `ParentAttemptID` 保留连续上下文。
 
 验证阶段会沿父 attempt 链汇总用户补充，并明确让最新指令优先。阶段输出在页面上以“环境、预期表现、实际观察、仍需补充、证据”等可读区块展示，不直接把 JSON 作为主内容。
+
+补充信息可以同时登记文字、截图和受控测试文件。文件只绑定当前 Case 与 continuation attempt，不自动转成长期机器人配置，也不会把本地路径写入 Case。
+
+### 重试验证或回归
+
+验证和回归失败时，页面先区分“业务信息不足”和“系统/外部失败”：
+
+- 缺少 URL、测试数据、业务附件或用户可提供的外部资料时，显示“补充信息并重试”。
+- 临时网络、Agent 启动、浏览器运行时或未分类系统失败时，显示“重试当前验证/回归”，不要求用户重复原始场景。
+- BrowserPlan 无效时重新生成计划；页面定位经过有限修复仍失败时重新观察当前页面，再生成验证计划。
+
+所有重试继续使用同一个 Case、cycle、原始场景和父 attempt 链。回归重试继续绑定本轮部署 observation，不能要求用户重新填写版本、scenario hash 或原始复现步骤。
+
+### 对根因或修复方案重新评估
+
+根因已确认后，用户仍可以提出异议。Studio 创建新的只读 investigation attempt，携带原根因、冻结证据和用户反馈重新比较候选，不回到第一步验证，也不因此取得修复权限。
+
+在修复授权前，用户可以“提出其他修复方案”；排障 Agent 只读评估新方案涉及的仓库、目标、风险、回滚和回归方式，完成后再次停在修复授权门。修复分支已经推送但尚未合并时，用户还可以“重新修复”：旧分支只保留审计，不能进入后续合并；新实现从用户再次确认的干净开发基线创建独立后缀分支，避免覆盖或误合并旧提交。
 
 ### 停止当前阶段
 
@@ -504,6 +552,10 @@ Case 变化后，Studio 通过 `incident-case:event` 通知前端，页面自动
 | 命令、授权、调度和结果编排 | `internal/bughub/workflow_orchestrator.go` |
 | 阶段 Prompt 和结构化结果解析 | `internal/bughub/workflow_phase_runner.go` |
 | phase validator 角色与 BrowserCoordinator | `internal/bughub/workflow_phase_bot.go`、`internal/bughub/workflow_browser_coordinator.go` |
+| Case 受控文件与浏览器上传 | `internal/bughub/workflow_browser_upload.go`、`cmd/tshoot-desktop/bindings_bug_evidence_upload.go` |
+| 根因异议 | `internal/bughub/workflow_root_cause_dispute.go` |
+| 方案重评和重新修复 | `internal/bughub/workflow_reassessment.go` |
+| 非代码处置确认 | `internal/bughub/workflow_remediation.go` |
 | 宿主 runtime、HostVerifier、session 和 worker | `internal/browserverify/` |
 | Codex/Claude Code/OpenClaw CLI 执行 | `internal/bughub/codex_runner.go` |
 | Git 合并和统一恢复 | `internal/bughub/workflow_git.go`、`internal/bughub/workflow_recovery.go` |

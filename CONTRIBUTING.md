@@ -25,6 +25,8 @@ git status --short
 | `cmd/tshoot-desktop/` | Wails 桌面 app 入口 | 改 binding 后跑 `make wails-gen` |
 | `api/` | HTTP handler | 改 router/handler 加 `api/handler_test.go` |
 | `internal/agent/` | install、self-test、MCP builder | 改 MCP 必看 decisions 里的软约束和 probe |
+| `internal/bughub/` | Bug 工单、Case 状态机、阶段编排、Git 与恢复 | 改命令或状态必须补幂等、非法跳转和 SQLite reopen 测试 |
+| `internal/browserverify/` | 固定 Chromium runtime、BrowserPlan 和宿主证据 | 改协议必须同步 Worker、严格宿主校验、semantic probe 与 runtime revision |
 | `internal/generator/` | yaml 到 workspace 渲染 | 改模板跑 generator 测试 |
 | `internal/config/` | yaml schema 与校验 | 改 schema 同步 `schema/` 和 examples |
 | `internal/cchub/` | 配置中心客户端 | nacos 逻辑看 plan D 决策 |
@@ -143,8 +145,10 @@ TSHOOT_BROWSER_SMOKE=1 scripts/test-browser-worker.sh
 - Git 集成测试只使用 `t.TempDir()` 的本地仓库和 bare remote；可以用 test-only URL rewrite 模拟 SSH，禁止连接真实远端、force push 或修改开发者工作区。
 - 部署测试只能使用 fake verifier、`httptest` 或 fake K8s reader；测试和 Studio 都不得执行真实应用部署。
 - 证据、事件、迁移和 verifier 错误测试必须包含 token、Cookie、Authorization、password 和 URL userinfo 等脱敏 fixture，并断言数据库及 artifact 中不含原值。
-- 完整闭环至少覆盖两次独立授权、部署版本 gate、新鲜回归证据、多仓库部分完成、重复通知以及重启后继续。
+- 完整闭环至少覆盖两次独立授权、部署观察 gate、版本可得/不可得/明确不匹配三条路径、新鲜回归证据、多仓库部分完成、重复通知以及重启后继续。
 - Web validation / regression 必须覆盖 planner → fake HostVerifier → evaluator、一次 locator 修正上限、最终截图 gate、登录父链 continuation、加密 session/内存降级、runtime 系统错误和 reservation/result manifest 重启恢复；默认测试只能使用 fake runtime 或离线 worker。
+- BrowserPlan 或 Worker 协议、内嵌脚本字节、semantic probe 合同变化时必须递增 `internal/browserverify/runtime.go` 的 runtime revision；不得原地复用旧 runtime 目录。
+- 受控文件上传必须覆盖合法 Case `file_ref`、缺失/越权引用、任意路径、符号链接、MIME/扩展名/大小/SHA256 不匹配、登录模式上传和生产上传等 negative test，并断言临时文件在 Worker 退出后清除。
 - 浏览器安全测试必须断言禁止动作、生产交互、越权/重绑定 URL、password 截图、原始 trace/HAR 和秘密 artifact 被拒绝；真实 Chromium 只通过上面的显式 smoke 命令执行，不得访问业务环境或真实登录态。
 
 跨仓库服务拓扑还有以下回归要求：

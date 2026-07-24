@@ -1340,6 +1340,7 @@ func TestBuildCodexValidationPromptKeepsValidatorEvidenceOnly(t *testing.T) {
 		"不要把它本身写入 gaps",
 		"后台登录态/测试账号",
 		"unchecked_scopes",
+		"运行版本；不可得时留空",
 		"最终回答不得输出该结构之外的解释性段落",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -1348,6 +1349,9 @@ func TestBuildCodexValidationPromptKeepsValidatorEvidenceOnly(t *testing.T) {
 	}
 	if strings.Contains(prompt, "禅道工单") {
 		t.Fatalf("validation prompt should use generic bug platform wording:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "运行版本；回归必填") {
+		t.Fatalf("validation prompt must not require a runtime version:\n%s", prompt)
 	}
 }
 

@@ -357,7 +357,7 @@ func validationOutputContractFor(statuses string) string {
 	sb.WriteString("observed_behavior: \"<what-was-observed-during-verification>\"\n")
 	sb.WriteString("expected_behavior: \"<expected>\"\n")
 	sb.WriteString("scenario_hash: \"<原始场景哈希；首次验证可为空，回归必须原样返回>\"\n")
-	sb.WriteString("evidence:\n  - kind: \"<har|screenshot|network|console|api|trace|log|command>\"\n    path: \"<Studio staging 目录内的相对路径>\"\n    captured_at: \"<RFC3339；仅兼容输出，Studio 以 fstat 为准>\"\n    environment: \"<env>\"\n    version: \"<运行版本；回归必填>\"\n    request_id: \"<可空>\"\n    trace_id: \"<可空>\"\n    redaction_status: redacted | not_required # 仅兼容输出，Studio 总会重新扫描\n")
+	sb.WriteString("evidence:\n  - kind: \"<har|screenshot|network|console|api|trace|log|command>\"\n    path: \"<Studio staging 目录内的相对路径>\"\n    captured_at: \"<RFC3339；仅兼容输出，Studio 以 fstat 为准>\"\n    environment: \"<env>\"\n    version: \"<宿主自动采集到的运行版本；不可得时留空>\"\n    request_id: \"<可空>\"\n    trace_id: \"<可空>\"\n    redaction_status: redacted | not_required # 仅兼容输出，Studio 总会重新扫描\n")
 	sb.WriteString("gaps: []\n")
 	sb.WriteString("只有当阻塞资料已经清空时 gaps 才能输出 []。证据必须通过 path 引用常规文件；不得内联密钥、cookie 或 Authorization。\n")
 	sb.WriteString("最终回答不得输出该结构之外的解释性段落。\n")

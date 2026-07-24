@@ -117,7 +117,7 @@ grep -E "<error pattern>" references/known-errors.yaml references/known-errors.l
 
 `repo-stack-map.yaml` 里 repo 带 `parent_repo` 字段(典型:commerce.git 是从 truss umbrella 切出去的独立仓,本地 clone 在 `<truss-clone>/commerce/`)→ 排障要做以下取证时**先去 umbrella(parent_repo 指向的仓)看一份**:
 
-- **代码基线 / git pull**:**在 umbrella 根目录跑** `git fetch --all && git pull --ff-only && git submodule update --init --recursive`,子模块会自动 checkout 到 umbrella 当前 pin 的 commit。**不要单独 cd 进子模块 `git pull`**,会拉到子模块自己 main 的 HEAD,跟 production 实际部署 commit 错位 → 代码定位看到的不是真问题代码
+- **代码基线**：只读记录 umbrella 当前 commit，并用 `git ls-tree <umbrella-revision> <submodule-path>` 取得该 revision 固定的子模块 commit；需要读历史内容时使用 `git show <revision>:<path>` / `git grep <pattern> <revision>`。排障阶段不得执行 `git fetch`、`git pull`、`git switch`、`git checkout` 或 `git submodule update`，也不能把子模块当前 main/HEAD 当成 umbrella pin 或 production 部署版本
 - **跨仓配置 / 共享 lib**:子模块的代码扫描只看自己,但 monorepo 拆出去的子模块往往跟同 umbrella 其他子模块共享 proto / config / 公共库 → 在 umbrella 根 / `pkg/` / `shared/` 找一遍
 - **历史变更**:故障窗 ±5min 的 commit 既要看子模块也要看 umbrella(umbrella 自己的 .gitmodules / 公共配置改动会同时影响所有子模块)
 - **`.gitmodules` 关系**:`cat <umbrella-clone>/.gitmodules` 能拿到所有姐妹子模块的 URL + 路径,定位"是不是某个姐妹子模块改了对方依赖的接口"

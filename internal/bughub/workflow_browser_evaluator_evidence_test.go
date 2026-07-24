@@ -260,6 +260,59 @@ func TestParseFrozenBrowserStructuredEvidenceRejectsUnknownOrMalformedRecords(t 
 	}
 }
 
+func TestBrowserRepairEvidenceAcceptsFailedControlledUploadAction(t *testing.T) {
+	png := append(append([]byte(nil), browserPNGSignature...), []byte("upload-locator-failure")...)
+	_, screenshot := frozenBrowserFixture(t, "screenshot", "browser/failure.png", png)
+	actions := []byte(`[{"id":"upload-media-sheet","action":"upload_file","locator_kind":"css","started_at":"2026-07-24T09:33:00Z","duration_ms":15850,"result":"failed","error_code":"locator_not_found"}]`)
+	_, actionEvidence := frozenBrowserFixture(t, "browser_actions", "browser/browser-actions.json", actions)
+	plan := BrowserPlan{
+		Version:  BrowserPlanVersion,
+		StartURL: "https://app.example.com/media",
+		Actions: []BrowserAction{{
+			ID:      "upload-media-sheet",
+			Action:  "upload_file",
+			Locator: &BrowserLocator{Kind: "css", Value: `input[type="file"][accept*=".xlsx"]`},
+			FileRef: "media-sheet",
+		}},
+		Assertions: []BrowserAssertion{{Kind: "visible_text", Value: "上传成功"}},
+	}
+	failed := BrowserVerificationResult{
+		Status:              "locator_failed",
+		ErrorCode:           "locator_not_found",
+		FailedActionID:      "upload-media-sheet",
+		FinalScreenshotPath: "browser/failure.png",
+	}
+
+	prompt, attachments, cleanup, err := browserRepairEvidence(
+		plan,
+		failed,
+		[]browserFrozenArtifact{screenshot, actionEvidence},
+		nil,
+		nil,
+		maxPhaseAttachments,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := cleanup(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if len(attachments) != 1 {
+		t.Fatalf("attachments=%+v", attachments)
+	}
+	for _, expected := range []string{
+		`"failed_action_id":"upload-media-sheet"`,
+		`"action":"upload_file"`,
+		`"error_code":"locator_not_found"`,
+	} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("repair prompt lacks controlled-upload failure evidence %s:\n%s", expected, prompt)
+		}
+	}
+}
+
 func TestPrepareBrowserEvaluatorEvidenceIncludesSanitizedResponseAssertions(t *testing.T) {
 	content := []byte(`[{"assertion_id":"nickname-and-signature-differ","action_id":"submit-search","kind":"json_fields_not_equal","url":"https://app.example.com/api/search","method":"GET","status":200,"left_field":"nick_name","right_field":"text","matched_objects":1,"violations":1,"passed":false,"failure_reason":""}]`)
 	_, structured, cleanup, err := prepareBrowserEvaluatorEvidence(BrowserVerificationResult{}, []browserFrozenArtifact{{Kind: "response_assertions", Content: content}})

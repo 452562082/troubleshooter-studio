@@ -434,9 +434,8 @@ func sanitizeBrowserConsoleEvidence(record *browserConsoleEvidence) error {
 }
 
 func sanitizeBrowserActionEvidence(record *browserActionEvidence) error {
-	allowedActions := map[string]bool{"goto": true, "click": true, "fill": true, "press": true, "select": true, "wait_for": true, "screenshot": true}
 	allowedResults := map[string]bool{"completed": true, "failed": true, "login_required": true}
-	if strings.TrimSpace(record.ID) == "" || !allowedActions[record.Action] || !allowedResults[record.Result] || record.DurationMS < 0 {
+	if strings.TrimSpace(record.ID) == "" || !isSupportedBrowserAction(record.Action) || !allowedResults[record.Result] || record.DurationMS < 0 {
 		return errors.New("frozen browser action evidence is invalid")
 	}
 	record.ID = safeBoundedBrowserText(record.ID, 128)

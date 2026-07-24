@@ -4,6 +4,22 @@
 
 格式仿 ADR(Architecture Decision Record),每条 4 段:**背景 → 决策 → 后果 → 演进**。新的决策**追加在后面**,**不改老条目**(过时了就标 SUPERSEDED 指向新条目)。
 
+## 当前决策导航
+
+本文件按时间追加，旧条目可能已被后续决策部分或全部取代。查当前实现时先看对应现行文档，再从本表进入最近一组 ADR：
+
+| 主题 | 当前权威说明 | 最近关键 ADR |
+|---|---|---|
+| 故障闭环状态、授权、重试和重评 | `docs/incident-workflow.md` | 2026-07-22 修复方案重新评估；2026-07-23 重新修复 |
+| 排障证据链和运行时取证 | `docs/troubleshooting-flow.md` | 2026-07-21 验证补采；2026-07-22 CodeGraph 宿主准备 |
+| BrowserPlan 与宿主浏览器 | `docs/incident-workflow.md` 第 4 节 | 2026-07-23 定位恢复、登录恢复、受控附件 |
+| 部署版本与回归新鲜度 | `docs/incident-workflow.md` 第 5.5/6 节 | 2026-07-18 部署版本改为可选自动证据 |
+| 创建向导资源目录 | `docs/resource-catalog.md` | 2026-07-19 创建向导资源目录 |
+| MCP builder 与 runtime probe | `AGENTS.md`、`CONTRIBUTING.md` | 2026-05-27 Nacos plan D；2026-06 install 后 runtime probe |
+| CI 与发版 | `docs/CI-RELEASE.md` | 以当前 GitHub Actions、GitLab CI 和发布脚本为准 |
+
+带 `SUPERSEDED` 标记的条目只用于解释历史选择，不能覆盖上表现行文档和后续 ADR。
+
 ---
 
 ## 2026-04 · 两层产品定位

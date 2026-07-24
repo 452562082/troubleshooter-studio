@@ -268,8 +268,12 @@ desktop:
     - test -f dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio
     - test -f dist/TroubleshooterStudio.app/Contents/Info.plist
     - test -f dist/TroubleshooterStudio.app/Contents/Resources/icon.icns
-    - test -f dist/TroubleshooterStudio.app/Contents/Resources/browser-runtime/1.61.1-r9/.runtime-ready.json
-    - test -d dist/TroubleshooterStudio.app/Contents/Resources/browser-runtime/1.61.1-r9/browsers
+    - |
+      runtime_root=dist/TroubleshooterStudio.app/Contents/Resources/browser-runtime
+      test "$(find "$runtime_root" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" = 1
+      runtime_dir="$(find "$runtime_root" -mindepth 1 -maxdepth 1 -type d)"
+      test -f "$runtime_dir/.runtime-ready.json"
+      test -d "$runtime_dir/browsers"
     - file dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio
     - echo "✓ .app bundle structure OK"
   artifacts:

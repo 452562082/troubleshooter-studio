@@ -9,19 +9,19 @@
 
 ## 2. 代码基线
 
-- [ ] 已执行 `git fetch --all --prune`
 - [ ] 已通过 `routing` 确认目标分支
-- [ ] 已切到目标分支并执行 `git pull --ff-only`
-- [ ] 已记录 baseline commit hash
+- [ ] 已只读检查 `git status --short`、`git remote -v` 和 `git rev-parse HEAD`
+- [ ] 已记录当前 checkout、目标环境分支和可获得的 deployed revision；三者不一致时已明确标注证据精度
+- [ ] 已使用 `git show <revision>:<path>` / `git grep <pattern> <revision>` 在指定 revision 取证，未切换或更新用户 checkout
 {{- $hasUmbrella := false -}}
 {{- range .Repos -}}{{- if .ParentRepo -}}{{- $hasUmbrella = true -}}{{- end -}}{{- end }}
 {{- if $hasUmbrella }}
 
 本系统有 umbrella + 子模块关系。排障子模块时：
 
-- [ ] 在 umbrella 仓执行 `git fetch --all && git pull --ff-only && git submodule update --init --recursive`
-- [ ] 未单独在子模块目录 `git pull`
-- [ ] 已记录 umbrella commit 和子模块 commit
+- [ ] 已只读记录 umbrella commit 和该提交固定的子模块 commit
+- [ ] 未执行 `git switch`、`git checkout`、`git pull`、`git fetch` 或 `git submodule update`
+- [ ] 未把子模块当前 main/HEAD 当成 umbrella pin 或部署版本
 {{- end }}
 
 ## 3. 取证链路

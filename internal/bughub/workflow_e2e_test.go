@@ -81,8 +81,13 @@ func TestWorkflowE2EFixedVerifiedSurvivesSQLiteReopen(t *testing.T) {
 	}
 	validationOutput := []byte(`{"verification_status":"reproduced","environment":"test","observed_behavior":"timeout","expected_behavior":"checkout succeeds","evidence":[{"kind":"api","path":"response.json","environment":"test","redaction_status":"not_required"}],"gaps":[]}`)
 	incident, err = orchestrator.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: incident.ID, AttemptID: validation.ID, ExpectedVersion: incident.Version, IdempotencyKey: "e2e:validation", ActorID: "validator", Outcome: PhaseOutcomeReproduced, OutputJSON: validationOutput})
-	if err != nil || incident.Status != CaseInvestigating {
+	if err != nil || incident.Status != CaseReproduced {
 		t.Fatalf("validation=%+v err=%v", incident, err)
+	}
+	confirmKey := ConfirmValidationKey(incident.ID, validation.ID, incident.Version)
+	incident, err = orchestrator.ConfirmValidation(ctx, ConfirmValidationCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: confirmKey, ActorID: "alice", ValidationAttemptID: validation.ID, Bug: bug, Bot: validator})
+	if err != nil || incident.Status != CaseInvestigating {
+		t.Fatalf("validation confirmation=%+v err=%v", incident, err)
 	}
 	investigation, _ := store.GetAttempt(ctx, incident.CurrentAttemptID)
 	var handoff InitialInvestigationInput
@@ -326,8 +331,13 @@ func TestWorkflowE2E_ResetStartsFreshAuditedCase(t *testing.T) {
 		t.Fatal(err)
 	}
 	progressed, err := restarted.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: recovered.ID, AttemptID: recoveredAttempt.ID, ExpectedVersion: recovered.Version, IdempotencyKey: "e2e:840:replacement-validation", ActorID: "validator", Outcome: PhaseOutcomeReproduced, OutputJSON: []byte(`{"verification_status":"reproduced","environment":"test","observed_behavior":"timeout","expected_behavior":"checkout succeeds","evidence":[{"kind":"api","path":"response.json","environment":"test","redaction_status":"not_required"}],"gaps":[]}`)})
-	if err != nil || progressed.Status != CaseInvestigating || progressed.ID != replacement.ID {
+	if err != nil || progressed.Status != CaseReproduced || progressed.ID != replacement.ID {
 		t.Fatalf("progressed=%+v err=%v", progressed, err)
+	}
+	confirmKey := ConfirmValidationKey(progressed.ID, recoveredAttempt.ID, progressed.Version)
+	progressed, err = restarted.ConfirmValidation(ctx, ConfirmValidationCommand{CaseID: progressed.ID, ExpectedVersion: progressed.Version, IdempotencyKey: confirmKey, ActorID: "alice", ValidationAttemptID: recoveredAttempt.ID, Bug: bug, Bot: bot})
+	if err != nil || progressed.Status != CaseInvestigating {
+		t.Fatalf("confirmed=%+v err=%v", progressed, err)
 	}
 	archivedAfterProgress, err := store.GetCase(ctx, archived.ID)
 	if err != nil || !reflect.DeepEqual(immutable, archivedAfterProgress) {

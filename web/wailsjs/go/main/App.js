@@ -86,6 +86,10 @@ export function CompleteIncidentRemediation(arg1) {
   return window['go']['main']['App']['CompleteIncidentRemediation'](arg1);
 }
 
+export function ConfirmIncidentValidation(arg1) {
+  return window['go']['main']['App']['ConfirmIncidentValidation'](arg1);
+}
+
 export function ContinueBugInvestigation(arg1) {
   return window['go']['main']['App']['ContinueBugInvestigation'](arg1);
 }
@@ -98,8 +102,16 @@ export function DefaultDestPath(arg1, arg2) {
   return window['go']['main']['App']['DefaultDestPath'](arg1, arg2);
 }
 
+export function DeleteBugHistory(arg1) {
+  return window['go']['main']['App']['DeleteBugHistory'](arg1);
+}
+
 export function DeleteBugPlatform(arg1) {
   return window['go']['main']['App']['DeleteBugPlatform'](arg1);
+}
+
+export function DeleteIncidentHistory(arg1) {
+  return window['go']['main']['App']['DeleteIncidentHistory'](arg1);
 }
 
 export function DeleteInfraCred(arg1) {
@@ -470,12 +482,12 @@ export function UninstallBot(arg1, arg2) {
   return window['go']['main']['App']['UninstallBot'](arg1, arg2);
 }
 
-export function UploadIncidentEvidenceImages(arg1) {
-  return window['go']['main']['App']['UploadIncidentEvidenceImages'](arg1);
-}
-
 export function UploadIncidentEvidenceFiles(arg1) {
   return window['go']['main']['App']['UploadIncidentEvidenceFiles'](arg1);
+}
+
+export function UploadIncidentEvidenceImages(arg1) {
+  return window['go']['main']['App']['UploadIncidentEvidenceImages'](arg1);
 }
 
 export function Validate(arg1) {

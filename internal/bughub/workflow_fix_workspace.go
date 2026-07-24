@@ -160,6 +160,28 @@ func (m *FixWorkspaceManager) prepareRepository(ctx context.Context, root, caseI
 		return fixWorkspaceBinding{}, fmt.Errorf("create standalone fix workspace for %s: %w", repo, err)
 	}
 	cleanupWorkspace := func() { _ = os.RemoveAll(worktree) }
+	// A clone from a local repository advertises its local heads, not its
+	// remote-tracking refs. The approved source branch may have advanced on the
+	// remote while the user's local branch remains behind, so the locked commit
+	// fetched above can otherwise be absent from this standalone clone. Import
+	// that exact frozen ref from the source repository before rebinding origin;
+	// Git transfers the objects into this repository without moving the user's
+	// local branch or borrowing an external object store.
+	lockedRef := "refs/studio/approved-fix-base"
+	sourceRef := "refs/remotes/" + remote + "/" + sourceBranch
+	if err := gitRun(ctx, worktree, "fetch", "--no-tags", path, "+"+sourceRef+":"+lockedRef); err != nil {
+		cleanupWorkspace()
+		return fixWorkspaceBinding{}, fmt.Errorf("import locked source baseline for %s: %w", repo, err)
+	}
+	importedCommit, err := gitOutput(ctx, worktree, "rev-parse", lockedRef+"^{commit}")
+	if err != nil {
+		cleanupWorkspace()
+		return fixWorkspaceBinding{}, fmt.Errorf("resolve imported source baseline for %s: %w", repo, err)
+	}
+	if strings.TrimSpace(importedCommit) != strings.TrimSpace(baseCommit) {
+		cleanupWorkspace()
+		return fixWorkspaceBinding{}, fmt.Errorf("imported source baseline for %s changed while preparing the fix workspace", repo)
+	}
 	if err := gitRun(ctx, worktree, "remote", "set-url", remote, fetchURL); err != nil {
 		cleanupWorkspace()
 		return fixWorkspaceBinding{}, fmt.Errorf("bind fetch remote for %s: %w", repo, err)
@@ -175,6 +197,10 @@ func (m *FixWorkspaceManager) prepareRepository(ctx context.Context, root, caseI
 	if err := gitRun(ctx, worktree, "checkout", "--detach", baseCommit); err != nil {
 		cleanupWorkspace()
 		return fixWorkspaceBinding{}, fmt.Errorf("lock standalone fix workspace for %s: %w", repo, err)
+	}
+	if err := gitRun(ctx, worktree, "update-ref", "-d", lockedRef); err != nil {
+		cleanupWorkspace()
+		return fixWorkspaceBinding{}, fmt.Errorf("remove temporary source baseline ref for %s: %w", repo, err)
 	}
 	if err := os.Chmod(worktree, 0o700); err != nil {
 		cleanupWorkspace()

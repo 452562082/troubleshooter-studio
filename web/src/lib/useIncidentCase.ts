@@ -55,7 +55,15 @@ export function continuationForDetail(detail: IncidentCaseDetail, evidence: stri
   const input: Record<string, unknown> = { ...(latest.input_json || {}), user_input: evidence }
   if (phase === 'validation') input.mode = 'reproduce'
   if (phase === 'regression') input.mode = 'regression'
-  if (phase === 'validation' && latest.error_code === 'browser_locator_failed') input.force_browser_replan = true
+  if (phase === 'validation' && evidence.trim()) {
+    input.force_browser_replan = true
+    input.scenario_contract_revision = {
+      reason: 'user_feedback',
+      source_attempt_id: latest.id,
+    }
+  } else if (phase === 'validation' && latest.error_code === 'browser_locator_failed') {
+    input.force_browser_replan = true
+  }
   if (phase === 'investigation' || phase === 'fix') delete input.mode
   return { phase, input_json: input }
 }
@@ -227,7 +235,20 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
   async function refreshCases() {
     loading.value = true
     try {
-      for (const incident of await listCases()) upsertCase(incident)
+      const listed = await listCases()
+      const currentByID = new Map(cases.value.map(item => [item.id, item]))
+      cases.value = listed
+        .map(incident => {
+          const current = currentByID.get(incident.id)
+          return current && current.version > incident.version ? current : incident
+        })
+        .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || '') || b.version - a.version)
+      if (selectedCaseID.value && !cases.value.some(item => item.id === selectedCaseID.value)) {
+        selectedCaseID.value = ''
+        detail.value = null
+        phaseEvents.value = {}
+        detailGeneration++
+      }
       error.value = ''
       return cases.value
     } catch (cause) {

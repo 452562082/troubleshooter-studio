@@ -24,6 +24,13 @@ func (e *durableCoordinatorExecutor) ExecutePhase(_ context.Context, _ string, _
 			return bughub.PhaseExecutionResult{}, errors.New("durable coordinator plan was regenerated")
 		}
 		return bughub.PhaseExecutionResult{FinalYAML: `version: 2
+scenario_contract:
+  version: 1
+  goal: Verify the Users page renders
+  basis: bug
+  causal_action_ids: [open-users]
+  evidence:
+    - kind: ui_assertions
 start_url: https://app.test/users
 actions:
   - id: goto

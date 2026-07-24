@@ -6,7 +6,9 @@ import {
   approveIncidentMerge,
   clearIncidentBrowserSession,
   completeIncidentRemediation,
+  confirmIncidentValidation,
   continueIncidentCase,
+  deleteIncidentHistory,
   disputeIncidentRootCause,
   getIncidentBrowserRuntimeStatus,
   getIncidentCase,
@@ -30,6 +32,7 @@ import {
   type IncidentCase,
   type IncidentCaseDetail,
 } from '../lib/bridge'
+import { confirmDialog } from '../lib/confirm'
 import BugCaseLifecycle from '../components/BugCaseLifecycle.vue'
 import IncidentWorkbenchPage from './IncidentWorkbenchPage.vue'
 
@@ -53,7 +56,9 @@ vi.mock('../lib/bridge', async importOriginal => ({
   cancelIncidentAttempt: vi.fn(),
   clearIncidentBrowserSession: vi.fn(),
   completeIncidentRemediation: vi.fn(),
+  confirmIncidentValidation: vi.fn(),
   continueIncidentCase: vi.fn(),
+  deleteIncidentHistory: vi.fn(),
   disputeIncidentRootCause: vi.fn(),
   fetchBugByID: vi.fn(),
   getIncidentBrowserRuntimeStatus: vi.fn().mockResolvedValue({ state: 'ready', version: '1.61.1', error_code: '', message: '' }),
@@ -78,6 +83,7 @@ vi.mock('../lib/toast', () => ({
   toast: { error: notifications.error, success: notifications.success, info: notifications.info },
   toastError: notifications.toastError,
 }))
+vi.mock('../lib/confirm', () => ({ confirmDialog: vi.fn().mockResolvedValue(true) }))
 
 const bugA = {
   id: 'bug-a',
@@ -192,9 +198,11 @@ afterEach(() => {
   vi.mocked(matchBugBots).mockReset().mockResolvedValue([botMatch])
   vi.mocked(saveBugSelectedBot).mockReset().mockResolvedValue(bugA as any)
   vi.mocked(startIncidentCase).mockReset()
+  vi.mocked(confirmIncidentValidation).mockReset()
   vi.mocked(uploadIncidentEvidenceFiles).mockReset()
   vi.mocked(uploadIncidentEvidenceImages).mockReset()
   vi.mocked(continueIncidentCase).mockReset()
+  vi.mocked(deleteIncidentHistory).mockReset()
   vi.mocked(disputeIncidentRootCause).mockReset()
   vi.mocked(approveIncidentFix).mockReset()
   vi.mocked(reconsiderIncidentRemediation).mockReset()
@@ -210,6 +218,7 @@ afterEach(() => {
   notifications.success.mockReset()
   notifications.info.mockReset()
   notifications.toastError.mockReset()
+  vi.mocked(confirmDialog).mockReset().mockResolvedValue(true)
 })
 
 describe('IncidentWorkbenchPage', () => {
@@ -497,6 +506,31 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe(terminal.id)
     expect(wrapper.get('.workflow-loop-hint').text()).toContain('Bug 工单已转为已解决')
     expect(wrapper.get('[data-action="restart-case"]').text()).toContain('重新开始故障闭环')
+  })
+
+  it('deletes all local incident history for a historical Bug after confirmation', async () => {
+    route.query = { bug_id: 'bug-a', view: 'history' }
+    vi.mocked(listBugs).mockResolvedValue([{ ...bugA, inbox_state: 'history', status: 'resolved' }])
+    const terminal = incident('case-history-delete', 'fixed_verified', '2026-07-13T00:00:00Z')
+    vi.mocked(listIncidentCases)
+      .mockResolvedValueOnce([terminal])
+      .mockResolvedValueOnce([])
+    mockCaseDetails(detail(terminal))
+    vi.mocked(deleteIncidentHistory).mockResolvedValue({ bug_id: 'bug-a', case_ids: [terminal.id] })
+    const wrapper = await mountedPage()
+
+    await wrapper.get('[data-action="delete-incident-history"]').trigger('click')
+    await flushPromises()
+
+    expect(confirmDialog).toHaveBeenCalledWith(expect.objectContaining({
+      danger: true,
+      defaultAction: 'cancel',
+      confirmText: '永久删除',
+    }))
+    expect(deleteIncidentHistory).toHaveBeenCalledWith({ case_id: terminal.id, bug_id: 'bug-a' })
+    expect(wrapper.find('.lifecycle-region').exists()).toBe(false)
+    expect(wrapper.find('[data-action="delete-incident-history"]').exists()).toBe(false)
+    expect(notifications.success).toHaveBeenCalledWith('故障闭环历史已删除')
   })
 
   it('hides the lifecycle immediately when the active Case becomes terminal', async () => {
@@ -1913,6 +1947,77 @@ describe('IncidentWorkbenchPage', () => {
     expect(router.push).toHaveBeenCalledWith({ path: '/bugs', query: { bug_id: 'bug-a' } })
     expect(continueIncidentCase).not.toHaveBeenCalled()
     expect(wrapper.text()).not.toContain('/private/raw URL error')
+  })
+
+  it('confirms a reproduced validation result before starting investigation', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-validation-review', 'reproduced', '2026-07-15T10:00:00Z', { current_attempt_id: 'attempt-validation', version: 7 })
+    const snapshot = detail(item, {
+      attempts: [{
+        id: 'attempt-validation', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'succeeded',
+        agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'reproduce', target_environment: 'test' },
+        output_json: { verification_status: 'reproduced', observed_behavior: '重复提交', expected_behavior: '只提交一次', evidence: [], gaps: [] },
+        parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {},
+      }],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(snapshot)
+    vi.mocked(confirmIncidentValidation).mockResolvedValue({ ...item, status: 'investigating', version: 8 })
+    const wrapper = await mountedPage()
+
+    await wrapper.get('.primary-action').trigger('click')
+    await flushPromises()
+
+    expect(confirmIncidentValidation).toHaveBeenCalledWith({
+      case_id: item.id,
+      expected_version: 7,
+      idempotency_key: `confirm-validation:${item.id}:attempt-validation:7`,
+      actor_id: 'desktop-user',
+      validation_attempt_id: 'attempt-validation',
+    })
+    expect(continueIncidentCase).not.toHaveBeenCalled()
+  })
+
+  it('carries validation feedback into a forced scenario contract revision', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-validation-revise', 'reproduced', '2026-07-15T10:00:00Z', { current_attempt_id: 'attempt-validation', version: 7 })
+    const snapshot = detail(item, {
+      attempts: [{
+        id: 'attempt-validation', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'succeeded',
+        agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'reproduce', target_environment: 'test' },
+        output_json: { verification_status: 'reproduced', observed_behavior: '重复提交', expected_behavior: '只提交一次', evidence: [], gaps: [] },
+        parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {},
+      }],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    mockCaseDetails(snapshot)
+    vi.mocked(continueIncidentCase).mockResolvedValue({ ...item, status: 'validating', version: 8 })
+    const wrapper = await mountedPage()
+
+    wrapper.getComponent(BugCaseLifecycle).vm.$emit('primary', {
+      kind: 'revise_validation',
+      input: '不存在第二次提交，选择文件后会自动上传。',
+    })
+    await flushPromises()
+
+    expect(continueIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
+      case_id: item.id,
+      expected_version: 7,
+      idempotency_key: `revise-validation:${item.id}:attempt-validation:7`,
+      phase: 'validation',
+      input_json: {
+        mode: 'reproduce',
+        target_environment: 'test',
+        user_input: '不存在第二次提交，选择文件后会自动上传。',
+        force_browser_replan: true,
+        scenario_contract_revision: {
+          reason: 'user_feedback',
+          source_attempt_id: 'attempt-validation',
+        },
+      },
+    }))
   })
 
   it('uploads supplemental screenshots before retrying the current validation Attempt', async () => {

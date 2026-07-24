@@ -811,6 +811,22 @@ export namespace bughub {
 		    return a;
 		}
 	}
+	export class CaseHistoryDeleteResult {
+	    bug_id: string;
+	    case_ids: string[];
+	    cleanup_warning?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new CaseHistoryDeleteResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.bug_id = source["bug_id"];
+	        this.case_ids = source["case_ids"];
+	        this.cleanup_warning = source["cleanup_warning"];
+	    }
+	}
 	export class DeploymentObservation {
 	    id: string;
 	    case_id: string;
@@ -2241,6 +2257,36 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class BugHistoryDeleteInput {
+	    bug_id: string;
+
+	    static createFrom(source: any = {}) {
+	        return new BugHistoryDeleteInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.bug_id = source["bug_id"];
+	    }
+	}
+	export class BugHistoryDeleteResult {
+	    bug_id: string;
+	    deleted: boolean;
+	    deleted_cases: number;
+	    cleanup_warning?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new BugHistoryDeleteResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.bug_id = source["bug_id"];
+	        this.deleted = source["deleted"];
+	        this.deleted_cases = source["deleted_cases"];
+	        this.cleanup_warning = source["cleanup_warning"];
+	    }
+	}
 	export class BugInvestigationCancelInput {
 	    run_id: string;
 
@@ -2595,6 +2641,26 @@ export namespace main {
 	        this.evidence = source["evidence"];
 	    }
 	}
+	export class ConfirmIncidentValidationInput {
+	    case_id: string;
+	    expected_version: number;
+	    idempotency_key: string;
+	    actor_id: string;
+	    validation_attempt_id: string;
+
+	    static createFrom(source: any = {}) {
+	        return new ConfirmIncidentValidationInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.expected_version = source["expected_version"];
+	        this.idempotency_key = source["idempotency_key"];
+	        this.actor_id = source["actor_id"];
+	        this.validation_attempt_id = source["validation_attempt_id"];
+	    }
+	}
 	export class ContinueIncidentCaseInput {
 	    case_id: string;
 	    expected_version: number;
@@ -2629,6 +2695,20 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.type = source["type"];
 	        this.fields = source["fields"];
+	    }
+	}
+	export class DeleteIncidentHistoryInput {
+	    case_id: string;
+	    bug_id: string;
+
+	    static createFrom(source: any = {}) {
+	        return new DeleteIncidentHistoryInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.bug_id = source["bug_id"];
 	    }
 	}
 	export class DisputeIncidentRootCauseInput {
@@ -3116,40 +3196,6 @@ export namespace main {
 	}
 
 
-	export class IncidentEvidenceImage {
-	    artifact_id: string;
-	    name: string;
-	    mime_type: string;
-	    size: number;
-
-	    static createFrom(source: any = {}) {
-	        return new IncidentEvidenceImage(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.artifact_id = source["artifact_id"];
-	        this.name = source["name"];
-	        this.mime_type = source["mime_type"];
-	        this.size = source["size"];
-	    }
-	}
-	export class IncidentEvidenceImageInput {
-	    name: string;
-	    mime_type: string;
-	    base64_data: string;
-
-	    static createFrom(source: any = {}) {
-	        return new IncidentEvidenceImageInput(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.name = source["name"];
-	        this.mime_type = source["mime_type"];
-	        this.base64_data = source["base64_data"];
-	    }
-	}
 	export class IncidentEvidenceFile {
 	    artifact_id: string;
 	    name: string;
@@ -3175,6 +3221,40 @@ export namespace main {
 
 	    static createFrom(source: any = {}) {
 	        return new IncidentEvidenceFileInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.mime_type = source["mime_type"];
+	        this.base64_data = source["base64_data"];
+	    }
+	}
+	export class IncidentEvidenceImage {
+	    artifact_id: string;
+	    name: string;
+	    mime_type: string;
+	    size: number;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentEvidenceImage(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.artifact_id = source["artifact_id"];
+	        this.name = source["name"];
+	        this.mime_type = source["mime_type"];
+	        this.size = source["size"];
+	    }
+	}
+	export class IncidentEvidenceImageInput {
+	    name: string;
+	    mime_type: string;
+	    base64_data: string;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentEvidenceImageInput(source);
 	    }
 
 	    constructor(source: any = {}) {
@@ -4202,6 +4282,42 @@ export namespace main {
 	        this.log = source["log"];
 	    }
 	}
+	export class UploadIncidentEvidenceFilesInput {
+	    case_id: string;
+	    attempt_id: string;
+	    expected_version: number;
+	    files: IncidentEvidenceFileInput[];
+
+	    static createFrom(source: any = {}) {
+	        return new UploadIncidentEvidenceFilesInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.attempt_id = source["attempt_id"];
+	        this.expected_version = source["expected_version"];
+	        this.files = this.convertValues(source["files"], IncidentEvidenceFileInput);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class UploadIncidentEvidenceImagesInput {
 	    case_id: string;
 	    attempt_id: string;
@@ -4231,37 +4347,6 @@ export namespace main {
 		            for (const key of Object.keys(a)) {
 		                a[key] = new classs(a[key]);
 		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class UploadIncidentEvidenceFilesInput {
-	    case_id: string;
-	    attempt_id: string;
-	    expected_version: number;
-	    files: IncidentEvidenceFileInput[];
-
-	    static createFrom(source: any = {}) {
-	        return new UploadIncidentEvidenceFilesInput(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.case_id = source["case_id"];
-	        this.attempt_id = source["attempt_id"];
-	        this.expected_version = source["expected_version"];
-	        this.files = this.convertValues(source["files"], IncidentEvidenceFileInput);
-	    }
-
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) return a;
-		    if (a.slice && a.map) return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) a[key] = new classs(a[key]);
 		            return a;
 		        }
 		        return new classs(a);

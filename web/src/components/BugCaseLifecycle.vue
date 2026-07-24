@@ -2,7 +2,7 @@
 import type { IncidentCase, IncidentCaseDetail as ActionDetail, IncidentEvidenceFileInput, IncidentEvidenceImageInput } from '../lib/bridge/bugWorkflow'
 
 export type CasePrimaryAction = {
-  kind: 'start_validation' | 'retry_validation' | 'retry_regression' | 'supply_evidence' | 'approve_fix' | 'reconsider_remediation' | 'dispute_root_cause' | 'redo_fix' | 'complete_remediation' | 'continue_fix' | 'approve_merge' | 'supply_merge_decision' | 'notify_deployed' | 'supply_deployment_proof' | 'cancel_attempt' | 'continue_legacy'
+  kind: 'start_validation' | 'retry_validation' | 'retry_regression' | 'supply_evidence' | 'confirm_validation' | 'revise_validation' | 'approve_fix' | 'reconsider_remediation' | 'dispute_root_cause' | 'redo_fix' | 'complete_remediation' | 'continue_fix' | 'approve_merge' | 'supply_merge_decision' | 'notify_deployed' | 'supply_deployment_proof' | 'cancel_attempt' | 'continue_legacy'
   label: string
   approval?: boolean
 }
@@ -26,9 +26,16 @@ function isRootCauseDispute(detail: ActionDetail | undefined): boolean {
 }
 
 function structuredEvidenceGaps(output: Record<string, unknown> | undefined): string[] {
-  if (!Array.isArray(output?.gaps)) return []
-  return [...new Set(output.gaps
-    .map(value => typeof value === 'string' ? value.trim() : '')
+  const gaps = Array.isArray(output?.gaps) ? output.gaps : []
+  const questions = Array.isArray(output?.validation_questions) ? output.validation_questions : []
+  return [...new Set([...gaps, ...questions]
+    .map(value => {
+      if (typeof value === 'string') return value.trim()
+      if (!value || typeof value !== 'object') return ''
+      const question = (value as Record<string, unknown>).question
+      const hint = (value as Record<string, unknown>).answer_hint
+      return [typeof question === 'string' ? question.trim() : '', typeof hint === 'string' ? hint.trim() : ''].filter(Boolean).join(' ')
+    })
     .filter(Boolean))]
     .slice(0, 8)
     .map(value => value.slice(0, 500))
@@ -38,7 +45,7 @@ function verificationNeedsUserEvidence(attempt: ActionDetail['attempts'][number]
   return Boolean(
     attempt &&
     ['validation', 'regression'].includes(attempt.phase) &&
-    attempt.output_json?.verification_status === 'insufficient_info' &&
+    (attempt.output_json?.verification_status === 'insufficient_info' || Array.isArray(attempt.output_json?.validation_questions)) &&
     structuredEvidenceGaps(attempt.output_json).length > 0,
   )
 }
@@ -50,6 +57,7 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
     pending_validation: { kind: 'start_validation', label: '开始验证' },
     validating: { kind: 'cancel_attempt', label: '停止当前验证' },
     waiting_evidence: { kind: 'supply_evidence', label: '补充证据并继续' },
+    reproduced: { kind: 'confirm_validation', label: '认可验证结果，开始排障' },
     not_reproduced: { kind: 'supply_evidence', label: '补充证据并重试' },
     investigating: { kind: 'cancel_attempt', label: '停止当前排障' },
     waiting_fix_approval: { kind: 'approve_fix', label: '允许修复', approval: true },
@@ -68,6 +76,11 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
     const outputCode = typeof attempt?.output_json?.error_code === 'string' ? attempt.output_json.error_code.trim() : ''
     const code = attempt?.error_code?.trim() || outputCode
     if (code === 'validation_evidence_refresh_exhausted') return undefined
+    if (verificationNeedsUserEvidence(attempt)) {
+      return attempt?.phase === 'regression'
+        ? { kind: 'supply_evidence', label: '回答 Agent 并调整回归策略' }
+        : { kind: 'supply_evidence', label: '回答 Agent 并调整验证策略' }
+    }
     if (attempt?.phase === 'regression' && ['failed', 'interrupted', 'cancelled'].includes(attempt.status)) {
       if (code === 'browser_login_required' || code === 'browser_runtime_broken' || code === 'browser_url_required' || code === 'validator_not_installed') return undefined
       if (code === 'browser_assertion_failed') return { kind: 'supply_evidence', label: '补充业务预期并重试' }
@@ -330,7 +343,7 @@ function stageStateLabel(index: number): string {
 
 function statusLabel(status: CaseStatus): string {
   const labels: Partial<Record<CaseStatus, string>> = {
-    pending_validation: '等待验证', validating: '验证中', waiting_evidence: '等待证据', reproduced: '已复现', not_reproduced: '未复现',
+    pending_validation: '等待验证', validating: '验证中', waiting_evidence: '等待证据', reproduced: '验证结果待确认', not_reproduced: '未复现',
     investigating: '排障中', root_cause_ready: '根因已确认', waiting_fix_approval: '等待修复授权', fixing: '修复中', fix_failed: '修复失败',
     waiting_remediation: '等待处置确认', remediation_applied: '处置已确认',
     fix_pushed: '修复已推送', waiting_merge_approval: '等待合并授权', merging: '合并中', merge_conflict: '合并冲突',
@@ -431,6 +444,24 @@ async function openRootCauseDispute(event: MouseEvent) {
   confirmButton.value?.focus()
 }
 
+async function openValidationRevision(event: MouseEvent) {
+  if (props.pending || props.detail?.case.status !== 'reproduced') return
+  actionTrigger.value = event.currentTarget as HTMLElement
+  dialogAction.value = { kind: 'revise_validation', label: '验证结果有问题，重新验证' }
+  dialogCaseVersion.value = props.detail.case.version
+  dialogRootCauseAttemptID.value = props.detail.case.current_attempt_id
+  dialogSourceBaselines.value = []
+  dialogInput.value = ''
+  dialogEvidence.value = ''
+  dialogImages.value = []
+  dialogImageError.value = ''
+  dialogFiles.value = []
+  dialogFileError.value = ''
+  dialogOpen.value = true
+  await nextTick()
+  confirmButton.value?.focus()
+}
+
 async function openFixRework(event: MouseEvent) {
   if (props.pending || props.detail?.case.status !== 'waiting_merge_approval') return
   const currentAttemptID = props.detail.case.current_attempt_id || ''
@@ -472,7 +503,7 @@ function confirmAction() {
     payload.caseVersion = dialogCaseVersion.value
     payload.sourceBaselines = Object.fromEntries(dialogSourceBaselines.value.map(item => [item.repo.trim(), typeof item.branch === 'string' ? item.branch.trim() : '']).filter(([repo]) => repo))
   }
-  if (dialogAction.value.kind === 'reconsider_remediation' || dialogAction.value.kind === 'dispute_root_cause' || dialogAction.value.kind === 'redo_fix') {
+  if (dialogAction.value.kind === 'reconsider_remediation' || dialogAction.value.kind === 'dispute_root_cause' || dialogAction.value.kind === 'redo_fix' || dialogAction.value.kind === 'revise_validation') {
     payload.rootCauseAttemptID = dialogRootCauseAttemptID.value
     payload.caseVersion = dialogCaseVersion.value
     payload.input = dialogInput.value.trim()
@@ -637,6 +668,7 @@ function dialogTitle(): string {
   if (dialogAction.value?.kind === 'reconsider_remediation') return '提出其他修复方案'
   if (dialogAction.value?.kind === 'dispute_root_cause') return '根因不认可，重新排障'
   if (dialogAction.value?.kind === 'redo_fix') return '提出重修要求'
+  if (dialogAction.value?.kind === 'revise_validation') return '验证结果有问题'
   if (dialogAction.value?.kind === 'complete_remediation') return '确认非代码处置已完成'
   if (dialogAction.value?.kind === 'approve_merge') return '确认合并基线和环境分支'
   if (dialogAction.value?.kind === 'supply_merge_decision') return '提交合并冲突处理决定'
@@ -685,6 +717,7 @@ function dialogTitle(): string {
             <h3 id="current-action-title">{{ statusLabel(detail.case.status) }}</h3>
             <p v-if="detail.case.status === 'legacy_archived'">历史记录只读；继续时会通过 CreateAndStart 创建新的 Case，不修改归档 attempt。</p>
             <p v-else-if="detail.case.status === 'reset_archived'">历史记录只读；重置后的新 Case 已保留原闭环的证据和审计关系。</p>
+            <p v-else-if="detail.case.status === 'reproduced'">Agent 已给出复现结论，但不会自动进入排障。请先确认它理解的场景和观察结果；如有偏差，说明问题后会重建 scenario_contract 并重新验证。</p>
             <p v-else-if="detail.case.status === 'waiting_deployment'">环境分支已推送。人工部署后，Studio 会尝试自动采集运行版本；采集不到也会直接启动回归验证。</p>
             <p v-else-if="detail.case.status === 'waiting_remediation'">根因不需要修改代码。可以确认处置，也可以质疑当前根因并基于已有验证证据重新排障。</p>
             <p v-else-if="detail.case.status === 'waiting_fix_approval'">可以接受当前建议并授权修复，也可以提出前端、后端或其他修复思路；如果不认可原因判断，可以基于已有验证证据重新排障。</p>
@@ -696,6 +729,9 @@ function dialogTitle(): string {
             <p v-else>第 {{ detail.case.cycle_number }} 轮 · {{ detail.case.environment || '环境未知' }}</p>
           </div>
           <div class="current-action-controls">
+            <button v-if="detail.case.status === 'reproduced'" class="btn dispute-action" type="button" :disabled="pending" @click="openValidationRevision">
+              验证结果有问题
+            </button>
             <button v-if="['waiting_fix_approval', 'waiting_remediation'].includes(detail.case.status)" class="btn dispute-action" type="button" :disabled="pending" @click="openRootCauseDispute">
               根因不认可
             </button>
@@ -798,6 +834,12 @@ function dialogTitle(): string {
           <label for="remediation-proposal">你的修复建议</label>
           <textarea id="remediation-proposal" v-model="dialogInput" rows="6" maxlength="4000" placeholder="例如：优先由后端统一字段语义，前端仅保留兼容兜底；请比较两种方案的影响面和回归风险。"></textarea>
         </template>
+        <template v-else-if="dialogAction.kind === 'revise_validation'">
+          <p>指出 Agent 对场景、操作次数、预期结果或证据理解中的偏差。旧验证结果会保留审计，但不会进入排障。</p>
+          <p>提交后将在同一 Case 中创建新的验证 Attempt，并根据你的反馈强制重新生成 scenario_contract 和浏览器计划。</p>
+          <label for="validation-revision-reason">需要纠正的内容</label>
+          <textarea id="validation-revision-reason" v-model="dialogInput" rows="6" maxlength="4000" placeholder="例如：这个流程只有一次提交；点击保存后会自动返回列表，不存在第二次提交按钮。请按这个真实流程重新验证。"></textarea>
+        </template>
         <template v-else-if="dialogAction.kind === 'dispute_root_cause'">
           <p>当前根因不会被删除，而会标记为已质疑。Studio 将保留原验证步骤和冻结证据，在同一 Case、同一轮次内创建新的排障 Attempt。</p>
           <p>排障 Agent 会重新查询源码、CodeGraph、日志和运行时证据；如果复现证据确实不足，只会发起定向补证，不会从第一步完整重跑。</p>
@@ -887,7 +929,7 @@ function dialogTitle(): string {
         </section>
         <footer>
           <button class="btn" type="button" :disabled="pending" @click="closeDialog">取消</button>
-          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (dialogAction.kind === 'approve_fix' && (dialogBranchOptionsLoading || Boolean(dialogBranchOptionsError) || !dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (['reconsider_remediation', 'dispute_root_cause', 'redo_fix'].includes(dialogAction.kind) && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim())) || (dialogAction.kind === 'complete_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim() || !dialogEvidence.trim())) || evidenceSupplementMissing" @click="confirmAction">{{ dialogAction.kind === 'reconsider_remediation' ? '提交并重新评估' : dialogAction.kind === 'dispute_root_cause' ? '提交并重新排障' : dialogAction.kind === 'redo_fix' ? '提交重修要求' : dialogAction.kind === 'complete_remediation' ? '确认并开始回归' : dialogAction.kind === 'supply_evidence' ? '保存证据并重试' : '确认' }}</button>
+          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (dialogAction.kind === 'approve_fix' && (dialogBranchOptionsLoading || Boolean(dialogBranchOptionsError) || !dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (['reconsider_remediation', 'dispute_root_cause', 'redo_fix', 'revise_validation'].includes(dialogAction.kind) && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim())) || (dialogAction.kind === 'complete_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim() || !dialogEvidence.trim())) || evidenceSupplementMissing" @click="confirmAction">{{ dialogAction.kind === 'reconsider_remediation' ? '提交并重新评估' : dialogAction.kind === 'dispute_root_cause' ? '提交并重新排障' : dialogAction.kind === 'redo_fix' ? '提交重修要求' : dialogAction.kind === 'revise_validation' ? '提交并重新验证' : dialogAction.kind === 'complete_remediation' ? '确认并开始回归' : dialogAction.kind === 'supply_evidence' ? '回答并继续验证' : '确认' }}</button>
         </footer>
       </section>
     </div>

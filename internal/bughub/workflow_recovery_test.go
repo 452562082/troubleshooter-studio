@@ -1043,7 +1043,7 @@ func TestRecoverInterruptedAppliesPersistedCompletionIntentWithoutRerunningPhase
 		t.Fatal(err)
 	}
 	got, _ := store.GetCase(ctx, incident.ID)
-	if got.Status != CaseInvestigating || got.CurrentAttemptID == attempt.ID {
+	if got.Status != CaseReproduced || got.CurrentAttemptID != attempt.ID {
 		t.Fatalf("case = %+v", got)
 	}
 	finished, _ := store.GetAttempt(ctx, attempt.ID)
@@ -1053,7 +1053,7 @@ func TestRecoverInterruptedAppliesPersistedCompletionIntentWithoutRerunningPhase
 	runner.mu.Lock()
 	starts := append([]PhaseAttempt(nil), runner.starts...)
 	runner.mu.Unlock()
-	if len(starts) != 1 || starts[0].Phase != PhaseInvestigation {
+	if len(starts) != 0 {
 		t.Fatalf("recovery reran original phase: %+v", starts)
 	}
 }

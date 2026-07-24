@@ -192,6 +192,17 @@ export interface BugPlatformDeleteInput {
   platform_id: string
 }
 
+export interface BugHistoryDeleteInput {
+  bug_id: string
+}
+
+export interface BugHistoryDeleteResult {
+  bug_id: string
+  deleted: boolean
+  deleted_cases: number
+  cleanup_warning?: string
+}
+
 export interface BugLoginResult {
   platform_id: string
   auth_mode: string
@@ -214,6 +225,11 @@ export async function saveBugPlatform(input: BugPlatformInput): Promise<BugPlatf
 export async function deleteBugPlatform(input: BugPlatformDeleteInput): Promise<void> {
   if (!isDesktop()) throw new Error('删除 Bug 平台只在桌面 app 可用')
   await desktopApp.DeleteBugPlatform(input)
+}
+
+export async function deleteBugHistory(input: BugHistoryDeleteInput): Promise<BugHistoryDeleteResult> {
+  if (!isDesktop()) throw new Error('删除 Bug 历史只在桌面 app 可用')
+  return desktopApp.DeleteBugHistory(input) as Promise<BugHistoryDeleteResult>
 }
 
 export async function bugHookBaseURL(): Promise<string> {

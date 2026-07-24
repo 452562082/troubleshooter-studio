@@ -27,11 +27,30 @@ func isSupportedBrowserAction(action string) bool {
 type BrowserPlan struct {
 	Version            int                        `yaml:"version" json:"version"`
 	DeviceProfile      string                     `yaml:"device_profile,omitempty" json:"device_profile,omitempty"`
+	ScenarioContract   *BrowserScenarioContract   `yaml:"scenario_contract,omitempty" json:"scenario_contract,omitempty"`
 	StartURL           string                     `yaml:"start_url" json:"start_url"`
 	Actions            []BrowserAction            `yaml:"actions" json:"actions"`
 	Assertions         []BrowserAssertion         `yaml:"assertions" json:"assertions"`
 	RequestCaptures    []BrowserRequestCapture    `yaml:"request_captures,omitempty" json:"request_captures,omitempty"`
 	ResponseAssertions []BrowserResponseAssertion `yaml:"response_assertions,omitempty" json:"response_assertions,omitempty"`
+}
+
+// BrowserScenarioContract records the validation Agent's semantic decision
+// separately from the executable browser program. Studio binds ContextSHA256
+// after parsing so a later user clarification cannot silently reuse a stale
+// contract. Evidence entries only reference host-verifiable assertions.
+type BrowserScenarioContract struct {
+	Version         int                       `yaml:"version" json:"version"`
+	Goal            string                    `yaml:"goal" json:"goal"`
+	Basis           string                    `yaml:"basis" json:"basis"`
+	CausalActionIDs []string                  `yaml:"causal_action_ids" json:"causal_action_ids"`
+	ContextSHA256   string                    `yaml:"context_sha256,omitempty" json:"context_sha256,omitempty"`
+	Evidence        []BrowserScenarioEvidence `yaml:"evidence" json:"evidence"`
+}
+
+type BrowserScenarioEvidence struct {
+	Kind        string `yaml:"kind" json:"kind"`
+	AssertionID string `yaml:"assertion_id,omitempty" json:"assertion_id,omitempty"`
 }
 
 type BrowserLocator struct {
@@ -177,6 +196,7 @@ type BrowserPolicyResolver interface {
 type browserPlanYAML struct {
 	Version            int                        `yaml:"version"`
 	DeviceProfile      string                     `yaml:"device_profile,omitempty"`
+	ScenarioContract   *BrowserScenarioContract   `yaml:"scenario_contract,omitempty"`
 	StartURL           string                     `yaml:"start_url"`
 	Actions            []browserActionYAML        `yaml:"actions"`
 	Assertions         []BrowserAssertion         `yaml:"assertions"`
@@ -227,6 +247,7 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 	plan := BrowserPlan{
 		Version:            raw.Version,
 		DeviceProfile:      raw.DeviceProfile,
+		ScenarioContract:   raw.ScenarioContract,
 		StartURL:           raw.StartURL,
 		Actions:            make([]BrowserAction, 0, len(raw.Actions)),
 		Assertions:         raw.Assertions,
@@ -358,7 +379,107 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 			return BrowserPlan{}, fmt.Errorf("browser plan %s.kind %q is not supported", prefix, assertion.Kind)
 		}
 	}
+	if err := validateBrowserScenarioContractStructure(plan); err != nil {
+		return BrowserPlan{}, err
+	}
 	return plan, nil
+}
+
+func validateBrowserScenarioContractStructure(plan BrowserPlan) error {
+	contract := plan.ScenarioContract
+	if contract == nil {
+		return nil
+	}
+	if contract.Version != 1 {
+		return fmt.Errorf("browser plan scenario_contract.version must be 1")
+	}
+	for field, value := range map[string]string{
+		"goal": contract.Goal, "basis": contract.Basis,
+	} {
+		if err := validateBrowserPlanString("scenario_contract."+field, value, true); err != nil {
+			return err
+		}
+	}
+	switch contract.Basis {
+	case "bug", "latest_user_clarification", "evidence_refresh":
+	default:
+		return fmt.Errorf("browser plan scenario_contract.basis %q is not supported", contract.Basis)
+	}
+	if contract.ContextSHA256 != "" && !validLowerSHA256(contract.ContextSHA256) {
+		return fmt.Errorf("browser plan scenario_contract.context_sha256 is invalid")
+	}
+	if len(contract.CausalActionIDs) < 1 || len(contract.CausalActionIDs) > 8 {
+		return fmt.Errorf("browser plan scenario_contract.causal_action_ids must contain 1 to 8 entries")
+	}
+	actionIDs := make(map[string]struct{}, len(plan.Actions))
+	for _, action := range plan.Actions {
+		actionIDs[action.ID] = struct{}{}
+	}
+	causalActionIDs := make(map[string]struct{}, len(contract.CausalActionIDs))
+	for index, actionID := range contract.CausalActionIDs {
+		if err := validateBrowserPlanString(fmt.Sprintf("scenario_contract.causal_action_ids[%d]", index), actionID, true); err != nil {
+			return err
+		}
+		if _, duplicate := causalActionIDs[actionID]; duplicate {
+			return fmt.Errorf("browser plan scenario_contract.causal_action_id %q is duplicated", actionID)
+		}
+		if _, found := actionIDs[actionID]; !found {
+			return fmt.Errorf("browser plan scenario_contract.causal_action_ids[%d] %q does not reference an action", index, actionID)
+		}
+		causalActionIDs[actionID] = struct{}{}
+	}
+	if len(contract.Evidence) < 1 || len(contract.Evidence) > 16 {
+		return fmt.Errorf("browser plan scenario_contract.evidence must contain 1 to 16 entries")
+	}
+	responseAssertions := make(map[string]BrowserResponseAssertion, len(plan.ResponseAssertions))
+	for _, assertion := range plan.ResponseAssertions {
+		responseAssertions[assertion.ID] = assertion
+	}
+	seen := make(map[string]struct{}, len(contract.Evidence))
+	hasUIEvidence := false
+	referencedResponses := make(map[string]struct{}, len(plan.ResponseAssertions))
+	for index, evidence := range contract.Evidence {
+		prefix := fmt.Sprintf("scenario_contract.evidence[%d]", index)
+		if err := validateBrowserPlanString(prefix+".kind", evidence.Kind, true); err != nil {
+			return err
+		}
+		key := evidence.Kind + "\x00" + evidence.AssertionID
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("browser plan %s is duplicated", prefix)
+		}
+		seen[key] = struct{}{}
+		switch evidence.Kind {
+		case "ui_assertions":
+			if evidence.AssertionID != "" {
+				return fmt.Errorf("browser plan %s kind ui_assertions forbids assertion_id", prefix)
+			}
+			if len(plan.Assertions) == 0 {
+				return fmt.Errorf("browser plan %s references missing UI assertions", prefix)
+			}
+			hasUIEvidence = true
+		case "response_assertion":
+			if err := validateBrowserPlanString(prefix+".assertion_id", evidence.AssertionID, true); err != nil {
+				return err
+			}
+			assertion, found := responseAssertions[evidence.AssertionID]
+			if !found {
+				return fmt.Errorf("browser plan %s.assertion_id %q does not reference a response assertion", prefix, evidence.AssertionID)
+			}
+			if _, causal := causalActionIDs[assertion.ActionID]; !causal {
+				return fmt.Errorf("browser plan %s assertion is not bound to a scenario_contract causal action", prefix)
+			}
+			referencedResponses[evidence.AssertionID] = struct{}{}
+		default:
+			return fmt.Errorf("browser plan %s.kind %q is not supported", prefix, evidence.Kind)
+		}
+	}
+	if len(plan.Assertions) > 0 && !hasUIEvidence {
+		return fmt.Errorf("browser plan scenario_contract does not cover its UI assertions")
+	}
+	if len(referencedResponses) != len(plan.ResponseAssertions) {
+		return fmt.Errorf("browser plan scenario_contract does not cover every response assertion")
+	}
+	return nil
 }
 
 func validBrowserRequestFieldPath(value string) bool {

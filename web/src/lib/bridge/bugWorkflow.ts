@@ -180,6 +180,7 @@ export function isIncidentWorkflowConflict(error: unknown): boolean {
   return incidentWorkflowConflictCode(error) !== ''
 }
 export interface ContinueIncidentCaseInput extends WorkflowCommandInput { phase: Phase; input_json?: Record<string, unknown> }
+export interface ConfirmIncidentValidationInput extends WorkflowCommandInput { validation_attempt_id: string }
 export interface IncidentEvidenceImageInput { name: string; mime_type: 'image/png' | 'image/jpeg'; base64_data: string }
 export interface UploadIncidentEvidenceImagesInput { case_id: string; attempt_id: string; expected_version: number; images: IncidentEvidenceImageInput[] }
 export interface IncidentEvidenceImage { artifact_id: string; name: string; mime_type: 'image/png'; size: number }
@@ -193,11 +194,23 @@ export interface CompleteIncidentRemediationInput extends WorkflowCommandInput {
 export interface ApproveIncidentMergeInput extends WorkflowCommandInput { fix_commits: Record<string, string>; target_branches: Record<string, string>; target_heads?: Record<string, string> }
 export interface NotifyIncidentDeployedInput extends WorkflowCommandInput { observed_version?: string; observed_commits?: Record<string, string>; version_source?: string; notification_text?: string; input_json?: Record<string, unknown> }
 export interface CancelIncidentAttemptInput extends WorkflowCommandInput { attempt_id: string }
+export interface DeleteIncidentHistoryInput { case_id: string; bug_id: string }
+export interface DeleteIncidentHistoryResult { bug_id: string; case_ids: string[]; cleanup_warning?: string }
 
 export async function listIncidentCases(): Promise<IncidentCase[]> {
   if (!isDesktop()) return []
   const result = await App.ListIncidentCases()
   return Array.isArray(result) ? result.map(normalizeCase) : []
+}
+
+export async function deleteIncidentHistory(input: DeleteIncidentHistoryInput): Promise<DeleteIncidentHistoryResult> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  const raw = record(await App.DeleteIncidentHistory(input))
+  return {
+    bug_id: String(raw.bug_id ?? input.bug_id),
+    case_ids: Array.isArray(raw.case_ids) ? raw.case_ids.map(String) : [],
+    cleanup_warning: typeof raw.cleanup_warning === 'string' ? raw.cleanup_warning : undefined,
+  }
 }
 
 export async function getIncidentWorkflowMetrics(): Promise<WorkflowMetrics> {
@@ -275,6 +288,10 @@ export async function resetIncidentCaseWithWarnings(input: ResetIncidentCaseInpu
 export async function continueIncidentCase(input: ContinueIncidentCaseInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.ContinueIncidentCase(input))
+}
+export async function confirmIncidentValidation(input: ConfirmIncidentValidationInput): Promise<IncidentCase> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  return normalizeCase(await App.ConfirmIncidentValidation(input))
 }
 export async function uploadIncidentEvidenceImages(input: UploadIncidentEvidenceImagesInput): Promise<IncidentEvidenceImage[]> {
   if (!isDesktop()) throw new Error(desktopOnly)

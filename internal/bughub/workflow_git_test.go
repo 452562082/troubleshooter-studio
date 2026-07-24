@@ -38,6 +38,47 @@ func newGitFixture(t *testing.T) gitFixture {
 	return gitFixture{remote: remote, repo: repo, worktrees: filepath.Join(root, "worktrees")}
 }
 
+func TestResolveGitIdentitySkipsLegacyStudioIdentity(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	runGitTest(t, root, "init", repo)
+	runGitTest(t, repo, "config", "--local", "user.name", legacyStudioGitUserName)
+	runGitTest(t, repo, "config", "--local", "user.email", legacyStudioGitUserEmail)
+	globalConfig := filepath.Join(root, "global.gitconfig")
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	runGitTest(t, root, "config", "--file", globalConfig, "user.name", "Personal User")
+	runGitTest(t, root, "config", "--file", globalConfig, "user.email", "personal@example.test")
+
+	identity, err := resolveGitIdentity(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Name != "Personal User" || identity.Email != "personal@example.test" {
+		t.Fatalf("identity = %+v, want personal global identity", identity)
+	}
+}
+
+func TestResolveGitIdentityRejectsMissingPersonalIdentity(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	runGitTest(t, root, "init", repo)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(root, "missing-global.gitconfig"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	for _, key := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"} {
+		t.Setenv(key, "")
+	}
+
+	identity, err := resolveGitIdentity(context.Background(), repo)
+	if err == nil {
+		t.Fatalf("identity = %+v, want missing identity error", identity)
+	}
+	if !strings.Contains(err.Error(), "git config --global user.name") ||
+		!strings.Contains(err.Error(), "git config --global user.email") {
+		t.Fatalf("error does not explain how to configure personal identity: %v", err)
+	}
+}
+
 func (f gitFixture) makeFix(t *testing.T, content string) string {
 	t.Helper()
 	runGitTest(t, f.repo, "switch", "-c", "fix/bug")

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { mount } from '@vue/test-utils'
+import { defineComponent, nextTick, ref } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   approveIncidentFix,
@@ -7,6 +8,7 @@ import {
   cancelBugInvestigation,
   clearBugPlatformLogin,
   continueIncidentCase,
+  deleteBugHistory,
   deleteBugPlatform,
   discoverBots,
   fetchBugByID,
@@ -37,6 +39,7 @@ vi.mock('../lib/bridge', () => ({
   cancelBugInvestigation: vi.fn(),
   clearBugPlatformLogin: vi.fn(),
   continueIncidentCase: vi.fn(),
+  deleteBugHistory: vi.fn(),
   deleteBugPlatform: vi.fn(),
   discoverBots: vi.fn().mockResolvedValue([]),
   fetchBugByID: vi.fn(),
@@ -89,6 +92,7 @@ afterEach(() => {
   vi.mocked(discoverBots).mockReset().mockResolvedValue([])
   vi.mocked(clearBugPlatformLogin).mockReset()
   vi.mocked(deleteBugPlatform).mockReset()
+  vi.mocked(deleteBugHistory).mockReset()
   vi.mocked(fetchBugByID).mockReset()
   vi.mocked(listBugInvestigationRuns).mockReset().mockResolvedValue([])
   vi.mocked(listBugPlatforms).mockReset().mockResolvedValue([])
@@ -283,6 +287,58 @@ describe('BugInboxPage', () => {
 
     await wrapper.get('[data-action="open-incident"]').trigger('click')
     expect(router.push).toHaveBeenCalledWith({ path: '/incidents', query: { bug_id: 'zentao-839', view: 'history' } })
+  })
+
+  it('refreshes a cached inbox on activation and moves the selected resolved Bug to history', async () => {
+    vi.mocked(listBugs)
+      .mockResolvedValueOnce([{ ...bug, inbox_state: 'active', status: 'active' }] as any)
+      .mockResolvedValueOnce([{ ...bug, inbox_state: 'history', status: 'resolved' }] as any)
+    const active = ref(true)
+    const Host = defineComponent({
+      components: { BugInboxPage },
+      setup: () => ({ active }),
+      template: '<KeepAlive><BugInboxPage v-if="active" /></KeepAlive>',
+    })
+    const wrapper = mount(Host)
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.get('[data-ticket-view="inbox"]').attributes('aria-selected')).toBe('true')
+
+    active.value = false
+    await nextTick()
+    active.value = true
+    await nextTick()
+    await flushPromises()
+
+    expect(listBugs).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[data-ticket-view="history"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.get('[data-ticket-id="zentao-840"]').text()).toContain('已解决')
+  })
+
+  it('permanently deletes a local Bug history item after explicit confirmation', async () => {
+    const historical = { ...bug, inbox_state: 'history', status: 'resolved' }
+    vi.mocked(listBugs)
+      .mockResolvedValueOnce([historical] as any)
+      .mockResolvedValueOnce([])
+    vi.mocked(deleteBugHistory).mockResolvedValue({
+      bug_id: bug.id,
+      deleted: true,
+      deleted_cases: 1,
+    })
+    const wrapper = await mountedInbox()
+    await wrapper.get('[data-ticket-view="history"]').trigger('click')
+
+    await wrapper.get('[data-action="delete-bug-history"]').trigger('click')
+    await flushPromises()
+
+    expect(confirmDialog).toHaveBeenCalledWith(expect.objectContaining({
+      danger: true,
+      defaultAction: 'cancel',
+      confirmText: '永久删除',
+    }))
+    expect(deleteBugHistory).toHaveBeenCalledWith({ bug_id: bug.id })
+    expect(wrapper.text()).toContain('暂无历史工单')
+    expect(toast.success).toHaveBeenCalledWith('Bug 本地历史已删除')
   })
 
   it('keeps platform configuration collapsed and saves mapped bots with their environment', async () => {

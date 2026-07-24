@@ -17,6 +17,7 @@ func TestCanTransition(t *testing.T) {
 		{CaseWaitingEvidence, CaseValidating},
 		{CaseWaitingEvidence, CaseInvestigating},
 		{CaseWaitingEvidence, CaseRegressionValidating},
+		{CaseReproduced, CaseValidating},
 		{CaseReproduced, CaseInvestigating},
 		{CaseNotReproduced, CaseValidating},
 		{CaseInvestigating, CaseValidating},

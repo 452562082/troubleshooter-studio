@@ -7,8 +7,11 @@ import { marked } from 'marked'
 import { computed } from 'vue'
 import type { BugAttachment, BugRecord } from '../lib/bridge/bugs'
 
-const props = defineProps<{ bug?: BugRecord; mode: 'full' | 'summary' }>()
-const emit = defineEmits<{ previewAttachment: [index: number]; openIncident: [bugId: string] }>()
+const props = withDefaults(defineProps<{ bug?: BugRecord; mode: 'full' | 'summary'; allowDeleteHistory?: boolean; deletingHistory?: boolean }>(), {
+  allowDeleteHistory: false,
+  deletingHistory: false,
+})
+const emit = defineEmits<{ previewAttachment: [index: number]; openIncident: [bugId: string]; deleteHistory: [bugId: string] }>()
 const detailInstanceID = `bug-ticket-detail-${++bugTicketDetailSequence}`
 
 const stepsHTML = computed(() => safeMarkdown(props.bug?.steps || '-'))
@@ -150,6 +153,14 @@ function safeLink(href: string): boolean {
 
       <div class="detail-actions">
         <button class="btn primary" type="button" data-action="open-incident" @click="emit('openIncident', bug.id)">进入故障闭环</button>
+        <button
+          v-if="allowDeleteHistory"
+          class="btn danger-secondary"
+          type="button"
+          data-action="delete-bug-history"
+          :disabled="deletingHistory"
+          @click="emit('deleteHistory', bug.id)"
+        >{{ deletingHistory ? '删除中…' : '删除本地历史' }}</button>
       </div>
     </template>
   </section>
@@ -210,8 +221,10 @@ dd { margin: 0; color: var(--c-ink); font-size: var(--fs-base); overflow-wrap: a
 }
 .attachment-copy small { color: var(--c-muted); font-size: var(--fs-xs); overflow-wrap: anywhere; }
 .attachment-action { width: 42px; display: grid; justify-items: end; color: #1d4ed8; font-size: var(--fs-xs); font-weight: 700; white-space: nowrap; }
-.detail-actions { margin-top: var(--sp-4); display: flex; justify-content: flex-end; }
+.detail-actions { margin-top: var(--sp-4); display: flex; justify-content: flex-end; gap: var(--sp-2); }
 .detail-actions .btn { min-height: 44px; }
+.detail-actions .danger-secondary { border-color: #fca5a5; background: #fff; color: #b91c1c; }
+.detail-actions .danger-secondary:hover:not(:disabled) { border-color: #dc2626; background: #fef2f2; }
 .detail-empty { min-height: 160px; margin: 0; display: grid; place-items: center; color: var(--c-muted); font-size: var(--fs-sm); }
 @container ticket-detail (max-width: 720px) {
   .detail-head { flex-direction: column; }

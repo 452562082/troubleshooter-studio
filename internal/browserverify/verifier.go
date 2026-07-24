@@ -872,7 +872,7 @@ func validateWorkerPlanShape(plan bughub.BrowserPlan) error {
 	}
 	responseIDs := make(map[string]struct{}, len(plan.ResponseAssertions))
 	for _, assertion := range plan.ResponseAssertions {
-		if strings.TrimSpace(assertion.ID) == "" || strings.TrimSpace(assertion.ActionID) == "" || strings.TrimSpace(assertion.LeftField) == "" || strings.TrimSpace(assertion.RightField) == "" {
+		if strings.TrimSpace(assertion.ID) == "" || strings.TrimSpace(assertion.ActionID) == "" {
 			return errors.New("browser response assertion is invalid")
 		}
 		if _, duplicate := responseIDs[assertion.ID]; duplicate {
@@ -883,7 +883,16 @@ func validateWorkerPlanShape(plan bughub.BrowserPlan) error {
 		if !exists || actionKind == "screenshot" || actionKind == "wait_for" {
 			return errors.New("browser response assertion action is invalid")
 		}
-		if assertion.Kind != "json_fields_not_equal" && assertion.Kind != "json_fields_equal" {
+		switch assertion.Kind {
+		case "http_status_rejected":
+			if assertion.LeftField != "" || assertion.RightField != "" {
+				return errors.New("browser HTTP status assertion must not contain JSON fields")
+			}
+		case "json_fields_not_equal", "json_fields_equal":
+			if strings.TrimSpace(assertion.LeftField) == "" || strings.TrimSpace(assertion.RightField) == "" {
+				return errors.New("browser JSON response assertion fields are required")
+			}
+		default:
 			return errors.New("browser response assertion kind is invalid")
 		}
 	}

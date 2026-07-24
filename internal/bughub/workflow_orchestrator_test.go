@@ -659,6 +659,11 @@ func TestOrchestratorAutomaticallyReturnsValidationEvidenceGapToValidator(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	confirmKey := ConfirmValidationKey(incident.ID, validation.ID, incident.Version)
+	incident, err = o.ConfirmValidation(ctx, ConfirmValidationCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: confirmKey, ActorID: "alice", ValidationAttemptID: validation.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "base|codex", Target: "codex"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	investigation, _ := store.GetAttempt(ctx, incident.CurrentAttemptID)
 	investigationOutput := mustJSON(InvestigationResult{
 		InvestigationStatus: "insufficient_info", Environment: "test", Confidence: "medium",
@@ -726,6 +731,11 @@ func TestOrchestratorStopsRepeatedValidationEvidenceRefreshLoop(t *testing.T) {
 		}
 		output := []byte(`{"verification_status":"reproduced","environment":"test","observed_behavior":"duplicate name","expected_behavior":"show both matches","scenario_hash":"scenario-1","evidence":[{"kind":"network","path":"network.json","environment":"test","redaction_status":"not_required"}],"gaps":[]}`)
 		incident, getErr = o.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: incident.ID, AttemptID: validation.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, ActorID: "validator", Outcome: PhaseOutcomeReproduced, OutputJSON: output})
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		confirmKey := ConfirmValidationKey(incident.ID, validation.ID, incident.Version)
+		incident, getErr = o.ConfirmValidation(ctx, ConfirmValidationCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: confirmKey, ActorID: "alice", ValidationAttemptID: validation.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "base|codex", Target: "codex"}})
 		if getErr != nil {
 			t.Fatal(getErr)
 		}
@@ -950,6 +960,19 @@ func TestOrchestratorSchedulingFailureRecordsExplicitFailureAfterCommit(t *testi
 				t.Fatalf("%s exposed %q: %q", name, forbidden, value)
 			}
 		}
+	}
+}
+
+func TestPhaseScheduleErrorMessageKeepsSafeActionableCause(t *testing.T) {
+	cause := errors.New("prepare locked source-baseline worktrees: lock standalone fix workspace for api: fatal: unable to read tree (abc123)")
+	message := phaseScheduleErrorMessage(cause)
+	if !strings.Contains(message, "unable to read tree") || !strings.Contains(message, "source-baseline") {
+		t.Fatalf("message = %q, want actionable scheduling cause", message)
+	}
+
+	secret := errors.New("git fetch failed: Authorization: Bearer runner.secret-token")
+	if got := phaseScheduleErrorMessage(secret); got != "阶段 Agent 启动失败，请检查运行环境后重试" {
+		t.Fatalf("sensitive message = %q", got)
 	}
 }
 

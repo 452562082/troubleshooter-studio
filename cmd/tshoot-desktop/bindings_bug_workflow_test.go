@@ -625,6 +625,50 @@ func TestListIncidentCasesWorksWithoutWailsContext(t *testing.T) {
 	}
 }
 
+func TestDeleteIncidentHistoryRequiresTheSelectedCaseToBelongToTheBug(t *testing.T) {
+	root := t.TempDir()
+	app, store, _ := newWorkflowBindingApp(t, filepath.Join(root, "cases.db"))
+	app.workflowRoot = root
+	closedAt := time.Now().UTC()
+	if err := store.CreateCase(context.Background(), bughub.IncidentCase{
+		ID:          "case-history",
+		BugID:       "bug-1",
+		Source:      "zentao",
+		SystemID:    "base",
+		Environment: "test",
+		Status:      bughub.CaseFixedVerified,
+		CycleNumber: 1,
+		ClosedAt:    &closedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := app.DeleteIncidentHistory(DeleteIncidentHistoryInput{
+		CaseID: "missing-case",
+		BugID:  "bug-1",
+	}); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("DeleteIncidentHistory error = %v", err)
+	}
+	if _, err := store.GetCase(context.Background(), "case-history"); err != nil {
+		t.Fatalf("existing history was deleted: %v", err)
+	}
+
+	result, err := app.DeleteIncidentHistory(DeleteIncidentHistoryInput{
+		CaseID: "case-history",
+		BugID:  "bug-1",
+	})
+	if err != nil || len(result.CaseIDs) != 1 || result.CaseIDs[0] != "case-history" {
+		t.Fatalf("DeleteIncidentHistory result=%+v err=%v", result, err)
+	}
+	replay, err := app.DeleteIncidentHistory(DeleteIncidentHistoryInput{
+		CaseID: "case-history",
+		BugID:  "bug-1",
+	})
+	if err != nil || len(replay.CaseIDs) != 0 {
+		t.Fatalf("DeleteIncidentHistory replay=%+v err=%v", replay, err)
+	}
+}
+
 func TestGetIncidentWorkflowMetricsIsReadOnly(t *testing.T) {
 	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "metrics.db"))
 	before := createPendingBindingCase(t, store, "case-metrics")
@@ -997,6 +1041,20 @@ func TestApproveIncidentFixRejectsMismatchedDialogScopeBeforeOpeningRuntime(t *t
 	})
 	if err == nil || !strings.Contains(err.Error(), "dialog snapshot scope") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestConfirmIncidentValidationRejectsMismatchedResultScopeBeforeOpeningRuntime(t *testing.T) {
+	rootFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(rootFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (&App{workflowRoot: rootFile}).ConfirmIncidentValidation(ConfirmIncidentValidationInput{
+		CaseID: "case-1", ExpectedVersion: 3, IdempotencyKey: "wrong",
+		ActorID: "alice", ValidationAttemptID: "validation-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "confirmation key") {
+		t.Fatalf("error=%v", err)
 	}
 }
 

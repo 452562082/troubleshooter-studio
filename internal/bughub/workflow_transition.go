@@ -6,7 +6,7 @@ var allowedCaseTransitions = map[CaseStatus]map[CaseStatus]struct{}{
 	CasePendingValidation:    {CaseValidating: {}, CaseResetArchived: {}},
 	CaseValidating:           {CaseReproduced: {}, CaseWaitingEvidence: {}, CaseNotReproduced: {}, CaseResetArchived: {}},
 	CaseWaitingEvidence:      {CaseValidating: {}, CaseInvestigating: {}, CaseRegressionValidating: {}, CaseResetArchived: {}},
-	CaseReproduced:           {CaseInvestigating: {}, CaseResetArchived: {}},
+	CaseReproduced:           {CaseValidating: {}, CaseInvestigating: {}, CaseResetArchived: {}},
 	CaseNotReproduced:        {CaseValidating: {}, CaseResetArchived: {}},
 	CaseInvestigating:        {CaseValidating: {}, CaseRootCauseReady: {}, CaseWaitingEvidence: {}, CaseResetArchived: {}},
 	CaseRootCauseReady:       {CaseWaitingFixApproval: {}, CaseWaitingRemediation: {}, CaseResetArchived: {}},

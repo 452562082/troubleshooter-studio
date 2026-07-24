@@ -171,6 +171,11 @@ type ResetIncidentCaseInput struct {
 	InputJSON       map[string]any `json:"input_json,omitempty"`
 }
 
+type DeleteIncidentHistoryInput struct {
+	CaseID string `json:"case_id"`
+	BugID  string `json:"bug_id"`
+}
+
 type ResolveIncidentFrontendEntryInput struct {
 	BugID           string `json:"bug_id"`
 	BotKey          string `json:"bot_key"`
@@ -185,6 +190,14 @@ type ContinueIncidentCaseInput struct {
 	ActorID         string         `json:"actor_id"`
 	Phase           bughub.Phase   `json:"phase"`
 	InputJSON       map[string]any `json:"input_json,omitempty"`
+}
+
+type ConfirmIncidentValidationInput struct {
+	CaseID              string `json:"case_id"`
+	ExpectedVersion     int64  `json:"expected_version"`
+	IdempotencyKey      string `json:"idempotency_key"`
+	ActorID             string `json:"actor_id"`
+	ValidationAttemptID string `json:"validation_attempt_id"`
 }
 
 type ApproveIncidentFixInput struct {
@@ -724,6 +737,52 @@ func (a *App) ListIncidentCases() ([]bughub.IncidentCase, error) {
 	return items, err
 }
 
+// DeleteIncidentHistory removes all terminal Case history for one Bug while
+// preserving the archived Bug snapshot. Supplying both identities makes a
+// repeated request idempotent without allowing a stale Case ID to delete a
+// different Bug's history.
+func (a *App) DeleteIncidentHistory(input DeleteIncidentHistoryInput) (bughub.CaseHistoryDeleteResult, error) {
+	caseID := strings.TrimSpace(input.CaseID)
+	bugID := strings.TrimSpace(input.BugID)
+	if caseID == "" || bugID == "" {
+		return bughub.CaseHistoryDeleteResult{}, errors.New("case_id and bug_id are required")
+	}
+	store, _, err := a.workflowComponents()
+	if err != nil {
+		return bughub.CaseHistoryDeleteResult{}, err
+	}
+	incident, err := store.GetCase(a.workflowCommandContext(), caseID)
+	if err == nil {
+		if incident.BugID != bugID {
+			return bughub.CaseHistoryDeleteResult{}, errors.New("Case does not belong to the requested Bug")
+		}
+		if !bughub.IsTerminalCaseStatus(incident.Status) {
+			return bughub.CaseHistoryDeleteResult{}, bughub.ErrActiveCaseHistory
+		}
+	} else if !errors.Is(err, bughub.ErrCaseNotFound) {
+		return bughub.CaseHistoryDeleteResult{}, err
+	} else {
+		// A replay after a successful deletion is a no-op because no Cases for
+		// this Bug remain. If other Cases still exist, the stale/unknown Case ID
+		// must not authorize deleting their history.
+		cases, listErr := store.ListCases(a.workflowCommandContext())
+		if listErr != nil {
+			return bughub.CaseHistoryDeleteResult{}, listErr
+		}
+		for _, current := range cases {
+			if current.BugID == bugID {
+				return bughub.CaseHistoryDeleteResult{}, errors.New("Case was not found for the requested Bug")
+			}
+		}
+	}
+	return bughub.DeleteTerminalCaseHistoryForBug(
+		a.workflowCommandContext(),
+		store,
+		filepath.Join(a.workflowRoot, "artifacts"),
+		bugID,
+	)
+}
+
 func (a *App) GetIncidentWorkflowMetrics() (bughub.WorkflowMetrics, error) {
 	store, _, err := a.workflowComponents()
 	if err != nil {
@@ -1213,6 +1272,35 @@ func (a *App) ContinueIncidentCase(input ContinueIncidentCaseInput) (bughub.Inci
 		return bughub.IncidentCase{}, err
 	}
 	incident, err := orchestrator.ContinueWithEvidence(a.workflowCommandContext(), bughub.ContinueWithEvidenceCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), Phase: input.Phase, Bug: bug, Bot: bot, InputJSON: inputJSON})
+	a.emitIncidentResult(incident, err)
+	return incident, err
+}
+
+func (a *App) ConfirmIncidentValidation(input ConfirmIncidentValidationInput) (bughub.IncidentCase, error) {
+	if err := validateWorkflowCommandScalars(input.CaseID, input.ExpectedVersion, input.IdempotencyKey, input.ActorID); err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	caseID := strings.TrimSpace(input.CaseID)
+	attemptID := strings.TrimSpace(input.ValidationAttemptID)
+	if attemptID == "" {
+		return bughub.IncidentCase{}, errors.New("validation_attempt_id is required")
+	}
+	expectedKey := bughub.ConfirmValidationKey(caseID, attemptID, input.ExpectedVersion)
+	if strings.TrimSpace(input.IdempotencyKey) != expectedKey {
+		return bughub.IncidentCase{}, errors.New("validation confirmation key does not match the current result scope")
+	}
+	_, orchestrator, err := a.workflowComponents()
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	bug, bot, err := a.loadIncidentContext(caseID)
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	incident, err := orchestrator.ConfirmValidation(a.workflowCommandContext(), bughub.ConfirmValidationCommand{
+		CaseID: caseID, ExpectedVersion: input.ExpectedVersion, IdempotencyKey: expectedKey,
+		ActorID: strings.TrimSpace(input.ActorID), ValidationAttemptID: attemptID, Bug: bug, Bot: bot,
+	})
 	a.emitIncidentResult(incident, err)
 	return incident, err
 }

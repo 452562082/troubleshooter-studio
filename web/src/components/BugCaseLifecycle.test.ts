@@ -222,9 +222,9 @@ describe('BugCaseLifecycle', () => {
       parent_attempt_id: '', started_at: '', error_code: 'needs_evidence', error_message: '', usage: {},
     }]
 
-    expect(primaryActionFor(snapshot)).toEqual({ kind: 'supply_evidence', label: '补充信息并重试验证' })
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'supply_evidence', label: '回答 Agent 并调整验证策略' })
     const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
-    expect(wrapper.get('.primary-action').text()).toBe('补充信息并重试验证')
+    expect(wrapper.get('.primary-action').text()).toBe('回答 Agent 并调整验证策略')
     await wrapper.get('.primary-action').trigger('click')
 
     expect(wrapper.get('.evidence-gap-summary').text()).toContain('需要测试账号的权限范围')
@@ -249,11 +249,11 @@ describe('BugCaseLifecycle', () => {
       parent_attempt_id: 'deployment-1', started_at: '', error_code: 'needs_evidence', error_message: '', usage: {},
     }]
 
-    expect(primaryActionFor(snapshot)).toEqual({ kind: 'supply_evidence', label: '补充信息并重试回归' })
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'supply_evidence', label: '回答 Agent 并调整回归策略' })
     const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
     await wrapper.get('.primary-action').trigger('click')
     expect(wrapper.get('.evidence-gap-summary').text()).toContain('无法确认提交后的成功提示文案')
-    expect(wrapper.get('[data-confirm]').text()).toBe('保存证据并重试')
+    expect(wrapper.get('[data-confirm]').text()).toBe('回答并继续验证')
   })
 
   it.each([
@@ -330,6 +330,64 @@ describe('BugCaseLifecycle', () => {
     await wrapper.get('.primary-action').trigger('click')
     expect(wrapper.emitted('primary')).toEqual([[{ kind: 'retry_validation' }]])
     expect(wrapper.find('#case-supplement').exists()).toBe(false)
+  })
+
+  it('shows the Agent question and waits for a user answer before replanning', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-question'
+    snapshot.attempts = [{
+      id: 'validation-question', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, parent_attempt_id: '', started_at: '',
+      error_code: 'browser_locator_failed', error_message: '', usage: {},
+      output_json: {
+        error_code: 'browser_locator_failed',
+        validation_questions: [{
+          id: 'clarify_validation_strategy',
+          question: '动作 submit-again 是否真实存在，还是上一步已经自动提交？',
+          answer_hint: '请明确是否不存在第二次提交。',
+        }],
+      },
+    }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'supply_evidence', label: '回答 Agent 并调整验证策略' })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    await wrapper.get('.primary-action').trigger('click')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('动作 submit-again 是否真实存在')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('不存在第二次提交')
+    await wrapper.get('#case-supplement').setValue('不存在第二次提交，选择文件后会自动上传。')
+    await wrapper.get('[data-confirm]').trigger('click')
+    expect(wrapper.emitted('primary')).toEqual([[{
+      kind: 'supply_evidence',
+      input: '不存在第二次提交，选择文件后会自动上传。',
+    }]])
+  })
+
+  it('requires the operator to accept or revise a reproduced result', async () => {
+    const snapshot = detail('reproduced')
+    snapshot.case.current_attempt_id = 'validation-reproduced'
+    snapshot.attempts = [{
+      id: 'validation-reproduced', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'succeeded',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, parent_attempt_id: '', started_at: '',
+      error_code: '', error_message: '', usage: {},
+      output_json: { verification_status: 'reproduced', observed_behavior: '重复提交', expected_behavior: '只提交一次', evidence: [], gaps: [] },
+    }]
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+
+    expect(wrapper.get('.status-pill').text()).toBe('验证结果待确认')
+    expect(wrapper.get('.primary-action').text()).toBe('认可验证结果，开始排障')
+    expect(wrapper.text()).toContain('不会自动进入排障')
+    await wrapper.get('.primary-action').trigger('click')
+    expect(wrapper.emitted('primary')).toEqual([[{ kind: 'confirm_validation' }]])
+
+    await wrapper.get('.dispute-action').trigger('click')
+    const confirm = wrapper.get<HTMLButtonElement>('[data-confirm]')
+    expect(confirm.element.disabled).toBe(true)
+    await wrapper.get('#validation-revision-reason').setValue('不存在第二次提交，请按自动上传流程重新验证。')
+    await confirm.trigger('click')
+    expect(wrapper.emitted('primary')?.[1]).toEqual([{
+      kind: 'revise_validation', rootCauseAttemptID: 'validation-reproduced', caseVersion: 2,
+      input: '不存在第二次提交，请按自动上传流程重新验证。',
+    }])
   })
 
   it('routes a missing frontend URL to Bug synchronization without generic evidence input', async () => {
@@ -431,6 +489,7 @@ describe('BugCaseLifecycle', () => {
 
   it.each([
     ['pending_validation', 'start_validation'], ['validating', 'cancel_attempt'],
+    ['reproduced', 'confirm_validation'],
     ['not_reproduced', 'supply_evidence'], ['investigating', 'cancel_attempt'],
     ['fixing', 'cancel_attempt'], ['fix_failed', 'continue_fix'],
     ['merge_conflict', 'supply_merge_decision'], ['deployment_unverified', 'supply_deployment_proof'],

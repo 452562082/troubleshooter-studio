@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 type scriptedPhaseExecutor struct {
@@ -67,12 +69,56 @@ func (s *scriptedPhaseExecutor) ExecutePhase(_ context.Context, _ string, _ BotR
 	}
 	result := s.Results[0]
 	s.Results = s.Results[1:]
+	if strings.Contains(prompt, "validation browser planner") && !strings.Contains(result.FinalYAML, "scenario_contract:") {
+		result.FinalYAML = testPlanWithScenarioContract(prompt, result.FinalYAML)
+	}
 	var err error
 	if len(s.Errors) != 0 {
 		err = s.Errors[0]
 		s.Errors = s.Errors[1:]
 	}
 	return result, err
+}
+
+func testPlanWithScenarioContract(prompt, raw string) string {
+	plan, err := ParseBrowserPlan([]byte(raw))
+	if err != nil {
+		return raw
+	}
+	basis := "bug"
+	switch {
+	case strings.Contains(prompt, `"scenario_contract_basis":"latest_user_clarification"`):
+		basis = "latest_user_clarification"
+	case strings.Contains(prompt, `"scenario_contract_basis":"evidence_refresh"`):
+		basis = "evidence_refresh"
+	}
+	causal := make([]string, 0, len(plan.ResponseAssertions)+1)
+	seen := make(map[string]struct{})
+	for _, assertion := range plan.ResponseAssertions {
+		if _, found := seen[assertion.ActionID]; !found {
+			seen[assertion.ActionID] = struct{}{}
+			causal = append(causal, assertion.ActionID)
+		}
+	}
+	if len(causal) == 0 && len(plan.Actions) != 0 {
+		causal = append(causal, plan.Actions[0].ID)
+	}
+	evidence := make([]BrowserScenarioEvidence, 0, len(plan.ResponseAssertions)+1)
+	if len(plan.Assertions) != 0 {
+		evidence = append(evidence, BrowserScenarioEvidence{Kind: "ui_assertions"})
+	}
+	for _, assertion := range plan.ResponseAssertions {
+		evidence = append(evidence, BrowserScenarioEvidence{Kind: "response_assertion", AssertionID: assertion.ID})
+	}
+	plan.ScenarioContract = &BrowserScenarioContract{
+		Version: 1, Goal: "test validation goal", Basis: basis,
+		CausalActionIDs: causal, Evidence: evidence,
+	}
+	encoded, err := yaml.Marshal(plan)
+	if err != nil {
+		return raw
+	}
+	return string(encoded)
 }
 
 func (s *scriptedPhaseExecutor) CancelPhase(context.Context, string) error { return nil }
@@ -120,7 +166,14 @@ func (f *fakeBrowserVerifier) Execute(_ context.Context, request BrowserVerifica
 }
 
 func validBrowserPlanYAML() string {
-	return `version: 1
+	return `version: 2
+scenario_contract:
+  version: 1
+  goal: 验证用户搜索结果
+  basis: bug
+  causal_action_ids: [open-users]
+  evidence:
+    - kind: ui_assertions
 start_url: https://app.example.com/users
 actions:
   - id: open-users
@@ -157,7 +210,14 @@ assertions:
 }
 
 func repairedRemainingPlanYAML() string {
-	return `version: 1
+	return `version: 2
+scenario_contract:
+  version: 1
+  goal: 验证用户搜索结果
+  basis: bug
+  causal_action_ids: [open-users]
+  evidence:
+    - kind: ui_assertions
 start_url: https://app.example.com/users
 actions:
   - id: open-users
@@ -832,27 +892,55 @@ func TestBrowserPlannerPromptSelectsMobileHybridEvidenceForAPIFieldClarification
 	request.Bug.Title = "H5 用户搜索字段展示错误"
 	request.UserClarifications = []string{"搜索 chengzi 后检查接口响应：同一对象的 nick_name 和 text 应不同"}
 	prompt := browserPlannerPrompt(request, nil)
-	for _, expected := range []string{"device_profile: mobile", "request_captures", "response_assertions", "json_fields_not_equal", "Do not replace an API field requirement with a visible_text assertion"} {
+	for _, expected := range []string{"device_profile: mobile", "request_captures", "response_assertions", "json_fields_not_equal", `"scenario_contract_basis":"latest_user_clarification"`, "installed bug-verifier skill"} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("planner prompt lacks hybrid validation contract %q:\n%s", expected, prompt)
 		}
 	}
 }
 
-func TestBrowserPlannerPromptRequiresCausalHTTPRejectionForImmediateImportValidation(t *testing.T) {
+func TestBrowserPlannerPromptDelegatesImmediateImportSemanticsToScenarioContract(t *testing.T) {
 	request := browserCoordinatorRequest(t)
 	request.Bug.Title = "Excel 导入缺少必填字段仍成功"
 	request.UserClarifications = []string{"在导入excel那个接口就要校验，专辑名称、分集名称、分集集数缺失就要报错"}
 	prompt := browserPlannerPrompt(request, nil)
 	for _, expected := range []string{
-		`"required_response_outcome"`,
-		`"kind":"http_status_rejected"`,
-		"must bind it to the causal submit or upload action",
-		"Do not replace it with UI text or a later asynchronous batch result",
+		`"scenario_contract_basis":"latest_user_clarification"`,
+		"derive a new goal, causal action set, and evidence set",
+		"Request-stage rejection uses",
+		"scenario_contract",
 	} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("planner prompt lacks request-stage rejection contract %q:\n%s", expected, prompt)
 		}
+	}
+	if strings.Contains(prompt, `"required_response_outcome"`) {
+		t.Fatalf("host still classified Bug prose into a product-specific response outcome:\n%s", prompt)
+	}
+}
+
+func TestBrowserScenarioContractReplacesHostKeywordClassification(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Bug.Title = "未填写分集名称和分集集数仍可上传媒资成功"
+	request.Bug.Expected = ""
+	request.Bug.Steps = "[步骤]\n1. 选择片单文件并等待处理。\n[结果]\n缺少字段仍上传成功。\n[期望]\n分集名称和分集集数为必填项；任一字段未填写时，系统应给出明确的必填提示并阻止上传。\n影响范围\n不完整数据可能入库。"
+
+	prompt := browserPlannerPrompt(request, nil)
+	if !strings.Contains(prompt, "阻止上传") || !strings.Contains(prompt, "scenario_contract") {
+		t.Fatalf("planner did not receive the semantic source and contract protocol:\n%s", prompt)
+	}
+
+	plan, err := ParseBrowserPlan([]byte(validBrowserPlanYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ScenarioContract = nil
+	scenarioSHA, err := browserValidationRecipeScenarioSHA256(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bindGeneratedBrowserScenarioContract(request, plan, scenarioSHA); err == nil {
+		t.Fatal("new plan without an Agent-generated scenario contract was accepted")
 	}
 }
 
@@ -1384,6 +1472,321 @@ func TestValidateBrowserRepairAllowsEvidenceBoundFailedSubmitDowngradeToWait(t *
 	}
 }
 
+func TestValidateBrowserRepairRebindsHTTPRejectionAssertionToAutomaticUpload(t *testing.T) {
+	exact := true
+	original := BrowserPlan{
+		Version: 2, DeviceProfile: "desktop", StartURL: "https://app.example.com",
+		Actions: []BrowserAction{
+			{ID: "upload-sheet", Action: "upload_file", Locator: &BrowserLocator{Kind: "css", Value: `input[type="file"]`}, FileRef: "case-file"},
+			{ID: "submit-import", Action: "click", Locator: &BrowserLocator{Kind: "role", Value: "button", Name: "导入", Exact: &exact}},
+			{ID: "wait-result", Action: "wait_for", Locator: &BrowserLocator{Kind: "text", Value: "处理完成", Exact: &exact}},
+		},
+		ResponseAssertions: []BrowserResponseAssertion{{
+			ID: "reject-invalid-sheet", ActionID: "submit-import", Kind: "http_status_rejected",
+		}},
+	}
+	repaired := original
+	repaired.Actions = append([]BrowserAction(nil), original.Actions...)
+	repaired.Actions[1] = BrowserAction{
+		ID: "submit-import", Action: "wait_for",
+		Locator: &BrowserLocator{Kind: "text", Value: "待处理", Exact: &exact},
+	}
+	repaired.ResponseAssertions = []BrowserResponseAssertion{{
+		ID: "reject-invalid-sheet", ActionID: "upload-sheet",
+		URLContains: "/admin/common/excel/import", Method: "POST", Kind: "http_status_rejected",
+	}}
+	failed := BrowserVerificationResult{
+		Status: "locator_failed", FailedActionID: "submit-import",
+		AccessibilitySummary: []BrowserAccessibilityNode{{
+			Role: "status", Name: "待处理", LocatorKind: "text", Visible: true,
+		}},
+	}
+	evidence := browserEvaluatorEvidence{
+		BrowserActions: []browserActionEvidence{
+			{ID: "upload-sheet", Action: "upload_file", Result: "completed"},
+			{ID: "submit-import", Action: "click", Result: "failed"},
+		},
+		Network: []browserNetworkEvidence{{
+			ActionID: "upload-sheet", Method: "POST",
+			URL:          "https://api.example.com/admin/common/excel/import",
+			ResourceType: "xhr", Outcome: "response", Status: 200,
+		}},
+	}
+
+	authorization := browserPassiveDowngradeAuthorizationFor(original, failed, evidence)
+	if !authorization.Allowed || len(authorization.ResponseAssertionRebinds) != 1 {
+		t.Fatalf("authorization = %+v", authorization)
+	}
+	rebind := authorization.ResponseAssertionRebinds[0]
+	if rebind.AssertionID != "reject-invalid-sheet" || rebind.ActionID != "upload-sheet" ||
+		rebind.URLContains != "/admin/common/excel/import" || rebind.Method != "POST" {
+		t.Fatalf("response assertion rebind = %+v", rebind)
+	}
+	prompt := browserRepairPrompt(original, failed, evidence, nil, nil)
+	for _, required := range []string{
+		"response_assertion_rebinds", "reject-invalid-sheet",
+		"/admin/common/excel/import", `"method":"POST"`,
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("repair prompt is missing %q: %s", required, prompt)
+		}
+	}
+	if err := validateBrowserRepairWithEvidence(original, failed, evidence, repaired); err != nil {
+		t.Fatalf("automatic upload response assertion rebind was rejected: %v", err)
+	}
+
+	unsafe := repaired
+	unsafe.ResponseAssertions = append([]BrowserResponseAssertion(nil), repaired.ResponseAssertions...)
+	unsafe.ResponseAssertions[0].URLContains = ""
+	if err := validateBrowserRepairWithEvidence(original, failed, evidence, unsafe); err == nil {
+		t.Fatal("response assertion rebind without the observed endpoint was accepted")
+	}
+}
+
+func TestBrowserAutomaticRedundantActionRepairUsesContractAndHostEvidence(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Bug.Expected = ""
+	request.Bug.Steps = "[步骤]\n选择片单并等待处理。\n[期望]\n缺少必填字段时系统应提示并阻止上传。"
+	request.uploadFiles = []BrowserUploadFile{{ID: "case-file"}}
+	exact := true
+	original := BrowserPlan{
+		Version: 2, DeviceProfile: "desktop", StartURL: "https://app.example.com",
+		Actions: []BrowserAction{
+			{ID: "upload-sheet", Action: "upload_file", Locator: &BrowserLocator{Kind: "css", Value: `input[type="file"]`}, FileRef: "case-file", ScreenshotAfter: true},
+			{ID: "submit-import", Action: "click", Locator: &BrowserLocator{Kind: "role", Value: "button", Name: "创建", Exact: &exact}, ScreenshotAfter: true},
+			{ID: "capture-result", Action: "screenshot"},
+		},
+		Assertions: []BrowserAssertion{
+			{Kind: "visible_text", Value: "请填写分集名称"},
+			{Kind: "visible_text", Value: "请填写分集集数"},
+		},
+		ResponseAssertions: []BrowserResponseAssertion{{
+			ID: "reject-invalid-upload", ActionID: "submit-import", Kind: "http_status_rejected",
+		}},
+		ScenarioContract: &BrowserScenarioContract{
+			Version: 1, Goal: "缺少必填字段时应拒绝业务请求", Basis: "bug",
+			CausalActionIDs: []string{"upload-sheet", "submit-import"},
+			Evidence: []BrowserScenarioEvidence{
+				{Kind: "ui_assertions"},
+				{Kind: "response_assertion", AssertionID: "reject-invalid-upload"},
+			},
+		},
+	}
+	failed := BrowserVerificationResult{
+		Status: "locator_failed", FailedActionID: "submit-import",
+		AccessibilitySummary: []BrowserAccessibilityNode{{
+			Role: "document", Name: "创建媒资 · 文件上传完成 · 待处理（68%） · 总数 0 · 成功数 0 · 失败数 0", Visible: true,
+		}},
+	}
+	evidence := browserEvaluatorEvidence{
+		BrowserActions: []browserActionEvidence{
+			{ID: "upload-sheet", Action: "upload_file", Result: "completed"},
+			{ID: "submit-import", Action: "click", Result: "failed"},
+		},
+		Network: []browserNetworkEvidence{{
+			ActionID: "upload-sheet", Method: "POST",
+			URL:          "https://api.example.com/admin/common/excel/import",
+			ResourceType: "xhr", Outcome: "response", Status: 200,
+		}},
+	}
+
+	repaired, repairedAutomatically := browserAutomaticRedundantActionRepair(original, failed, evidence)
+	if !repairedAutomatically {
+		t.Fatal("host evidence did not repair an automatic upload submission")
+	}
+	if repaired.Actions[1].ID != "submit-import" || repaired.Actions[1].Action != "screenshot" ||
+		repaired.Actions[1].Locator != nil || repaired.Actions[1].ScreenshotAfter {
+		t.Fatalf("redundant submit action was not converted to a strict screenshot: %+v", repaired.Actions[1])
+	}
+	if len(repaired.ResponseAssertions) != 1 {
+		t.Fatalf("response assertions = %+v", repaired.ResponseAssertions)
+	}
+	assertion := repaired.ResponseAssertions[0]
+	if assertion.ActionID != "upload-sheet" || assertion.Kind != "http_status_rejected" ||
+		assertion.URLContains != "/admin/common/excel/import" || assertion.Method != "POST" {
+		t.Fatalf("automatic response assertion = %+v", assertion)
+	}
+	if err := validateDurableBrowserPlan(repaired); err != nil {
+		t.Fatalf("automatic repair is not a durable BrowserPlan: %v", err)
+	}
+	if err := validateBrowserPlanScenarioEvidence(request, repaired); err != nil {
+		t.Fatalf("automatic repair does not satisfy scenario evidence: %v", err)
+	}
+
+	withoutProductSpecificText := failed
+	withoutProductSpecificText.AccessibilitySummary = nil
+	if _, ok := browserAutomaticRedundantActionRepair(original, withoutProductSpecificText, evidence); !ok {
+		t.Fatal("contract-bound causal response still depended on product-specific processing text")
+	}
+
+	nonCausal := original
+	nonCausal.ScenarioContract = &BrowserScenarioContract{
+		Version: 1, Goal: "缺少必填字段时应拒绝业务请求", Basis: "bug",
+		CausalActionIDs: []string{"submit-import"},
+		Evidence: []BrowserScenarioEvidence{
+			{Kind: "ui_assertions"},
+			{Kind: "response_assertion", AssertionID: "reject-invalid-upload"},
+		},
+	}
+	if _, ok := browserAutomaticRedundantActionRepair(nonCausal, failed, evidence); ok {
+		t.Fatal("an observed write outside the Agent-declared causal contract was skipped")
+	}
+
+	ambiguousWrites := evidence
+	ambiguousWrites.Network = append(append([]browserNetworkEvidence(nil), evidence.Network...), browserNetworkEvidence{
+		ActionID: "upload-sheet", Method: "POST",
+		URL:          "https://api.example.com/admin/common/file/upload",
+		ResourceType: "xhr", Outcome: "response", Status: 200,
+	})
+	if _, ok := browserAutomaticRedundantActionRepair(original, failed, ambiguousWrites); ok {
+		t.Fatal("multiple upload write responses authorized an ambiguous automatic submission")
+	}
+}
+
+func TestBrowserCoordinatorAutomaticallySkipsSubmitAfterUploadStartsProcessing(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Bug.Title = "未填写分集名称和分集集数仍可上传媒资成功"
+	request.Bug.Expected = ""
+	request.Bug.Steps = "[步骤]\n1. 选择片单并等待处理。\n[期望]\n缺少必填字段时系统应提示并阻止上传。"
+	uploadPath := filepath.Join(t.TempDir(), "fixture.xlsx")
+	if err := os.WriteFile(uploadPath, []byte("xlsx-fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request.Bug.Attachments = []Attachment{{
+		ID: "case-file", Name: "fixture.xlsx",
+		Type:      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		LocalPath: uploadPath,
+	}}
+	plan := `version: 2
+device_profile: desktop
+scenario_contract:
+  version: 1
+  goal: 缺少必填字段时业务请求应被拒绝并显示提示
+  basis: bug
+  causal_action_ids: [upload-sheet, submit-import]
+  evidence:
+    - kind: ui_assertions
+    - kind: response_assertion
+      assertion_id: reject-invalid-upload
+start_url: https://app.example.com/users
+actions:
+  - id: upload-sheet
+    action: upload_file
+    locator: {kind: css, value: 'input[type="file"]'}
+    file_ref: case-file
+    screenshot_after: true
+  - id: submit-import
+    action: click
+    locator: {kind: role, value: button, name: 创建, exact: true}
+    screenshot_after: true
+  - id: capture-result
+    action: screenshot
+assertions:
+  - kind: visible_text
+    value: 请填写分集名称
+response_assertions:
+  - id: reject-invalid-upload
+    action_id: submit-import
+    kind: http_status_rejected
+`
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: plan}}}
+
+	failedScreenshot := append([]byte("\x89PNG\r\n\x1a\n"), []byte("automatic-upload-failed")...)
+	failedNetwork := []byte(`[{"action_id":"upload-sheet","method":"POST","url":"https://api.example.com/admin/common/excel/import","status":200,"resource_type":"xhr","outcome":"response","duration_ms":1}]`)
+	failedActions := []byte(`[{"id":"upload-sheet","action":"upload_file","locator_kind":"css","started_at":"2026-07-24T08:00:00Z","duration_ms":1,"result":"completed","error_code":""},{"id":"submit-import","action":"click","locator_kind":"role","started_at":"2026-07-24T08:00:01Z","duration_ms":1,"result":"failed","error_code":"browser_action_failed"}]`)
+	failed := BrowserVerificationResult{
+		Status: "locator_failed", FailedActionID: "submit-import",
+		FinalURL:            "https://app.example.com/users",
+		Title:               "创建媒资",
+		FinalScreenshotPath: "browser/failed.png",
+		AccessibilitySummary: []BrowserAccessibilityNode{{
+			Role: "document", Name: "创建媒资 · 文件上传完成 · 待处理（68%）", Visible: true,
+		}},
+		Artifacts: []BrowserArtifactReference{
+			verifiedBrowserArtifact("screenshot", "browser/failed.png", "test", failedScreenshot),
+			verifiedBrowserArtifact("network", "browser/failed-network.json", "test", failedNetwork),
+			verifiedBrowserArtifact("browser_actions", "browser/failed-actions.json", "test", failedActions),
+		},
+	}
+	finalScreenshot := append([]byte("\x89PNG\r\n\x1a\n"), []byte("automatic-upload-final")...)
+	responseAssertions := []byte(`[{"assertion_id":"reject-invalid-upload","action_id":"upload-sheet","kind":"http_status_rejected","url":"https://api.example.com/admin/common/excel/import","method":"POST","status":200,"left_field":"","right_field":"","matched_objects":1,"violations":1,"passed":false,"failure_reason":""}]`)
+	completed := BrowserVerificationResult{
+		Status:              "assertion_failed",
+		FinalURL:            "https://app.example.com/users",
+		Title:               "创建媒资",
+		FinalScreenshotPath: "browser/final.png",
+		Artifacts: []BrowserArtifactReference{
+			verifiedBrowserArtifact("screenshot", "browser/final.png", "test", finalScreenshot),
+			verifiedBrowserArtifact("response_assertions", "browser/http-status-response-assertions.json", "test", responseAssertions),
+		},
+	}
+	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{failed, completed}}
+	frozenContent := map[string][]byte{
+		"browser-executions/primary/browser/failed.png":                            failedScreenshot,
+		"browser-executions/primary/browser/failed-network.json":                   failedNetwork,
+		"browser-executions/primary/browser/failed-actions.json":                   failedActions,
+		"browser-executions/repair-1/browser/final.png":                            finalScreenshot,
+		"browser-executions/repair-1/browser/http-status-response-assertions.json": responseAssertions,
+	}
+	frozenRoot := t.TempDir()
+	request.FreezeArtifacts = func(_ context.Context, references []BrowserArtifactReference) ([]browserFrozenArtifact, error) {
+		result := make([]browserFrozenArtifact, 0, len(references))
+		for _, reference := range references {
+			content, found := frozenContent[reference.Path]
+			if !found {
+				return nil, fmt.Errorf("unknown frozen fixture %s", reference.Path)
+			}
+			digest := fmt.Sprintf("%x", sha256.Sum256(content))
+			if reference.SHA256 != digest || reference.Size != int64(len(content)) {
+				return nil, errors.New("frozen fixture does not match reference")
+			}
+			path := filepath.Join(frozenRoot, digest)
+			if err := os.WriteFile(path, content, 0o600); err != nil {
+				return nil, err
+			}
+			result = append(result, browserFrozenArtifact{
+				ReferencePath: reference.Path, Kind: reference.Kind, SHA256: reference.SHA256,
+				Size: reference.Size, PathOrReference: path, Content: append([]byte(nil), content...),
+			})
+		}
+		return result, nil
+	}
+	events := make([]InvestigationEvent, 0, 1)
+	request.Emit = func(event InvestigationEvent) { events = append(events, event) }
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), request)
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if executor.Calls != 1 || verifier.Calls != 2 || result.RepairCount != 1 {
+		t.Fatalf("agent=%d verifier=%d repairs=%d result=%+v", executor.Calls, verifier.Calls, result.RepairCount, result)
+	}
+	repairedPlan := verifier.Requests[1].Plan
+	if repairedPlan.Actions[1].Action != "screenshot" || repairedPlan.Actions[1].Locator != nil {
+		t.Fatalf("repaired submit action = %+v", repairedPlan.Actions[1])
+	}
+	if len(repairedPlan.ResponseAssertions) != 1 ||
+		repairedPlan.ResponseAssertions[0].ActionID != "upload-sheet" ||
+		repairedPlan.ResponseAssertions[0].URLContains != "/admin/common/excel/import" ||
+		repairedPlan.ResponseAssertions[0].Method != "POST" {
+		t.Fatalf("repaired response assertions = %+v", repairedPlan.ResponseAssertions)
+	}
+	var validation ValidationResult
+	if err := json.Unmarshal([]byte(result.FinalYAML), &validation); err != nil {
+		t.Fatal(err)
+	}
+	if validation.VerificationStatus != "reproduced" || !strings.Contains(validation.ObservedBehavior, "返回了成功状态") {
+		t.Fatalf("machine validation = %+v", validation)
+	}
+	foundAutomaticEvent := false
+	for _, event := range events {
+		foundAutomaticEvent = foundAutomaticEvent || event.Type == "browser_redundant_action_skipped"
+	}
+	if !foundAutomaticEvent {
+		t.Fatalf("events=%+v", events)
+	}
+}
+
 func TestValidateBrowserRepairAllowsCausalClickToSameOriginGoto(t *testing.T) {
 	original := BrowserPlan{Version: 1, StartURL: "https://app.example.com", Actions: []BrowserAction{
 		{ID: "open-search", Action: "click", Locator: &BrowserLocator{Kind: "label", Value: "打开搜索页"}},
@@ -1768,7 +2171,9 @@ assertions:
 		t.Fatalf("second repair did not consume the latest repaired plan and failure: %s", prompt)
 	}
 	stored, found := recipes.recipes[request.Attempt.CaseID]
-	if !found || !reflect.DeepEqual(stored.Plan, verifier.Requests[2].Plan) {
+	executedStoredPlan := stored.Plan
+	executedStoredPlan.ScenarioContract = nil
+	if !found || !reflect.DeepEqual(executedStoredPlan, verifier.Requests[2].Plan) {
 		t.Fatalf("latest successful repair was not frozen for future replay: found=%v stored=%+v", found, stored)
 	}
 }
@@ -1780,6 +2185,10 @@ func TestBrowserCoordinatorReobservesBeforeSecondRepairOfSameAction(t *testing.T
 		t.Fatal(err)
 	}
 	primaryPlan, err := ParseBrowserPlan([]byte(validBrowserPlanYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	primaryPlan, err = bindGeneratedBrowserScenarioContract(request, primaryPlan, scenarioSHA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1972,6 +2381,8 @@ func TestBrowserCoordinatorRecoveryReusesDurablePrimaryAndRepairPlans(t *testing
 		t.Fatal(err)
 	}
 	wantRepair = expandBrowserRepairForFreshContext(wantPrimary, "open-users", wantRepair)
+	wantPrimary.ScenarioContract = nil
+	wantRepair.ScenarioContract = nil
 	if !reflect.DeepEqual(recoveryVerifier.Requests[0].Plan, wantPrimary) || !reflect.DeepEqual(recoveryVerifier.Requests[1].Plan, wantRepair) {
 		t.Fatalf("recovery plans changed: got=%+v want primary=%+v repair=%+v", recoveryVerifier.Requests, wantPrimary, wantRepair)
 	}
@@ -2006,6 +2417,57 @@ func TestBrowserCoordinatorReusesFrozenRecipeAcrossAttemptsWithoutPlanner(t *tes
 	}
 	if len(events) == 0 || events[0].Type != "browser_recipe_replayed" {
 		t.Fatalf("events=%+v", events)
+	}
+}
+
+func TestBrowserCoordinatorUserFeedbackRegeneratesScenarioContract(t *testing.T) {
+	recipes := &memoryValidationRecipeStore{}
+	firstRequest := browserCoordinatorRequest(t)
+	firstExecutor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: validBrowserPlanYAML()},
+		{FinalYAML: reproducedValidationYAML("browser/final.png")},
+	}}
+	firstVerifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{completedBrowserResult("browser/final.png")}}
+	first, err := (BrowserCoordinator{Executor: firstExecutor, Verifier: firstVerifier, Recipes: recipes}).Execute(context.Background(), firstRequest)
+	if err != nil || first.ErrorCode != "" {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	oldRecipe := recipes.recipes[firstRequest.Attempt.CaseID]
+
+	secondRequest := browserCoordinatorRequest(t)
+	secondRequest.Attempt.ID = "attempt-browser-user-feedback"
+	secondRequest.Attempt.CaseID = firstRequest.Attempt.CaseID
+	secondRequest.UserClarifications = []string{"上次验证目标不对；这次只检查用户页是否展示汤圆"}
+	replanned := strings.Replace(validBrowserPlanYAML(), "goal: 验证用户搜索结果", "goal: 以最新用户想法重新验证搜索结果", 1)
+	replanned = strings.Replace(replanned, "basis: bug", "basis: latest_user_clarification", 1)
+	secondExecutor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: replanned},
+		{FinalYAML: reproducedValidationYAML("browser/final.png")},
+	}}
+	secondVerifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{completedBrowserResult("browser/final.png")}}
+	events := make([]InvestigationEvent, 0)
+	secondRequest.Emit = func(event InvestigationEvent) { events = append(events, event) }
+
+	second, err := (BrowserCoordinator{Executor: secondExecutor, Verifier: secondVerifier, Recipes: recipes}).Execute(context.Background(), secondRequest)
+	if err != nil || second.ErrorCode != "" || secondExecutor.Calls != 2 || secondVerifier.Calls != 1 {
+		t.Fatalf("second=%+v agent=%d browser=%d err=%v", second, secondExecutor.Calls, secondVerifier.Calls, err)
+	}
+	for _, event := range events {
+		if event.Type == "browser_recipe_replayed" {
+			t.Fatalf("user feedback replayed the stale scenario contract: %+v", events)
+		}
+	}
+	if !strings.Contains(secondExecutor.Prompts[0], secondRequest.UserClarifications[0]) ||
+		!strings.Contains(secondExecutor.Prompts[0], `"scenario_contract_basis":"latest_user_clarification"`) {
+		t.Fatalf("planner did not receive the latest user validation idea:\n%s", secondExecutor.Prompts[0])
+	}
+	newRecipe := recipes.recipes[firstRequest.Attempt.CaseID]
+	if newRecipe.ScenarioSHA256 == oldRecipe.ScenarioSHA256 ||
+		newRecipe.Plan.ScenarioContract == nil ||
+		newRecipe.Plan.ScenarioContract.Basis != "latest_user_clarification" ||
+		newRecipe.Plan.ScenarioContract.ContextSHA256 != newRecipe.ScenarioSHA256 ||
+		newRecipe.Plan.ScenarioContract.Goal == oldRecipe.Plan.ScenarioContract.Goal {
+		t.Fatalf("scenario contract was not regenerated: old=%+v new=%+v", oldRecipe, newRecipe)
 	}
 }
 
@@ -2786,6 +3248,33 @@ func TestBrowserCoordinatorRecordsAgentFailureStageWithoutProviderDetails(t *tes
 	}
 }
 
+func TestBrowserStopOutputAsksForActionableValidationClarification(t *testing.T) {
+	result := BrowserCoordinatorResult{
+		ErrorCode:    "browser_locator_failed",
+		ErrorMessage: "页面定位经过有限次现场修复仍失败",
+		BrowserResult: BrowserVerificationResult{
+			FailedActionID: "submit-again",
+		},
+	}
+	var output struct {
+		Questions []struct {
+			ID         string `json:"id"`
+			Question   string `json:"question"`
+			AnswerHint string `json:"answer_hint"`
+		} `json:"validation_questions"`
+		ContinuationStrategy string `json:"continuation_strategy"`
+	}
+	if err := json.Unmarshal(browserStopOutput(result), &output); err != nil {
+		t.Fatal(err)
+	}
+	if len(output.Questions) != 1 || output.Questions[0].ID != "clarify_validation_strategy" ||
+		!strings.Contains(output.Questions[0].Question, "submit-again") ||
+		!strings.Contains(output.Questions[0].AnswerHint, "不存在第二次提交") ||
+		output.ContinuationStrategy != "collect_user_feedback_and_regenerate_scenario_contract" {
+		t.Fatalf("output=%+v", output)
+	}
+}
+
 func TestBrowserCoordinatorPreservesSafeHostSystemErrorCode(t *testing.T) {
 	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: validBrowserPlanYAML()}}}
 	verifier := &fakeBrowserVerifier{
@@ -2868,6 +3357,13 @@ func TestBrowserVerifierErrorCodeMapsRuntimeInstallTimeoutToRepairableRuntimeFai
 	err := errors.New("browser_runtime_install_failed: Playwright Chromium install failed: context deadline exceeded")
 	if got := browserVerifierErrorCode(err); got != "browser_runtime_broken" {
 		t.Fatalf("code = %q, want browser_runtime_broken", got)
+	}
+}
+
+func TestBrowserVerifierErrorCodeDoesNotMisreportInvalidPlanAsPolicyBlock(t *testing.T) {
+	err := errors.New("browser_plan_invalid: browser response assertion is invalid")
+	if got := browserVerifierErrorCode(err); got != "browser_validator_plan_invalid" {
+		t.Fatalf("code = %q, want browser_validator_plan_invalid", got)
 	}
 }
 

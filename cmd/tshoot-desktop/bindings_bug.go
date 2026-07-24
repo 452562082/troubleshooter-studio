@@ -69,6 +69,17 @@ type BugPlatformDeleteInput struct {
 	PlatformID string `json:"platform_id"`
 }
 
+type BugHistoryDeleteInput struct {
+	BugID string `json:"bug_id"`
+}
+
+type BugHistoryDeleteResult struct {
+	BugID          string `json:"bug_id"`
+	Deleted        bool   `json:"deleted"`
+	DeletedCases   int    `json:"deleted_cases"`
+	CleanupWarning string `json:"cleanup_warning,omitempty"`
+}
+
 type BugLoginResult struct {
 	PlatformID   string `json:"platform_id"`
 	AuthMode     string `json:"auth_mode"`
@@ -124,6 +135,54 @@ func (a *App) BugHookBaseURL() (string, error) {
 
 func (a *App) ListBugs() ([]bughub.Bug, error) {
 	return bugStore().List()
+}
+
+// DeleteBugHistory deletes only Studio's local archived snapshot, attachment
+// cache, and terminal incident history. It never deletes the source ticket.
+func (a *App) DeleteBugHistory(input BugHistoryDeleteInput) (BugHistoryDeleteResult, error) {
+	bugID := strings.TrimSpace(input.BugID)
+	result := BugHistoryDeleteResult{BugID: bugID}
+	if bugID == "" {
+		return result, errors.New("bug_id is required")
+	}
+	bugs := bugStore()
+	bug, found, err := bugs.Get(bugID)
+	if err != nil {
+		return result, err
+	}
+	if !found {
+		return result, nil
+	}
+	if bug.InboxState != bughub.BugInboxHistory {
+		return result, bughub.ErrBugHistoryRequired
+	}
+	store, _, err := a.workflowComponents()
+	if err != nil {
+		return result, err
+	}
+	history, err := bughub.DeleteTerminalCaseHistoryForBug(
+		a.workflowCommandContext(),
+		store,
+		filepath.Join(a.workflowRoot, "artifacts"),
+		bugID,
+	)
+	if err != nil {
+		return result, err
+	}
+	result.DeletedCases = len(history.CaseIDs)
+	result.CleanupWarning = history.CleanupWarning
+	deleted, err := bugs.DeleteHistory(bugID)
+	if err != nil {
+		return result, err
+	}
+	result.Deleted = deleted
+	if deleted {
+		cacheDir := filepath.Join(bughub.DefaultRoot(), "attachments", safePathSegment(bugID))
+		if err := os.RemoveAll(cacheDir); err != nil && result.CleanupWarning == "" {
+			result.CleanupWarning = "工单记录已删除，但部分本地附件缓存清理失败"
+		}
+	}
+	return result, nil
 }
 
 func (a *App) SyncBugPlatform(platformID string) (bughub.SyncResult, error) {

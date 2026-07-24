@@ -12,7 +12,9 @@ import {
   cancelIncidentAttempt,
   clearIncidentBrowserSession,
   completeIncidentRemediation,
+  confirmIncidentValidation,
   continueIncidentCase,
+  deleteIncidentHistory,
   disputeIncidentRootCause,
   fetchBugByID,
   getIncidentBrowserRuntimeStatus,
@@ -43,6 +45,7 @@ import {
   type FrontendEntryResolution,
 } from '../lib/bridge'
 import { toast, toastError } from '../lib/toast'
+import { confirmDialog } from '../lib/confirm'
 import { useBugTickets } from '../lib/useBugTickets'
 import { activeCaseForBug, casesForBug, continuationForDetail, terminalCaseStatuses, useIncidentCase } from '../lib/useIncidentCase'
 
@@ -93,6 +96,7 @@ type ResetDialogSnapshot = {
 }
 const resetDialog = ref<ResetDialogSnapshot | null>(null)
 const resetting = ref(false)
+const deletingIncidentHistory = ref(false)
 const restartPreparing = ref(false)
 const resetError = ref('')
 const resetDialogElement = ref<HTMLElement | null>(null)
@@ -165,6 +169,11 @@ const botActionStatus = computed(() => {
   if (!current) return '尚未开启故障闭环'
   return terminalCaseStatuses.has(current.status) ? '历史故障闭环' : '故障闭环进行中'
 })
+const canDeleteDisplayedHistory = computed(() => Boolean(
+  historyViewRequested.value
+  && displayedCase.value
+  && terminalCaseStatuses.has(displayedCase.value.status),
+))
 
 watch(() => tickets.selectedID.value, async bugID => {
   workflowNotice.value = ''
@@ -414,6 +423,32 @@ async function selectTicketView(view: TicketView) {
     return
   }
   await selectBug(nextBug.id)
+}
+
+async function deleteDisplayedIncidentHistory() {
+  const incident = displayedCase.value
+  const bug = tickets.selectedBug.value
+  if (!incident || !bug || !canDeleteDisplayedHistory.value || deletingIncidentHistory.value) return
+  const confirmed = await confirmDialog({
+    title: '删除故障闭环历史',
+    message: `确定删除「${bug.title}」的全部本地故障闭环历史吗？Case、阶段记录、证据、授权和时间线将永久删除；Bug 工单历史及禅道工单不会被删除或修改。`,
+    confirmText: '永久删除',
+    cancelText: '取消',
+    danger: true,
+    defaultAction: 'cancel',
+  })
+  if (!confirmed) return
+  deletingIncidentHistory.value = true
+  try {
+    const result = await deleteIncidentHistory({ case_id: incident.id, bug_id: bug.id })
+    await incidentWorkflow.refreshCases()
+    if (result.cleanup_warning) toast.error(result.cleanup_warning)
+    else toast.success('故障闭环历史已删除')
+  } catch (error) {
+    toastError('删除故障闭环历史', error)
+  } finally {
+    deletingIncidentHistory.value = false
+  }
 }
 
 async function refreshMatches(bugID: string) {
@@ -996,6 +1031,22 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         if (!incident.selected_bot_key) throw new Error('当前 Case 没有绑定排障机器人')
         return startIncidentCase({ ...base, bug_id: incident.bug_id, bot_key: incident.selected_bot_key, bot_environment: incident.environment, input_json: { mode: 'reproduce', target_environment: incident.environment } })
       }
+      if (payload.kind === 'confirm_validation') {
+        if (!incident.current_attempt_id) throw new Error('当前没有可确认的验证 Attempt')
+        return confirmIncidentValidation({
+          ...base,
+          idempotency_key: `confirm-validation:${incident.id}:${incident.current_attempt_id}:${incident.version}`,
+          validation_attempt_id: incident.current_attempt_id,
+        })
+      }
+      if (payload.kind === 'revise_validation') {
+        if (!payload.input?.trim()) throw new Error('请说明验证结果或场景理解中的问题')
+        return continueIncidentCase({
+          ...base,
+          idempotency_key: `revise-validation:${incident.id}:${incident.current_attempt_id}:${incident.version}`,
+          ...continuationForDetail(detail, payload.input.trim()),
+        })
+      }
       if (payload.kind === 'retry_validation') {
         return continueIncidentCase({ ...base, ...continuationForDetail(detail, '') })
       }
@@ -1207,6 +1258,14 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
             <button v-else class="btn danger-secondary" type="button" data-action="restart-case" :disabled="writeActionDisabled" @click="restartIncidentCase()">
               {{ starting || resetting || restartPreparing ? '处理中…' : '重新开始故障闭环' }}
             </button>
+            <button
+              v-if="canDeleteDisplayedHistory"
+              class="btn danger-secondary"
+              type="button"
+              data-action="delete-incident-history"
+              :disabled="deletingIncidentHistory"
+              @click="deleteDisplayedIncidentHistory"
+            >{{ deletingIncidentHistory ? '删除中…' : '删除闭环历史' }}</button>
           </div>
           <p v-if="writeActionDisabledReason" class="bot-action-disabled-reason" role="status">{{ writeActionDisabledReason }}</p>
           <p v-if="workflowNotice" class="workflow-notice" role="status" aria-live="polite">{{ workflowNotice }}</p>

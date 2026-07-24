@@ -347,7 +347,11 @@ func (s *GitIntegrationService) mergeRepo(ctx context.Context, req MergeRequest,
 	} else if _, gitErr := os.Lstat(filepath.Join(worktree, ".git")); gitErr != nil {
 		return inspection, errors.New("existing Studio worktree is not registered with Git")
 	}
-	identity := resolveGitIdentity(ctx, path)
+	identity, err := resolveGitIdentity(ctx, path)
+	if err != nil {
+		inspection.Error = err.Error()
+		return inspection, err
+	}
 	if err := gitRunWithIdentity(ctx, worktree, identity, "merge", "--no-edit", change.FixCommit); err != nil {
 		inspection.Conflict = true
 		inspection.Error = err.Error()
@@ -499,8 +503,8 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 }
 
 const (
-	fallbackGitUserName  = "Troubleshooter Studio"
-	fallbackGitUserEmail = "studio@localhost"
+	legacyStudioGitUserName  = "Troubleshooter Studio"
+	legacyStudioGitUserEmail = "studio@localhost"
 )
 
 type gitIdentity struct {
@@ -508,20 +512,50 @@ type gitIdentity struct {
 	Email string
 }
 
-func resolveGitIdentity(ctx context.Context, sourcePath string) gitIdentity {
-	name, err := gitOutput(ctx, sourcePath, "config", "--get", "user.name")
-	if err != nil || strings.TrimSpace(name) == "" {
-		name = fallbackGitUserName
+func resolveGitIdentity(ctx context.Context, sourcePath string) (gitIdentity, error) {
+	if identity, ok := readGitIdentity(ctx, sourcePath); ok && !isLegacyStudioGitIdentity(identity) {
+		return identity, nil
 	}
-	email, err := gitOutput(ctx, sourcePath, "config", "--get", "user.email")
-	if err != nil || strings.TrimSpace(email) == "" {
-		email = fallbackGitUserEmail
+	if identity, ok := readGitIdentity(ctx, sourcePath, "--global"); ok && !isLegacyStudioGitIdentity(identity) {
+		return identity, nil
 	}
-	return gitIdentity{Name: strings.TrimSpace(name), Email: strings.TrimSpace(email)}
+	for _, keys := range [][2]string{
+		{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"},
+		{"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"},
+	} {
+		identity := gitIdentity{
+			Name:  strings.TrimSpace(os.Getenv(keys[0])),
+			Email: strings.TrimSpace(os.Getenv(keys[1])),
+		}
+		if identity.Name != "" && identity.Email != "" && !isLegacyStudioGitIdentity(identity) {
+			return identity, nil
+		}
+	}
+	return gitIdentity{}, errors.New(
+		"personal Git identity is not configured; set it before starting a fix: " +
+			`git config --global user.name "<your name>" and ` +
+			`git config --global user.email "<your email>"`,
+	)
+}
+
+func readGitIdentity(ctx context.Context, sourcePath string, scope ...string) (gitIdentity, bool) {
+	args := append([]string{"config"}, scope...)
+	name, nameErr := gitOutput(ctx, sourcePath, append(args, "--get", "user.name")...)
+	email, emailErr := gitOutput(ctx, sourcePath, append(args, "--get", "user.email")...)
+	identity := gitIdentity{Name: strings.TrimSpace(name), Email: strings.TrimSpace(email)}
+	return identity, nameErr == nil && emailErr == nil && identity.Name != "" && identity.Email != ""
+}
+
+func isLegacyStudioGitIdentity(identity gitIdentity) bool {
+	return strings.EqualFold(strings.TrimSpace(identity.Name), legacyStudioGitUserName) ||
+		strings.EqualFold(strings.TrimSpace(identity.Email), legacyStudioGitUserEmail)
 }
 
 func configureStandaloneGitIdentity(ctx context.Context, sourcePath, destinationPath string) error {
-	identity := resolveGitIdentity(ctx, sourcePath)
+	identity, err := resolveGitIdentity(ctx, sourcePath)
+	if err != nil {
+		return err
+	}
 	if err := gitRun(ctx, destinationPath, "config", "--local", "user.name", identity.Name); err != nil {
 		return err
 	}
@@ -534,7 +568,13 @@ func gitRunWithIdentity(ctx context.Context, dir string, identity gitIdentity, a
 }
 
 func gitEnvironment() []string {
-	return append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_MERGE_AUTOEDIT=no")
+	env := os.Environ()
+	if strings.TrimSpace(os.Getenv("HOME")) == "" {
+		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+			env = append(env, "HOME="+home)
+		}
+	}
+	return append(env, "GIT_TERMINAL_PROMPT=0", "GIT_MERGE_AUTOEDIT=no")
 }
 func normalizedRemote(remote string) string {
 	if strings.TrimSpace(remote) == "" {

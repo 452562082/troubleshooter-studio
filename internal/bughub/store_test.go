@@ -1,6 +1,7 @@
 package bughub
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -165,6 +166,33 @@ func TestStoreResolvedBugIsListedAsHistory(t *testing.T) {
 	history, err := store.ListHistory()
 	if err != nil || len(history) != 1 || history[0].ArchiveReason != BugArchiveSourceResolved {
 		t.Fatalf("history=%+v err=%v", history, err)
+	}
+}
+
+func TestStoreDeleteHistoryRemovesOnlyArchivedBug(t *testing.T) {
+	store := NewStore(t.TempDir())
+	if err := store.Upsert(Bug{ID: "active", Title: "still active", Status: "active"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Upsert(Bug{ID: "history", Title: "already resolved", Status: "resolved"}); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := store.DeleteHistory("history")
+	if err != nil || !deleted {
+		t.Fatalf("DeleteHistory deleted=%v err=%v", deleted, err)
+	}
+	if _, found, err := store.Get("history"); err != nil || found {
+		t.Fatalf("deleted history found=%v err=%v", found, err)
+	}
+	if _, found, err := store.Get("active"); err != nil || !found {
+		t.Fatalf("active Bug found=%v err=%v", found, err)
+	}
+	if deleted, err := store.DeleteHistory("history"); err != nil || deleted {
+		t.Fatalf("idempotent DeleteHistory deleted=%v err=%v", deleted, err)
+	}
+	if deleted, err := store.DeleteHistory("active"); !errors.Is(err, ErrBugHistoryRequired) || deleted {
+		t.Fatalf("active DeleteHistory deleted=%v err=%v", deleted, err)
 	}
 }
 

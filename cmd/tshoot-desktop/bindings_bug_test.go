@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,10 +11,71 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 )
+
+func TestDeleteBugHistoryCascadesLocalIncidentHistoryAndAttachmentCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workflowRoot := bughub.DefaultRoot()
+	app, workflowStore, _ := newWorkflowBindingApp(t, filepath.Join(workflowRoot, "workflows.db"))
+	app.workflowRoot = workflowRoot
+
+	if err := bugStore().Upsert(bughub.Bug{
+		ID:         "zentao-1842",
+		Source:     "zentao",
+		Title:      "支付页提交后 500",
+		Status:     "resolved",
+		InboxState: bughub.BugInboxHistory,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	closedAt := time.Now().UTC()
+	if err := workflowStore.CreateCase(context.Background(), bughub.IncidentCase{
+		ID:          "case-delete-history",
+		BugID:       "zentao-1842",
+		Source:      "zentao",
+		SystemID:    "base",
+		Environment: "test",
+		Status:      bughub.CaseFixedVerified,
+		CycleNumber: 1,
+		ClosedAt:    &closedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := filepath.Join(workflowRoot, "attachments", "zentao-1842")
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "screen.png"), []byte("cached"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := app.DeleteBugHistory(BugHistoryDeleteInput{BugID: "zentao-1842"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Deleted || result.DeletedCases != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	if _, found, err := bugStore().Get("zentao-1842"); err != nil || found {
+		t.Fatalf("deleted Bug found=%v err=%v", found, err)
+	}
+	if cases, err := workflowStore.ListCases(context.Background()); err != nil || len(cases) != 0 {
+		t.Fatalf("remaining Cases=%+v err=%v", cases, err)
+	}
+	if _, err := os.Stat(cacheDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("attachment cache still exists: %v", err)
+	}
+
+	replay, err := app.DeleteBugHistory(BugHistoryDeleteInput{BugID: "zentao-1842"})
+	if err != nil || replay.Deleted || replay.DeletedCases != 0 {
+		t.Fatalf("idempotent delete result=%+v err=%v", replay, err)
+	}
+}
 
 func TestSyncBugPlatformStoresAssignedBugs(t *testing.T) {
 	root := t.TempDir()

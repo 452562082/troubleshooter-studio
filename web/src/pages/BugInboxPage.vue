@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, useId, watch } from 'vue'
+import { computed, onActivated, onMounted, ref, useId, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import BugTicketDetail from '../components/BugTicketDetail.vue'
 import BugTicketList from '../components/BugTicketList.vue'
@@ -10,6 +10,7 @@ import {
   type DiscoveredBot,
   bugHookBaseURL,
   clearBugPlatformLogin,
+  deleteBugHistory,
   deleteBugPlatform,
   discoverBots,
   fetchBugByID,
@@ -52,6 +53,7 @@ const syncingBugs = ref(false)
 const fetchingBug = ref(false)
 const attachmentPreviewing = ref(false)
 const attachmentPreview = ref<BugAttachmentPreviewResult | null>(null)
+const deletingBugHistory = ref(false)
 const platformDraft = ref(emptyPlatformDraft())
 const selectedPlatform = computed(() => platforms.value.find(platform => platform.id === selectedPlatformID.value))
 const selectedPlatformHasSession = computed(() => Boolean(selectedPlatform.value?.session_header))
@@ -101,6 +103,26 @@ watch(selectedPlatform, platform => {
 onMounted(async () => {
   await Promise.all([loadPlatforms(), loadInstalledBots(), loadHookBase(), loadTickets()])
 })
+
+let hasActivatedOnce = false
+onActivated(() => {
+  if (!hasActivatedOnce) {
+    hasActivatedOnce = true
+    return
+  }
+  void refreshActivatedTickets()
+})
+
+async function refreshActivatedTickets() {
+  const selectedID = tickets.selectedID.value
+  await loadTickets()
+  const selected = tickets.bugs.value.find(bug => bug.id === selectedID)
+  if (selected?.inbox_state === 'history') {
+    tickets.select(selected.id)
+    ticketView.value = 'history'
+  }
+  ensureVisibleTicketSelection()
+}
 
 async function loadTickets() {
   try {
@@ -321,6 +343,32 @@ async function previewAttachment(index: number) {
     toastError('预览附件', error)
   } finally {
     attachmentPreviewing.value = false
+  }
+}
+
+async function deleteSelectedBugHistory(bugID: string) {
+  const bug = tickets.bugs.value.find(item => item.id === bugID)
+  if (!bug || bug.inbox_state !== 'history' || deletingBugHistory.value) return
+  const confirmed = await confirmDialog({
+    title: '删除 Bug 本地历史',
+    message: `确定删除「${bug.title}」吗？这会永久删除 Studio 本机保存的工单快照、附件缓存和关联故障闭环历史，但不会删除或修改禅道中的工单。`,
+    confirmText: '永久删除',
+    cancelText: '取消',
+    danger: true,
+    defaultAction: 'cancel',
+  })
+  if (!confirmed) return
+  deletingBugHistory.value = true
+  try {
+    const result = await deleteBugHistory({ bug_id: bugID })
+    await loadTickets()
+    ensureVisibleTicketSelection()
+    if (result.cleanup_warning) toast.error(result.cleanup_warning)
+    else toast.success('Bug 本地历史已删除')
+  } catch (error) {
+    toastError('删除 Bug 本地历史', error)
+  } finally {
+    deletingBugHistory.value = false
   }
 }
 
@@ -592,8 +640,11 @@ function eventValue(event: Event): string {
         <BugTicketDetail
           :bug="tickets.selectedBug.value"
           mode="full"
+          :allow-delete-history="ticketView === 'history'"
+          :deleting-history="deletingBugHistory"
           @preview-attachment="previewAttachment"
           @open-incident="openIncident"
+          @delete-history="deleteSelectedBugHistory"
         />
       </main>
     </section>

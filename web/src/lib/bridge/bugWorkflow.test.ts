@@ -4,9 +4,11 @@ import {
   approveIncidentMerge,
   ackIncidentWorkflowReminder,
   cancelIncidentAttempt,
+  confirmIncidentValidation,
   continueIncidentCase,
   clearIncidentBrowserSession,
   completeIncidentRemediation,
+  deleteIncidentHistory,
   getIncidentArtifactPreview,
   getIncidentCase,
   listIncidentFixBranches,
@@ -31,6 +33,19 @@ afterEach(() => {
 })
 
 describe('incident workflow bridge', () => {
+  it('forwards validation confirmation through the desktop binding', async () => {
+    const confirm = vi.fn().mockResolvedValue({ id: 'case-1', status: 'investigating', version: 8 })
+    ;(window as any).go = { main: { App: { ConfirmIncidentValidation: confirm } } }
+    const input = {
+      case_id: 'case-1', expected_version: 7,
+      idempotency_key: 'confirm-validation:case-1:attempt-1:7',
+      actor_id: 'desktop-user', validation_attempt_id: 'attempt-1',
+    }
+
+    await expect(confirmIncidentValidation(input)).resolves.toMatchObject({ id: 'case-1', status: 'investigating', version: 8 })
+    expect(confirm).toHaveBeenCalledWith(input)
+  })
+
   it('normalizes nullable collections while preserving numeric versions', async () => {
     const list = vi.fn().mockResolvedValue([{ id: 'case-1', status: 'validating', version: 7 }])
     const get = vi.fn().mockResolvedValue({
@@ -85,6 +100,23 @@ describe('incident workflow bridge', () => {
     await expect(listIncidentFixBranches('case-1', 'attempt-1')).resolves.toEqual({})
     await expect(listPendingIncidentWorkflowReminders()).resolves.toEqual([])
     await expect(ackIncidentWorkflowReminder({ case_id: 'case-1', reservation_key: 'slot-1', delivery_attempt: 1, actor_id: 'desktop-root' })).rejects.toThrow(/桌面 app/)
+  })
+
+  it('forwards incident history deletion and normalizes nullable Case IDs', async () => {
+    const remove = vi.fn().mockResolvedValue({
+      bug_id: 'zentao-1842',
+      case_ids: null,
+      cleanup_warning: '部分证据文件未清理',
+    })
+    ;(window as any).go = { main: { App: { DeleteIncidentHistory: remove } } }
+    const input = { case_id: 'case-1', bug_id: 'zentao-1842' }
+
+    await expect(deleteIncidentHistory(input)).resolves.toEqual({
+      bug_id: 'zentao-1842',
+      case_ids: [],
+      cleanup_warning: '部分证据文件未清理',
+    })
+    expect(remove).toHaveBeenCalledWith(input)
   })
 
   it('validates and forwards Case-bound browser upload files', async () => {

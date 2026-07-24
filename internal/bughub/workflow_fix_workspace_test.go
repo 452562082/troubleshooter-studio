@@ -102,6 +102,58 @@ func TestFixWorkspaceManagerLocksExplicitSourceBaselineAndKeepsEnvironmentTarget
 	}
 }
 
+func TestFixWorkspaceManagerReplacesLegacyStudioIdentityWithPersonalIdentity(t *testing.T) {
+	fixture := newGitFixture(t)
+	runGitTest(t, fixture.repo, "config", "--local", "user.name", legacyStudioGitUserName)
+	runGitTest(t, fixture.repo, "config", "--local", "user.email", legacyStudioGitUserEmail)
+	globalConfig := filepath.Join(t.TempDir(), "global.gitconfig")
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	runGitTest(t, fixture.repo, "config", "--file", globalConfig, "user.name", "Personal User")
+	runGitTest(t, fixture.repo, "config", "--file", globalConfig, "user.email", "personal@example.test")
+
+	botPath := writeFixWorkspaceBranchMap(t, "test", "api", "test")
+	manager := NewFixWorkspaceManager(filepath.Join(t.TempDir(), "fix-worktrees"), func(_ context.Context, _, _ string) (string, error) {
+		return fixture.repo, nil
+	})
+	lease, err := manager.Prepare(context.Background(), "case-personal", "attempt-1", "test", BotRef{Path: botPath}, []byte(`{"source_baselines":{"api":"test"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lease.Close(context.Background()) }()
+
+	binding := lease.bindings[0]
+	if got := strings.TrimSpace(runGitTest(t, binding.Worktree, "config", "--local", "--get", "user.name")); got != "Personal User" {
+		t.Fatalf("fix workspace user.name = %q, want personal identity", got)
+	}
+	if got := strings.TrimSpace(runGitTest(t, binding.Worktree, "config", "--local", "--get", "user.email")); got != "personal@example.test" {
+		t.Fatalf("fix workspace user.email = %q, want personal identity", got)
+	}
+}
+
+func TestFixWorkspaceManagerRefusesToStartWithoutPersonalGitIdentity(t *testing.T) {
+	fixture := newGitFixture(t)
+	runGitTest(t, fixture.repo, "config", "--local", "user.name", legacyStudioGitUserName)
+	runGitTest(t, fixture.repo, "config", "--local", "user.email", legacyStudioGitUserEmail)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "missing-global.gitconfig"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	for _, key := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"} {
+		t.Setenv(key, "")
+	}
+
+	botPath := writeFixWorkspaceBranchMap(t, "test", "api", "test")
+	manager := NewFixWorkspaceManager(filepath.Join(t.TempDir(), "fix-worktrees"), func(_ context.Context, _, _ string) (string, error) {
+		return fixture.repo, nil
+	})
+	lease, err := manager.Prepare(context.Background(), "case-missing-identity", "attempt-1", "test", BotRef{Path: botPath}, []byte(`{"source_baselines":{"api":"test"}}`))
+	if lease != nil {
+		t.Fatalf("lease = %+v, want no fix workspace lease", lease)
+	}
+	if err == nil || !strings.Contains(err.Error(), "git config --global user.name") {
+		t.Fatalf("error = %v, want actionable personal Git identity error", err)
+	}
+}
+
 func TestRemoveStandaloneFixWorkspaceRefusesPathsOutsideOwnedRoot(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()

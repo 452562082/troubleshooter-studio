@@ -57,13 +57,19 @@ export function ClearIncidentBrowserSession(arg1:main.IncidentBrowserCommandInpu
 
 export function CompleteIncidentRemediation(arg1:main.CompleteIncidentRemediationInput):Promise<bughub.IncidentCase>;
 
+export function ConfirmIncidentValidation(arg1:main.ConfirmIncidentValidationInput):Promise<bughub.IncidentCase>;
+
 export function ContinueBugInvestigation(arg1:main.BugInvestigationContinueInput):Promise<bughub.InvestigationRun>;
 
 export function ContinueIncidentCase(arg1:main.ContinueIncidentCaseInput):Promise<bughub.IncidentCase>;
 
 export function DefaultDestPath(arg1:string,arg2:string):Promise<string>;
 
+export function DeleteBugHistory(arg1:main.BugHistoryDeleteInput):Promise<main.BugHistoryDeleteResult>;
+
 export function DeleteBugPlatform(arg1:main.BugPlatformDeleteInput):Promise<void>;
+
+export function DeleteIncidentHistory(arg1:main.DeleteIncidentHistoryInput):Promise<bughub.CaseHistoryDeleteResult>;
 
 export function DeleteInfraCred(arg1:string):Promise<void>;
 
@@ -249,9 +255,9 @@ export function UninstallAgent(arg1:string):Promise<agent.UninstallOpenclawResul
 
 export function UninstallBot(arg1:string,arg2:string):Promise<main.UninstallBotResult>;
 
-export function UploadIncidentEvidenceImages(arg1:main.UploadIncidentEvidenceImagesInput):Promise<Array<main.IncidentEvidenceImage>>;
-
 export function UploadIncidentEvidenceFiles(arg1:main.UploadIncidentEvidenceFilesInput):Promise<Array<main.IncidentEvidenceFile>>;
+
+export function UploadIncidentEvidenceImages(arg1:main.UploadIncidentEvidenceImagesInput):Promise<Array<main.IncidentEvidenceImage>>;
 
 export function Validate(arg1:string):Promise<main.ValidateResult>;
 

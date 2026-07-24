@@ -749,6 +749,16 @@ func (o *CaseOrchestrator) ContinueWithEvidence(ctx context.Context, cmd Continu
 	if err := validateCommand(cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey, cmd.ActorID); err != nil {
 		return IncidentCase{}, err
 	}
+	if cmd.Phase == PhaseValidation {
+		if event, found, eventErr := o.store.GetEventByIdempotencyKey(ctx, cmd.IdempotencyKey); eventErr != nil {
+			return IncidentCase{}, eventErr
+		} else if found && event.EventType == "validation_feedback_submitted" {
+			if event.ActorType != "user" || event.ActorID != cmd.ActorID {
+				return IncidentCase{}, ErrIdempotencyConflict
+			}
+			return o.replayValidationFeedback(ctx, cmd)
+		}
+	}
 	if cmd.Phase == PhaseRegression {
 		release := workflowCommandLocks.acquire("continue-regression:" + cmd.IdempotencyKey)
 		defer release()
@@ -765,7 +775,7 @@ func (o *CaseOrchestrator) ContinueWithEvidence(ctx context.Context, cmd Continu
 			return replayed, replayErr
 		}
 	}
-	if incident.Status != CaseWaitingEvidence && incident.Status != CaseNotReproduced && incident.Status != CaseFixFailed && incident.Status != CaseDeploymentUnverified && incident.Status != CaseMergeConflict {
+	if incident.Status != CaseWaitingEvidence && incident.Status != CaseNotReproduced && incident.Status != CaseReproduced && incident.Status != CaseFixFailed && incident.Status != CaseDeploymentUnverified && incident.Status != CaseMergeConflict {
 		return IncidentCase{}, ErrApprovalNotReady
 	}
 	if incident.Status == CaseDeploymentUnverified || incident.Status == CaseMergeConflict {
@@ -792,6 +802,15 @@ func (o *CaseOrchestrator) ContinueWithEvidence(ctx context.Context, cmd Continu
 		return IncidentCase{}, fmt.Errorf("cannot continue phase %q from %s", cmd.Phase, incident.Status)
 	}
 	input := CloneRawMessage(cmd.InputJSON)
+	eventType := "evidence_continued"
+	if incident.Status == CaseReproduced {
+		var inputErr error
+		input, inputErr = o.prepareValidationFeedbackInput(ctx, incident, cmd, input)
+		if inputErr != nil {
+			return IncidentCase{}, inputErr
+		}
+		eventType = "validation_feedback_submitted"
+	}
 	continuationIdentity := ""
 	if phase == PhaseRegression {
 		previous, loadErr := o.store.GetAttempt(ctx, incident.CurrentAttemptID)
@@ -821,7 +840,72 @@ func (o *CaseOrchestrator) ContinueWithEvidence(ctx context.Context, cmd Continu
 		payload := mustJSON(map[string]string{"attempt_id": attempt.ID, "continuation_identity_sha256": continuationIdentity})
 		return o.beginPhaseWithUpdateAndPayload(ctx, incident, to, attempt, cmd.Bug, cmd.Bot, cmd.IdempotencyKey, cmd.ActorID, "evidence_continued", CaseSnapshotUpdate{}, payload)
 	}
-	return o.beginPhase(ctx, incident, to, attempt, cmd.Bug, cmd.Bot, cmd.IdempotencyKey, cmd.ActorID, "evidence_continued")
+	return o.beginPhase(ctx, incident, to, attempt, cmd.Bug, cmd.Bot, cmd.IdempotencyKey, cmd.ActorID, eventType)
+}
+
+func (o *CaseOrchestrator) prepareValidationFeedbackInput(ctx context.Context, incident IncidentCase, cmd ContinueWithEvidenceCommand, input json.RawMessage) (json.RawMessage, error) {
+	if cmd.Phase != PhaseValidation {
+		return nil, ErrApprovalNotReady
+	}
+	if cmd.IdempotencyKey != ReviseValidationKey(incident.ID, incident.CurrentAttemptID, cmd.ExpectedVersion) {
+		return nil, ErrApprovalScope
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(input, &fields); err != nil || fields == nil {
+		return nil, errors.Join(errors.New("validation feedback input must be an object"), err)
+	}
+	feedback, _ := fields["user_input"].(string)
+	feedback = strings.TrimSpace(feedback)
+	if feedback == "" {
+		return nil, errors.New("validation feedback is required")
+	}
+	if len([]byte(feedback)) > 4000 {
+		return nil, errors.New("validation feedback is too large")
+	}
+	if containsSensitiveData([]byte(feedback)) {
+		return nil, errors.New("validation feedback contains sensitive data")
+	}
+	source, loadErr := o.store.GetAttempt(ctx, incident.CurrentAttemptID)
+	if loadErr != nil || source.CaseID != incident.ID || source.CycleNumber != incident.CycleNumber ||
+		source.Phase != PhaseValidation || source.Mode != AttemptReproduce || source.Status != AttemptStatusSucceeded ||
+		source.BotKey != cmd.Bot.Key || source.AgentTarget != cmd.Bot.Target {
+		return nil, ErrApprovalScope
+	}
+	previous, parseErr := ParseValidationResult(source.OutputJSON)
+	if parseErr != nil || previous.VerificationStatus != "reproduced" {
+		return nil, ErrApprovalScope
+	}
+	fields["force_browser_replan"] = true
+	fields["validation_feedback"] = map[string]any{
+		"kind":                         "user_validation_feedback",
+		"reason":                       feedback,
+		"source_validation_attempt_id": source.ID,
+		"previous_result":              previous,
+	}
+	return mustJSON(fields), nil
+}
+
+func (o *CaseOrchestrator) replayValidationFeedback(ctx context.Context, cmd ContinueWithEvidenceCommand) (IncidentCase, error) {
+	attempt, err := o.store.GetAttempt(ctx, stableID("attempt", cmd.IdempotencyKey))
+	if err != nil || attempt.CaseID != cmd.CaseID || attempt.Phase != PhaseValidation || attempt.Mode != AttemptReproduce ||
+		attempt.BotKey != cmd.Bot.Key || attempt.AgentTarget != cmd.Bot.Target || strings.TrimSpace(attempt.ParentAttemptID) == "" {
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	source, err := o.store.GetAttempt(ctx, attempt.ParentAttemptID)
+	if err != nil {
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	replaySource := IncidentCase{
+		ID:               cmd.CaseID,
+		Status:           CaseReproduced,
+		CycleNumber:      source.CycleNumber,
+		CurrentAttemptID: source.ID,
+	}
+	expectedInput, err := o.prepareValidationFeedbackInput(ctx, replaySource, cmd, CloneRawMessage(cmd.InputJSON))
+	if err != nil || string(expectedInput) != string(attempt.InputJSON) {
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	return o.store.GetCase(ctx, cmd.CaseID)
 }
 
 func (o *CaseOrchestrator) ContinueBrowserRecoveryWithEvidence(ctx context.Context, cmd ContinueWithEvidenceCommand, supplied BrowserRecoveryOperation) (IncidentCase, error) {
@@ -2071,19 +2155,12 @@ func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCa
 	}
 	switch cmd.Outcome {
 	case PhaseOutcomeReproduced:
-		investigationInput, err := o.buildInitialInvestigationInput(ctx, attempt, cmd.OutputJSON)
-		if err != nil {
-			return IncidentCase{}, err
-		}
-		investigationInput, err = o.carryRootCauseDisputeAfterValidationRefresh(ctx, attempt, investigationInput)
-		if err != nil {
+		// Validate and freeze the handoff prerequisites now, but wait for the
+		// operator to accept the observed scenario before starting diagnosis.
+		if _, err := o.buildInitialInvestigationInput(ctx, attempt, cmd.OutputJSON); err != nil {
 			return IncidentCase{}, err
 		}
 		add(CaseReproduced, "validation_reproduced", "agent", actor, cmd.OutputJSON)
-		add(CaseInvestigating, "investigation_started", "studio", "orchestrator", map[string]string{"parent_attempt_id": attempt.ID})
-		created := newAttempt(incident, PhaseInvestigation, "", cmd.IdempotencyKey+":investigation", BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget}, investigationInput, attempt.ID)
-		next = &created
-		update.CurrentAttemptID = workflowStringPtr(created.ID)
 	case PhaseOutcomeNotReproduced:
 		add(CaseNotReproduced, "validation_not_reproduced", "agent", actor, cmd.OutputJSON)
 	case PhaseOutcomeNeedsEvidence:
@@ -2292,7 +2369,20 @@ func phaseScheduleErrorMessage(cause error) string {
 	if errors.Is(cause, ErrValidatorNotInstalled) {
 		return "验证机器人未安装，请重新部署当前机器人"
 	}
-	return "阶段 Agent 启动失败，请检查运行环境后重试"
+	const fallback = "阶段 Agent 启动失败，请检查运行环境后重试"
+	if cause == nil {
+		return fallback
+	}
+	detail := strings.TrimSpace(cause.Error())
+	if detail == "" || containsSensitiveData([]byte(detail)) {
+		return fallback
+	}
+	const maxDetailRunes = 600
+	runes := []rune(detail)
+	if len(runes) > maxDetailRunes {
+		detail = string(runes[:maxDetailRunes]) + "…"
+	}
+	return "阶段 Agent 启动失败：" + detail
 }
 
 type phaseScheduleStartError struct {
@@ -2442,7 +2532,7 @@ func continuationTarget(incident IncidentCase, requested Phase) (CaseStatus, Att
 	phase := requested
 	if phase == "" {
 		switch incident.Status {
-		case CaseNotReproduced:
+		case CaseNotReproduced, CaseReproduced:
 			phase = PhaseValidation
 		case CaseFixFailed:
 			phase = PhaseFix

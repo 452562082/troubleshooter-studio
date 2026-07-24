@@ -47,15 +47,35 @@ description: Bug 验证 Agent 统一入口。用于主动复现、修复后回�
 9. 停在验证状态，不继续做原因分析。
 10. 如果已拿到能复现问题的证据，停止扩展排查；不要继续 grep 业务代码或生成修复方案。
 
+### 困难与用户反馈
+
+- 无法继续时不要猜测、不要机械重复同一计划，也不要只返回“定位失败”“验证失败”。返回 `insufficient_info`，在 `gaps` 中写出一个用户能直接回答的最小问题，并说明卡住的具体动作或判断条件。
+- 问题应围绕真实业务流程，例如“选择文件后是否会自动上传，还是还存在独立提交按钮”，不能要求用户理解 locator、selector、runner、scenario hash 等内部实现。
+- 用户回复后，把最后一条非空回复视为当前场景修正；重新复述场景、重新生成完整 `scenario_contract`，再制定新的验证策略。不得只换 locator 后沿用旧语义。
+- 每轮只解决当前最小阻塞项；仍有困难就再次提出新的具体问题。验证结果由 Studio 留给用户确认，用户不认可时继续按反馈重验，不得自动进入根因分析。
+
 ### Studio 宿主浏览器协议
 
 在 Studio 故障闭环的 Web validation / regression attempt 中，浏览器由 **Studio BrowserVerifier** 在宿主进程执行，不由 Agent CLI 或生成工作区启动：
 
-1. Studio 第一次调用 validator 时注入严格的 BrowserPlan 规划协议；此时只返回声明式计划，不提前返回验证成功。
+1. Studio 第一次调用 validator 时注入严格的 BrowserPlan 规划协议；此时先理解当前验证语义并生成 `scenario_contract`，再返回声明式执行计划，不提前返回验证成功。
 2. 计划只能使用 Studio 允许的导航、点击、填充、按键、选择、受控文件上传、等待和截图动作，不得携带 Cookie、Authorization、账号、密码、宿主路径或任意 JavaScript。`upload_file.file_ref` 必须来自 Studio 注入的 `controlled_upload_files`；没有受控输入时返回真实业务资料缺口，不得编造路径、跳过前置上传或把提交按钮当成文件控件。
 3. Studio 校验 BrowserPlan 后在宿主 Chromium 执行、脱敏 Network / console / action trace，并冻结当前 attempt 的 artifact；这些宿主证据和渲染截图是权威事实，Agent 不得改写路径或伪造引用。
 4. locator 首次失败时，Studio 只允许 validator 修正失败步骤及后续步骤一次，不得重复已完成动作。
 5. Studio 最后一次调用 validator 时注入执行报告和精确 artifact 引用；此时才按 `ValidationResult` 输出契约给出结论。Web 成功结论必须绑定 Studio 提供的最终渲染截图。
+
+#### scenario_contract 语义合同
+
+`scenario_contract` 由验证 Agent 生成，负责描述“当前到底要验证什么”；Studio 宿主只校验合同结构、动作/断言引用、安全边界和真实证据，不用业务关键词替 Agent 推断验证目标。
+
+- 原 Bug 是历史上下文。存在用户补充时，以最后一条非空用户补充作为当前验证想法；它覆盖冲突的旧期望、旧实际表现和旧合同。
+- 用户认为上次验证有问题并提出新想法后，必须重新生成完整合同：重新填写 `goal`、`basis`、`causal_action_ids` 和 `evidence`，不得只修改 locator 或沿用旧合同结论。
+- `basis` 必须使用 Studio 注入的 `scenario_contract_basis`。用户补充场景通常为 `latest_user_clarification`，原工单为 `bug`，排障要求补采证据时为 `evidence_refresh`。
+- `goal` 用一句话表达当前可证伪的成功标准，不复述根因猜测。例如“缺少必填字段时业务请求应被拒绝并显示提示”，而不是“后端校验函数有问题”。
+- `causal_action_ids` 只列真正产生验证证据的动作。选择文件可能已经自动触发上传/导入请求；除非工单步骤或当前页面观察明确存在独立提交控件，不得凭经验虚构后续“提交/创建”动作。
+- `evidence` 必须覆盖计划中的全部断言：页面现象使用 `ui_assertions`，请求结果或 JSON 字段关系使用对应的 `response_assertion` ID。请求阶段应拒绝的场景使用 `http_status_rejected`，不能用稍后的异步处理失败冒充当次请求被拒绝。
+- `context_sha256` 由 Studio 根据原工单、最新用户补充、环境和策略绑定，Agent不得填写或复用。用户补充变化后，旧合同和旧验证 recipe 会自动失效。
+- 合同决定语义，宿主证据决定事实。即使 Agent认为某动作成功，也只能以 Studio 冻结的 action、Network、截图和机器断言为准。
 
 Agent **不得直接启动 Playwright**、Chromium、`browser_collect.mjs` 或自行读取/写入登录 session。Studio 返回 `browser_login_required` 时，不要把它改写成 Agent 输出的业务 `gaps`，也不要索要或填写账号密码；停止当前结论，交由用户在 Studio 打开的可见验证浏览器中手动登录。Studio 会把该稳定证据限制映射到 `waiting_evidence`，并在登录后创建父链明确的新 attempt 继续同一 Case / cycle，只向后续执行提供宿主管理的 session，不把 Cookie 写入 Case 输入或 artifact。
 

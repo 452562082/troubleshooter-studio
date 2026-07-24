@@ -47,6 +47,22 @@ describe('incident Case controller', () => {
     expect(controller.detail.value?.case.version).toBe(7)
   })
 
+  it('treats list refresh as authoritative and removes deleted Cases', async () => {
+    const listCases = vi.fn()
+      .mockResolvedValueOnce([detail(3, 'case-delete').case, detail(2, 'case-keep').case])
+      .mockResolvedValueOnce([detail(2, 'case-keep').case])
+    const controller = createIncidentCaseController({ listCases })
+
+    await controller.refreshCases()
+    await controller.selectCase('case-delete').catch(() => undefined)
+    controller.applySnapshot(detail(3, 'case-delete'))
+    await controller.refreshCases()
+
+    expect(controller.cases.value.map(item => item.id)).toEqual(['case-keep'])
+    expect(controller.selectedCaseID.value).toBe('')
+    expect(controller.detail.value).toBeNull()
+  })
+
   it('applies a returned Case state before a detail refresh is available', () => {
     const controller = createIncidentCaseController()
     const blocked = detail(7)
@@ -430,6 +446,32 @@ describe('incident Case controller', () => {
         target_environment: 'test',
         user_input: '',
         force_browser_replan: true,
+      },
+    })
+  })
+
+  it('marks user feedback as a scenario contract revision for every validation retry', () => {
+    const snapshot = detail(4)
+    snapshot.case.status = 'reproduced'
+    snapshot.case.current_attempt_id = 'validation-reproduced'
+    snapshot.attempts = [{
+      id: 'validation-reproduced', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce',
+      status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex',
+      input_json: { mode: 'reproduce', target_environment: 'test' }, output_json: {},
+      parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {},
+    }]
+
+    expect(continuationForDetail(snapshot, '不存在第二次提交')).toEqual({
+      phase: 'validation',
+      input_json: {
+        mode: 'reproduce',
+        target_environment: 'test',
+        user_input: '不存在第二次提交',
+        force_browser_replan: true,
+        scenario_contract_revision: {
+          reason: 'user_feedback',
+          source_attempt_id: 'validation-reproduced',
+        },
       },
     })
   })

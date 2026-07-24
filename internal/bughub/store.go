@@ -14,6 +14,8 @@ type Store struct {
 	root string
 }
 
+var ErrBugHistoryRequired = errors.New("only archived Bug history can be deleted")
+
 const (
 	BugInboxActive  = "active"
 	BugInboxHistory = "history"
@@ -152,6 +154,39 @@ func (s *Store) Archive(id, reason string) error {
 		return s.writeAll(items)
 	}
 	return os.ErrNotExist
+}
+
+// DeleteHistory permanently removes one local archived Bug snapshot. It never
+// calls the source Bug platform. Missing records are an idempotent no-op.
+func (s *Store) DeleteHistory(id string) (bool, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, errors.New("bug id is required")
+	}
+	items, err := s.readAll()
+	if err != nil {
+		return false, err
+	}
+	normalizeStoredBugs(items)
+	next := make([]Bug, 0, len(items))
+	found := false
+	for _, item := range items {
+		if item.ID != id {
+			next = append(next, item)
+			continue
+		}
+		found = true
+		if item.InboxState != BugInboxHistory {
+			return false, ErrBugHistoryRequired
+		}
+	}
+	if !found {
+		return false, nil
+	}
+	if err := s.writeAll(next); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // PruneStale 将指定来源+平台中不在 keepIDs 集合里的 Bug 移出收件箱。

@@ -109,6 +109,46 @@ assertions:
 	}
 }
 
+func TestParseBrowserPlanValidatesScenarioContractReferences(t *testing.T) {
+	valid := `version: 2
+device_profile: desktop
+scenario_contract:
+  version: 1
+  goal: 缺少必填字段时请求应被拒绝
+  basis: latest_user_clarification
+  causal_action_ids: [upload]
+  evidence:
+    - kind: response_assertion
+      assertion_id: reject-upload
+start_url: https://app.example.com
+actions:
+  - id: upload
+    action: upload_file
+    locator: {kind: css, value: 'input[type="file"]'}
+    file_ref: case-file
+assertions: []
+response_assertions:
+  - id: reject-upload
+    action_id: upload
+    kind: http_status_rejected
+`
+	plan, err := ParseBrowserPlan([]byte(valid))
+	if err != nil || plan.ScenarioContract == nil || plan.ScenarioContract.CausalActionIDs[0] != "upload" {
+		t.Fatalf("plan=%+v err=%v", plan, err)
+	}
+
+	tests := []string{
+		strings.Replace(valid, "causal_action_ids: [upload]", "causal_action_ids: [missing]", 1),
+		strings.Replace(valid, "assertion_id: reject-upload", "assertion_id: missing", 1),
+		strings.Replace(valid, "evidence:\n    - kind: response_assertion\n      assertion_id: reject-upload", "evidence:\n    - kind: ui_assertions", 1),
+	}
+	for _, raw := range tests {
+		if _, err := ParseBrowserPlan([]byte(raw)); err == nil {
+			t.Fatalf("invalid scenario contract was accepted:\n%s", raw)
+		}
+	}
+}
+
 func TestParseBrowserPlanV2AcceptsMobileResponseFieldAssertion(t *testing.T) {
 	plan, err := ParseBrowserPlan([]byte(`version: 2
 device_profile: mobile

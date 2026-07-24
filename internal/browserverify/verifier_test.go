@@ -129,6 +129,61 @@ func TestValidateWorkerPlanShapeAcceptsNegativeTextAssertion(t *testing.T) {
 	}
 }
 
+func TestHostVerifierAcceptsHTTPStatusRejectedResponseAssertion(t *testing.T) {
+	worker := &fakeWorker{Result: completedWorkerResult()}
+	verifier := newTestHostVerifier(t, worker)
+	request := validBrowserRequest(t)
+	request.Plan = bughub.BrowserPlan{
+		Version:  bughub.BrowserPlanVersion,
+		StartURL: "https://app.test/import",
+		Actions: []bughub.BrowserAction{{
+			ID:     "submit-import",
+			Action: "click",
+			Locator: &bughub.BrowserLocator{
+				Kind: "text", Value: "Import",
+			},
+		}},
+		ResponseAssertions: []bughub.BrowserResponseAssertion{{
+			ID:       "reject-invalid-import",
+			ActionID: "submit-import",
+			Kind:     "http_status_rejected",
+		}},
+	}
+
+	if _, err := verifier.Execute(context.Background(), request); err != nil {
+		t.Fatalf("HTTP rejection assertion was rejected by the host verifier: %v", err)
+	}
+	if worker.Calls != 1 {
+		t.Fatalf("worker calls = %d, want 1", worker.Calls)
+	}
+}
+
+func TestValidateWorkerPlanShapeRejectsHTTPStatusAssertionWithJSONFields(t *testing.T) {
+	request := validBrowserRequest(t)
+	request.Plan = bughub.BrowserPlan{
+		Version:  bughub.BrowserPlanVersion,
+		StartURL: "https://app.test/import",
+		Actions: []bughub.BrowserAction{{
+			ID:     "submit-import",
+			Action: "click",
+			Locator: &bughub.BrowserLocator{
+				Kind: "text", Value: "Import",
+			},
+		}},
+		ResponseAssertions: []bughub.BrowserResponseAssertion{{
+			ID:         "reject-invalid-import",
+			ActionID:   "submit-import",
+			Kind:       "http_status_rejected",
+			LeftField:  "result.status",
+			RightField: "expected.status",
+		}},
+	}
+
+	if err := validateWorkerPlanShape(request.Plan); err == nil {
+		t.Fatal("expected HTTP rejection assertion with JSON fields to be rejected")
+	}
+}
+
 func completedWorkerResult() workerResult {
 	return workerResult{
 		Status:              "completed",

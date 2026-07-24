@@ -57,17 +57,18 @@ type BrowserAssertion struct {
 	Value string `yaml:"value" json:"value"`
 }
 
-// BrowserResponseAssertion evaluates a narrow relationship between two JSON
-// fields in an XHR/fetch response caused by one browser action. The worker
-// never persists the response body or either field value; only comparison
-// counts are emitted as evidence.
+// BrowserResponseAssertion evaluates either a narrow relationship between two
+// JSON fields or the HTTP outcome of an XHR/fetch response caused by one
+// browser action. The worker never persists the response body or field values;
+// only bounded comparison or status counts are emitted as evidence.
 type BrowserResponseAssertion struct {
 	ID          string `yaml:"id" json:"id"`
 	ActionID    string `yaml:"action_id" json:"action_id"`
 	URLContains string `yaml:"url_contains,omitempty" json:"url_contains,omitempty"`
+	Method      string `yaml:"method,omitempty" json:"method,omitempty"`
 	Kind        string `yaml:"kind" json:"kind"`
-	LeftField   string `yaml:"left_field" json:"left_field"`
-	RightField  string `yaml:"right_field" json:"right_field"`
+	LeftField   string `yaml:"left_field,omitempty" json:"left_field,omitempty"`
+	RightField  string `yaml:"right_field,omitempty" json:"right_field,omitempty"`
 }
 
 // BrowserRequestCapture declares the minimum request parameters that the
@@ -308,7 +309,6 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 		prefix := fmt.Sprintf("response_assertions[%d]", i)
 		for field, value := range map[string]string{
 			"id": assertion.ID, "action_id": assertion.ActionID, "kind": assertion.Kind,
-			"left_field": assertion.LeftField, "right_field": assertion.RightField,
 		} {
 			if err := validateBrowserPlanString(prefix+"."+field, value, true); err != nil {
 				return BrowserPlan{}, err
@@ -317,6 +317,12 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 		if err := validateBrowserPlanString(prefix+".url_contains", assertion.URLContains, false); err != nil {
 			return BrowserPlan{}, err
 		}
+		if err := validateBrowserPlanString(prefix+".method", assertion.Method, false); err != nil {
+			return BrowserPlan{}, err
+		}
+		if assertion.Method != "" && assertion.Method != strings.ToUpper(assertion.Method) {
+			return BrowserPlan{}, fmt.Errorf("browser plan %s.method must be uppercase", prefix)
+		}
 		if _, duplicate := seenAssertionIDs[assertion.ID]; duplicate {
 			return BrowserPlan{}, fmt.Errorf("browser plan response assertion id %q is duplicated", assertion.ID)
 		}
@@ -324,26 +330,32 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 		if _, exists := seenIDs[assertion.ActionID]; !exists {
 			return BrowserPlan{}, fmt.Errorf("browser plan %s.action_id %q does not reference an action", prefix, assertion.ActionID)
 		}
-		pairedCapture := false
-		for _, capture := range plan.RequestCaptures {
-			if capture.ActionID == assertion.ActionID {
-				pairedCapture = true
-				break
-			}
-		}
-		if !pairedCapture {
-			return BrowserPlan{}, fmt.Errorf("browser plan %s.action_id %q requires a request capture for the same action", prefix, assertion.ActionID)
-		}
 		for _, action := range plan.Actions {
 			if action.ID == assertion.ActionID && (action.Action == "screenshot" || action.Action == "wait_for") {
 				return BrowserPlan{}, fmt.Errorf("browser plan %s.action_id %q does not reference a request-capable action", prefix, assertion.ActionID)
 			}
 		}
-		if assertion.Kind != "json_fields_not_equal" && assertion.Kind != "json_fields_equal" {
+		switch assertion.Kind {
+		case "http_status_rejected":
+			if assertion.LeftField != "" || assertion.RightField != "" {
+				return BrowserPlan{}, fmt.Errorf("browser plan %s kind http_status_rejected forbids JSON field paths", prefix)
+			}
+		case "json_fields_not_equal", "json_fields_equal":
+			pairedCapture := false
+			for _, capture := range plan.RequestCaptures {
+				if capture.ActionID == assertion.ActionID {
+					pairedCapture = true
+					break
+				}
+			}
+			if !pairedCapture {
+				return BrowserPlan{}, fmt.Errorf("browser plan %s.action_id %q requires a request capture for the same action", prefix, assertion.ActionID)
+			}
+			if !validBrowserJSONFieldPath(assertion.LeftField) || !validBrowserJSONFieldPath(assertion.RightField) {
+				return BrowserPlan{}, fmt.Errorf("browser plan %s contains an invalid JSON field path", prefix)
+			}
+		default:
 			return BrowserPlan{}, fmt.Errorf("browser plan %s.kind %q is not supported", prefix, assertion.Kind)
-		}
-		if !validBrowserJSONFieldPath(assertion.LeftField) || !validBrowserJSONFieldPath(assertion.RightField) {
-			return BrowserPlan{}, fmt.Errorf("browser plan %s contains an invalid JSON field path", prefix)
 		}
 	}
 	return plan, nil

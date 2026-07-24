@@ -41,6 +41,7 @@ import {
   executeAction,
   launchPinnedBrowser,
   resolvePinnedTarget,
+  resolveUploadFileLocator,
   saveLoginStorageState,
   startPinnedProxy,
   validateWorkerRequest,
@@ -451,6 +452,29 @@ test('browser worker validates mobile response assertions without requiring a UI
   assert.throws(() => validateWorkerRequest(invalid), /action_id/);
 });
 
+test('browser worker validates HTTP rejection assertions without request captures or JSON field paths', () => {
+  const request = baseRequest();
+  request.plan.version = 2;
+  request.plan.actions = [{
+    id: 'submit-invalid-import',
+    action: 'click',
+    locator: { kind: 'role', value: 'button', name: '导入', exact: true },
+  }];
+  request.plan.assertions = [];
+  request.plan.response_assertions = [{
+    id: 'import-must-reject-invalid-row',
+    action_id: 'submit-invalid-import',
+    url_contains: '/admin/common/excel/import',
+    method: 'POST',
+    kind: 'http_status_rejected',
+  }];
+  assert.doesNotThrow(() => validateWorkerRequest(request));
+
+  const invalid = structuredClone(request);
+  invalid.plan.response_assertions[0].left_field = 'code';
+  assert.throws(() => validateWorkerRequest(invalid), /forbids JSON field paths/);
+});
+
 test('browser worker validates request captures and rejects credential field paths', () => {
   const request = baseRequest();
   request.plan.version = 2;
@@ -595,6 +619,38 @@ test('response assertion capture binds one causal JSON response without requirin
   assert.equal(bodyReads, 1);
 });
 
+test('HTTP rejection assertions bind method and status without reading response bodies', async () => {
+  const assertion = {
+    id: 'import-must-reject-invalid-row',
+    action_id: 'submit-invalid-import',
+    url_contains: '/admin/common/excel/import',
+    method: 'POST',
+    kind: 'http_status_rejected',
+  };
+  let bodyReads = 0;
+  const response = (method, status) => ({
+    request: () => ({ resourceType: () => 'xhr', method: () => method }),
+    url: () => 'https://api.test/admin/common/excel/import',
+    status: () => status,
+    body: async () => {
+      bodyReads += 1;
+      throw new Error('status assertions must not read the response body');
+    },
+  });
+
+  const accepted = await evaluateResponseAssertionsForResponse(response('POST', 200), { actionID: 'submit-invalid-import' }, [assertion], {});
+  assert.equal(accepted.length, 1);
+  assert.deepEqual(accepted[0].evaluation, { matched_objects: 1, violations: 1, passed: false });
+
+  const rejected = await evaluateResponseAssertionsForResponse(response('POST', 422), { actionID: 'submit-invalid-import' }, [assertion], {});
+  assert.equal(rejected.length, 1);
+  assert.deepEqual(rejected[0].evaluation, { matched_objects: 1, violations: 0, passed: true });
+
+  const preflight = await evaluateResponseAssertionsForResponse(response('OPTIONS', 204), { actionID: 'submit-invalid-import' }, [assertion], {});
+  assert.deepEqual(preflight, []);
+  assert.equal(bodyReads, 0);
+});
+
 test('login worker requires visible mode, one absolute state path, and an original application URL', () => {
   assert.doesNotThrow(() => validateWorkerRequest(baseLoginRequest()));
 
@@ -698,6 +754,8 @@ test('upload_file accepts only a host-controlled file reference and uses its res
     count: async () => 1,
     nth: () => locator,
     isVisible: async () => true,
+    isDisabled: async () => false,
+    and: () => locator,
     setInputFiles: async (value) => received.push(value),
   };
   const page = { locator: () => locator };
@@ -720,6 +778,126 @@ test('upload_file accepts only a host-controlled file reference and uses its res
   const arbitraryPath = structuredClone(request);
   arbitraryPath.plan.actions[0].file_ref = uploadPath;
   assert.throws(() => validateWorkerRequest(arbitraryPath), /host-controlled/);
+});
+
+test('upload_file accepts one hidden file input without weakening visibility checks for other actions', async () => {
+  const uploadDir = mkdtempSync(join(tmpdir(), 'browser-hidden-upload-action-'));
+  const lexicalUploadPath = join(uploadDir, 'fixture.xlsx');
+  writeFileSync(lexicalUploadPath, Buffer.from('xlsx-fixture'));
+  const uploadPath = realpathSync(lexicalUploadPath);
+  test.after(() => rmSync(uploadDir, { recursive: true, force: true }));
+
+  const received = [];
+  const fileInput = {
+    isVisible: async () => false,
+    getAttribute: async (name) => name === 'type' ? 'file' : '',
+    isDisabled: async () => false,
+    setInputFiles: async (value) => received.push(value),
+  };
+  const candidates = {
+    count: async () => 1,
+    nth: () => fileInput,
+    and: () => candidates,
+  };
+  const request = baseRequest();
+  request.upload_files = { fixture: uploadPath };
+  request.plan.actions = [{
+    id: 'upload',
+    action: 'upload_file',
+    locator: { kind: 'css', value: 'input[type="file"]' },
+    file_ref: 'fixture',
+  }];
+  const page = {
+    locator: (selector) => {
+      assert.ok(selector === 'css=input[type="file"]' || selector === 'input[type="file"]');
+      return candidates;
+    },
+  };
+
+  await executeAction(
+    page,
+    request.plan.actions[0],
+    request,
+    0,
+    async () => ({ loginRequired: false, path: '' }),
+    null,
+    null,
+  );
+
+  assert.deepEqual(received, [uploadPath]);
+});
+
+test('upload_file safely recovers a visible choose-file button hint to the only hidden file input', async () => {
+  const uploadDir = mkdtempSync(join(tmpdir(), 'browser-button-upload-action-'));
+  const lexicalUploadPath = join(uploadDir, 'fixture.xlsx');
+  writeFileSync(lexicalUploadPath, Buffer.from('xlsx-fixture'));
+  const uploadPath = realpathSync(lexicalUploadPath);
+  test.after(() => rmSync(uploadDir, { recursive: true, force: true }));
+
+  const received = [];
+  const chooseFileButton = {
+    isVisible: async () => true,
+    getAttribute: async (name) => name === 'type' ? 'button' : '',
+    setInputFiles: async () => assert.fail('upload must never target the visible proxy button'),
+  };
+  const hiddenFileInput = {
+    isVisible: async () => false,
+    getAttribute: async (name) => name === 'type' ? 'file' : '',
+    isDisabled: async () => false,
+    setInputFiles: async (value) => received.push(value),
+  };
+  const noHintedFileInputs = { count: async () => 0, nth: () => assert.fail('button must not intersect the file input') };
+  const request = baseRequest();
+  request.upload_files = { fixture: uploadPath };
+  request.plan.actions = [{
+    id: 'upload',
+    action: 'upload_file',
+    locator: { kind: 'role', value: 'button', name: '选择文件', exact: true },
+    file_ref: 'fixture',
+  }];
+  const page = {
+    getByRole: () => ({ count: async () => 1, nth: () => chooseFileButton, and: () => noHintedFileInputs }),
+    locator: (selector) => {
+      assert.equal(selector, 'input[type="file"]');
+      return { count: async () => 1, nth: () => hiddenFileInput };
+    },
+  };
+
+  await executeAction(
+    page,
+    request.plan.actions[0],
+    request,
+    0,
+    async () => ({ loginRequired: false, path: '' }),
+    null,
+    null,
+  );
+
+  assert.deepEqual(received, [uploadPath]);
+});
+
+test('upload_file recovery refuses to guess between multiple hidden file inputs', async () => {
+  const hiddenFileInputs = [
+    { isDisabled: async () => false },
+    { isDisabled: async () => false },
+  ];
+  const noHintedFileInputs = { count: async () => 0, nth: () => assert.fail('button must not intersect the file inputs') };
+  const page = {
+    getByRole: () => ({ count: async () => 1, nth: () => ({}), and: () => noHintedFileInputs }),
+    locator: (selector) => {
+      assert.equal(selector, 'input[type="file"]');
+      return { count: async () => hiddenFileInputs.length, nth: index => hiddenFileInputs[index] };
+    },
+  };
+
+  await assert.rejects(
+    resolveUploadFileLocator(
+      page,
+      { kind: 'role', value: 'button', name: '选择文件', exact: true },
+      { timeoutMs: 0, pollMs: 10 },
+    ),
+    error => error?.code === 'locator_ambiguous' && /multiple file inputs/.test(error.message),
+  );
 });
 
 test('assertAllowedURL re-resolves every navigation and request', async () => {

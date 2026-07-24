@@ -22,7 +22,7 @@ const PROGRESS_PREFIX = 'TSHOOT_BROWSER_PROGRESS ';
 const ALLOWED_ACTIONS = new Set(['goto', 'click', 'fill', 'press', 'select', 'upload_file', 'wait_for', 'screenshot']);
 const ALLOWED_LOCATORS = new Set(['role', 'label', 'text', 'placeholder', 'test_id', 'css']);
 const ALLOWED_ASSERTIONS = new Set(['visible_text', 'not_visible_text', 'page_loaded']);
-const ALLOWED_RESPONSE_ASSERTIONS = new Set(['json_fields_not_equal', 'json_fields_equal']);
+const ALLOWED_RESPONSE_ASSERTIONS = new Set(['json_fields_not_equal', 'json_fields_equal', 'http_status_rejected']);
 const READ_ONLY_PROD_ACTIONS = new Set(['goto', 'wait_for', 'screenshot']);
 export const EVIDENCE_MAX_RECORDS = 1000;
 export const EVIDENCE_MAX_BYTES = 1 << 20;
@@ -407,19 +407,24 @@ export function validateWorkerRequest(request) {
   const responseAssertionIDs = new Set();
   for (const assertion of plan.response_assertions ?? []) {
     if (!assertion || typeof assertion !== 'object' || Array.isArray(assertion)) throw new Error('response assertion must be an object');
-    ownKeys(assertion, new Set(['id', 'action_id', 'url_contains', 'kind', 'left_field', 'right_field']), 'response assertion');
+    ownKeys(assertion, new Set(['id', 'action_id', 'url_contains', 'method', 'kind', 'left_field', 'right_field']), 'response assertion');
     requiredString(assertion.id, 'response assertion id', 256);
     if (responseAssertionIDs.has(assertion.id)) throw new Error('response assertion id is duplicated');
     responseAssertionIDs.add(assertion.id);
     requiredString(assertion.action_id, 'response assertion action_id', 256);
     if (!ids.has(assertion.action_id)) throw new Error('response assertion action_id does not reference an action');
     if (ids.get(assertion.action_id) === 'screenshot' || ids.get(assertion.action_id) === 'wait_for') throw new Error('response assertion action_id must reference a request-capable action');
-		if (!requestCaptureActionIDs.has(assertion.action_id)) throw new Error('response assertion action_id requires a request capture for the same action');
     if (assertion.url_contains !== undefined) requiredString(assertion.url_contains, 'response assertion url_contains', 2048);
+    if (assertion.method !== undefined && !/^[A-Z][A-Z0-9!#$%&'*+.^_`|~-]{0,15}$/.test(assertion.method)) throw new Error('response assertion method is invalid');
     if (!ALLOWED_RESPONSE_ASSERTIONS.has(assertion.kind)) throw new Error('response assertion kind is not supported');
-    for (const field of ['left_field', 'right_field']) {
-      const value = requiredString(assertion[field], `response assertion ${field}`, 256);
-      if (!value.split('.').every((part) => /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(part))) throw new Error(`response assertion ${field} is invalid`);
+    if (assertion.kind === 'http_status_rejected') {
+      if (assertion.left_field !== undefined || assertion.right_field !== undefined) throw new Error('response assertion http_status_rejected forbids JSON field paths');
+    } else {
+      if (!requestCaptureActionIDs.has(assertion.action_id)) throw new Error('response assertion action_id requires a request capture for the same action');
+      for (const field of ['left_field', 'right_field']) {
+        const value = requiredString(assertion[field], `response assertion ${field}`, 256);
+        if (!value.split('.').every((part) => /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(part))) throw new Error(`response assertion ${field} is invalid`);
+      }
     }
   }
 }
@@ -469,7 +474,7 @@ function createResponseAssertionCollector(assertions = []) {
     matched_objects: 0,
     violations: 0,
     passed: false,
-    failure_reason: 'no_matching_json_object',
+    failure_reason: assertion.kind === 'http_status_rejected' ? 'no_matching_response' : 'no_matching_json_object',
   }]));
   return {
     assertions,
@@ -495,26 +500,41 @@ export async function evaluateResponseAssertionsForResponse(response, requestCon
   const browserRequest = response.request();
   const resourceType = String(browserRequest.resourceType?.() ?? '').toLowerCase();
   if (resourceType !== 'xhr' && resourceType !== 'fetch') return [];
+  const method = String(browserRequest.method?.() ?? '').toUpperCase();
   const matchingAssertions = assertions.filter((assertion) => (
     assertion.action_id === requestContext.actionID
     && (!assertion.url_contains || response.url().includes(assertion.url_contains))
+    && (!assertion.method || assertion.method === method)
   ));
   if (matchingAssertions.length === 0) return [];
+  const metadata = { method, url: response.url(), status: response.status() };
+  const statusObservations = matchingAssertions
+    .filter((assertion) => assertion.kind === 'http_status_rejected')
+    .map((assertion) => {
+      const violations = metadata.status >= 200 && metadata.status < 400 ? 1 : 0;
+      return {
+        assertion,
+        metadata,
+        evaluation: { matched_objects: 1, violations, passed: violations === 0 },
+      };
+    });
+  const jsonAssertions = matchingAssertions.filter((assertion) => assertion.kind !== 'http_status_rejected');
+  if (jsonAssertions.length === 0) return statusObservations;
   const declaredLength = Number(headers['content-length'] ?? headers['Content-Length'] ?? 0);
-  if (Number.isFinite(declaredLength) && declaredLength > RESPONSE_ASSERTION_BODY_MAX_BYTES) return [];
+  if (Number.isFinite(declaredLength) && declaredLength > RESPONSE_ASSERTION_BODY_MAX_BYTES) return statusObservations;
   let payload;
   try {
     const body = await response.body();
-    if (!Buffer.isBuffer(body) || body.length > RESPONSE_ASSERTION_BODY_MAX_BYTES) return [];
+    if (!Buffer.isBuffer(body) || body.length > RESPONSE_ASSERTION_BODY_MAX_BYTES) return statusObservations;
     payload = JSON.parse(body.toString('utf8'));
   } catch {
-    return [];
+    return statusObservations;
   }
-  return matchingAssertions.map((assertion) => ({
+  return statusObservations.concat(jsonAssertions.map((assertion) => ({
     assertion,
-    metadata: { method: browserRequest.method(), url: response.url(), status: response.status() },
+    metadata,
     evaluation: evaluateJSONResponseAssertion(payload, assertion),
-  }));
+  })));
 }
 
 function requestFactPathValue(value, fieldPath) {
@@ -2598,6 +2618,60 @@ export async function resolveVisibleInteractionLocator(page, locatorSpec, {
   }
 }
 
+async function enabledFileInputCandidates(candidates) {
+  const count = await candidates.count();
+  if (count > 64) {
+    throw new BrowserInteractionError('locator_ambiguous', 'upload locator matched too many elements');
+  }
+  const resolved = [];
+  for (let index = 0; index < count; index += 1) {
+    const candidate = candidates.nth(index);
+    if (typeof candidate.isDisabled === 'function' && await candidate.isDisabled().catch(() => true)) continue;
+    resolved.push(candidate);
+    if (resolved.length > 1) break;
+  }
+  return resolved;
+}
+
+// Native file inputs are commonly hidden behind a styled "choose file"
+// button. Playwright's file assignment is intentionally allowed to target
+// that hidden input, while every other state-changing action remains visible-only.
+// Prefer a unique file input matched by the supplied locator; if a model points
+// at the visible proxy button, recover only when the document contains exactly
+// one enabled file input. Never guess between multiple upload controls.
+export async function resolveUploadFileLocator(page, locatorSpec, {
+  timeoutMs = INTERACTION_LOCATOR_TIMEOUT_MS,
+  pollMs = INTERACTION_LOCATOR_POLL_MS,
+  now = Date.now,
+  wait = (milliseconds) => page.waitForTimeout(milliseconds),
+} = {}) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || !Number.isFinite(pollMs) || pollMs <= 0) {
+    throw new Error('upload locator wait options are invalid');
+  }
+  const documentCandidates = page.locator('input[type="file"]');
+  const hintedCandidates = buildLocator(page, locatorSpec).and(documentCandidates);
+  const startedAt = now();
+  while (true) {
+    const hinted = await enabledFileInputCandidates(hintedCandidates);
+    if (hinted.length === 1) return { locator: hinted[0], recovered: false };
+    if (hinted.length > 1) {
+      throw new BrowserInteractionError('locator_ambiguous', 'upload locator matched multiple file inputs');
+    }
+
+    const documentInputs = await enabledFileInputCandidates(documentCandidates);
+    if (documentInputs.length === 1) return { locator: documentInputs[0], recovered: true };
+    if (documentInputs.length > 1) {
+      throw new BrowserInteractionError('locator_ambiguous', 'document contains multiple file inputs');
+    }
+
+    if (now() - startedAt >= timeoutMs) {
+      throw new BrowserInteractionError('locator_not_found', 'upload locator did not match an enabled file input');
+    }
+    const remainingMs = timeoutMs - (now() - startedAt);
+    await wait(Math.min(pollMs, Math.max(1, remainingMs)));
+  }
+}
+
 function interactionBindingKey(locatorSpec) {
   if (!locatorSpec || typeof locatorSpec !== 'object') return '';
   return JSON.stringify([
@@ -2664,15 +2738,21 @@ export async function executeAction(page, action, request, index, captureScreens
         await dismissObstructions();
         let locator = await reusableInteractionBinding(previousBinding, action, index);
         if (!locator) {
-          try {
-            locator = await resolveVisibleInteractionLocator(page, action.locator, locatorOptions);
-          } catch (error) {
-            // Ambiguity is never auto-recovered because choosing a different
-            // control could mutate the wrong business state. A zero-match result
-            // may safely use the observed-document resolver below.
-            if (error?.code !== 'locator_not_found') throw error;
-            locator = await resolveObservedInteractionLocator(page, action);
-            if (typeof onLocatorRecovered === 'function') onLocatorRecovered(action);
+          if (action.action === 'upload_file') {
+            const upload = await resolveUploadFileLocator(page, action.locator, locatorOptions);
+            locator = upload.locator;
+            if (upload.recovered && typeof onLocatorRecovered === 'function') onLocatorRecovered(action);
+          } else {
+            try {
+              locator = await resolveVisibleInteractionLocator(page, action.locator, locatorOptions);
+            } catch (error) {
+              // Ambiguity is never auto-recovered because choosing a different
+              // control could mutate the wrong business state. A zero-match result
+              // may safely use the observed-document resolver below.
+              if (error?.code !== 'locator_not_found') throw error;
+              locator = await resolveObservedInteractionLocator(page, action);
+              if (typeof onLocatorRecovered === 'function') onLocatorRecovered(action);
+            }
           }
         }
         const applyInteraction = async () => {

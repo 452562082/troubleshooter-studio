@@ -446,18 +446,26 @@ func sanitizeBrowserActionEvidence(record *browserActionEvidence) error {
 }
 
 func sanitizeBrowserResponseAssertionEvidence(record *browserResponseAssertionEvidence) error {
-	if strings.TrimSpace(record.AssertionID) == "" || strings.TrimSpace(record.ActionID) == "" || (record.Kind != "json_fields_not_equal" && record.Kind != "json_fields_equal") || record.Status < 0 || record.MatchedObjects < 0 || record.Violations < 0 || record.Violations > record.MatchedObjects {
+	if strings.TrimSpace(record.AssertionID) == "" || strings.TrimSpace(record.ActionID) == "" || (record.Kind != "json_fields_not_equal" && record.Kind != "json_fields_equal" && record.Kind != "http_status_rejected") || record.Status < 0 || record.MatchedObjects < 0 || record.Violations < 0 || record.Violations > record.MatchedObjects {
 		return errors.New("frozen browser response assertion evidence is invalid")
 	}
-	if !validBrowserJSONFieldPath(record.LeftField) || !validBrowserJSONFieldPath(record.RightField) {
-		return errors.New("frozen browser response assertion field path is invalid")
-	}
 	if record.MatchedObjects == 0 {
-		if record.Passed || record.FailureReason != "no_matching_json_object" || record.URL != "" || record.Method != "" || record.Status != 0 {
+		wantReason := "no_matching_json_object"
+		if record.Kind == "http_status_rejected" {
+			wantReason = "no_matching_response"
+		}
+		if record.Passed || record.FailureReason != wantReason || record.URL != "" || record.Method != "" || record.Status != 0 {
 			return errors.New("frozen browser response assertion no-match evidence is invalid")
 		}
 	} else if record.FailureReason != "" || record.Passed != (record.Violations == 0) {
 		return errors.New("frozen browser response assertion result is inconsistent")
+	}
+	if record.Kind == "http_status_rejected" {
+		if record.LeftField != "" || record.RightField != "" || (record.MatchedObjects > 0 && (record.Status < 100 || record.Status > 599)) {
+			return errors.New("frozen browser HTTP status assertion evidence is invalid")
+		}
+	} else if !validBrowserJSONFieldPath(record.LeftField) || !validBrowserJSONFieldPath(record.RightField) {
+		return errors.New("frozen browser response assertion field path is invalid")
 	}
 	record.AssertionID = safeBoundedBrowserText(record.AssertionID, 128)
 	record.ActionID = safeBoundedBrowserText(record.ActionID, 128)

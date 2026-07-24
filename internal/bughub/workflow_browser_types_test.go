@@ -146,6 +146,58 @@ response_assertions:
 	}
 }
 
+func TestParseBrowserPlanV2AcceptsHTTPStatusRejectedWithoutRequestCapture(t *testing.T) {
+	plan, err := ParseBrowserPlan([]byte(`version: 2
+device_profile: desktop
+start_url: https://test.example.com/import
+actions:
+  - id: upload-invalid-file
+    action: upload_file
+    locator: {kind: css, value: 'input[type="file"][accept*=".xlsx"]'}
+    file_ref: invalid-media-sheet
+assertions: []
+response_assertions:
+  - id: import-must-reject-invalid-row
+    action_id: upload-invalid-file
+    url_contains: /admin/common/excel/import
+    method: POST
+    kind: http_status_rejected
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.RequestCaptures) != 0 || len(plan.ResponseAssertions) != 1 {
+		t.Fatalf("plan = %+v", plan)
+	}
+	assertion := plan.ResponseAssertions[0]
+	if assertion.Method != "POST" || assertion.Kind != "http_status_rejected" || assertion.LeftField != "" || assertion.RightField != "" {
+		t.Fatalf("response assertion = %+v", assertion)
+	}
+}
+
+func TestParseBrowserPlanV2RejectsFieldsOnHTTPStatusAssertion(t *testing.T) {
+	_, err := ParseBrowserPlan([]byte(`version: 2
+device_profile: desktop
+start_url: https://test.example.com/import
+actions:
+  - id: upload-invalid-file
+    action: upload_file
+    locator: {kind: css, value: 'input[type="file"][accept*=".xlsx"]'}
+    file_ref: invalid-media-sheet
+assertions: []
+response_assertions:
+  - id: import-must-reject-invalid-row
+    action_id: upload-invalid-file
+    method: POST
+    kind: http_status_rejected
+    left_field: code
+    right_field: message
+`))
+	if err == nil || !strings.Contains(err.Error(), "forbids JSON field paths") {
+		t.Fatalf("status assertion fields error=%v", err)
+	}
+}
+
 func TestParseBrowserPlanV2AcceptsBoundedRequestCaptures(t *testing.T) {
 	plan, err := ParseBrowserPlan([]byte(`version: 2
 device_profile: desktop

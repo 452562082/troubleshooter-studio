@@ -119,13 +119,12 @@ const invalidURLBug = computed(() => Boolean(routeBugID() && !tickets.loading.va
 const pickerSelectedBotKey = computed(() => selectedBotKey.value)
 const selectedBot = computed(() => matches.value.find(match => match.bot.key === pickerSelectedBotKey.value)?.bot)
 const selectedBotSupportsStart = computed(() => Boolean(selectedBot.value && ['codex', 'claude-code', 'openclaw'].includes(selectedBot.value.target)))
-const selectedBugRequiresBrowser = computed(() => suggestsBrowserValidation(tickets.selectedBug.value))
-const browserRuntimeBlocksSelectedBug = computed(() => selectedBugRequiresBrowser.value && browserRuntimeStatus.value.state !== 'ready')
+const browserRuntimeBlocksSelectedBug = computed(() => Boolean(frontendResolution.value?.required) && browserRuntimeStatus.value.state !== 'ready')
 const frontendEntryBlocksSelectedBug = computed(() => {
-  if (!selectedBugRequiresBrowser.value) return false
   if (resolvingFrontendEntry.value) return true
   const resolution = frontendResolution.value
   if (!resolution) return true
+  if (!resolution.required) return false
   if (resolution.status === 'selected') return false
   return resolution.status === 'unavailable' || !selectedFrontendEntryID.value
 })
@@ -201,7 +200,7 @@ async function refreshFrontendEntryResolution() {
   const generation = ++frontendResolutionGeneration
   selectedFrontendEntryID.value = ''
   frontendResolution.value = null
-  if (!bug || !bot || !bot.env?.trim() || !suggestsBrowserValidation(bug)) return
+  if (!bug || !bot || !bot.env?.trim()) return
   resolvingFrontendEntry.value = true
   try {
     const resolution = await resolveIncidentFrontendEntry({ bug_id: bug.id, bot_key: bot.key, bot_environment: bot.env })
@@ -210,7 +209,7 @@ async function refreshFrontendEntryResolution() {
     if (resolution.status === 'selected' && resolution.selected) selectedFrontendEntryID.value = resolution.selected.id
   } catch (error) {
     if (generation !== frontendResolutionGeneration) return
-    frontendResolution.value = { status: 'unavailable', message: error instanceof Error ? error.message : String(error) }
+    frontendResolution.value = { status: 'unavailable', required: true, message: error instanceof Error ? error.message : String(error) }
   } finally {
     if (generation === frontendResolutionGeneration) resolvingFrontendEntry.value = false
   }
@@ -277,14 +276,6 @@ onMounted(async () => {
 })
 
 onUnmounted(() => unlistenBrowserRuntime?.())
-
-function suggestsBrowserValidation(bug?: BugRecord): boolean {
-  if (!bug) return false
-  if (bug.frontend_url?.trim() || bug.frontend_repo?.trim() || bug.browser?.trim()) return true
-  const text = [bug.title, bug.description, bug.steps, bug.expected, bug.actual].filter(Boolean).join(' ').toLocaleLowerCase()
-  if (['页面', '浏览器', '网页', '前端', '小程序'].some(marker => text.includes(marker))) return true
-  return text.split(/[^a-z0-9\u3400-\u9fff]+/).some(token => ['app', 'web', 'h5', 'ui', 'frontend'].includes(token))
-}
 
 function applyBrowserRuntimeEvent(raw: unknown) {
   const payload = raw !== null && typeof raw === 'object' ? raw as Record<string, unknown> : {}
@@ -1237,7 +1228,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         <p v-else-if="selectedBot && !selectedBotSupportsStart" class="support-note">{{ selectedBot.target }} 暂不支持由 Studio 后台启动，请选择 Codex、Claude Code 或 OpenClaw。</p>
         <section v-if="tickets.selectedBug.value" class="bot-action-panel" aria-label="故障闭环操作">
           <p class="bot-action-status" role="status">{{ botActionStatus }}</p>
-          <section v-if="selectedBugRequiresBrowser && frontendResolution" class="frontend-entry-resolution" aria-label="前端验证入口">
+          <section v-if="frontendResolution?.required" class="frontend-entry-resolution" aria-label="前端验证入口">
             <p class="frontend-entry-title">验证入口</p>
             <p v-if="frontendResolution.status === 'selected' && frontendResolution.selected" class="frontend-entry-selected">
               {{ frontendResolution.selected.name }} · {{ frontendResolution.selected.url }}

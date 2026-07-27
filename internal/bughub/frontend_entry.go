@@ -55,6 +55,7 @@ type FrontendEntryCandidate struct {
 
 type FrontendEntryResolution struct {
 	Status     string                   `json:"status"`
+	Required   bool                     `json:"required"`
 	Selected   *FrontendEntryBinding    `json:"selected,omitempty"`
 	Candidates []FrontendEntryCandidate `json:"candidates,omitempty"`
 	Message    string                   `json:"message,omitempty"`
@@ -73,14 +74,11 @@ func ResolveFrontendEntry(entries []config.FrontendEntry, bug Bug, selectedID st
 		prepared = append(prepared, scoreFrontendEntry(binding, entry, bug))
 	}
 	if len(prepared) == 0 {
-		if explicit := strings.TrimSpace(bug.FrontendURL); explicit != "" {
-			binding, err := explicitTicketFrontendBinding(explicit)
-			if err != nil {
-				return FrontendEntryResolution{}, err
-			}
-			return selectedFrontendResolution(binding, nil), nil
-		}
-		return FrontendEntryResolution{Status: FrontendResolutionUnavailable, Message: "当前环境未配置前端入口，工单也没有可用页面 URL"}, nil
+		return FrontendEntryResolution{
+			Status:   FrontendResolutionUnavailable,
+			Required: false,
+			Message:  "当前环境未配置前端入口",
+		}, nil
 	}
 	sort.SliceStable(prepared, func(i, j int) bool {
 		if prepared[i].Score != prepared[j].Score {
@@ -119,6 +117,7 @@ func ResolveFrontendEntry(entries []config.FrontendEntry, bug Bug, selectedID st
 		if len(matching) == 0 {
 			return FrontendEntryResolution{
 				Status:     FrontendResolutionAmbiguous,
+				Required:   true,
 				Candidates: prepared,
 				Message:    "工单页面 URL 未命中当前环境配置的前端入口，请确认本次验证对应的应用",
 			}, nil
@@ -148,7 +147,7 @@ func ResolveFrontendEntry(entries []config.FrontendEntry, bug Bug, selectedID st
 		return selectedFrontendResolution(binding, prepared), nil
 	}
 	return FrontendEntryResolution{
-		Status: FrontendResolutionAmbiguous, Candidates: prepared,
+		Status: FrontendResolutionAmbiguous, Required: true, Candidates: prepared,
 		Message: "工单证据无法唯一确定前端入口，请选择本次验证对应的应用",
 	}, nil
 }
@@ -187,7 +186,7 @@ func mostSpecificFrontendURLMatch(candidates []FrontendEntryCandidate) (Frontend
 
 func selectedFrontendResolution(binding FrontendEntryBinding, candidates []FrontendEntryCandidate) FrontendEntryResolution {
 	cloned := binding.Clone()
-	return FrontendEntryResolution{Status: FrontendResolutionSelected, Selected: &cloned, Candidates: candidates}
+	return FrontendEntryResolution{Status: FrontendResolutionSelected, Required: true, Selected: &cloned, Candidates: candidates}
 }
 
 func frontendBinding(entry config.FrontendEntry) (FrontendEntryBinding, error) {
@@ -204,15 +203,6 @@ func frontendBinding(entry config.FrontendEntry) (FrontendEntryBinding, error) {
 		ID: strings.TrimSpace(entry.ID), Name: strings.TrimSpace(entry.Name), URL: canonical, ConfigURL: canonical,
 		Repo: strings.TrimSpace(entry.Repo), DeviceProfile: strings.TrimSpace(entry.DeviceProfile), ConfigSHA256: hex.EncodeToString(digest[:]),
 	}, nil
-}
-
-func explicitTicketFrontendBinding(raw string) (FrontendEntryBinding, error) {
-	canonical, err := canonicalFrontendTicketURL(raw)
-	if err != nil {
-		return FrontendEntryBinding{}, err
-	}
-	digest := sha256.Sum256([]byte(canonical))
-	return FrontendEntryBinding{ID: "ticket-url", Name: "工单页面入口", URL: canonical, ConfigURL: canonical, ResolutionSource: "ticket_url", Reason: "使用工单提供的页面 URL", ConfigSHA256: hex.EncodeToString(digest[:])}, nil
 }
 
 func canonicalFrontendTicketURL(raw string) (string, error) {

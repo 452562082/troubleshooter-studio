@@ -48,6 +48,16 @@ func TestResolveFrontendEntryDoesNotAuthorizeUnconfiguredTicketOrigin(t *testing
 	}
 }
 
+func TestResolveFrontendEntryNeverPromotesTicketURLWithoutConfiguredEntry(t *testing.T) {
+	resolution, err := ResolveFrontendEntry(nil, Bug{FrontendURL: "https://ticket-only.test/search"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolution.Status != FrontendResolutionUnavailable || resolution.Required || resolution.Selected != nil || len(resolution.Candidates) != 0 {
+		t.Fatalf("resolution=%+v", resolution)
+	}
+}
+
 func TestResolveFrontendEntryUsesMostSpecificConfiguredPath(t *testing.T) {
 	entries := []config.FrontendEntry{
 		{ID: "consumer", Name: "C 端", URL: "https://portal.test/", Repo: "consumer-web"},

@@ -72,7 +72,7 @@ vi.mock('../lib/bridge', async importOriginal => ({
   prepareIncidentBrowserRuntime: vi.fn(),
   reconsiderIncidentRemediation: vi.fn(),
   repairIncidentBrowserRuntime: vi.fn(),
-  resolveIncidentFrontendEntry: vi.fn().mockResolvedValue({ status: 'selected', selected: { id: 'default-web', name: '默认 Web 入口', url: 'https://app.test/', resolution_source: 'only_candidate' } }),
+  resolveIncidentFrontendEntry: vi.fn().mockResolvedValue({ status: 'selected', required: true, selected: { id: 'default-web', name: '默认 Web 入口', url: 'https://app.test/', resolution_source: 'only_candidate' } }),
   resetIncidentCaseWithWarnings: vi.fn(),
   saveBugSelectedBot: vi.fn(),
   startIncidentCase: vi.fn(),
@@ -193,7 +193,7 @@ afterEach(() => {
   vi.mocked(listIncidentFixBranches).mockReset().mockResolvedValue({ 'admin-web': ['feature/new-navigation'], api: ['feature/work'] })
   vi.mocked(listIncidentCases).mockReset().mockResolvedValue([])
   vi.mocked(getIncidentCase).mockReset()
-  vi.mocked(resolveIncidentFrontendEntry).mockReset().mockResolvedValue({ status: 'selected', selected: { id: 'default-web', name: '默认 Web 入口', url: 'https://app.test/', resolution_source: 'only_candidate' } })
+  vi.mocked(resolveIncidentFrontendEntry).mockReset().mockResolvedValue({ status: 'selected', required: true, selected: { id: 'default-web', name: '默认 Web 入口', url: 'https://app.test/', resolution_source: 'only_candidate' } })
   vi.mocked(getIncidentBrowserRuntimeStatus).mockReset().mockResolvedValue({ state: 'ready', version: '1.61.1', error_code: '', message: '' })
   vi.mocked(matchBugBots).mockReset().mockResolvedValue([botMatch])
   vi.mocked(saveBugSelectedBot).mockReset().mockResolvedValue(bugA as any)
@@ -824,9 +824,16 @@ describe('IncidentWorkbenchPage', () => {
 
   it('requires an explicit frontend choice when ticket evidence is ambiguous and freezes it into Start', async () => {
     route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([{ ...bugA, frontend_url: 'https://portal.test/search' }])
+    vi.mocked(listBugs).mockResolvedValue([{
+      ...bugA,
+      title: '【测试环境】【PC端】媒资全部下架后内容仍可进入',
+      frontend_url: '',
+      frontend_repo: '',
+      browser: '',
+    }])
     vi.mocked(resolveIncidentFrontendEntry).mockResolvedValue({
       status: 'ambiguous',
+      required: true,
       message: '工单证据无法唯一确定前端入口，请选择本次验证对应的应用',
       candidates: [
         { binding: { id: 'consumer', name: 'C 端 H5', url: 'https://m.test/', resolution_source: '' }, score: 0, reasons: [] },

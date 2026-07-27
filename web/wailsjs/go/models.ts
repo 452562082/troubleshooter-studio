@@ -954,6 +954,7 @@ export namespace bughub {
 	}
 	export class FrontendEntryResolution {
 	    status: string;
+	    required: boolean;
 	    selected?: FrontendEntryBinding;
 	    candidates?: FrontendEntryCandidate[];
 	    message?: string;
@@ -965,6 +966,7 @@ export namespace bughub {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.status = source["status"];
+	        this.required = source["required"];
 	        this.selected = this.convertValues(source["selected"], FrontendEntryBinding);
 	        this.candidates = this.convertValues(source["candidates"], FrontendEntryCandidate);
 	        this.message = source["message"];

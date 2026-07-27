@@ -1359,6 +1359,12 @@ func TestStartIncidentCaseRejectsWebCaseUntilHostRuntimeIsReady(t *testing.T) {
 	app.workflowLoadBug = func(id string) (bughub.Bug, error) {
 		return bughub.Bug{ID: id, Source: "zentao", Title: "用户页面搜索失败", FrontendURL: "https://app.test/users", Env: "test", SystemID: "base"}, nil
 	}
+	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
+		return &config.SystemConfig{
+			System:       config.System{ID: "base"},
+			Environments: []config.Environment{{ID: "test", WebDomain: "https://app.test"}},
+		}, nil
+	}
 	app.workflowBrowser = &fakeIncidentBrowserController{status: browserverify.RuntimeStatus{
 		State: browserverify.RuntimeInstalling, Version: "1.61.1", ErrorCode: "browser_runtime_install_in_progress",
 	}}
@@ -1481,27 +1487,38 @@ func TestResolveIncidentRecoveryContextHydratesConfiguredFrontendURL(t *testing.
 	}
 }
 
-func TestStartIncidentCaseDoesNotRouteBackendBugThroughBrowser(t *testing.T) {
+func TestStartIncidentCaseRequiresConfiguredFrontendSelectionWhenTicketTextDoesNotMap(t *testing.T) {
 	app, _, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
 	app.workflowLoadBug = func(id string) (bughub.Bug, error) {
 		return bughub.Bug{ID: id, Source: "zentao", Title: "数据库查询超时", Env: "test"}, nil
 	}
 	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
 		return &config.SystemConfig{
-			System:       config.System{ID: "base"},
-			Environments: []config.Environment{{ID: "test", WebDomain: "https://app.test"}},
+			System: config.System{ID: "base"},
+			Environments: []config.Environment{{ID: "test", FrontendEntries: []config.FrontendEntry{
+				{ID: "consumer", Name: "C端", URL: "https://web.test", Repo: "frontend"},
+				{ID: "admin", Name: "管理端", URL: "https://admin.test", Repo: "frontend"},
+			}}},
 		}, nil
 	}
 
-	_, err := app.StartIncidentCase(StartIncidentCaseInput{
+	input := StartIncidentCaseInput{
 		CaseID: "case-backend-context", BugID: "bug-backend-context", BotKey: "base|codex", ExpectedVersion: 0,
 		IdempotencyKey: "create:backend-context", ActorID: "user-1", InputJSON: map[string]any{"mode": "reproduce"},
-	})
+	}
+	if _, err := app.StartIncidentCase(input); err == nil || !strings.Contains(err.Error(), "frontend_entry_selection_required") {
+		t.Fatalf("error=%v, want configured frontend selection", err)
+	}
+	input.FrontendEntryID = "consumer"
+	created, err := app.StartIncidentCase(input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if startedBug := runner.lastBug(); startedBug.SystemID != "base" || startedBug.FrontendURL != "" {
-		t.Fatalf("runner Bug = %+v, backend Bug must not be routed through browser", startedBug)
+	if created.FrontendEntry.ID != "consumer" {
+		t.Fatalf("frontend entry=%+v", created.FrontendEntry)
+	}
+	if startedBug := runner.lastBug(); startedBug.SystemID != "base" || startedBug.FrontendURL != "https://web.test/" {
+		t.Fatalf("runner Bug = %+v, want user-selected configured frontend", startedBug)
 	}
 }
 

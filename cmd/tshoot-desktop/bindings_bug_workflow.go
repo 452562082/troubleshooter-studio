@@ -1805,12 +1805,15 @@ func (a *App) ResolveIncidentFrontendEntry(input ResolveIncidentFrontendEntryInp
 }
 
 func (a *App) resolveIncidentFrontendBinding(bug bughub.Bug, bot bughub.BotRef, selectedID string) (bughub.FrontendEntryBinding, bughub.Bug, error) {
-	if !bughub.SuggestsBrowserValidation(bug) {
-		return bughub.FrontendEntryBinding{}, bug, nil
-	}
 	resolution, err := a.resolveIncidentFrontendEntryForContext(bug, bot, selectedID)
 	if err != nil {
+		if strings.TrimSpace(selectedID) == "" && !bughub.SuggestsBrowserValidation(bug) {
+			return bughub.FrontendEntryBinding{}, bug, nil
+		}
 		return bughub.FrontendEntryBinding{}, bug, err
+	}
+	if !resolution.Required {
+		return bughub.FrontendEntryBinding{}, bug, nil
 	}
 	if resolution.Status == bughub.FrontendResolutionAmbiguous {
 		return bughub.FrontendEntryBinding{}, bug, errors.New("frontend_entry_selection_required: 工单证据无法唯一确定前端入口")
@@ -1835,7 +1838,16 @@ func (a *App) resolveIncidentFrontendEntryForContext(bug bughub.Bug, bot bughub.
 	}
 	for _, candidate := range cfg.Environments {
 		if strings.TrimSpace(candidate.ID) == environment {
-			return bughub.ResolveFrontendEntry(candidate.EffectiveFrontendEntries(), bug, selectedID)
+			entries := candidate.EffectiveFrontendEntries()
+			resolution, resolveErr := bughub.ResolveFrontendEntry(entries, bug, selectedID)
+			if resolveErr != nil {
+				return bughub.FrontendEntryResolution{}, resolveErr
+			}
+			if len(entries) == 0 && bughub.SuggestsBrowserValidation(bug) {
+				resolution.Required = true
+				resolution.Message = "当前环境未配置前端入口，无法将工单映射到受管应用"
+			}
+			return resolution, nil
 		}
 	}
 	return bughub.FrontendEntryResolution{}, errors.New("incident frontend environment is unavailable")

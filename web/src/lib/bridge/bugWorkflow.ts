@@ -42,6 +42,7 @@ export interface FrontendEntryBinding {
 export interface FrontendEntryCandidate { binding: FrontendEntryBinding; score: number; reasons: string[] }
 export interface FrontendEntryResolution {
   status: 'selected' | 'ambiguous' | 'unavailable'
+  required: boolean
   selected?: FrontendEntryBinding
   candidates?: FrontendEntryCandidate[]
   message?: string
@@ -259,7 +260,7 @@ export async function startIncidentCase(input: StartIncidentCaseInput): Promise<
   return normalizeCase(await App.StartIncidentCase(input))
 }
 export async function resolveIncidentFrontendEntry(input: { bug_id: string; bot_key: string; bot_environment?: string; frontend_entry_id?: string }): Promise<FrontendEntryResolution> {
-  if (!isDesktop()) return { status: 'unavailable', message: desktopOnly }
+  if (!isDesktop()) return { status: 'unavailable', required: true, message: desktopOnly }
   return await App.ResolveIncidentFrontendEntry(input) as FrontendEntryResolution
 }
 export async function resetIncidentCase(input: ResetIncidentCaseInput): Promise<IncidentCase> {

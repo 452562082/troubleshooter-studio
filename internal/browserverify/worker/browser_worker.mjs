@@ -3351,7 +3351,11 @@ async function loginWorker(request) {
     emitProgress('browser_login_opened', 'Complete login in the visible validation browser');
     await assertAllowedURL(request.plan.start_url, request.policy);
     await page.goto(request.plan.start_url, { waitUntil: 'domcontentloaded' });
-    let loginStarted = navigationHistory.started();
+    // The failed validation already established that authentication is
+    // required. Custom and localized login pages do not need to expose an
+    // English button or a conventional /login route to preserve that fact.
+    let loginStarted = true;
+    const storageStateBeforeLogin = await context.storageState();
     while (true) {
       if (guarded.blocked()) throw new Error('browser destination was blocked');
       const pages = context.pages();
@@ -3361,7 +3365,9 @@ async function loginWorker(request) {
       }
       const observed = await observeLoginState(pages, request.policy, loginStarted || navigationHistory.started(), authFailures.active());
       loginStarted = observed.started;
-      if (navigationHistory.completionStable(observed.ready)) {
+      const storageStateAfterLogin = await context.storageState();
+      const sessionChanged = loginSessionStateChanged(storageStateBeforeLogin, storageStateAfterLogin);
+      if (navigationHistory.completionStable(observed.ready && sessionChanged)) {
         await saveLoginStorageState(context, request.storage_state_path);
         emitProgress('browser_login_completed', 'Browser login session saved');
         return { status: 'completed' };
@@ -3375,6 +3381,24 @@ async function loginWorker(request) {
     if (launched) await launched.close().catch(() => {});
     else if (browser) await browser.close().catch(() => {});
   }
+}
+
+export function loginSessionStateChanged(before, after) {
+  if (!before || !after || typeof before !== 'object' || typeof after !== 'object') return false;
+  const normalize = (state) => ({
+    cookies: Array.isArray(state.cookies)
+      ? [...state.cookies].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))
+      : [],
+    origins: Array.isArray(state.origins)
+      ? state.origins.map((entry) => ({
+        ...entry,
+        localStorage: Array.isArray(entry?.localStorage)
+          ? [...entry.localStorage].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))
+          : [],
+      })).sort((left, right) => String(left?.origin || '').localeCompare(String(right?.origin || '')))
+      : [],
+  });
+  return !isDeepStrictEqual(normalize(before), normalize(after));
 }
 
 async function probeWorker(outputPath) {

@@ -70,17 +70,20 @@ Web 验证和回归由 Studio 持有浏览器：
 ```text
 validator 生成声明式 BrowserPlan
 → HostVerifier 执行动作并脱敏取证
-→ locator 失败时最多修正一次
+→ 每个现场检查点由 validator 选择继续、提问或给结论
 → validator 根据冻结证据给结论
 ```
 
 允许导航、点击、填充、按键、选择、受控文件上传、等待和截图。禁止任意 JavaScript、凭据、Cookie、任意 header、宿主路径和生产写操作。
 
 - 文件上传只能引用当前 Case 的工单附件或用户显式上传的测试文件。
-- 登录由用户在 Studio 可见浏览器中完成；账号、Cookie 和 storageState 不进入 Case 文本。
+- 登录由用户在 Studio 可见浏览器中完成；账号、Cookie 和 storageState 不进入 Case 文本。Worker 观察到持久登录态变化后只保存会话，必须由用户明确确认已登录，Studio 才创建下一次验证 Attempt。
 - Web 成功结论必须有当前 attempt 的最终渲染截图。
-- 计划或定位失败可在当前 Case 重新观察和重试，无需重建闭环。
-- 验证遇到业务流程歧义时返回具体问题，而不是只显示定位失败。用户回复会成为最新场景澄清，强制作废旧 recipe，并重新生成完整 `scenario_contract` 和 BrowserPlan。
+- locator 失败是现场观察，不自动等于系统失败。Agent 可以根据冻结截图、页面结构和 Network 直接判定结果、询问用户，或生成有证据依据的后续动作；只有协议、进程或运行时故障才走系统重试。
+- 规划、页面定位修复或最终判定遇到业务流程歧义时返回 1–3 个具体问题，而不是猜测流程或只显示失败。问题只能收集用户掌握的业务事实，不能要求用户排查 Agent 进程、工具、附件或运行时。
+- 用户回复会成为最新场景澄清；validation 和 regression 都强制作废旧 recipe，并在同一 Case 的新 attempt 中重新生成完整 `scenario_contract` 和 BrowserPlan。
+- 计划连续两次未通过结构校验时，Case 保存经过安全分类的失败规则并走系统重试；无效 YAML、协议字段或 Agent 进程问题不会伪装成用户必须回答的业务问题。
+- Agent 超时按 `planning`、`locator_repair`、`evaluation` 展示。定位策略超时会转入冻结证据判定；最终判定首次超时会自动使用同一份证据重试，不重新执行浏览器。
 
 具体安全和协议演进见 [decisions.md](decisions.md) 中的 BrowserPlan / HostVerifier ADR。
 
@@ -113,10 +116,10 @@ HTTP 版本检查默认拒绝代理、loopback、内网、link-local 和 metadat
 | 信息不足 | 补充信息并继续 | 创建父链 attempt，回到原阶段 |
 | 系统或网络失败 | 重试当前验证/回归 | 保留原场景和部署绑定 |
 | 页面变化 | 重新观察并生成计划 | 获取当前页面结构后重试 |
-| Agent 不理解当前流程 | 回答 Agent 的具体问题 | 以回复重建 `scenario_contract` 并创建新验证 attempt |
+| Agent 不理解当前流程 | 回答 Agent 的具体问题 | 以回复重建 `scenario_contract` 并创建新的验证/回归 attempt |
 | 复现结论正确 | 认可验证结果 | 从冻结验证证据启动方案评估 |
 | 复现结论有偏差 | 提出验证异议 | 保留旧结果审计，带反馈重新验证 |
-| 需要登录 | 打开验证浏览器 | 用户完成 SSO/MFA 后继续 |
+| 需要登录 | 打开验证浏览器 | 登录态发生变化并保存会话后，用户明确确认再继续 |
 | 根因不认可 | 对根因提出异议 | 只读重评，不从验证开始 |
 | 方案不认可 | 提出其他修复方案 | 重评仓库、风险、回滚和回归 |
 | 已推送但想重修 | 重新修复 | 旧分支留审计，新分支从确认基线开始 |

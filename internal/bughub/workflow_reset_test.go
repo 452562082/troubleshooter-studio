@@ -650,6 +650,127 @@ func TestResetCaseWithReplacementIsAtomic(t *testing.T) {
 	}
 }
 
+func TestResetCaseWithReplacementSupersedesUnconsumedBrowserRecovery(t *testing.T) {
+	for _, status := range []BrowserRecoveryOperationStatus{
+		BrowserRecoveryClaimed,
+		BrowserRecoveryEffectSucceeded,
+		BrowserRecoveryOutcomeUncertain,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			store := openTestCaseStore(t)
+			ctx := context.Background()
+			incident, attempt, request := eligibleBrowserRecoveryOperationFixture(t, store, "reset-"+string(status), BrowserRecoveryLogin)
+			if _, err := store.db.Exec(`UPDATE incident_cases SET system_id='base',environment='test',selected_bot_key='validator|codex' WHERE id=?`, incident.ID); err != nil {
+				t.Fatal(err)
+			}
+			operation, acquired, err := store.ClaimBrowserRecoveryOperation(ctx, request, "claim-reset-"+string(status))
+			if err != nil || !acquired {
+				t.Fatalf("operation=%+v acquired=%v err=%v", operation, acquired, err)
+			}
+			if status != BrowserRecoveryClaimed {
+				operation, err = store.RecordBrowserRecoveryOutcome(ctx, request, operation.ClaimToken, status)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			incident, err = store.GetCase(ctx, incident.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			result, err := store.ResetCaseWithReplacement(ctx, resetCommand(incident, incident.ID+"-next", "reset-browser-"+string(status)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Archived.Status != CaseResetArchived || result.Replacement.Status != CasePendingValidation || result.Replacement.ResetFromCaseID != incident.ID {
+				t.Fatalf("result=%+v", result)
+			}
+			if persisted, found, err := store.GetBrowserRecoveryOperation(ctx, request); err != nil || found {
+				t.Fatalf("persisted=%+v found=%v err=%v", persisted, found, err)
+			}
+			storedAttempt, err := store.GetAttempt(ctx, attempt.ID)
+			if err != nil || storedAttempt.Status != AttemptStatusFailed {
+				t.Fatalf("attempt=%+v err=%v", storedAttempt, err)
+			}
+		})
+	}
+}
+
+func TestLateBrowserRecoveryOutcomeCannotReviveResetCase(t *testing.T) {
+	store := openTestCaseStore(t)
+	ctx := context.Background()
+	incident, _, request := eligibleBrowserRecoveryOperationFixture(t, store, "late-reset-outcome", BrowserRecoveryRepair)
+	if _, err := store.db.Exec(`UPDATE incident_cases SET system_id='base',environment='test',selected_bot_key='validator|codex' WHERE id=?`, incident.ID); err != nil {
+		t.Fatal(err)
+	}
+	operation, acquired, err := store.ClaimBrowserRecoveryOperation(ctx, request, "claim-late-reset-outcome")
+	if err != nil || !acquired {
+		t.Fatalf("operation=%+v acquired=%v err=%v", operation, acquired, err)
+	}
+	incident, err = store.GetCase(ctx, incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.ResetCaseWithReplacement(ctx, resetCommand(incident, incident.ID+"-next", "reset-late-browser-outcome"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.RecordBrowserRecoveryOutcome(ctx, request, operation.ClaimToken, BrowserRecoveryEffectSucceeded); err == nil {
+		t.Fatal("late browser recovery outcome was accepted after reset")
+	}
+	archived, err := store.GetCase(ctx, incident.ID)
+	if err != nil || archived.Status != CaseResetArchived || archived.Version != result.Archived.Version {
+		t.Fatalf("archived=%+v err=%v", archived, err)
+	}
+	replacement, err := store.GetCase(ctx, result.Replacement.ID)
+	if err != nil || replacement.Status != CasePendingValidation || replacement.Version != result.Replacement.Version {
+		t.Fatalf("replacement=%+v err=%v", replacement, err)
+	}
+	if persisted, found, err := store.GetBrowserRecoveryOperation(ctx, request); err != nil || found {
+		t.Fatalf("persisted=%+v found=%v err=%v", persisted, found, err)
+	}
+}
+
+func TestResetFailureRollsBackBrowserRecoverySupersession(t *testing.T) {
+	store := openTestCaseStore(t)
+	ctx := context.Background()
+	incident, _, request := eligibleBrowserRecoveryOperationFixture(t, store, "reset-browser-rollback", BrowserRecoveryLogin)
+	if _, err := store.db.Exec(`UPDATE incident_cases SET system_id='base',environment='test',selected_bot_key='validator|codex' WHERE id=?`, incident.ID); err != nil {
+		t.Fatal(err)
+	}
+	operation, acquired, err := store.ClaimBrowserRecoveryOperation(ctx, request, "claim-reset-browser-rollback")
+	if err != nil || !acquired {
+		t.Fatalf("operation=%+v acquired=%v err=%v", operation, acquired, err)
+	}
+	operation, err = store.RecordBrowserRecoveryOutcome(ctx, request, operation.ClaimToken, BrowserRecoveryEffectSucceeded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER fail_reset_with_browser_recovery BEFORE INSERT ON incident_cases WHEN NEW.reset_from_case_id<>'' BEGIN SELECT RAISE(FAIL, 'injected replacement failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	incident, err = store.GetCase(ctx, incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.ResetCaseWithReplacement(ctx, resetCommand(incident, incident.ID+"-next", "reset-browser-rollback")); err == nil {
+		t.Fatal("expected reset failure")
+	}
+	persisted, found, err := store.GetBrowserRecoveryOperation(ctx, request)
+	if err != nil || !found || persisted.Status != BrowserRecoveryEffectSucceeded || persisted.ClaimToken != operation.ClaimToken {
+		t.Fatalf("persisted=%+v found=%v err=%v", persisted, found, err)
+	}
+	current, err := store.GetCase(ctx, incident.ID)
+	if err != nil || current.Status != CaseWaitingEvidence || current.Version != incident.Version || current.CurrentAttemptID != incident.CurrentAttemptID {
+		t.Fatalf("current=%+v err=%v", current, err)
+	}
+	if _, err := store.GetCase(ctx, incident.ID+"-next"); !errors.Is(err, ErrCaseNotFound) {
+		t.Fatalf("replacement err=%v", err)
+	}
+}
+
 func TestResetCaseWithReplacementReplaysSameReplacement(t *testing.T) {
 	store := openTestCaseStore(t)
 	incident, attempt := prepareResetCase(t, store, "case-reset-replay")

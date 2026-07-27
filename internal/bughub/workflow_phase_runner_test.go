@@ -845,6 +845,56 @@ func TestAgentPhaseRunnerCoordinatesBrowserAndRegistersCurrentAttemptArtifacts(t
 	}
 }
 
+func TestAgentPhaseRunnerPersistsPlannerQuestionsAsAUserOwnedPause(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-browser-planner-question", CaseValidating)
+	attempt := createPhaseRunnerAttempt(t, store, incident, PhaseValidation, AttemptReproduce)
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: `assistance_status: needs_user_input
+questions:
+  - id: confirm_auto_submit
+    question: 保存编辑后是否会自动提交？
+    answer_hint: 请说明是否还存在独立提交按钮。
+`}}}
+	verifierCalls := 0
+	completed := make(chan CompleteAttemptCommand, 1)
+	runner := NewAgentPhaseRunner(store, executor, nil, phaseArtifactsRoot(t), func(_ context.Context, command CompleteAttemptCommand) error {
+		completed <- command
+		return nil
+	})
+	runner.SetBrowserVerifier(browserVerifierFunc(func(context.Context, BrowserVerificationRequest) (BrowserVerificationResult, error) {
+		verifierCalls++
+		return BrowserVerificationResult{}, nil
+	}), browserPolicyResolverFunc(func(context.Context, IncidentCase, Bug) (BrowserSecurityPolicy, error) {
+		return testBrowserApplicationPolicy("https://app.example.com"), nil
+	}))
+	if err := runner.Start(context.Background(), attempt, Bug{
+		ID: incident.BugID, Env: "test", FrontendURL: "https://app.example.com/users",
+		Steps: "编辑用户并保存",
+	}, installedPhaseRunnerBot(t, "bot", "codex")); err != nil {
+		t.Fatal(err)
+	}
+	command := <-completed
+	if command.Outcome != PhaseOutcomeNeedsEvidence || command.ErrorCode != "browser_validation_needs_user_input" ||
+		executor.Calls != 1 || verifierCalls != 0 {
+		t.Fatalf("agent=%d browser=%d command=%+v", executor.Calls, verifierCalls, command)
+	}
+	var output struct {
+		EvidenceLimitation bool `json:"evidence_limitation"`
+		Questions          []struct {
+			ID       string `json:"id"`
+			Question string `json:"question"`
+		} `json:"validation_questions"`
+	}
+	if err := json.Unmarshal(command.OutputJSON, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !output.EvidenceLimitation || len(output.Questions) != 1 ||
+		output.Questions[0].ID != "confirm_auto_submit" ||
+		!strings.Contains(output.Questions[0].Question, "自动提交") {
+		t.Fatalf("output=%s", command.OutputJSON)
+	}
+}
+
 func TestAgentPhaseRunnerRejectsBrowserArtifactReplacementBeforeFreeze(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-browser-freeze-mismatch", CaseValidating)
@@ -1182,7 +1232,7 @@ func TestAgentPhaseRunnerBrowserLoginStopPersistsOriginalApplicationURLAndAuthen
 func TestBrowserFailureOutcomeSeparatesSystemFailuresFromEvidenceGaps(t *testing.T) {
 	for _, code := range []string{
 		"browser_runtime_broken", "browser_policy_unavailable", "browser_policy_changed",
-		"browser_verifier_failed", "browser_execution_interrupted", "browser_validator_plan_invalid", "browser_locator_repair_plan_invalid", "browser_locator_failed",
+		"browser_verifier_failed", "browser_execution_interrupted", "browser_validator_plan_invalid", "browser_locator_repair_plan_invalid",
 		"browser_worker_protocol_invalid", "browser_artifact_invalid", "browser_artifact_staging_invalid", "browser_artifact_identity_changed",
 		"browser_artifact_manifest_invalid", "browser_artifact_digest_changed", "browser_artifact_sensitive", "browser_artifact_freeze_failed",
 		"browser_artifact_frozen_invalid", "browser_artifact_repair_evidence_invalid", "browser_artifact_repair_cleanup_failed",
@@ -1194,7 +1244,10 @@ func TestBrowserFailureOutcomeSeparatesSystemFailuresFromEvidenceGaps(t *testing
 			t.Errorf("code=%s outcome=%s", code, got)
 		}
 	}
-	for _, code := range []string{"browser_login_required", "browser_login_failed", "browser_assertion_failed", "browser_url_required"} {
+	for _, code := range []string{
+		"browser_validation_needs_user_input", "browser_locator_failed", "browser_login_required",
+		"browser_login_failed", "browser_assertion_failed", "browser_policy_blocked", "browser_url_required",
+	} {
 		if got := browserFailureOutcome(PhaseValidation, code); got != PhaseOutcomeNeedsEvidence {
 			t.Errorf("code=%s outcome=%s", code, got)
 		}

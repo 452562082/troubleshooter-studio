@@ -355,6 +355,10 @@ export async function openIncidentBrowserLogin(input: IncidentBrowserCommandInpu
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.OpenIncidentBrowserLogin(input))
 }
+export async function confirmIncidentBrowserLogin(input: IncidentBrowserCommandInput): Promise<IncidentCase> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  return normalizeCase(await App.ConfirmIncidentBrowserLogin(input))
+}
 export async function repairIncidentBrowserRuntime(input: IncidentBrowserCommandInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.RepairIncidentBrowserRuntime(input))

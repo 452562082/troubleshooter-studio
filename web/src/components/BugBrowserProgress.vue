@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { incidentBrowserProgressCodes, type IncidentBrowserProgressCode, type IncidentPhaseEvent, type PhaseAttempt } from '../lib/bridge/bugWorkflow'
 
-type BrowserAction = 'login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url'
+type BrowserAction = 'login' | 'confirm-login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url'
 
 const props = withDefaults(defineProps<{
   attempt?: PhaseAttempt | null
@@ -10,7 +10,8 @@ const props = withDefaults(defineProps<{
   systemID?: string
   environment?: string
   pending?: boolean
-}>(), { attempt: null, events: () => [], systemID: '', environment: '', pending: false })
+  loginReady?: boolean
+}>(), { attempt: null, events: () => [], systemID: '', environment: '', pending: false, loginReady: false })
 
 defineEmits<{ action: [action: BrowserAction] }>()
 
@@ -66,8 +67,41 @@ const stableErrorCode = computed(() => {
   return value.startsWith('browser_') || value === 'validator_not_installed' ? value : ''
 })
 
-const state = computed<'progress' | 'login' | 'runtime' | 'validator' | 'quota' | 'locator' | 'url' | 'business' | 'plan' | 'attachment' | 'configuration' | 'process' | 'retry' | 'system' | ''>(() => {
+const planValidationIssueCopy: Record<string, string> = {
+  plan_not_canonical: '计划包含与持久化协议不一致的空字段或默认值',
+  frontend_scope_incomplete: '场景合同未覆盖全部已选择的应用端',
+  frontend_scope_order_invalid: '场景合同中的应用端顺序与用户选择不一致',
+  frontend_entry_not_visited: '计划没有访问全部已选择的应用端',
+  frontend_evidence_incomplete: '至少一个已选择的应用端没有形成可验证证据',
+  device_profile_mismatch: '计划设备类型与当前验证场景不一致',
+  scenario_contract_invalid: '场景合同缺失、引用不完整或不属于当前用户澄清',
+  search_entry_unresolved: '计划没有使用当前页面中可确认的搜索入口',
+  frontend_origin_invalid: '计划入口不属于本次已配置的应用范围',
+  sensitive_plan_rejected: '计划包含凭据语义或其他不允许持久化的敏感内容',
+  locator_contract_invalid: '页面控件定位方式不符合浏览器协议',
+  plan_structure_invalid: '动作、断言或必填字段不符合浏览器计划协议',
+}
+const planValidationIssue = computed(() => {
+  if (stableErrorCode.value !== 'browser_validator_plan_invalid') return ''
+  const value = props.attempt?.output_json?.plan_validation_code
+  if (typeof value !== 'string' || !/^[a-z0-9_]{1,128}$/.test(value)) return ''
+  return planValidationIssueCopy[value] || ''
+})
+
+const failureStageCopy = computed(() => {
+  const stage = props.attempt?.output_json?.failure_stage
+  if (typeof stage !== 'string') return ''
+  return ({
+    planning: '生成验证计划',
+    locator_repair: '根据现场证据决定下一步',
+    evaluation: '判定验证结果',
+    plan_validation: '校验验证计划',
+  } as Record<string, string>)[stage] || ''
+})
+
+const state = computed<'progress' | 'assistance' | 'login' | 'runtime' | 'validator' | 'quota' | 'locator' | 'url' | 'business' | 'plan' | 'attachment' | 'configuration' | 'process' | 'retry' | 'system' | ''>(() => {
   const code = stableErrorCode.value
+  if (code === 'browser_validation_needs_user_input') return 'assistance'
   if (code === 'browser_login_required') return 'login'
   if (code === 'browser_runtime_broken') return 'runtime'
   if (code === 'validator_not_installed') return 'validator'
@@ -95,7 +129,16 @@ const loginOrigin = computed(() => {
 
 const stateCopy = computed(() => {
   if (stableErrorCode.value === 'browser_validator_timeout') {
-    return '等待验证机器人超时。当前 Case 和已采集的浏览器证据均已保留，可以直接重试，无需补充附件或重建故障闭环。'
+    if (failureStageCopy.value === '生成验证计划') {
+      return '验证 Agent 在生成计划时超时，尚未开始浏览器执行。可以在当前 Case 重新生成计划，无需重建故障闭环。'
+    }
+    if (failureStageCopy.value === '根据现场证据决定下一步') {
+      return '验证 Agent 在根据页面现场决定下一步时超时。Studio 会改用已冻结证据进入结果判定；若判定也超时，当前 Case 仍保留全部现场证据。'
+    }
+    if (failureStageCopy.value === '判定验证结果') {
+      return '验证 Agent 基于同一份冻结证据自动重试判定后仍超时。浏览器步骤和证据均已保留，不需要重新补充附件。'
+    }
+    return '等待验证 Agent 超时。当前 Case 和已采集的浏览器证据均已保留，可以直接重试，无需补充附件或重建故障闭环。'
   }
   if (stableErrorCode.value === 'browser_locator_repair_plan_invalid') {
     return '页面定位修复计划未通过协议校验。当前 Case、原计划与现场证据均已保留，可以直接重新生成计划并重试。'
@@ -116,14 +159,17 @@ const stateCopy = computed(() => {
   }
   if (artifactCopy[stableErrorCode.value]) return artifactCopy[stableErrorCode.value]
   return ({
-    login: '当前验证需要登录。请在 Studio 打开的验证浏览器中完成登录，不要在 Case 中粘贴账号、密码或 Cookie。',
+    assistance: '验证 Agent 无法安全确定下一步，已暂停并提出具体问题。回答后会在当前 Case 中重建 scenario_contract 和完整验证计划。',
+    login: props.loginReady
+      ? '登录会话已保存，但验证尚未继续。请确认页面确实已经登录；只有你确认后，Studio 才会创建新的验证。'
+      : '当前验证需要登录。请在 Studio 打开的验证浏览器中完成登录，不要在 Case 中粘贴账号、密码或 Cookie。浏览器打开不代表登录完成。',
     runtime: '验证浏览器环境不可用。修复并通过运行时探测后，Studio 会创建一次新的验证继续。',
     validator: '验证机器人尚未部署，浏览器验证不会退回普通排障机器人。请重新部署当前机器人的 validator 角色。',
     quota: '验证机器人用量已达上限。恢复额度或切换到可用机器人后，请重新开始故障闭环。',
-    locator: '页面定位经过有限次现场修复仍失败。当前 Case 已保留执行证据，可直接重新观察页面并生成验证计划，无需补充业务证据。',
+    locator: '页面定位经过有限次现场修复仍失败。当前 Case 已保留执行证据；请按 Agent 的具体问题说明真实控件或页面流程，回答后会重新观察页面并生成验证计划。',
     url: '来源工单缺少 frontend_url。请先在来源工单平台补充页面地址，再前往 Bug 收件箱重新同步该 Bug。',
     business: '页面结果与预期不一致。请补充最小业务预期或测试数据后重试。',
-    plan: '验证机器人生成的浏览器计划未通过结构校验。可以在当前 Case 内重新生成计划，无需重建故障闭环。',
+    plan: '验证机器人连续生成的浏览器计划未通过结构校验。失败规则和可回答的问题会保留在当前 Case 中；你可以说明真实流程后重新生成计划，无需重建故障闭环。',
     attachment: '验证机器人无法读取本次截图证据。Studio 会优先使用结构化页面与网络证据降级判定；仍失败时请检查 macOS 文件访问权限后在当前 Case 重试。',
     configuration: '验证机器人启动配置不兼容。请升级或重新启动已修复的 Studio 后，在当前 Case 直接重试验证；无需补充证据或重建故障闭环。',
     process: '验证机器人进程异常退出或没有返回结构化结果。当前 Case 和浏览器证据均已保留，可以直接重试。',
@@ -153,12 +199,15 @@ const stateCopy = computed(() => {
 
     <div v-if="stateCopy" class="browser-recovery-copy">
       <p>{{ stateCopy }}</p>
+      <small v-if="planValidationIssue" data-browser-plan-validation-issue>未通过规则：{{ planValidationIssue }}</small>
+      <small v-if="failureStageCopy" data-browser-failure-stage>发生阶段：{{ failureStageCopy }}</small>
       <small v-if="state === 'login' && loginOrigin">登录入口：{{ loginOrigin }}</small>
       <small v-if="stableErrorCode" data-browser-error-code>错误码：{{ stableErrorCode }}</small>
     </div>
 
     <div v-if="state === 'login'" class="browser-recovery-actions">
-      <button class="btn primary" type="button" data-browser-action="login" :disabled="pending" @click="$emit('action', 'login')">打开验证浏览器完成登录</button>
+      <button v-if="loginReady" class="btn primary" type="button" data-browser-action="confirm-login" :disabled="pending" @click="$emit('action', 'confirm-login')">确认已登录并继续验证</button>
+      <button v-else class="btn primary" type="button" data-browser-action="login" :disabled="pending" @click="$emit('action', 'login')">打开验证浏览器完成登录</button>
       <button class="btn" type="button" data-browser-action="clear-session" :disabled="pending" @click="$emit('action', 'clear-session')">清除此环境登录态</button>
     </div>
     <div v-else-if="state === 'runtime'" class="browser-recovery-actions">
@@ -175,7 +224,7 @@ const stateCopy = computed(() => {
 
 <style scoped>
 .browser-progress { display: grid; gap: var(--sp-3); padding: var(--sp-4); border: 1px solid #bfdbfe; border-left: 3px solid #2563eb; border-radius: var(--r-lg); background: #f8fbff; }
-.browser-progress[data-browser-state="login"], .browser-progress[data-browser-state="url"], .browser-progress[data-browser-state="business"] { border-color: #fed7aa; border-left-color: #ea580c; background: #fffaf5; }
+.browser-progress[data-browser-state="assistance"], .browser-progress[data-browser-state="login"], .browser-progress[data-browser-state="url"], .browser-progress[data-browser-state="business"] { border-color: #fed7aa; border-left-color: #ea580c; background: #fffaf5; }
 .browser-progress[data-browser-state="runtime"], .browser-progress[data-browser-state="validator"], .browser-progress[data-browser-state="quota"], .browser-progress[data-browser-state="locator"], .browser-progress[data-browser-state="plan"], .browser-progress[data-browser-state="retry"], .browser-progress[data-browser-state="system"] { border-color: #fecaca; border-left-color: #dc2626; background: #fffafa; }
 .browser-progress header { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: var(--sp-2); }
 .browser-progress header span, .browser-progress header small, .browser-recovery-copy small { color: var(--c-muted); font-size: var(--fs-xs); }

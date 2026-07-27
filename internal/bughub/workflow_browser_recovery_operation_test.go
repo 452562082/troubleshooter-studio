@@ -84,6 +84,48 @@ func TestBrowserRecoveryClaimBlocksGenericCaseMutation(t *testing.T) {
 	}
 }
 
+func TestResetBrowserLoginRecoveryForcesFreshExternalLogin(t *testing.T) {
+	store := openTestCaseStore(t)
+	ctx := context.Background()
+	incident, attempt, request := eligibleBrowserRecoveryOperationFixture(t, store, "reset-login", BrowserRecoveryLogin)
+	if _, acquired, err := store.ClaimBrowserRecoveryOperation(ctx, request, "claim-reset-login"); err != nil || !acquired {
+		t.Fatalf("acquired=%v err=%v", acquired, err)
+	}
+	if _, err := store.RecordBrowserRecoveryOutcome(ctx, request, "claim-reset-login", BrowserRecoveryEffectSucceeded); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.ResetBrowserLoginRecovery(ctx, incident.ID, attempt.ID, incident.Version); err != nil {
+		t.Fatal(err)
+	}
+	if operation, found, err := store.GetBrowserRecoveryOperation(ctx, request); err != nil || found {
+		t.Fatalf("operation=%+v found=%v err=%v", operation, found, err)
+	}
+	if _, acquired, err := store.ClaimBrowserRecoveryOperation(ctx, request, "claim-reset-login-again"); err != nil || !acquired {
+		t.Fatalf("fresh claim acquired=%v err=%v", acquired, err)
+	}
+	current, err := store.GetCase(ctx, incident.ID)
+	if err != nil || current.Version != incident.Version || current.Status != CaseWaitingEvidence || current.CurrentAttemptID != attempt.ID {
+		t.Fatalf("current=%+v err=%v", current, err)
+	}
+}
+
+func TestResetBrowserLoginRecoveryDoesNotDeleteActiveClaim(t *testing.T) {
+	store := openTestCaseStore(t)
+	ctx := context.Background()
+	incident, attempt, request := eligibleBrowserRecoveryOperationFixture(t, store, "reset-active", BrowserRecoveryLogin)
+	if _, acquired, err := store.ClaimBrowserRecoveryOperation(ctx, request, "claim-reset-active"); err != nil || !acquired {
+		t.Fatalf("acquired=%v err=%v", acquired, err)
+	}
+	if err := store.ResetBrowserLoginRecovery(ctx, incident.ID, attempt.ID, incident.Version); !errors.Is(err, ErrBrowserRecoveryReserved) {
+		t.Fatalf("reset error=%v", err)
+	}
+	operation, found, err := store.GetBrowserRecoveryOperation(ctx, request)
+	if err != nil || !found || operation.Status != BrowserRecoveryClaimed {
+		t.Fatalf("operation=%+v found=%v err=%v", operation, found, err)
+	}
+}
+
 func TestBrowserRecoveryClaimSerializesWithSecondStoreCaseWriter(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "workflow.db")
 	first, err := OpenCaseStore(path)

@@ -55,7 +55,7 @@ export function continuationForDetail(detail: IncidentCaseDetail, evidence: stri
   const input: Record<string, unknown> = { ...(latest.input_json || {}), user_input: evidence }
   if (phase === 'validation') input.mode = 'reproduce'
   if (phase === 'regression') input.mode = 'regression'
-  if (phase === 'validation' && evidence.trim()) {
+  if ((phase === 'validation' || phase === 'regression') && evidence.trim()) {
     input.force_browser_replan = true
     input.scenario_contract_revision = {
       reason: 'user_feedback',

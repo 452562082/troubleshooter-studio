@@ -150,6 +150,68 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.text()).not.toContain('raw rejected output')
   })
 
+  it('shows the rejected plan rule and lets the user clarify the strategy before replanning', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-plan-question'
+    snapshot.attempts = [{
+      id: 'validation-plan-question', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, parent_attempt_id: '', started_at: '',
+      error_code: 'browser_validator_plan_invalid', error_message: '', usage: {},
+      output_json: {
+        error_code: 'browser_validator_plan_invalid',
+        plan_validation_code: 'frontend_evidence_incomplete',
+        plan_validation_issue: '至少一个已选择的应用端没有形成可验证证据',
+        validation_questions: [{
+          id: 'clarify_validation_strategy',
+          question: '请确认真实的跨端顺序、关键操作和成功判定。',
+          answer_hint: '说明先操作哪个端，以及随后在哪个端观察结果。',
+        }],
+      },
+    }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'supply_evidence', label: '回答 Agent 并调整验证策略' })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(wrapper.get('[data-browser-plan-validation-issue]').text()).toContain('应用端没有形成可验证证据')
+    await wrapper.get('.primary-action').trigger('click')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('真实的跨端顺序')
+    await wrapper.get('#case-supplement').setValue('先在管理端下架，再到 PC 端确认列表和详情都不可见。')
+    await wrapper.get('[data-confirm]').trigger('click')
+    expect(wrapper.emitted('primary')).toEqual([[{
+      kind: 'supply_evidence',
+      input: '先在管理端下架，再到 PC 端确认列表和详情都不可见。',
+    }]])
+  })
+
+  it('shows validation Agent questions and continues the same Case with the user answer', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-assistance'
+    snapshot.attempts = [{
+      id: 'validation-assistance', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'reproduce' }, parent_attempt_id: '', started_at: '',
+      error_code: 'browser_validation_needs_user_input', error_message: '', usage: {},
+      output_json: {
+        error_code: 'browser_validation_needs_user_input',
+        validation_questions: [{
+          id: 'confirm_auto_upload',
+          question: '选择文件后是否会自动上传，还是还需要点击一次提交？',
+          answer_hint: '请按真实页面流程说明。',
+        }],
+      },
+    }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'supply_evidence', label: '回答 Agent 并调整验证策略' })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(wrapper.get('[data-browser-state="assistance"]').text()).toContain('无法安全确定下一步')
+    await wrapper.get('.primary-action').trigger('click')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('是否会自动上传')
+    await wrapper.get('#case-supplement').setValue('选择文件后会自动上传，不存在第二次提交。')
+    await wrapper.get('[data-confirm]').trigger('click')
+    expect(wrapper.emitted('primary')).toEqual([[{
+      kind: 'supply_evidence',
+      input: '选择文件后会自动上传，不存在第二次提交。',
+    }]])
+  })
+
   it('retries an invalid locator repair plan inside the current Case', () => {
     const snapshot = detail('waiting_evidence')
     snapshot.case.current_attempt_id = 'repair-plan'

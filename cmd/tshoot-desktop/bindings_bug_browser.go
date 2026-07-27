@@ -491,7 +491,7 @@ func (a *App) OpenIncidentBrowserLogin(input IncidentBrowserCommandInput) (bughu
 		return bughub.IncidentCase{}, err
 	}
 	if operation != nil {
-		return a.resumeIncidentBrowserRecovery(input, attempt, request, *operation)
+		return a.resumeIncidentBrowserLoginCapture(request, *operation)
 	}
 	controller := a.workflowBrowser
 	if controller == nil {
@@ -522,7 +522,7 @@ func (a *App) OpenIncidentBrowserLogin(input IncidentBrowserCommandInput) (bughu
 		return bughub.IncidentCase{}, err
 	}
 	if !acquired {
-		return a.resumeIncidentBrowserRecovery(input, attempt, request, claimed)
+		return a.resumeIncidentBrowserLoginCapture(request, claimed)
 	}
 	if err := controller.Login(a.workflowCommandContext(), browserverify.BrowserLoginRequest{
 		SystemID: incident.SystemID, Environment: incident.Environment, ApplicationURL: applicationURL, ApplicationOrigin: applicationOrigin, LoginOrigin: loginOrigin, Policy: policy,
@@ -544,7 +544,32 @@ func (a *App) OpenIncidentBrowserLogin(input IncidentBrowserCommandInput) (bughu
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	return a.continueIncidentBrowserRecovery(input, attempt, request, claimed)
+	return incident.Clone(), nil
+}
+
+// ConfirmIncidentBrowserLogin is the explicit user gate between capturing a
+// durable browser session and creating a new validation/regression attempt.
+func (a *App) ConfirmIncidentBrowserLogin(input IncidentBrowserCommandInput) (bughub.IncidentCase, error) {
+	a.workflowBrowserMu.Lock()
+	defer a.workflowBrowserMu.Unlock()
+
+	_, attempt, request, operation, err := a.incidentBrowserBlockedAttempt(input, bughub.BrowserRecoveryLogin, "browser_login_required")
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	if operation == nil {
+		return bughub.IncidentCase{}, bughub.ErrBrowserRecoveryNotEligible
+	}
+	switch operation.Status {
+	case bughub.BrowserRecoveryEffectSucceeded:
+		return a.continueIncidentBrowserRecovery(input, attempt, request, *operation)
+	case bughub.BrowserRecoveryContinued:
+		return operation.ResultCase.Clone(), nil
+	case bughub.BrowserRecoveryClaimed, bughub.BrowserRecoveryOutcomeUncertain:
+		return bughub.IncidentCase{}, bughub.ErrBrowserRecoveryOutcomeUncertain
+	default:
+		return bughub.IncidentCase{}, bughub.ErrBrowserRecoveryNotEligible
+	}
 }
 
 func (a *App) RepairIncidentBrowserRuntime(input IncidentBrowserCommandInput) (bughub.IncidentCase, error) {
@@ -646,6 +671,13 @@ func (a *App) ClearIncidentBrowserSession(input IncidentBrowserCommandInput) err
 		SystemID: incident.SystemID, Environment: incident.Environment, Origin: applicationOrigin,
 	}); err != nil {
 		return errors.New("clear incident browser session failed")
+	}
+	store, _, err := a.workflowComponents()
+	if err != nil {
+		return err
+	}
+	if err := store.ResetBrowserLoginRecovery(a.workflowCommandContext(), incident.ID, attempt.ID, input.ExpectedVersion); err != nil {
+		return errors.New("reset incident browser login recovery failed")
 	}
 	return nil
 }
@@ -777,6 +809,30 @@ func (a *App) resumeIncidentBrowserRecovery(input IncidentBrowserCommandInput, a
 		return operation.ResultCase.Clone(), nil
 	default:
 		return bughub.IncidentCase{}, bughub.ErrIdempotencyConflict
+	}
+}
+
+func (a *App) resumeIncidentBrowserLoginCapture(request bughub.BrowserRecoveryOperationRequest, operation bughub.BrowserRecoveryOperation) (bughub.IncidentCase, error) {
+	switch operation.Status {
+	case bughub.BrowserRecoveryClaimed, bughub.BrowserRecoveryOutcomeUncertain:
+		return bughub.IncidentCase{}, bughub.ErrBrowserRecoveryOutcomeUncertain
+	case bughub.BrowserRecoveryEffectSucceeded:
+		store, _, err := a.workflowComponents()
+		if err != nil {
+			return bughub.IncidentCase{}, err
+		}
+		incident, err := store.GetCase(a.workflowCommandContext(), request.CaseID)
+		if err != nil {
+			return bughub.IncidentCase{}, err
+		}
+		if incident.Version != request.ExpectedVersion || incident.Status != bughub.CaseWaitingEvidence || incident.CurrentAttemptID != request.AttemptID || incident.CycleNumber != request.CycleNumber {
+			return bughub.IncidentCase{}, bughub.ErrBrowserRecoveryNotEligible
+		}
+		return incident, nil
+	case bughub.BrowserRecoveryContinued:
+		return operation.ResultCase.Clone(), nil
+	default:
+		return bughub.IncidentCase{}, bughub.ErrBrowserRecoveryNotEligible
 	}
 }
 

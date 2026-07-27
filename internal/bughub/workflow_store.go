@@ -1019,8 +1019,14 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 	} else if found {
 		return result, fmt.Errorf("%w: reset cancellation key %q", ErrIdempotencyConflict, reset.IdempotencyKey)
 	}
-	if err := rejectUnresolvedBrowserRecovery(ctx, tx, reset.CaseID); err != nil {
-		return result, err
+	// Reset is the explicit terminal boundary for the old Case. Supersede any
+	// unconsumed browser recovery in the same transaction so a stale login or
+	// runtime-repair journal cannot block the replacement Case. If the external
+	// effect returns later, its compare-and-set outcome write finds no claim and
+	// therefore cannot continue the archived Case.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM browser_recovery_operations WHERE case_id=? AND status IN (?,?,?)`,
+		reset.CaseID, BrowserRecoveryClaimed, BrowserRecoveryEffectSucceeded, BrowserRecoveryOutcomeUncertain); err != nil {
+		return result, fmt.Errorf("supersede reset Case browser recovery: %w", err)
 	}
 
 	incident, err := getCase(ctx, tx, reset.CaseID)

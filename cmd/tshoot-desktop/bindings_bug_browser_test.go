@@ -288,6 +288,13 @@ func browserCommandInput(incident bughub.IncidentCase, attempt bughub.PhaseAttem
 	}
 }
 
+func openAndConfirmIncidentBrowserLogin(app *App, input IncidentBrowserCommandInput) (bughub.IncidentCase, error) {
+	if _, err := app.OpenIncidentBrowserLogin(input); err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	return app.ConfirmIncidentBrowserLogin(input)
+}
+
 func browserRecoveryOperationRequest(input IncidentBrowserCommandInput, attempt bughub.PhaseAttempt, operation bughub.BrowserRecoveryOperationKind, expectedCode string) bughub.BrowserRecoveryOperationRequest {
 	return bughub.BrowserRecoveryOperationRequest{
 		Operation: operation, CaseID: input.CaseID, AttemptID: input.AttemptID,
@@ -406,11 +413,32 @@ func TestCanonicalIncidentBrowserOriginNormalizesIPLiteralSpellingsAndDefaultPor
 	}
 }
 
-func TestOpenIncidentBrowserLoginContinuesOnceAndReplaysWithoutSecondLogin(t *testing.T) {
+func TestOpenIncidentBrowserLoginWaitsForExplicitConfirmationAndReplaysWithoutSecondLogin(t *testing.T) {
 	app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
 	input := browserCommandInput(incident, attempt, "browser-login:case-browser-recovery")
 
-	continued, err := app.OpenIncidentBrowserLogin(input)
+	captured, err := app.OpenIncidentBrowserLogin(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if captured.Status != bughub.CaseWaitingEvidence || captured.CurrentAttemptID != attempt.ID || runner.count() != 0 {
+		t.Fatalf("captured=%+v starts=%d", captured, runner.count())
+	}
+	request := browserRecoveryOperationRequest(input, attempt, bughub.BrowserRecoveryLogin, "browser_login_required")
+	operation, found, err := store.GetBrowserRecoveryOperation(context.Background(), request)
+	if err != nil || !found || operation.Status != bughub.BrowserRecoveryEffectSucceeded {
+		t.Fatalf("operation=%+v found=%v err=%v", operation, found, err)
+	}
+	replayedCapture, err := app.OpenIncidentBrowserLogin(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logins, _, _ := controller.snapshot()
+	if replayedCapture.CurrentAttemptID != captured.CurrentAttemptID || runner.count() != 0 || len(logins) != 1 {
+		t.Fatalf("replayed capture=%+v starts=%d logins=%d", replayedCapture, runner.count(), len(logins))
+	}
+
+	continued, err := app.ConfirmIncidentBrowserLogin(input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,7 +446,7 @@ func TestOpenIncidentBrowserLoginContinuesOnceAndReplaysWithoutSecondLogin(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	logins, _, _ := controller.snapshot()
+	logins, _, _ = controller.snapshot()
 	if continued.Status != bughub.CaseValidating || continued.CycleNumber != incident.CycleNumber || child.ParentAttemptID != attempt.ID || child.Phase != attempt.Phase || runner.count() != 1 || len(logins) != 1 {
 		t.Fatalf("continued=%+v child=%+v starts=%d logins=%d", continued, child, runner.count(), len(logins))
 	}
@@ -426,7 +454,7 @@ func TestOpenIncidentBrowserLoginContinuesOnceAndReplaysWithoutSecondLogin(t *te
 		t.Fatalf("login request = %+v", logins[0])
 	}
 
-	replayed, err := app.OpenIncidentBrowserLogin(input)
+	replayed, err := app.ConfirmIncidentBrowserLogin(input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,19 +462,36 @@ func TestOpenIncidentBrowserLoginContinuesOnceAndReplaysWithoutSecondLogin(t *te
 	if replayed.CurrentAttemptID != continued.CurrentAttemptID || runner.count() != 1 || len(logins) != 1 {
 		t.Fatalf("replayed=%+v starts=%d logins=%d", replayed, runner.count(), len(logins))
 	}
+	operation, found, err = store.GetBrowserRecoveryOperation(context.Background(), request)
+	if err != nil || !found || operation.Status != bughub.BrowserRecoveryContinued {
+		t.Fatalf("operation=%+v found=%v err=%v", operation, found, err)
+	}
+}
+
+func TestConfirmIncidentBrowserLoginRejectsMissingCapturedSession(t *testing.T) {
+	app, _, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
+	input := browserCommandInput(incident, attempt, "browser-login:confirmation-without-capture")
+
+	if _, err := app.ConfirmIncidentBrowserLogin(input); !errors.Is(err, bughub.ErrBrowserRecoveryNotEligible) {
+		t.Fatalf("confirmation error=%v", err)
+	}
+	logins, _, _ := controller.snapshot()
+	if len(logins) != 0 || runner.count() != 0 {
+		t.Fatalf("logins=%d starts=%d", len(logins), runner.count())
+	}
 }
 
 func TestOpenIncidentBrowserLoginFallsBackToApplicationOriginWhenWorkerDidNotObserveLoginPage(t *testing.T) {
 	app, _, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "")
 	input := browserCommandInput(incident, attempt, "browser-login:same-origin-fallback")
 
-	continued, err := app.OpenIncidentBrowserLogin(input)
+	captured, err := app.OpenIncidentBrowserLogin(input)
 	if err != nil {
 		t.Fatal(err)
 	}
 	logins, _, _ := controller.snapshot()
-	if continued.Status != bughub.CaseValidating || runner.count() != 1 || len(logins) != 1 {
-		t.Fatalf("continued=%+v starts=%d logins=%d", continued, runner.count(), len(logins))
+	if captured.Status != bughub.CaseWaitingEvidence || runner.count() != 0 || len(logins) != 1 {
+		t.Fatalf("captured=%+v starts=%d logins=%d", captured, runner.count(), len(logins))
 	}
 	if logins[0].ApplicationURL != "https://app.test/oauth/start?state=opaque" ||
 		logins[0].ApplicationOrigin != "https://app.test" ||
@@ -511,11 +556,11 @@ func TestIncidentBrowserRecoverySuccessNeverPersistsOrEmitsCallerKey(t *testing.
 		}
 	}
 
-	continued, err := app.OpenIncidentBrowserLogin(input)
+	continued, err := openAndConfirmIncidentBrowserLogin(app, input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	replayed, err := app.OpenIncidentBrowserLogin(input)
+	replayed, err := app.ConfirmIncidentBrowserLogin(input)
 	if err != nil || replayed.CurrentAttemptID != continued.CurrentAttemptID {
 		t.Fatalf("replayed=%+v err=%v", replayed, err)
 	}
@@ -599,11 +644,11 @@ func TestIncidentBrowserRecoveryAnonymizesActorAcrossDurableAndEmittedSurfaces(t
 				}
 			}
 
-			continued, err := app.OpenIncidentBrowserLogin(input)
+			continued, err := openAndConfirmIncidentBrowserLogin(app, input)
 			if err != nil {
 				t.Fatal(err)
 			}
-			replayed, err := app.OpenIncidentBrowserLogin(input)
+			replayed, err := app.ConfirmIncidentBrowserLogin(input)
 			if err != nil || replayed.CurrentAttemptID != continued.CurrentAttemptID {
 				t.Fatalf("replayed=%+v err=%v", replayed, err)
 			}
@@ -712,7 +757,11 @@ func TestIncidentBrowserKnownLoginFailuresRemainRetryable(t *testing.T) {
 			}
 
 			controller.loginErr = nil
-			continued, err := app.OpenIncidentBrowserLogin(input)
+			captured, err := app.OpenIncidentBrowserLogin(input)
+			if err != nil || captured.Status != bughub.CaseWaitingEvidence {
+				t.Fatalf("captured=%+v err=%v", captured, err)
+			}
+			continued, err := app.ConfirmIncidentBrowserLogin(input)
 			if err != nil || continued.Status != bughub.CaseValidating {
 				t.Fatalf("continued=%+v err=%v", continued, err)
 			}
@@ -918,7 +967,7 @@ func TestIncidentBrowserRecoveryRetriesOnlyContinuationAfterFailure(t *testing.T
 		effectCount func(*fakeIncidentBrowserController) int
 	}{
 		{name: "login", errorCode: "browser_login_required", operation: bughub.BrowserRecoveryLogin, run: func(app *App, input IncidentBrowserCommandInput) (bughub.IncidentCase, error) {
-			return app.OpenIncidentBrowserLogin(input)
+			return openAndConfirmIncidentBrowserLogin(app, input)
 		}, effectCount: func(controller *fakeIncidentBrowserController) int {
 			logins, _, _ := controller.snapshot()
 			return len(logins)
@@ -1001,8 +1050,12 @@ func TestIncidentBrowserLoginReservationBlocksConcurrentCaseMutation(t *testing.
 		t.Fatal(err)
 	}
 	logins, _, _ := controller.snapshot()
-	if len(logins) != 1 || runner.count() != 1 || replayed.CurrentAttemptID != first.CurrentAttemptID {
+	if len(logins) != 1 || runner.count() != 0 || replayed.CurrentAttemptID != first.CurrentAttemptID {
 		t.Fatalf("first=%+v replayed=%+v logins=%d starts=%d", first, replayed, len(logins), runner.count())
+	}
+	continued, err := app.ConfirmIncidentBrowserLogin(input)
+	if err != nil || continued.Status != bughub.CaseValidating || runner.count() != 1 {
+		t.Fatalf("continued=%+v err=%v starts=%d", continued, err, runner.count())
 	}
 }
 
@@ -1075,10 +1128,13 @@ func TestIncidentBrowserLoginContextReloadFailureRetriesOnlyContinuation(t *test
 		}
 		return bughub.Bug{ID: id, Source: "zentao", Title: "checkout fails", Env: "test", SystemID: "base", FrontendURL: "https://app.test/users"}, nil
 	}
-	if _, err := app.OpenIncidentBrowserLogin(input); err == nil {
+	if _, err := app.OpenIncidentBrowserLogin(input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.ConfirmIncidentBrowserLogin(input); err == nil {
 		t.Fatal("expected context reload failure")
 	}
-	continued, err := app.OpenIncidentBrowserLogin(input)
+	continued, err := app.ConfirmIncidentBrowserLogin(input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1112,6 +1168,56 @@ func TestClearIncidentBrowserSessionIsIdempotentAndDoesNotMutateCase(t *testing.
 	_, clears, _ := controller.snapshot()
 	if len(clears) != 2 || clears[0].Origin != "https://app.test" || string(before) != string(after) {
 		t.Fatalf("clears=%+v before=%s after=%s", clears, before, after)
+	}
+}
+
+func TestClearIncidentBrowserSessionInvalidatesCapturedLoginAndReopensBrowser(t *testing.T) {
+	app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
+	loginInput := browserCommandInput(incident, attempt, "browser-login:clear-captured")
+	if _, err := app.OpenIncidentBrowserLogin(loginInput); err != nil {
+		t.Fatal(err)
+	}
+	request := browserRecoveryOperationRequest(loginInput, attempt, bughub.BrowserRecoveryLogin, "browser_login_required")
+	if operation, found, err := store.GetBrowserRecoveryOperation(context.Background(), request); err != nil || !found || operation.Status != bughub.BrowserRecoveryEffectSucceeded {
+		t.Fatalf("operation=%+v found=%v err=%v", operation, found, err)
+	}
+
+	if err := app.ClearIncidentBrowserSession(browserCommandInput(incident, attempt, "browser-clear:captured")); err != nil {
+		t.Fatal(err)
+	}
+	if operation, found, err := store.GetBrowserRecoveryOperation(context.Background(), request); err != nil || found {
+		t.Fatalf("operation after clear=%+v found=%v err=%v", operation, found, err)
+	}
+	if _, err := app.OpenIncidentBrowserLogin(loginInput); err != nil {
+		t.Fatal(err)
+	}
+	logins, clears, _ := controller.snapshot()
+	if len(logins) != 2 || len(clears) != 1 || runner.count() != 0 {
+		t.Fatalf("logins=%d clears=%d starts=%d", len(logins), len(clears), runner.count())
+	}
+}
+
+func TestClearIncidentBrowserSessionFailurePreservesCapturedLogin(t *testing.T) {
+	app, store, _, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
+	loginInput := browserCommandInput(incident, attempt, "browser-login:clear-failure")
+	if _, err := app.OpenIncidentBrowserLogin(loginInput); err != nil {
+		t.Fatal(err)
+	}
+	controller.clearErr = errors.New("injected clear failure")
+	if err := app.ClearIncidentBrowserSession(browserCommandInput(incident, attempt, "browser-clear:failure")); err == nil {
+		t.Fatal("expected clear failure")
+	}
+	request := browserRecoveryOperationRequest(loginInput, attempt, bughub.BrowserRecoveryLogin, "browser_login_required")
+	operation, found, err := store.GetBrowserRecoveryOperation(context.Background(), request)
+	if err != nil || !found || operation.Status != bughub.BrowserRecoveryEffectSucceeded {
+		t.Fatalf("operation=%+v found=%v err=%v", operation, found, err)
+	}
+	if _, err := app.OpenIncidentBrowserLogin(loginInput); err != nil {
+		t.Fatal(err)
+	}
+	logins, _, _ := controller.snapshot()
+	if len(logins) != 1 {
+		t.Fatalf("login calls=%d", len(logins))
 	}
 }
 
@@ -1197,7 +1303,11 @@ func TestIncidentBrowserLoginRedactsContinuationRunnerFailure(t *testing.T) {
 			emitted = append(emitted, payload)
 		}
 	}
-	continued, err := app.OpenIncidentBrowserLogin(browserCommandInput(incident, attempt, "browser-login:runner-redaction"))
+	input := browserCommandInput(incident, attempt, "browser-login:runner-redaction")
+	if _, openErr := app.OpenIncidentBrowserLogin(input); openErr != nil {
+		t.Fatal(openErr)
+	}
+	continued, err := app.ConfirmIncidentBrowserLogin(input)
 	if err == nil {
 		t.Fatal("expected continuation failure")
 	}

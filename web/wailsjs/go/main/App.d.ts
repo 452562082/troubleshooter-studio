@@ -57,6 +57,8 @@ export function ClearIncidentBrowserSession(arg1:main.IncidentBrowserCommandInpu
 
 export function CompleteIncidentRemediation(arg1:main.CompleteIncidentRemediationInput):Promise<bughub.IncidentCase>;
 
+export function ConfirmIncidentBrowserLogin(arg1:main.IncidentBrowserCommandInput):Promise<bughub.IncidentCase>;
+
 export function ConfirmIncidentValidation(arg1:main.ConfirmIncidentValidationInput):Promise<bughub.IncidentCase>;
 
 export function ContinueBugInvestigation(arg1:main.BugInvestigationContinueInput):Promise<bughub.InvestigationRun>;

@@ -6,6 +6,7 @@ import {
   approveIncidentMerge,
   clearIncidentBrowserSession,
   completeIncidentRemediation,
+  confirmIncidentBrowserLogin,
   confirmIncidentValidation,
   continueIncidentCase,
   deleteIncidentHistory,
@@ -40,6 +41,7 @@ const route = vi.hoisted(() => ({ path: '/incidents', query: {} as Record<string
 const router = vi.hoisted(() => ({ replace: vi.fn(), push: vi.fn() }))
 const runtime = vi.hoisted(() => ({ EventsOn: vi.fn((_name: string, _handler: (payload: unknown) => void) => vi.fn()) }))
 const notifications = vi.hoisted(() => ({
+  dismiss: vi.fn(),
   error: vi.fn(),
   success: vi.fn(),
   info: vi.fn(),
@@ -56,6 +58,7 @@ vi.mock('../lib/bridge', async importOriginal => ({
   cancelIncidentAttempt: vi.fn(),
   clearIncidentBrowserSession: vi.fn(),
   completeIncidentRemediation: vi.fn(),
+  confirmIncidentBrowserLogin: vi.fn(),
   confirmIncidentValidation: vi.fn(),
   continueIncidentCase: vi.fn(),
   deleteIncidentHistory: vi.fn(),
@@ -80,6 +83,7 @@ vi.mock('../lib/bridge', async importOriginal => ({
   uploadIncidentEvidenceImages: vi.fn(),
 }))
 vi.mock('../lib/toast', () => ({
+  dismiss: notifications.dismiss,
   toast: { error: notifications.error, success: notifications.success, info: notifications.info },
   toastError: notifications.toastError,
 }))
@@ -199,6 +203,7 @@ afterEach(() => {
   vi.mocked(saveBugSelectedBot).mockReset().mockResolvedValue(bugA as any)
   vi.mocked(startIncidentCase).mockReset()
   vi.mocked(confirmIncidentValidation).mockReset()
+  vi.mocked(confirmIncidentBrowserLogin).mockReset()
   vi.mocked(uploadIncidentEvidenceFiles).mockReset()
   vi.mocked(uploadIncidentEvidenceImages).mockReset()
   vi.mocked(continueIncidentCase).mockReset()
@@ -215,6 +220,7 @@ afterEach(() => {
   vi.mocked(completeIncidentRemediation).mockReset()
   vi.mocked(resetIncidentCaseWithWarnings).mockReset()
   notifications.error.mockReset()
+  notifications.dismiss.mockReset()
   notifications.success.mockReset()
   notifications.info.mockReset()
   notifications.toastError.mockReset()
@@ -1755,7 +1761,7 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe(item.id)
   })
 
-  it('runs login once with the exact browser identity, then refreshes the continued snapshot', async () => {
+  it('captures login once, waits for explicit confirmation, then refreshes the continued snapshot', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
     const item = incident('case-browser-login', 'waiting_evidence', '2026-07-15T10:00:00Z', { version: 7, current_attempt_id: 'attempt-login' })
@@ -1772,7 +1778,12 @@ describe('IncidentWorkbenchPage', () => {
     vi.mocked(getIncidentCase).mockImplementation(async () => recoveryCompleted ? refreshed : blocked)
     const pending = deferred<IncidentCase>()
     vi.mocked(openIncidentBrowserLogin).mockReturnValue(pending.promise)
+    vi.mocked(confirmIncidentBrowserLogin).mockImplementation(async () => {
+      recoveryCompleted = true
+      return continued
+    })
     const wrapper = await mountedPage()
+    const initialReads = vi.mocked(getIncidentCase).mock.calls.length
 
     const login = wrapper.get<HTMLButtonElement>('[data-browser-action="login"]')
     await login.trigger('click')
@@ -1786,11 +1797,25 @@ describe('IncidentWorkbenchPage', () => {
       actor_id: 'desktop-user',
     })
 
-    recoveryCompleted = true
-    pending.resolve(continued)
+    pending.resolve(item)
     await flushPromises()
     await flushPromises()
 
+    expect(wrapper.get('.status-pill').text()).toBe('等待证据')
+    expect(wrapper.get('[data-browser-action="confirm-login"]').text()).toBe('确认已登录并继续验证')
+    expect(getIncidentCase).toHaveBeenCalledTimes(initialReads)
+
+    await wrapper.get('[data-browser-action="confirm-login"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    expect(confirmIncidentBrowserLogin).toHaveBeenCalledWith({
+      case_id: item.id,
+      attempt_id: 'attempt-login',
+      expected_version: 7,
+      idempotency_key: 'login:case-browser-login:attempt-login:v7',
+      actor_id: 'desktop-user',
+    })
     expect(getIncidentCase).toHaveBeenLastCalledWith(item.id)
     expect(wrapper.get('.status-pill').text()).toBe('验证中')
     expect(wrapper.find('[data-artifact-id="recovery-evidence"]').exists()).toBe(true)
@@ -1841,7 +1866,8 @@ describe('IncidentWorkbenchPage', () => {
       if (recoveryCompleted) throw new Error('Cookie: secret /private/detail')
       return blocked
     })
-    vi.mocked(openIncidentBrowserLogin).mockImplementation(async () => {
+    vi.mocked(openIncidentBrowserLogin).mockResolvedValue(item)
+    vi.mocked(confirmIncidentBrowserLogin).mockImplementation(async () => {
       recoveryCompleted = true
       return continued
     })
@@ -1849,6 +1875,7 @@ describe('IncidentWorkbenchPage', () => {
 
     await wrapper.get('[data-browser-action="login"]').trigger('click')
     await flushPromises()
+    await wrapper.get('[data-browser-action="confirm-login"]').trigger('click')
     await flushPromises()
 
     expect(getIncidentCase).toHaveBeenLastCalledWith(item.id)
@@ -1937,6 +1964,34 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
     expect(getIncidentCase).toHaveBeenCalledTimes(initialReads + 1)
+  })
+
+  it('clears the captured-login confirmation and dismisses its stale success notice', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-browser-clear-captured', 'waiting_evidence', '2026-07-15T10:00:00Z', { version: 5, current_attempt_id: 'attempt-login' })
+    const blocked = detail(item, {
+      attempts: [{ id: 'attempt-login', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_login_required', application_origin: 'https://app.test', login_origin: 'https://login.test' }, parent_attempt_id: '', started_at: '', error_code: 'browser_login_required', error_message: '', usage: {} }],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    vi.mocked(getIncidentCase).mockResolvedValue(blocked)
+    vi.mocked(openIncidentBrowserLogin).mockResolvedValue(item)
+    vi.mocked(clearIncidentBrowserSession).mockResolvedValue()
+    notifications.info.mockReturnValue(73)
+    const wrapper = await mountedPage()
+
+    await wrapper.get('[data-browser-action="login"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-browser-action="confirm-login"]').exists()).toBe(true)
+
+    await wrapper.get('[data-browser-action="clear-session"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    expect(notifications.dismiss).toHaveBeenCalledWith(73)
+    expect(wrapper.find('[data-browser-action="confirm-login"]').exists()).toBe(false)
+    expect(wrapper.find('[data-browser-action="login"]').exists()).toBe(true)
+    expect(notifications.success).toHaveBeenCalledWith('已清除此环境登录态')
   })
 
   it('keeps clear-session success separate from a captured-Case refresh failure', async () => {

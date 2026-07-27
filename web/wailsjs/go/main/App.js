@@ -86,6 +86,10 @@ export function CompleteIncidentRemediation(arg1) {
   return window['go']['main']['App']['CompleteIncidentRemediation'](arg1);
 }
 
+export function ConfirmIncidentBrowserLogin(arg1) {
+  return window['go']['main']['App']['ConfirmIncidentBrowserLogin'](arg1);
+}
+
 export function ConfirmIncidentValidation(arg1) {
   return window['go']['main']['App']['ConfirmIncidentValidation'](arg1);
 }

@@ -30,6 +30,7 @@ import {
   EVIDENCE_TRUNCATION_MARKER,
   hasVisiblePasswordField,
   loginOriginForResult,
+  loginSessionStateChanged,
   observeLoginState,
   dialPinnedTarget,
   executeAssertion,
@@ -46,6 +47,26 @@ import {
   startPinnedProxy,
   validateWorkerRequest,
 } from './browser_worker.mjs';
+
+test('login session completion requires a durable storage-state change', () => {
+  const before = {
+    cookies: [{ name: 'csrf', value: 'same', domain: 'app.test', path: '/' }],
+    origins: [{ origin: 'https://app.test', localStorage: [{ name: 'theme', value: 'dark' }] }],
+  };
+  const reordered = {
+    origins: [{ origin: 'https://app.test', localStorage: [{ value: 'dark', name: 'theme' }] }],
+    cookies: [{ path: '/', domain: 'app.test', value: 'same', name: 'csrf' }],
+  };
+  const authenticated = {
+    ...before,
+    cookies: [...before.cookies, { name: 'session', value: 'opaque', domain: 'app.test', path: '/', httpOnly: true }],
+  };
+
+  assert.equal(loginSessionStateChanged(before, before), false);
+  assert.equal(loginSessionStateChanged(before, reordered), false);
+  assert.equal(loginSessionStateChanged(before, authenticated), true);
+  assert.equal(loginSessionStateChanged(null, authenticated), false);
+});
 
 test('login result falls back to the configured application origin when no login page remains open', () => {
   assert.equal(loginOriginForResult(undefined, 'https://app.test/admin?redirect=%2Fmedia'), 'https://app.test');

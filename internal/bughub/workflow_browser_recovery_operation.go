@@ -310,6 +310,58 @@ func (s *CaseStore) RecordBrowserRecoveryOutcome(ctx context.Context, request Br
 	return BrowserRecoveryOperation{}, ErrIdempotencyConflict
 }
 
+// ResetBrowserLoginRecovery removes a captured/failed login recovery for the
+// exact blocked attempt after its browser session has been explicitly cleared.
+// This makes a later login request perform the external login flow again instead
+// of replaying an effect_succeeded journal entry whose session no longer exists.
+func (s *CaseStore) ResetBrowserLoginRecovery(ctx context.Context, caseID, attemptID string, expectedVersion int64) error {
+	caseID = strings.TrimSpace(caseID)
+	attemptID = strings.TrimSpace(attemptID)
+	if s == nil || s.db == nil || caseID == "" || attemptID == "" || expectedVersion < 1 {
+		return errors.New("browser login recovery reset identity is incomplete")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin browser login recovery reset: %w", err)
+	}
+	defer tx.Rollback()
+	attempt, err := getAttempt(ctx, tx, attemptID)
+	if err != nil || attempt.CaseID != caseID || attempt.Status != AttemptStatusFailed || attempt.ErrorCode != "browser_login_required" || attempt.Phase != PhaseValidation && attempt.Phase != PhaseRegression {
+		return ErrBrowserRecoveryNotEligible
+	}
+	incident, err := getCase(ctx, tx, caseID)
+	if err != nil || incident.Status != CaseWaitingEvidence || incident.Version != expectedVersion || incident.CurrentAttemptID != attemptID || incident.CycleNumber != attempt.CycleNumber {
+		return ErrBrowserRecoveryNotEligible
+	}
+	var status BrowserRecoveryOperationStatus
+	err = tx.QueryRowContext(ctx, `SELECT status FROM browser_recovery_operations WHERE operation=? AND case_id=? AND attempt_id=?`, BrowserRecoveryLogin, caseID, attemptID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return tx.Commit()
+	}
+	if err != nil {
+		return err
+	}
+	switch status {
+	case BrowserRecoveryEffectSucceeded, BrowserRecoveryEffectFailed, BrowserRecoveryOutcomeUncertain:
+	case BrowserRecoveryClaimed:
+		return ErrBrowserRecoveryReserved
+	default:
+		return ErrBrowserRecoveryNotEligible
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM browser_recovery_operations WHERE operation=? AND case_id=? AND attempt_id=? AND status=?`, BrowserRecoveryLogin, caseID, attemptID, status)
+	if err != nil {
+		return fmt.Errorf("reset browser login recovery: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return ErrIdempotencyConflict
+	}
+	return tx.Commit()
+}
+
 func browserRecoveryAttemptEligible(attempt PhaseAttempt, request BrowserRecoveryOperationRequest) bool {
 	if attempt.CaseID != request.CaseID || attempt.CycleNumber != request.CycleNumber || attempt.Status != AttemptStatusFailed || attempt.FinishedAt == nil || attempt.ErrorCode != request.ExpectedErrorCode {
 		return false

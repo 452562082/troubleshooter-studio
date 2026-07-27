@@ -12,6 +12,7 @@ import {
   cancelIncidentAttempt,
   clearIncidentBrowserSession,
   completeIncidentRemediation,
+  confirmIncidentBrowserLogin,
   confirmIncidentValidation,
   continueIncidentCase,
   deleteIncidentHistory,
@@ -44,7 +45,7 @@ import {
   type IncidentEvidenceImageInput,
   type FrontendEntryResolution,
 } from '../lib/bridge'
-import { toast, toastError } from '../lib/toast'
+import { dismiss as dismissToast, toast, toastError } from '../lib/toast'
 import { confirmDialog } from '../lib/confirm'
 import { useBugTickets } from '../lib/useBugTickets'
 import { activeCaseForBug, casesForBug, continuationForDetail, terminalCaseStatuses, useIncidentCase } from '../lib/useIncidentCase'
@@ -71,6 +72,8 @@ const matching = ref(false)
 const botError = ref('')
 const starting = ref(false)
 const workflowNotice = ref('')
+const browserLoginConfirmationKey = ref('')
+const browserLoginToastID = ref<number | null>(null)
 const browserRuntimeStatus = ref<IncidentBrowserRuntimeStatus>({
   state: 'installing',
   version: '',
@@ -938,10 +941,15 @@ async function refreshIncidentWorkflow() {
   }
 }
 
-type IncidentBrowserAction = 'login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url'
+type IncidentBrowserAction = 'login' | 'confirm-login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url'
 
 const browserKey = (kind: string, detail: NonNullable<typeof displayedDetail.value>) =>
   `${kind}:${detail.case.id}:${detail.case.current_attempt_id}:v${detail.case.version}`
+
+const browserLoginReady = computed(() => {
+  const detail = displayedDetail.value
+  return Boolean(detail && browserLoginConfirmationKey.value === browserKey('login', detail))
+})
 
 type IncidentBrowserContext = { bugID: string; caseID: string; attemptID: string; version: number }
 
@@ -966,6 +974,14 @@ async function refreshBrowserCaseBestEffort(context: IncidentBrowserContext): Pr
   }
 }
 
+function clearBrowserLoginConfirmation() {
+  browserLoginConfirmationKey.value = ''
+  if (browserLoginToastID.value !== null) {
+    dismissToast(browserLoginToastID.value)
+    browserLoginToastID.value = null
+  }
+}
+
 async function handleIncidentBrowser(action: IncidentBrowserAction) {
   if (action === 'redeploy-validator') {
     await router.push('/bots')
@@ -981,11 +997,12 @@ async function handleIncidentBrowser(action: IncidentBrowserAction) {
   const incident = detail.case
   const context: IncidentBrowserContext = { bugID: tickets.selectedID.value, caseID: incident.id, attemptID: incident.current_attempt_id, version: incident.version }
   const key = browserKey(action, detail)
+  const recoveryKey = action === 'confirm-login' ? browserKey('login', detail) : key
   const input = {
     case_id: incident.id,
     attempt_id: incident.current_attempt_id,
     expected_version: incident.version,
-    idempotency_key: key,
+    idempotency_key: recoveryKey,
     actor_id: 'desktop-user',
   }
   incidentWorkflow.error.value = ''
@@ -994,22 +1011,34 @@ async function handleIncidentBrowser(action: IncidentBrowserAction) {
     if (action === 'clear-session') {
       await incidentWorkflow.runOnce(key, () => clearIncidentBrowserSession(input))
       if (!isSameBlockedBrowserAttempt(context)) return
+      clearBrowserLoginConfirmation()
       const refreshed = await refreshBrowserCaseBestEffort(context)
       if (refreshed && isSameBrowserCase(context)) toast.success('已清除此环境登录态')
       return
     }
     const updated = await incidentWorkflow.runOnce(key, () => action === 'login'
       ? openIncidentBrowserLogin(input)
-      : repairIncidentBrowserRuntime(input))
+      : action === 'confirm-login'
+        ? confirmIncidentBrowserLogin(input)
+        : repairIncidentBrowserRuntime(input))
     if (updated.id !== context.caseID) throw new Error('browser recovery returned another Case')
     if (!isSameBlockedBrowserAttempt(context)) return
     if (!incidentWorkflow.applyCase(updated)) throw new Error('browser recovery returned stale Case state')
+    if (action === 'login') {
+      browserLoginConfirmationKey.value = recoveryKey
+      if (browserLoginToastID.value !== null) dismissToast(browserLoginToastID.value)
+      browserLoginToastID.value = toast.info('登录会话已保存，请确认页面确实已登录后继续验证。')
+      return
+    }
+    clearBrowserLoginConfirmation()
     const refreshed = await refreshBrowserCaseBestEffort(context)
-    if (refreshed && isSameBrowserCase(context)) toast.success(action === 'login' ? '登录完成，验证已继续' : '浏览器环境已修复，验证已继续')
+    if (refreshed && isSameBrowserCase(context)) toast.success(action === 'confirm-login' ? '已确认登录，验证已继续' : '浏览器环境已修复，验证已继续')
   } catch {
     if (!isSameBlockedBrowserAttempt(context)) return
     const message = action === 'login'
       ? '无法完成验证浏览器登录，请刷新 Case 后重试。'
+      : action === 'confirm-login'
+        ? '登录确认失败，验证尚未继续，请刷新 Case 后重试。'
       : action === 'repair-runtime'
         ? '浏览器环境修复失败，请稍后重试。'
         : '清除浏览器登录态失败，请稍后重试。'
@@ -1299,6 +1328,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         :pending="incidentWorkflow.pending.value || starting"
         :error="incidentWorkflow.error.value"
         :phase-events="incidentWorkflow.phaseEvents.value[displayedDetail.case.current_attempt_id] || []"
+        :browser-login-ready="browserLoginReady"
         :load-fix-branches="listIncidentFixBranches"
         @refresh="refreshIncidentWorkflow"
         @primary="handleIncidentPrimary"

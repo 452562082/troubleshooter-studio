@@ -89,6 +89,21 @@ describe('BugBrowserProgress', () => {
     expect(wrapper.emitted('action')).toEqual([['login'], ['clear-session']])
   })
 
+  it('requires an explicit user confirmation after the login session is saved', async () => {
+    const wrapper = mount(BugBrowserProgress, {
+      props: {
+        attempt: attempt('browser_login_required', { error_code: 'browser_login_required', application_origin: 'https://app.test' }),
+        loginReady: true,
+      },
+    })
+
+    expect(wrapper.text()).toContain('验证尚未继续')
+    expect(wrapper.find('[data-browser-action="login"]').exists()).toBe(false)
+    expect(wrapper.get('[data-browser-action="confirm-login"]').text()).toBe('确认已登录并继续验证')
+    await wrapper.get('[data-browser-action="confirm-login"]').trigger('click')
+    expect(wrapper.emitted('action')).toEqual([['confirm-login']])
+  })
+
   it('separates runtime repair, validator deployment, locator and business gaps', async () => {
     const runtime = mount(BugBrowserProgress, { props: { attempt: attempt('browser_runtime_broken'), events: [], systemID: 'base', environment: 'test' } })
     expect(runtime.text()).toContain('验证浏览器环境不可用')
@@ -107,7 +122,8 @@ describe('BugBrowserProgress', () => {
 
     const locator = mount(BugBrowserProgress, { props: { attempt: attempt('browser_locator_failed'), events: [], systemID: 'base', environment: 'test' } })
     expect(locator.text()).toContain('有限次现场修复仍失败')
-    expect(locator.text()).toContain('无需补充业务证据')
+    expect(locator.text()).toContain('说明真实控件或页面流程')
+    expect(locator.text()).toContain('重新观察页面')
     expect(locator.find('[data-browser-action="repair-runtime"]').exists()).toBe(false)
 
     const business = mount(BugBrowserProgress, { props: { attempt: attempt('browser_url_required'), events: [], systemID: 'base', environment: 'test' } })
@@ -126,10 +142,21 @@ describe('BugBrowserProgress', () => {
     expect(artifact.text()).toContain('不是页面定位失败')
     expect(artifact.get('[data-browser-error-code]').text()).toBe('错误码：browser_artifact_manifest_invalid')
 
-    const plan = mount(BugBrowserProgress, { props: { attempt: attempt('browser_validator_plan_invalid'), events: [], systemID: 'base', environment: 'test' } })
+    const plan = mount(BugBrowserProgress, { props: { attempt: attempt('browser_validator_plan_invalid', {
+      error_code: 'browser_validator_plan_invalid',
+      plan_validation_code: 'frontend_evidence_incomplete',
+      plan_validation_issue: 'Cookie: sid=secret /Users/alice/private/trace.zip',
+    }), events: [], systemID: 'base', environment: 'test' } })
     expect(plan.get('[data-browser-state="plan"]').text()).toContain('未通过结构校验')
     expect(plan.text()).toContain('当前 Case')
     expect(plan.text()).toContain('无需重建故障闭环')
+    expect(plan.get('[data-browser-plan-validation-issue]').text()).toContain('至少一个已选择的应用端没有形成可验证证据')
+    expect(plan.text()).not.toMatch(/Cookie|secret|private/)
+
+    const assistance = mount(BugBrowserProgress, { props: { attempt: attempt('browser_validation_needs_user_input'), events: [], systemID: 'base', environment: 'test' } })
+    expect(assistance.get('[data-browser-state="assistance"]').text()).toContain('无法安全确定下一步')
+    expect(assistance.text()).toContain('重建 scenario_contract')
+    expect(assistance.find('[data-browser-action]').exists()).toBe(false)
 
     const repairPlan = mount(BugBrowserProgress, { props: { attempt: attempt('browser_locator_repair_plan_invalid'), events: [], systemID: 'base', environment: 'test' } })
     expect(repairPlan.get('[data-browser-state="plan"]').text()).toContain('页面定位修复计划')
@@ -147,9 +174,13 @@ describe('BugBrowserProgress', () => {
     expect(configuration.get('[data-browser-state="configuration"]').text()).toContain('启动配置不兼容')
     expect(configuration.text()).toContain('升级或重新启动')
 
-    const timeout = mount(BugBrowserProgress, { props: { attempt: attempt('browser_validator_timeout'), events: [], systemID: 'base', environment: 'test' } })
-    expect(timeout.get('[data-browser-state="process"]').text()).toContain('等待验证机器人超时')
-    expect(timeout.text()).toContain('浏览器证据均已保留')
+    const timeout = mount(BugBrowserProgress, { props: { attempt: attempt('browser_validator_timeout', {
+      error_code: 'browser_validator_timeout',
+      failure_stage: 'evaluation',
+    }), events: [], systemID: 'base', environment: 'test' } })
+    expect(timeout.get('[data-browser-state="process"]').text()).toContain('自动重试判定后仍超时')
+    expect(timeout.text()).toContain('浏览器步骤和证据均已保留')
+    expect(timeout.get('[data-browser-failure-stage]').text()).toBe('发生阶段：判定验证结果')
   })
 
   it('shows planner and evaluator work after browser actions complete', () => {

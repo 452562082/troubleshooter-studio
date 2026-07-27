@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -2103,6 +2104,23 @@ assertions:
 	}
 }
 
+func TestBrowserCoordinatorAcceptsPlannerExplicitEmptyOptionalCollections(t *testing.T) {
+	plan := validBrowserPlanYAML() + "request_captures: []\nresponse_assertions: []\n"
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: plan},
+		{FinalYAML: reproducedValidationYAML("browser/final.png")},
+	}}
+	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{completedBrowserResult("browser/final.png")}}
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), browserCoordinatorRequest(t))
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if executor.Calls != 2 || verifier.Calls != 1 {
+		t.Fatalf("agent=%d browser=%d", executor.Calls, verifier.Calls)
+	}
+}
+
 func TestBrowserCoordinatorStopsAfterOneInvalidPlannerRetry(t *testing.T) {
 	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
 		{FinalYAML: invalidScreenshotBrowserPlanYAML()},
@@ -2116,6 +2134,114 @@ func TestBrowserCoordinatorStopsAfterOneInvalidPlannerRetry(t *testing.T) {
 	}
 	if result.ErrorCode != "browser_validator_plan_invalid" || executor.Calls != 2 || verifier.Calls != 0 {
 		t.Fatalf("agent=%d browser=%d result=%+v", executor.Calls, verifier.Calls, result)
+	}
+	if result.FailureStage != "plan_validation" || result.PlanValidationCode == "" || result.PlanValidationIssue == "" {
+		t.Fatalf("missing safe plan diagnostic: %+v", result)
+	}
+	var output map[string]any
+	if err := json.Unmarshal(browserStopOutput(result), &output); err != nil {
+		t.Fatal(err)
+	}
+	if output["plan_validation_code"] != result.PlanValidationCode || output["plan_validation_issue"] == "" {
+		t.Fatalf("stop output lacks plan diagnostic: %+v", output)
+	}
+	if _, found := output["validation_questions"]; found {
+		t.Fatalf("schema failures must not be delegated to the user: %+v", output)
+	}
+	if output["system_failure"] != true {
+		t.Fatalf("schema failure must remain system-owned: %+v", output)
+	}
+}
+
+func TestBrowserCoordinatorPlannerCanPauseForUserBusinessInput(t *testing.T) {
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: `assistance_status: needs_user_input
+questions:
+  - id: confirm_auto_upload
+    question: 选择文件后是否会自动上传，还是还需要点击一次提交？
+    answer_hint: 请按真实页面流程说明是否存在第二次提交。
+`}}}
+	verifier := &fakeBrowserVerifier{}
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), browserCoordinatorRequest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ErrorCode != "browser_validation_needs_user_input" || result.FailureStage != "planning" ||
+		executor.Calls != 1 || verifier.Calls != 0 || len(result.ValidationQuestions) != 1 {
+		t.Fatalf("agent=%d browser=%d result=%+v", executor.Calls, verifier.Calls, result)
+	}
+	var output map[string]any
+	if err := json.Unmarshal(browserStopOutput(result), &output); err != nil {
+		t.Fatal(err)
+	}
+	questions, ok := output["validation_questions"].([]any)
+	if !ok || len(questions) != 1 || output["evidence_limitation"] != true {
+		t.Fatalf("output=%+v", output)
+	}
+	if _, found := output["system_failure"]; found {
+		t.Fatalf("business clarification must not be reported as a system failure: %+v", output)
+	}
+}
+
+func TestBrowserCoordinatorLocatorRepairCanPauseForUserBusinessInput(t *testing.T) {
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: validBrowserPlanYAML()},
+		{FinalYAML: `assistance_status: needs_user_input
+questions:
+  - id: confirm_real_control
+    question: 当前页面中是否确实存在“再次提交”按钮？
+    answer_hint: 如果上一步已自动提交，请直接说明不存在第二次提交。
+`},
+	}}
+	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{
+		failedBrowserResult("locator_failed", "submit-again", "browser/failure.png"),
+	}}
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), browserCoordinatorRequest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ErrorCode != "browser_validation_needs_user_input" || result.FailureStage != "locator_repair" ||
+		executor.Calls != 2 || verifier.Calls != 1 || len(result.ValidationQuestions) != 1 {
+		t.Fatalf("agent=%d browser=%d result=%+v", executor.Calls, verifier.Calls, result)
+	}
+	if result.ValidationQuestions[0].ID != "confirm_real_control" {
+		t.Fatalf("questions=%+v", result.ValidationQuestions)
+	}
+}
+
+func TestBrowserCoordinatorLocatorDecisionCanConcludeFromFrozenObservation(t *testing.T) {
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: validBrowserPlanYAML()},
+		{FinalYAML: `verification_status: not_reproduced
+environment: test
+observed_behavior: 目标内容在搜索结果中已不存在，无法进入详情。
+expected_behavior: 全部媒资下架后内容不可再进入。
+evidence: []
+gaps: []
+`},
+	}}
+	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{
+		failedBrowserResult("locator_failed", "open-users", "browser/target-absent.png"),
+	}}
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), browserCoordinatorRequest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ErrorCode != "" || result.RepairCount != 0 || executor.Calls != 2 || verifier.Calls != 1 {
+		t.Fatalf("agent=%d browser=%d result=%+v", executor.Calls, verifier.Calls, result)
+	}
+	var validation ValidationResult
+	if err := json.Unmarshal([]byte(result.FinalYAML), &validation); err != nil {
+		t.Fatal(err)
+	}
+	if validation.VerificationStatus != "not_reproduced" || len(validation.Evidence) == 0 {
+		t.Fatalf("validation=%+v", validation)
+	}
+	if !strings.Contains(executor.Prompts[1], "observation checkpoint") ||
+		!strings.Contains(executor.Prompts[1], "Do not force a click") {
+		t.Fatalf("locator decision prompt is not evidence-driven: %s", executor.Prompts[1])
 	}
 }
 
@@ -2932,6 +3058,9 @@ func TestBrowserCoordinatorRejectsUnsafeDurableApplicationURLBeforeHost(t *testi
 			if result.ErrorCode != "browser_validator_plan_invalid" || verifier.Calls != 0 || strings.Contains(result.ErrorMessage, startURL) {
 				t.Fatalf("browser=%d result=%+v", verifier.Calls, result)
 			}
+			if strings.Contains(result.PlanValidationIssue, startURL) {
+				t.Fatalf("plan diagnostic leaked rejected URL: %+v", result)
+			}
 		})
 	}
 }
@@ -3031,7 +3160,7 @@ func TestBrowserCoordinatorMapsNonEvidenceBrowserStopsWithoutEvaluator(t *testin
 	}
 }
 
-func TestBrowserCoordinatorEvaluatesAssertionButRepeatedLocatorIsSystemRetry(t *testing.T) {
+func TestBrowserCoordinatorEvaluatesAssertionAndExhaustedLocatorEvidence(t *testing.T) {
 	tests := []struct {
 		name       string
 		results    []BrowserVerificationResult
@@ -3049,14 +3178,17 @@ func TestBrowserCoordinatorEvaluatesAssertionButRepeatedLocatorIsSystemRetry(t *
 			wantCalls:  1,
 		},
 		{
-			name: "repeated locator system retry",
+			name: "repeated locator reaches evaluator",
 			results: []BrowserVerificationResult{
 				failedBrowserResult("locator_failed", "open-users", "browser/primary-failure.png"),
 				failedBrowserResult("locator_failed", "open-users", "browser/repair-failure.png"),
 			},
-			plans:      []PhaseExecutionResult{{FinalYAML: validBrowserPlanYAML()}, {FinalYAML: repairedRemainingPlanYAML()}},
-			wantCode:   "browser_locator_failed",
-			wantAgents: 2,
+			plans: []PhaseExecutionResult{
+				{FinalYAML: validBrowserPlanYAML()},
+				{FinalYAML: repairedRemainingPlanYAML()},
+				{FinalYAML: "verification_status: not_reproduced\nenvironment: test\nobserved_behavior: 目标控件在当前页面不存在\nexpected_behavior: 目标控件不存在\nevidence: []\ngaps: []\n"},
+			},
+			wantAgents: 3,
 			wantCalls:  2,
 			wantRepair: 1,
 		},
@@ -3074,9 +3206,6 @@ func TestBrowserCoordinatorEvaluatesAssertionButRepeatedLocatorIsSystemRetry(t *
 			}
 			if test.wantCode == "" && !strings.Contains(executor.Prompts[len(executor.Prompts)-1], "A stopped action is evidence") {
 				t.Fatalf("assertion evidence did not reach evaluator: %s", executor.Prompts[len(executor.Prompts)-1])
-			}
-			if test.wantCode != "" && strings.Contains(executor.Prompts[len(executor.Prompts)-1], "A stopped action is evidence") {
-				t.Fatalf("repeated locator failure incorrectly reached evaluator: %s", executor.Prompts[len(executor.Prompts)-1])
 			}
 		})
 	}
@@ -3158,6 +3287,64 @@ func TestBrowserCoordinatorTimesOutSilentPlannerAndReturnsRetryableFailure(t *te
 	}
 	if result.ErrorCode != "browser_validator_timeout" || result.FailureStage != "planning" || executor.Calls != 1 {
 		t.Fatalf("result=%+v calls=%d", result, executor.Calls)
+	}
+}
+
+func TestBrowserCoordinatorRetriesTimedOutEvaluatorWithSameFrozenEvidence(t *testing.T) {
+	executor := &scriptedPhaseExecutor{
+		Results: []PhaseExecutionResult{
+			{FinalYAML: validBrowserPlanYAML()},
+			{},
+			{FinalYAML: reproducedValidationYAML("browser/final.png")},
+		},
+		Errors: []error{nil, context.DeadlineExceeded, nil},
+	}
+	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{
+		completedBrowserResult("browser/final.png"),
+	}}
+	var events []InvestigationEvent
+	request := browserCoordinatorRequest(t)
+	request.Emit = func(event InvestigationEvent) { events = append(events, event) }
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ErrorCode != "" || executor.Calls != 3 || verifier.Calls != 1 {
+		t.Fatalf("agent=%d browser=%d result=%+v", executor.Calls, verifier.Calls, result)
+	}
+	if !strings.Contains(executor.Prompts[2], "same frozen evidence") ||
+		!slices.ContainsFunc(events, func(event InvestigationEvent) bool { return event.Type == "browser_evaluator_timeout_retry" }) {
+		t.Fatalf("retry prompt/events missing: prompts=%v events=%+v", executor.Prompts, events)
+	}
+}
+
+func TestBrowserCoordinatorFallsBackFromTimedOutLocatorDecisionToEvaluator(t *testing.T) {
+	executor := &scriptedPhaseExecutor{
+		Results: []PhaseExecutionResult{
+			{FinalYAML: validBrowserPlanYAML()},
+			{},
+			{FinalYAML: "verification_status: not_reproduced\nenvironment: test\nobserved_behavior: 目标控件不存在\nexpected_behavior: 目标控件应不存在\nevidence: []\ngaps: []\n"},
+		},
+		Errors: []error{nil, context.DeadlineExceeded, nil},
+	}
+	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{
+		failedBrowserResult("locator_failed", "open-users", "browser/target-absent.png"),
+	}}
+	var events []InvestigationEvent
+	request := browserCoordinatorRequest(t)
+	request.Emit = func(event InvestigationEvent) { events = append(events, event) }
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ErrorCode != "" || executor.Calls != 3 || verifier.Calls != 1 {
+		t.Fatalf("agent=%d browser=%d result=%+v", executor.Calls, verifier.Calls, result)
+	}
+	if !slices.ContainsFunc(events, func(event InvestigationEvent) bool { return event.Type == "browser_locator_adjudication_fallback" }) ||
+		!strings.Contains(executor.Prompts[2], "A stopped action is evidence") {
+		t.Fatalf("fallback did not reach frozen-evidence evaluator: prompts=%v events=%+v", executor.Prompts, events)
 	}
 }
 

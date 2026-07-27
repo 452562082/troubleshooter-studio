@@ -8,6 +8,7 @@ import {
   continueIncidentCase,
   clearIncidentBrowserSession,
   completeIncidentRemediation,
+  confirmIncidentBrowserLogin,
   deleteIncidentHistory,
   getIncidentArtifactPreview,
   getIncidentCase,
@@ -184,6 +185,7 @@ describe('incident workflow bridge', () => {
     await expect(resetIncidentCase({ ...base, new_case_id: 'case-2', bot_key: 'base|codex' })).rejects.toThrow(/桌面 app/)
     const browser = { ...base, attempt_id: 'attempt-1' }
     await expect(openIncidentBrowserLogin(browser)).rejects.toThrow(/桌面 app/)
+    await expect(confirmIncidentBrowserLogin(browser)).rejects.toThrow(/桌面 app/)
     await expect(repairIncidentBrowserRuntime(browser)).rejects.toThrow(/桌面 app/)
     await expect(clearIncidentBrowserSession(browser)).rejects.toThrow(/桌面 app/)
     await expect(getIncidentArtifactPreview('case-1', 'shot-1')).rejects.toThrow(/桌面 app/)
@@ -192,19 +194,23 @@ describe('incident workflow bridge', () => {
 
   it('forwards exact browser recovery inputs through the desktop bridge', async () => {
     const login = vi.fn().mockResolvedValue({ id: 'case-1', status: 'validating', version: 8 })
+    const confirmLogin = vi.fn().mockResolvedValue({ id: 'case-1', status: 'validating', version: 8 })
     const repair = vi.fn().mockResolvedValue({ id: 'case-1', status: 'validating', version: 9 })
     const clear = vi.fn().mockResolvedValue(undefined)
     ;(window as any).go = { main: { App: {
       OpenIncidentBrowserLogin: login,
+      ConfirmIncidentBrowserLogin: confirmLogin,
       RepairIncidentBrowserRuntime: repair,
       ClearIncidentBrowserSession: clear,
     } } }
     const input = { case_id: 'case-1', attempt_id: 'attempt-1', expected_version: 7, idempotency_key: 'browser-login:case-1:attempt-1:v7', actor_id: 'desktop-user' }
 
     await expect(openIncidentBrowserLogin(input)).resolves.toMatchObject({ id: 'case-1', version: 8 })
+    await expect(confirmIncidentBrowserLogin(input)).resolves.toMatchObject({ id: 'case-1', version: 8 })
     await expect(repairIncidentBrowserRuntime(input)).resolves.toMatchObject({ id: 'case-1', version: 9 })
     await expect(clearIncidentBrowserSession(input)).resolves.toBeUndefined()
     expect(login).toHaveBeenCalledWith(input)
+    expect(confirmLogin).toHaveBeenCalledWith(input)
     expect(repair).toHaveBeenCalledWith(input)
     expect(clear).toHaveBeenCalledWith(input)
   })

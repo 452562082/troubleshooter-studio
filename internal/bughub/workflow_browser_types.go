@@ -54,6 +54,78 @@ type BrowserScenarioEvidence struct {
 	AssertionID string `yaml:"assertion_id,omitempty" json:"assertion_id,omitempty"`
 }
 
+// BrowserAssistanceRequest is the only non-plan response accepted from the
+// browser planner or locator-repair Agent. It lets the Agent pause on a real
+// business ambiguity without inventing an executable action.
+type BrowserAssistanceRequest struct {
+	AssistanceStatus string                      `yaml:"assistance_status" json:"assistance_status"`
+	Questions        []BrowserValidationQuestion `yaml:"questions" json:"questions"`
+}
+
+type BrowserValidationQuestion struct {
+	ID         string `yaml:"id" json:"id"`
+	Question   string `yaml:"question" json:"question"`
+	AnswerHint string `yaml:"answer_hint" json:"answer_hint"`
+}
+
+func ParseBrowserAssistanceRequest(data []byte) (BrowserAssistanceRequest, error) {
+	var request BrowserAssistanceRequest
+	if len(data) == 0 || len(data) > 16<<10 || containsSensitiveData(data) {
+		return BrowserAssistanceRequest{}, fmt.Errorf("browser assistance request is unsafe")
+	}
+	if err := decodeStrictYAML(data, &request); err != nil {
+		return BrowserAssistanceRequest{}, fmt.Errorf("parse browser assistance request: %w", err)
+	}
+	if request.AssistanceStatus != "needs_user_input" || len(request.Questions) < 1 || len(request.Questions) > 3 {
+		return BrowserAssistanceRequest{}, fmt.Errorf("browser assistance request status or question count is invalid")
+	}
+	seen := make(map[string]struct{}, len(request.Questions))
+	for index, question := range request.Questions {
+		question.ID = strings.TrimSpace(question.ID)
+		question.Question = strings.TrimSpace(question.Question)
+		question.AnswerHint = strings.TrimSpace(question.AnswerHint)
+		if !validBrowserAssistanceQuestionID(question.ID) ||
+			!validBrowserAssistanceText(question.Question, 1000) ||
+			!validBrowserAssistanceText(question.AnswerHint, 1000) ||
+			browserStrongCredentialSemantic(question.Question) ||
+			browserStrongCredentialSemantic(question.AnswerHint) {
+			return BrowserAssistanceRequest{}, fmt.Errorf("browser assistance question %d is invalid", index)
+		}
+		if _, duplicate := seen[question.ID]; duplicate {
+			return BrowserAssistanceRequest{}, fmt.Errorf("browser assistance question id is duplicated")
+		}
+		seen[question.ID] = struct{}{}
+		request.Questions[index] = question
+	}
+	return request, nil
+}
+
+func validBrowserAssistanceQuestionID(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		if character != '_' && character != '-' &&
+			(character < 'a' || character > 'z') &&
+			(character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func validBrowserAssistanceText(value string, limit int) bool {
+	if value == "" || len(value) > limit {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 && character != '\n' && character != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
 type BrowserLocator struct {
 	Kind  string `yaml:"kind" json:"kind"`
 	Value string `yaml:"value" json:"value"`
@@ -254,6 +326,23 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 		Assertions:         raw.Assertions,
 		RequestCaptures:    raw.RequestCaptures,
 		ResponseAssertions: raw.ResponseAssertions,
+	}
+	// Optional collections have one durable representation. YAML decoders
+	// distinguish an omitted list from an explicit `[]`, while JSON omitempty
+	// does not. Canonicalize them before the coordinator performs its
+	// parse-marshal-parse durability check so semantically identical plans are
+	// not rejected before browser execution.
+	if len(plan.Assertions) == 0 {
+		plan.Assertions = nil
+	}
+	if len(plan.RequestCaptures) == 0 {
+		plan.RequestCaptures = nil
+	}
+	if len(plan.ResponseAssertions) == 0 {
+		plan.ResponseAssertions = nil
+	}
+	if plan.ScenarioContract != nil && len(plan.ScenarioContract.FrontendEntryIDs) == 0 {
+		plan.ScenarioContract.FrontendEntryIDs = nil
 	}
 	seenIDs := make(map[string]struct{}, len(raw.Actions))
 	for i, rawAction := range raw.Actions {

@@ -900,6 +900,8 @@ Studio 故障闭环已经把选定机器人、system 和内部 role 持久化到
 
 ## 2026-07-21 · 浏览器验证计划必须绑定现场控件且重复定位失败归系统重试
 
+状态：`PARTIALLY SUPERSEDED`。现场控件绑定和修复计划约束继续有效；“重复定位失败必须在判定前终止”已由 2026-07-27“浏览器验证改为观察驱动的 Agent 决策循环”取代。
+
 **背景**：执行前页面观察已经能看到首页真实搜索框，但计划校验只检查“填入前存在一个搜索语义动作”。验证 Agent 因而可以用泛化的“搜索”文本点击满足结构校验，并继续编造页面上不存在的 placeholder。第一次执行进入错误页面后，定位修复只看到失败终态，可能原样保留错误 locator；第二次定位失败仍被交给业务判定 Agent，最终错误地生成 `insufficient_info` 并要求用户补充本应由系统自行采集的页面信息。
 
 **决策**：worker 的 accessibility 摘要为原生可交互控件补充受限 `locator_kind`，搜索输入至少区分 `placeholder`、`label` 与显式 `role`，规划 Agent 必须同时复制初始观察中的 locator kind、完整名称和 `exact: true`。当工单明确要求进入搜索页且初始页已经观测到唯一搜索文本框时，宿主在执行前拒绝泛化搜索文本、错误 locator kind 和未观察名称，并使用现有一次计划重生成机会修正。
@@ -1364,3 +1366,124 @@ BrowserPlan 的动作和断言是可执行协议，但没有保存验证 Agent �
 ### 结果
 
 管理端与 C 端等跨应用链路可以留在同一 Bug、同一 Case 和同一审计时间线中；用户选择决定应用边界，Agent 决定具体验证动作。历史单端数据和旧调用继续兼容。当前阶段以一个跨端合同和每端因果证据门禁保证整体完整性；后续如果产品需要在 UI 中分别重试某一端，可在该冻结范围之上增加每端 Attempt 投影，不需要再次改变入口绑定模型。
+
+---
+
+## 2026-07-27：浏览器计划失败保留安全诊断并进入对话重规划
+
+状态：`PARTIALLY SUPERSEDED`。计划结构错误仍保留安全诊断，但不再自动转成用户问题；用户求助出口改由下方“验证 Agent 使用严格协议主动求助”决策定义。
+
+### 背景
+
+验证 Agent 可以生成语义完整的 BrowserPlan，但显式输出 `request_captures: []`、`response_assertions: []` 等可选空列表时，YAML 解码结果是非 nil 空切片，JSON 持久化因 `omitempty` 将其省略，重新解析后变成 nil。协调器用 `reflect.DeepEqual` 做耐久性校验，因表示差异把等价计划判成 `browser_validator_plan_invalid`。自动重试仍会输出相同空列表，因此持续失败。协调器虽然持有具体校验错误，完成 Attempt 时却只保存通用错误码和文案；该错误又没有 `validation_questions`，用户只能盲目重试，无法看到失败规则或补充真实流程。
+
+### 决策
+
+- `ParseBrowserPlan` 在耐久性校验前把可选空集合规范化为唯一的 nil 表示，包括 UI 断言、请求采集、响应断言和可选的单端 `frontend_entry_ids`。显式 `[]` 与省略字段语义相同，均能稳定通过 parse → marshal → parse。
+- 计划经一次自动重生后仍失败时，协调器保存 `plan_validation_code`、安全分类后的 `plan_validation_issue` 和 `failure_stage=plan_validation`。不直接持久化或展示原始 `err.Error()`，防止 Agent 输出中的 URL、locator、凭据语义或本地路径泄漏。
+- 失败分类覆盖多端范围、应用访问、每端因果证据、设备类型、场景合同、搜索入口、安全 origin、locator 和通用动作结构。页面只按稳定 code 的文案白名单展示原因，不信任历史数据库中的任意错误文本。
+- `browser_validator_plan_invalid` 生成一个最小 `validation_questions`：请用户确认跨端顺序、关键动作和成功判定；如果工单已经准确，也可以明确要求按工单继续。回复沿用父链 continuation，强制作废旧 recipe 并生成新的 `scenario_contract` 和 BrowserPlan。
+- 没有结构化诊断的历史 Attempt 保留原“重新生成并重试”行为，避免把旧通用错误伪装成用户必须回答的问题。
+
+### 结果
+
+等价空列表不会再让有效计划在浏览器启动前失败；这次多端 Case 可直接进入执行。未来如果计划仍被硬协议拒绝，用户能看到失败属于“漏端、缺证据、设备类型或结构字段”等哪一类，并可在同一 Case 内协助 Agent 调整策略。安全边界仍由宿主硬校验，原始不可信计划内容不会进入 UI。
+
+---
+
+## 2026-07-27：登录恢复拆分为会话捕获与人工确认
+
+### 背景
+
+旧登录恢复把可见浏览器 Worker 返回直接视为“用户已完成登录”，并立即创建新的验证 Attempt。Worker 为兼容不同站点会观察密码框、英文登录按钮、常见登录路径、认证域和 401/403；同域中文或定制登录页不满足这些形态时，页面可能被误判为已经返回应用，导致用户刚打开窗口、尚未输入账号就重新开始验证。
+
+### 决策
+
+- 登录 Worker 不再仅凭页面形态完成恢复。它以失败验证已经确认“需要登录”为前提，并要求 Playwright `storageState` 相对打开登录页后的基线发生真实变化，同时页面稳定返回配置的应用 origin。
+- Worker 保存登录会话后，浏览器恢复操作只进入 `effect_succeeded`，Case 继续保持 `waiting_evidence`，不会自动创建验证或回归 Attempt。
+- 工作台显示“确认已登录并继续验证”。只有用户点击确认，Host 才消费同一条持久化恢复操作并调用 continuation；重复打开、重复确认和应用重启继续沿用原幂等记录。
+- 登录捕获修改了嵌入 Worker 行为，浏览器运行时升级为 `1.61.1-r32`，避免已安装的旧 Worker 继续使用页面形态误判。
+
+### 结果
+
+“浏览器已打开”“页面看起来不是登录页”“登录会话已保存”和“授权故障闭环继续”成为四个不同事实。定制登录页漏识别不会再直接推进 Case；即使自动观察仍有偏差，验证也必须经过用户确认门。
+
+---
+
+## 2026-07-27：清除登录态同时作废已捕获的登录恢复
+
+### 背景
+
+登录恢复拆成“捕获会话”和“人工确认”后，成功捕获会在恢复日志中保留 `effect_succeeded`。原“清除此环境登录态”只删除加密浏览器会话，没有删除当前失败 Attempt 的捕获记录。用户清除后再次点击登录，Host 会幂等重放旧成功记录，不再启动可见浏览器；前端又把该重放当成新捕获，因而同时出现“已清除登录态”和“登录会话已保存”。
+
+### 决策
+
+- 清除动作在同一 Host 恢复互斥区内先删除指定 system/environment/application origin 的会话，再作废当前 Case、Attempt 和版本对应的未消费登录恢复记录。
+- 只允许作废 `effect_succeeded`、`effect_failed` 或 `outcome_uncertain`；正在执行的 `claimed` 仍受恢复保留锁保护，已经 `continued` 的记录不能清除。
+- 作废后，相同幂等键可以重新 claim，下一次“打开登录页”必须真正调用浏览器控制器。会话删除失败则保留恢复记录，避免把仍存在的会话伪装成已清除。
+- 前端清除本地“待确认登录”状态，并撤下之前的“会话已保存”提示，避免展示互相矛盾的反馈。
+
+### 结果
+
+“清除登录态”成为完整的恢复重置操作，而不只是文件删除。用户清除后会重新看到“打开登录页”，再次操作必定进入新的可见登录流程；旧捕获不会跨清除动作复活。
+
+---
+
+## 2026-07-27：Case 重置终止未消费的浏览器恢复
+
+### 背景
+
+普通 Case 写操作必须被 `claimed`、`effect_succeeded` 或 `outcome_uncertain` 浏览器恢复保留锁阻止，否则恢复动作与用户续跑可能同时创建 Attempt。但“重新开始故障闭环”同样使用了普通写入门禁，导致登录页已关闭、进程崩溃或会话捕获待确认时，用户无法归档旧 Case，只能看到内部错误 `incident browser recovery reserves this Case`。
+
+### 决策
+
+- Case reset 是旧 Case 的显式终止边界，不沿用普通 continuation 的浏览器恢复保留规则。
+- `ResetCaseWithReplacement` 在同一个 SQLite 事务中删除旧 Case 尚未消费的 `claimed`、`effect_succeeded` 和 `outcome_uncertain` 恢复操作，然后归档旧 Case、创建接替 Case并记录重置事件。
+- 任何重置校验、归档或接替 Case 创建失败都会回滚恢复操作删除；旧 Case 和恢复记录保持原样。
+- 已经在外部执行的浏览器动作可以自然结束，但它之后的 compare-and-set 结果写入找不到 claim，且旧 Case 已归档，因此不能创建新 Attempt或恢复旧 Case。普通证据续跑和其他 Case 写操作仍受原保留锁保护。
+
+### 结果
+
+用户可以从登录恢复、运行时修复或崩溃遗留状态直接“重新开始故障闭环”，同时不会引入旧浏览器动作晚到后推进新 Case的竞态。内部恢复错误不再暴露到重置弹窗。
+
+---
+
+## 2026-07-27：验证 Agent 使用严格协议主动求助
+
+### 背景
+
+验证规划器过去只能返回 `BrowserPlan`。当工单和页面证据无法确定“上传后是否自动提交”“跨端操作顺序”“成功状态在哪里观察”等业务事实时，Agent 没有合法的暂停出口，只能猜测动作；猜错后又表现为定位失败或无效计划。最终判定阶段虽然已经能通过 `insufficient_info` 暴露证据缺口，但规划和定位修复阶段无法与用户形成同样的对话回路。
+
+### 决策
+
+- 浏览器规划和定位修复 Agent 可以二选一返回严格 `BrowserPlan`，或返回 `assistance_status: needs_user_input` 与 1–3 个结构化问题。禁止夹带说明文字、未知字段、凭据语义或超长内容。
+- 求助问题只允许询问用户掌握的业务事实：真实操作顺序、是否自动完成某一步、受影响应用端、测试数据含义和可观察的成功结果。运行时、Provider、附件读取、协议格式和工具故障仍由 Studio 分类恢复，不能要求用户替系统排障。
+- Host 将合法求助持久化为 `browser_validation_needs_user_input` 和 `validation_questions`，停止当前 attempt，不启动浏览器或继续猜测。前端展示 Agent 原问题和回答提示。
+- 用户回答后仍在当前 Case 创建父链明确的新 attempt。validation 与 regression 均写入 `force_browser_replan=true` 和 `scenario_contract_revision`，使旧 recipe 失效，并以最新回答重新生成完整场景合同与浏览器计划。
+- 最终判定阶段继续使用既有 `verification_status: insufficient_info` 与 gaps 协议；三处对话出口共享同一前端回答和续跑机制。
+- `browser_validator_plan_invalid`、`browser_locator_repair_plan_invalid` 等无效结构仍是系统失败。它们保留安全诊断和重试能力，但不伪装成用户需要回答的问题。
+
+### 结果
+
+验证 Agent 可以在真正不确定时明确说出卡点，用户回答后持续验证直到接受结论；系统也不会把无效 YAML 或运行时故障转嫁给用户。该协议位于 Studio 共用 BrowserCoordinator，不依赖 Codex、Claude Code 或 OpenClaw 的单独实现，所有接入同一 validator 角色的 AI 平台获得一致行为。
+
+---
+
+## 2026-07-27：浏览器验证改为观察驱动的 Agent 决策循环
+
+### 背景
+
+旧 BrowserCoordinator 仍以一次性命令链为中心：Planner 先输出完整 BrowserPlan，Host 顺序执行；locator 失败经过有限修复后直接返回 `browser_locator_failed`。即使失败现场已经包含截图、accessibility、动作和 Network，Agent 也没有机会判断“目标按预期不存在”“Bug 已经复现”或“需要用户确认业务语义”。这会把修复后的正确缺失误判为定位故障，也会让用户只能机械重试。所有 Agent 调用又共用三分钟硬超时，页面只显示通用 timeout，无法区分计划、现场决策和结果判定。
+
+### 决策
+
+- locator 失败后的冻结现场成为 Agent 决策检查点。Agent 必须三选一返回：有现场依据的后续 BrowserPlan、结构化 assistance，或当前 validation/regression 阶段允许的严格 ValidationResult。
+- Host 接受现场结论前重新绑定冻结 artifact，校验阶段状态、业务缺口、响应断言、请求事实和最终截图；Agent 不能伪造证据引用或用 validation 状态冒充 regression 结果。
+- 目标元素按场景预期不存在时，可以直接判定 `not_reproduced` / `fixed_verified`；目标意外存在且现场已证明问题时，可以直接判定 `reproduced` / `still_reproduces`。不再为了完成旧计划强行点击不存在的控件。
+- Agent 若仍需要页面操作，后续计划继续受原 scenario_contract、origin、动作和 locator 约束；若缺少用户掌握的业务事实，沿用 assistance 问答并在回复后重建合同。
+- 有限 locator 修复耗尽或当前 verifier 不支持再次观察时，不再立即返回系统失败，而是把最后现场交给 evaluator。定位策略 Agent 超时时同样降级到冻结证据判定。
+- `browser_validator_timeout` 保留 `failure_stage` 并在 UI 显示“生成计划 / 根据现场决定下一步 / 判定结果”。最终判定首次超时自动使用同一份冻结证据重试一次，不重新执行浏览器；第二次仍超时才结束 attempt。
+
+### 结果
+
+浏览器验证从“一次性计划是否全部执行成功”改成“观察—判断—继续/提问/结论”的受控 Agent 循环。条件式场景可以自然处理：例如内容已下架时目标不存在代表修复成功，仍存在时继续进入详情采证。安全边界仍由 Host 的严格协议与冻结证据校验负责；系统超时和格式错误不会转嫁给用户。

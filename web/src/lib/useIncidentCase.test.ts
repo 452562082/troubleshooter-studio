@@ -476,6 +476,33 @@ describe('incident Case controller', () => {
     })
   })
 
+  it('marks regression feedback as a fresh scenario contract revision too', () => {
+    const snapshot = detail(4)
+    snapshot.case.status = 'waiting_evidence'
+    snapshot.case.current_attempt_id = 'regression-question'
+    snapshot.attempts = [{
+      id: 'regression-question', case_id: 'case-1', cycle_number: 1, phase: 'regression', mode: 'regression',
+      status: 'failed', agent_target: 'codex', bot_key: 'base|codex',
+      input_json: { mode: 'regression', target_environment: 'test' },
+      output_json: { error_code: 'browser_validation_needs_user_input' },
+      parent_attempt_id: 'fix-1', started_at: '', error_code: 'browser_validation_needs_user_input', error_message: '', usage: {},
+    }]
+
+    expect(continuationForDetail(snapshot, '成功后还要在 C 端确认内容不可见')).toEqual({
+      phase: 'regression',
+      input_json: {
+        mode: 'regression',
+        target_environment: 'test',
+        user_input: '成功后还要在 C 端确认内容不可见',
+        force_browser_replan: true,
+        scenario_contract_revision: {
+          reason: 'user_feedback',
+          source_attempt_id: 'regression-question',
+        },
+      },
+    })
+  })
+
   it('rejects waiting evidence without a runnable latest attempt instead of falling back', () => {
     const snapshot = detail(4)
     snapshot.case.status = 'waiting_evidence'

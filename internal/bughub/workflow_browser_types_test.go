@@ -109,6 +109,38 @@ assertions:
 	}
 }
 
+func TestParseBrowserPlanCanonicalizesExplicitEmptyOptionalCollections(t *testing.T) {
+	plan, err := ParseBrowserPlan([]byte(`version: 2
+device_profile: desktop
+scenario_contract:
+  version: 1
+  goal: 验证页面状态
+  basis: bug
+  frontend_entry_ids: []
+  causal_action_ids: [capture]
+  evidence:
+    - kind: ui_assertions
+start_url: https://test.example.com/users
+actions:
+  - id: capture
+    action: screenshot
+assertions:
+  - kind: visible_text
+    value: 用户
+request_captures: []
+response_assertions: []
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.RequestCaptures != nil || plan.ResponseAssertions != nil || plan.ScenarioContract == nil || plan.ScenarioContract.FrontendEntryIDs != nil {
+		t.Fatalf("optional collections were not canonicalized: %+v", plan)
+	}
+	if err := validateDurableBrowserPlan(plan); err != nil {
+		t.Fatalf("explicit empty optional collections must remain durable: %v", err)
+	}
+}
+
 func TestParseBrowserPlanValidatesScenarioContractReferences(t *testing.T) {
 	valid := `version: 2
 device_profile: desktop
@@ -558,5 +590,56 @@ func TestParseBrowserPlanDefersURLSemanticsToHostPolicy(t *testing.T) {
 	raw = []byte(strings.Replace(string(raw), "https://test.example.com/users", "relative/start", 1))
 	if _, err := ParseBrowserPlan(raw); err != nil {
 		t.Fatalf("syntax parser must leave URL policy to the host: %v", err)
+	}
+}
+
+func TestParseBrowserAssistanceRequestAcceptsBoundedBusinessQuestions(t *testing.T) {
+	request, err := ParseBrowserAssistanceRequest([]byte(`assistance_status: needs_user_input
+questions:
+  - id: confirm_auto_upload
+    question: " 选择文件后页面是否会自动上传？ "
+    answer_hint: " 请说明是否还需要再次点击提交。 "
+  - id: confirm_success_state
+    question: 成功后应在哪个端看到什么结果？
+    answer_hint: 说明页面状态或接口结果即可。
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.AssistanceStatus != "needs_user_input" || len(request.Questions) != 2 ||
+		request.Questions[0].Question != "选择文件后页面是否会自动上传？" ||
+		request.Questions[0].AnswerHint != "请说明是否还需要再次点击提交。" {
+		t.Fatalf("request=%+v", request)
+	}
+}
+
+func TestParseBrowserAssistanceRequestRejectsUnsafeOrInvalidOutput(t *testing.T) {
+	cases := map[string]string{
+		"unknown field": `assistance_status: needs_user_input
+reason: guess
+questions:
+  - {id: flow, question: 实际流程是什么？, answer_hint: 描述关键操作。}`,
+		"wrong status": `assistance_status: blocked
+questions:
+  - {id: flow, question: 实际流程是什么？, answer_hint: 描述关键操作。}`,
+		"no questions": `assistance_status: needs_user_input
+questions: []`,
+		"duplicate id": `assistance_status: needs_user_input
+questions:
+  - {id: flow, question: 实际流程是什么？, answer_hint: 描述关键操作。}
+  - {id: flow, question: 成功结果是什么？, answer_hint: 描述页面结果。}`,
+		"bad id": `assistance_status: needs_user_input
+questions:
+  - {id: Flow.Question, question: 实际流程是什么？, answer_hint: 描述关键操作。}`,
+		"sensitive": `assistance_status: needs_user_input
+questions:
+  - {id: auth, question: "请提供 password: secret", answer_hint: 粘贴账号密码。}`,
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseBrowserAssistanceRequest([]byte(raw)); err == nil {
+				t.Fatal("expected strict assistance request validation error")
+			}
+		})
 	}
 }

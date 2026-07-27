@@ -129,12 +129,13 @@ const props = defineProps<{
   pending?: boolean
   error?: string
   phaseEvents?: IncidentPhaseEvent[]
+  browserLoginReady?: boolean
   loadFixBranches?: (caseID: string, rootCauseAttemptID: string) => Promise<Record<string, string[]>>
 }>()
 const emit = defineEmits<{
   refresh: []
   primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; images?: IncidentEvidenceImageInput[]; files?: IncidentEvidenceFileInput[]; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }]
-  browser: [action: 'login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url']
+  browser: [action: 'login' | 'confirm-login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url']
 }>()
 
 const dialogOpen = ref(false)
@@ -759,6 +760,7 @@ function dialogTitle(): string {
           :system-i-d="detail.case.system_id"
           :environment="detail.case.environment"
           :pending="pending"
+          :login-ready="browserLoginReady"
           @action="emit('browser', $event)"
         />
 

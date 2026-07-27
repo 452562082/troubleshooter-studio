@@ -1461,6 +1461,53 @@ func TestStartIncidentCaseRequiresAndPersistsAmbiguousFrontendSelection(t *testi
 	}
 }
 
+func TestStartIncidentCasePersistsConfiguredMultiFrontendSelection(t *testing.T) {
+	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
+	app.workflowLoadBug = func(id string) (bughub.Bug, error) {
+		return bughub.Bug{ID: id, Source: "zentao", Title: "管理端下架后 C端仍可播放", Env: "test"}, nil
+	}
+	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
+		return &config.SystemConfig{
+			System: config.System{ID: "base"},
+			Environments: []config.Environment{{ID: "test", FrontendEntries: []config.FrontendEntry{
+				{ID: "consumer", Name: "C 端", URL: "https://m.test", Repo: "consumer-web", Aliases: []string{"C端"}},
+				{ID: "admin", Name: "管理端", URL: "https://admin.test", Repo: "admin-web"},
+			}}},
+		}, nil
+	}
+	created, err := app.StartIncidentCase(StartIncidentCaseInput{
+		CaseID: "case-multi-scope", BugID: "bug-multi-scope", BotKey: "base|codex",
+		FrontendEntryIDs: []string{"consumer", "admin"}, PrimaryFrontendEntryID: "admin",
+		ExpectedVersion: 0, IdempotencyKey: "create:multi-scope", ActorID: "user-1",
+		InputJSON: map[string]any{"mode": "reproduce"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := store.GetCase(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := stored.EffectiveFrontendEntries()
+	if stored.FrontendEntry.ID != "admin" || len(entries) != 2 || entries[0].ID != "admin" || entries[1].ID != "consumer" {
+		t.Fatalf("stored primary=%+v entries=%+v", stored.FrontendEntry, entries)
+	}
+	attempts, err := store.ListAttempts(context.Background(), bughub.AttemptFilter{CaseID: created.ID})
+	if err != nil || len(attempts) != 1 {
+		t.Fatalf("attempts=%+v err=%v", attempts, err)
+	}
+	var input struct {
+		PrimaryFrontendEntryID string                        `json:"primary_frontend_entry_id"`
+		FrontendEntries        []bughub.FrontendEntryBinding `json:"frontend_entries"`
+	}
+	if err := json.Unmarshal(attempts[0].InputJSON, &input); err != nil || input.PrimaryFrontendEntryID != "admin" || len(input.FrontendEntries) != 2 {
+		t.Fatalf("attempt input=%s decoded=%+v err=%v", attempts[0].InputJSON, input, err)
+	}
+	if startedBug := runner.lastBug(); startedBug.FrontendURL != "https://admin.test/" {
+		t.Fatalf("runner bug=%+v", startedBug)
+	}
+}
+
 func TestResolveIncidentRecoveryContextHydratesConfiguredFrontendURL(t *testing.T) {
 	app := &App{}
 	app.workflowLoadBug = func(id string) (bughub.Bug, error) {

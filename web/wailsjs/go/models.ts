@@ -956,6 +956,8 @@ export namespace bughub {
 	    status: string;
 	    required: boolean;
 	    selected?: FrontendEntryBinding;
+	    selected_entries?: FrontendEntryBinding[];
+	    suggested_entry_ids?: string[];
 	    candidates?: FrontendEntryCandidate[];
 	    message?: string;
 
@@ -968,6 +970,8 @@ export namespace bughub {
 	        this.status = source["status"];
 	        this.required = source["required"];
 	        this.selected = this.convertValues(source["selected"], FrontendEntryBinding);
+	        this.selected_entries = this.convertValues(source["selected_entries"], FrontendEntryBinding);
+	        this.suggested_entry_ids = source["suggested_entry_ids"];
 	        this.candidates = this.convertValues(source["candidates"], FrontendEntryCandidate);
 	        this.message = source["message"];
 	    }
@@ -997,6 +1001,7 @@ export namespace bughub {
 	    system_id: string;
 	    environment: string;
 	    frontend_entry?: FrontendEntryBinding;
+	    frontend_entries?: FrontendEntryBinding[];
 	    status: string;
 	    cycle_number: number;
 	    current_attempt_id: string;
@@ -1023,6 +1028,7 @@ export namespace bughub {
 	        this.system_id = source["system_id"];
 	        this.environment = source["environment"];
 	        this.frontend_entry = this.convertValues(source["frontend_entry"], FrontendEntryBinding);
+	        this.frontend_entries = this.convertValues(source["frontend_entries"], FrontendEntryBinding);
 	        this.status = source["status"];
 	        this.cycle_number = source["cycle_number"];
 	        this.current_attempt_id = source["current_attempt_id"];
@@ -4133,6 +4139,8 @@ export namespace main {
 	    bot_key: string;
 	    bot_environment?: string;
 	    frontend_entry_id?: string;
+	    frontend_entry_ids?: string[];
+	    primary_frontend_entry_id?: string;
 	    expected_version: number;
 	    idempotency_key: string;
 	    actor_id: string;
@@ -4149,6 +4157,8 @@ export namespace main {
 	        this.bot_key = source["bot_key"];
 	        this.bot_environment = source["bot_environment"];
 	        this.frontend_entry_id = source["frontend_entry_id"];
+	        this.frontend_entry_ids = source["frontend_entry_ids"];
+	        this.primary_frontend_entry_id = source["primary_frontend_entry_id"];
 	        this.expected_version = source["expected_version"];
 	        this.idempotency_key = source["idempotency_key"];
 	        this.actor_id = source["actor_id"];
@@ -4160,6 +4170,8 @@ export namespace main {
 	    bot_key: string;
 	    bot_environment?: string;
 	    frontend_entry_id?: string;
+	    frontend_entry_ids?: string[];
+	    primary_frontend_entry_id?: string;
 
 	    static createFrom(source: any = {}) {
 	        return new ResolveIncidentFrontendEntryInput(source);
@@ -4171,6 +4183,8 @@ export namespace main {
 	        this.bot_key = source["bot_key"];
 	        this.bot_environment = source["bot_environment"];
 	        this.frontend_entry_id = source["frontend_entry_id"];
+	        this.frontend_entry_ids = source["frontend_entry_ids"];
+	        this.primary_frontend_entry_id = source["primary_frontend_entry_id"];
 	    }
 	}
 	export class RunInstallResult {
@@ -4232,6 +4246,8 @@ export namespace main {
 	    bot_key?: string;
 	    bot_environment?: string;
 	    frontend_entry_id?: string;
+	    frontend_entry_ids?: string[];
+	    primary_frontend_entry_id?: string;
 	    expected_version: number;
 	    idempotency_key: string;
 	    actor_id: string;
@@ -4248,6 +4264,8 @@ export namespace main {
 	        this.bot_key = source["bot_key"];
 	        this.bot_environment = source["bot_environment"];
 	        this.frontend_entry_id = source["frontend_entry_id"];
+	        this.frontend_entry_ids = source["frontend_entry_ids"];
+	        this.primary_frontend_entry_id = source["primary_frontend_entry_id"];
 	        this.expected_version = source["expected_version"];
 	        this.idempotency_key = source["idempotency_key"];
 	        this.actor_id = source["actor_id"];

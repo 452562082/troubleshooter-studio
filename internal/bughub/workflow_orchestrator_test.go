@@ -72,6 +72,33 @@ func (r *deadlinePhaseRunner) Start(ctx context.Context, _ PhaseAttempt, _ Bug, 
 }
 func (r *deadlinePhaseRunner) Cancel(context.Context, string) error { return nil }
 
+func TestNewValidationAndRegressionAttemptPreserveFrozenFrontendEntries(t *testing.T) {
+	entries := FrontendEntryBindings{
+		{ID: "admin", URL: "https://admin.test/", ResolutionSource: "user"},
+		{ID: "consumer", URL: "https://m.test/", ResolutionSource: "user"},
+	}
+	incident := IncidentCase{
+		ID: "case-multi-attempt", CycleNumber: 1,
+		FrontendEntry: entries[0], FrontendEntries: &entries,
+	}
+	bot := BotRef{Key: "base|codex", Target: "codex"}
+	modes := map[Phase]AttemptMode{PhaseValidation: AttemptReproduce, PhaseRegression: AttemptRegression}
+	for _, phase := range []Phase{PhaseValidation, PhaseRegression} {
+		attempt := newAttempt(incident, phase, modes[phase], "multi-attempt:"+string(phase), bot, mustJSON(map[string]any{"user_input": "调整验证策略"}), "")
+		var fields struct {
+			PrimaryFrontendEntryID string                 `json:"primary_frontend_entry_id"`
+			FrontendEntries        []FrontendEntryBinding `json:"frontend_entries"`
+			UserInput              string                 `json:"user_input"`
+		}
+		if err := json.Unmarshal(attempt.InputJSON, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if fields.PrimaryFrontendEntryID != "admin" || len(fields.FrontendEntries) != 2 || fields.FrontendEntries[1].ID != "consumer" || fields.UserInput != "调整验证策略" {
+			t.Fatalf("phase=%s fields=%+v", phase, fields)
+		}
+	}
+}
+
 func TestOrchestratorBlockedRunnerUsesBoundedDetachedContext(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-runner-deadline", CasePendingValidation)

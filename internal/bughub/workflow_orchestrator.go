@@ -235,6 +235,7 @@ type ResetCaseCommand struct {
 	Bug             Bug
 	Bot             BotRef
 	FrontendEntry   FrontendEntryBinding
+	FrontendEntries []FrontendEntryBinding
 	InputJSON       json.RawMessage
 }
 
@@ -265,6 +266,7 @@ type CreateAndStartCaseCommand struct {
 	Bug             Bug
 	Bot             BotRef
 	FrontendEntry   FrontendEntryBinding
+	FrontendEntries []FrontendEntryBinding
 	InputJSON       json.RawMessage
 }
 
@@ -537,6 +539,7 @@ func (o *CaseOrchestrator) ResetCaseWithOutcome(ctx context.Context, cmd ResetCa
 		ReplacementSystemID:         cmd.Bug.SystemID,
 		ReplacementEnvironment:      environment,
 		ReplacementFrontendEntry:    cmd.FrontendEntry.Clone(),
+		ReplacementFrontendEntries:  cloneFrontendEntryBindings(cmd.FrontendEntries),
 		RequestJSON:                 mustJSON(cmd),
 		replayOnlyLegacyEnvironment: resolveLegacyResetEnvironment(cmd.Bug, cmd.Bot),
 	}
@@ -717,7 +720,12 @@ func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAnd
 		return o.StartCase(ctx, StartCaseCommand{CaseID: existing.ID, ExpectedVersion: cmd.ExpectedVersion, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, Bug: cmd.Bug, Bot: cmd.Bot, InputJSON: cmd.InputJSON})
 	}
 	environment := resolveIncidentEnvironment(cmd.Bug, cmd.Bot)
-	pending := IncidentCase{ID: targetID, BugID: cmd.Bug.ID, Source: cmd.Bug.Source, SystemID: cmd.Bug.SystemID, Environment: environment, FrontendEntry: cmd.FrontendEntry.Clone(), Status: CasePendingValidation, CycleNumber: cycle, SelectedBotKey: cmd.Bot.Key}
+	pending := IncidentCase{
+		ID: targetID, BugID: cmd.Bug.ID, Source: cmd.Bug.Source, SystemID: cmd.Bug.SystemID,
+		Environment: environment, FrontendEntry: cmd.FrontendEntry.Clone(),
+		FrontendEntries: newFrontendEntryBindings(cmd.FrontendEntries),
+		Status:          CasePendingValidation, CycleNumber: cycle, SelectedBotKey: cmd.Bot.Key,
+	}
 	creation, createErr := o.store.CreateCaseWithIdentity(ctx, CaseCreation{Case: pending, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, RequestJSON: mustJSON(cmd)})
 	if createErr != nil {
 		return IncidentCase{}, createErr
@@ -882,7 +890,7 @@ func (o *CaseOrchestrator) prepareValidationFeedbackInput(ctx context.Context, i
 		"source_validation_attempt_id": source.ID,
 		"previous_result":              previous,
 	}
-	return mustJSON(fields), nil
+	return bindAttemptFrontendEntries(mustJSON(fields), incident.EffectiveFrontendEntries()), nil
 }
 
 func (o *CaseOrchestrator) replayValidationFeedback(ctx context.Context, cmd ContinueWithEvidenceCommand) (IncidentCase, error) {
@@ -895,11 +903,17 @@ func (o *CaseOrchestrator) replayValidationFeedback(ctx context.Context, cmd Con
 	if err != nil {
 		return IncidentCase{}, ErrIdempotencyConflict
 	}
+	current, err := o.store.GetCase(ctx, cmd.CaseID)
+	if err != nil {
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
 	replaySource := IncidentCase{
 		ID:               cmd.CaseID,
 		Status:           CaseReproduced,
 		CycleNumber:      source.CycleNumber,
 		CurrentAttemptID: source.ID,
+		FrontendEntry:    current.FrontendEntry.Clone(),
+		FrontendEntries:  current.FrontendEntries,
 	}
 	expectedInput, err := o.prepareValidationFeedbackInput(ctx, replaySource, cmd, CloneRawMessage(cmd.InputJSON))
 	if err != nil || string(expectedInput) != string(attempt.InputJSON) {
@@ -2493,7 +2507,23 @@ func newAttempt(incident IncidentCase, phase Phase, mode AttemptMode, key string
 	if len(input) == 0 {
 		input = []byte(`{}`)
 	}
+	if phase == PhaseValidation || phase == PhaseRegression {
+		input = bindAttemptFrontendEntries(input, incident.EffectiveFrontendEntries())
+	}
 	return PhaseAttempt{ID: stableID("attempt", key), CaseID: incident.ID, CycleNumber: incident.CycleNumber, Phase: phase, Mode: mode, Status: AttemptStatusRunning, AgentTarget: bot.Target, BotKey: bot.Key, InputJSON: CloneRawMessage(input), OutputJSON: []byte(`{}`), ParentAttemptID: parent}
+}
+
+func bindAttemptFrontendEntries(input json.RawMessage, entries []FrontendEntryBinding) json.RawMessage {
+	if len(entries) == 0 {
+		return input
+	}
+	var fields map[string]any
+	if json.Unmarshal(input, &fields) != nil || fields == nil {
+		return input
+	}
+	fields["primary_frontend_entry_id"] = entries[0].ID
+	fields["frontend_entries"] = entries
+	return mustJSON(fields)
 }
 
 func validateCommand(caseID string, version int64, key, actor string) error {

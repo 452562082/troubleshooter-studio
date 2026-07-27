@@ -131,22 +131,26 @@ func (s AttemptStatus) valid() bool {
 }
 
 type IncidentCase struct {
-	ID                 string               `json:"id"`
-	BugID              string               `json:"bug_id"`
-	Source             string               `json:"source"`
-	SystemID           string               `json:"system_id"`
-	Environment        string               `json:"environment"`
-	FrontendEntry      FrontendEntryBinding `json:"frontend_entry,omitempty"`
-	Status             CaseStatus           `json:"status"`
-	CycleNumber        int                  `json:"cycle_number"`
-	CurrentAttemptID   string               `json:"current_attempt_id"`
-	SelectedBotKey     string               `json:"selected_bot_key"`
-	ResetFromCaseID    string               `json:"reset_from_case_id,omitempty"`
-	SupersededByCaseID string               `json:"superseded_by_case_id,omitempty"`
-	Version            int64                `json:"version"`
-	CreatedAt          time.Time            `json:"created_at"`
-	UpdatedAt          time.Time            `json:"updated_at"`
-	ClosedAt           *time.Time           `json:"closed_at"`
+	ID            string               `json:"id"`
+	BugID         string               `json:"bug_id"`
+	Source        string               `json:"source"`
+	SystemID      string               `json:"system_id"`
+	Environment   string               `json:"environment"`
+	FrontendEntry FrontendEntryBinding `json:"frontend_entry,omitempty"`
+	// FrontendEntries is the immutable multi-application verification scope.
+	// The first entry is the primary/start application. FrontendEntry mirrors
+	// that first value for backward compatibility with existing Cases.
+	FrontendEntries    *FrontendEntryBindings `json:"frontend_entries,omitempty"`
+	Status             CaseStatus             `json:"status"`
+	CycleNumber        int                    `json:"cycle_number"`
+	CurrentAttemptID   string                 `json:"current_attempt_id"`
+	SelectedBotKey     string                 `json:"selected_bot_key"`
+	ResetFromCaseID    string                 `json:"reset_from_case_id,omitempty"`
+	SupersededByCaseID string                 `json:"superseded_by_case_id,omitempty"`
+	Version            int64                  `json:"version"`
+	CreatedAt          time.Time              `json:"created_at"`
+	UpdatedAt          time.Time              `json:"updated_at"`
+	ClosedAt           *time.Time             `json:"closed_at"`
 }
 
 func (c IncidentCase) Clone() IncidentCase {
@@ -154,6 +158,36 @@ func (c IncidentCase) Clone() IncidentCase {
 	cloned.FrontendEntry = c.FrontendEntry.Clone()
 	cloned.ClosedAt = cloneTimePtr(c.ClosedAt)
 	return cloned
+}
+
+type FrontendEntryBindings []FrontendEntryBinding
+
+func cloneFrontendEntryBindings(entries []FrontendEntryBinding) []FrontendEntryBinding {
+	if len(entries) == 0 {
+		return nil
+	}
+	cloned := make([]FrontendEntryBinding, len(entries))
+	copy(cloned, entries)
+	return cloned
+}
+
+func newFrontendEntryBindings(entries []FrontendEntryBinding) *FrontendEntryBindings {
+	if len(entries) == 0 {
+		return nil
+	}
+	cloned := FrontendEntryBindings(cloneFrontendEntryBindings(entries))
+	return &cloned
+}
+
+// EffectiveFrontendEntries upgrades a legacy single-entry Case in memory.
+func (c IncidentCase) EffectiveFrontendEntries() []FrontendEntryBinding {
+	if c.FrontendEntries != nil && len(*c.FrontendEntries) != 0 {
+		return cloneFrontendEntryBindings([]FrontendEntryBinding(*c.FrontendEntries))
+	}
+	if !c.FrontendEntry.IsZero() {
+		return []FrontendEntryBinding{c.FrontendEntry.Clone()}
+	}
+	return nil
 }
 
 func (c IncidentCase) Validate() error {
@@ -171,6 +205,20 @@ func (c IncidentCase) Validate() error {
 	}
 	if !c.FrontendEntry.IsZero() && (blank(c.FrontendEntry.ID) || blank(c.FrontendEntry.URL)) {
 		return fmt.Errorf("incident case frontend entry requires id and URL")
+	}
+	entries := c.EffectiveFrontendEntries()
+	seenFrontendEntries := make(map[string]struct{}, len(entries))
+	for index, entry := range entries {
+		if blank(entry.ID) || blank(entry.URL) {
+			return fmt.Errorf("incident case frontend entries[%d] requires id and URL", index)
+		}
+		if _, exists := seenFrontendEntries[entry.ID]; exists {
+			return fmt.Errorf("incident case frontend entry %q is duplicated", entry.ID)
+		}
+		seenFrontendEntries[entry.ID] = struct{}{}
+	}
+	if c.FrontendEntries != nil && len(*c.FrontendEntries) != 0 && (c.FrontendEntry.IsZero() || c.FrontendEntry.ID != (*c.FrontendEntries)[0].ID || c.FrontendEntry.URL != (*c.FrontendEntries)[0].URL) {
+		return fmt.Errorf("incident case primary frontend entry must match the first frontend entries item")
 	}
 	return nil
 }

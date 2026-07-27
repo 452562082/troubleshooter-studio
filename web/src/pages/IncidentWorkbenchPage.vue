@@ -63,7 +63,8 @@ const visibleBugs = computed(() => tickets.filteredBugs.value.filter(bug => tick
 const matches = ref<BotMatch[]>([])
 const selectedBotKey = ref('')
 const frontendResolution = ref<FrontendEntryResolution | null>(null)
-const selectedFrontendEntryID = ref('')
+const selectedFrontendEntryIDs = ref<string[]>([])
+const primaryFrontendEntryID = ref('')
 const resolvingFrontendEntry = ref(false)
 const explicitlySelectedBots = ref<Record<string, string>>({})
 const matching = ref(false)
@@ -90,7 +91,8 @@ type ResetDialogSnapshot = {
   newBotName: string
   newBotTarget: string
   newEnvironment: string
-  frontendEntryID: string
+  frontendEntryIDs: string[]
+  primaryFrontendEntryID: string
   newCaseID: string
   idempotencyKey: string
 }
@@ -125,8 +127,8 @@ const frontendEntryBlocksSelectedBug = computed(() => {
   const resolution = frontendResolution.value
   if (!resolution) return true
   if (!resolution.required) return false
-  if (resolution.status === 'selected') return false
-  return resolution.status === 'unavailable' || !selectedFrontendEntryID.value
+  if (resolution.status === 'unavailable') return true
+  return selectedFrontendEntryIDs.value.length === 0 || !selectedFrontendEntryIDs.value.includes(primaryFrontendEntryID.value)
 })
 const browserRuntimePercent = computed(() => {
   const { current, total } = browserRuntimeProgress.value
@@ -156,7 +158,8 @@ const writeActionDisabledReason = computed(() => {
       : '验证浏览器基础工具未就绪，请先重新准备 Chromium。'
   }
   if (resolvingFrontendEntry.value) return '正在识别工单对应的前端应用入口…'
-  if (frontendResolution.value?.status === 'ambiguous' && !selectedFrontendEntryID.value) return '工单可能对应多个前端应用，请先选择验证入口。'
+  if (frontendResolution.value?.status === 'ambiguous' && selectedFrontendEntryIDs.value.length === 0) return '工单可能对应多个前端应用，请选择所有需要验证的端。'
+  if (frontendResolution.value?.required && !primaryFrontendEntryID.value) return '请从已选端中指定一个起始端。'
   if (frontendResolution.value?.status === 'unavailable') return frontendResolution.value.message || '当前环境未配置可用的前端应用入口。'
   if (!selectedBot.value) return '请选择排障机器人后继续。'
   if (!selectedBotSupportsStart.value) return `${selectedBot.value.target} 暂不支持由 Studio 后台启动，请选择 Codex、Claude Code 或 OpenClaw。`
@@ -198,7 +201,8 @@ async function refreshFrontendEntryResolution() {
   const bug = tickets.selectedBug.value
   const bot = selectedBot.value
   const generation = ++frontendResolutionGeneration
-  selectedFrontendEntryID.value = ''
+  selectedFrontendEntryIDs.value = []
+  primaryFrontendEntryID.value = ''
   frontendResolution.value = null
   if (!bug || !bot || !bot.env?.trim()) return
   resolvingFrontendEntry.value = true
@@ -206,7 +210,13 @@ async function refreshFrontendEntryResolution() {
     const resolution = await resolveIncidentFrontendEntry({ bug_id: bug.id, bot_key: bot.key, bot_environment: bot.env })
     if (generation !== frontendResolutionGeneration) return
     frontendResolution.value = resolution
-    if (resolution.status === 'selected' && resolution.selected) selectedFrontendEntryID.value = resolution.selected.id
+    if (resolution.status === 'selected' && resolution.selected) {
+      selectedFrontendEntryIDs.value = (resolution.selected_entries?.length ? resolution.selected_entries : [resolution.selected]).map(entry => entry.id)
+      primaryFrontendEntryID.value = resolution.selected.id
+    } else if (resolution.status === 'ambiguous' && resolution.suggested_entry_ids?.length) {
+      selectedFrontendEntryIDs.value = [...resolution.suggested_entry_ids]
+      primaryFrontendEntryID.value = resolution.suggested_entry_ids[0]
+    }
   } catch (error) {
     if (generation !== frontendResolutionGeneration) return
     frontendResolution.value = { status: 'unavailable', required: true, message: error instanceof Error ? error.message : String(error) }
@@ -214,6 +224,10 @@ async function refreshFrontendEntryResolution() {
     if (generation === frontendResolutionGeneration) resolvingFrontendEntry.value = false
   }
 }
+
+watch(selectedFrontendEntryIDs, ids => {
+  if (!ids.includes(primaryFrontendEntryID.value)) primaryFrontendEntryID.value = ids[0] || ''
+}, { deep: true })
 
 watch(incidentWorkflow.cases, () => {
   void openPreferredCase()
@@ -579,7 +593,7 @@ async function openResetDialog(incident: IncidentCase, choice: StartBotChoice) {
   const newEnvironment = newBot?.env?.trim() || ''
   if (!choice.key || !newBot || !['codex', 'claude-code', 'openclaw'].includes(newBot.target) || !newEnvironment) return
   const mode: RestartMode = terminalCaseStatuses.has(incident.status) ? 'terminal_new_round' : 'active_reset'
-  const identity = resetRequestIdentity(mode, incident.id, incident.version, choice.key, newBot.target, newEnvironment, selectedFrontendEntryID.value)
+  const identity = resetRequestIdentity(mode, incident.id, incident.version, choice.key, newBot.target, newEnvironment, selectedFrontendEntryIDs.value, primaryFrontendEntryID.value)
   let request = resetRequests.get(identity)
   if (!request) {
     const newCaseID = freshResetCaseID()
@@ -603,15 +617,16 @@ async function openResetDialog(incident: IncidentCase, choice: StartBotChoice) {
     newBotName: newBot.name?.trim() || newBot.system_id?.trim() || '排障机器人',
     newBotTarget: newBot.target,
     newEnvironment,
-    frontendEntryID: selectedFrontendEntryID.value,
+    frontendEntryIDs: [...selectedFrontendEntryIDs.value],
+    primaryFrontendEntryID: primaryFrontendEntryID.value,
     ...request,
   }
   await nextTick()
   resetCancelButton.value?.focus()
 }
 
-function resetRequestIdentity(mode: RestartMode, caseID: string, caseVersion: number, botKey: string, botTarget: string, environment: string, frontendEntryID: string): string {
-  return `${mode}:${caseID}:v${caseVersion}:${botKey}:${botTarget}:${environment}:${frontendEntryID}`
+function resetRequestIdentity(mode: RestartMode, caseID: string, caseVersion: number, botKey: string, botTarget: string, environment: string, frontendEntryIDs: string[], primaryFrontendEntryID: string): string {
+  return `${mode}:${caseID}:v${caseVersion}:${botKey}:${botTarget}:${environment}:${primaryFrontendEntryID}:${frontendEntryIDs.join(',')}`
 }
 
 function botTargetLabel(target: string): string {
@@ -695,7 +710,9 @@ async function confirmReset() {
       actor_id: 'desktop-user',
       bot_key: request.newBotKey,
       bot_environment: request.newEnvironment,
-      frontend_entry_id: request.frontendEntryID,
+      frontend_entry_id: request.primaryFrontendEntryID,
+      frontend_entry_ids: request.frontendEntryIDs,
+      primary_frontend_entry_id: request.primaryFrontendEntryID,
       input_json: { target_environment: request.newEnvironment },
     }))
     const replacement = result.case
@@ -719,7 +736,7 @@ async function confirmReset() {
   } catch (error) {
     if (isIncidentWorkflowConflict(error)) {
       if (!isCurrentResetRequest()) return
-      const identity = resetRequestIdentity(request.mode, request.caseID, request.caseVersion, request.newBotKey, request.newBotTarget, request.newEnvironment, request.frontendEntryID)
+      const identity = resetRequestIdentity(request.mode, request.caseID, request.caseVersion, request.newBotKey, request.newBotTarget, request.newEnvironment, request.frontendEntryIDs, request.primaryFrontendEntryID)
       resetRequests.delete(identity)
       resetting.value = false
       closeResetDialog()
@@ -792,7 +809,9 @@ async function confirmTerminalNewRound(request: ResetDialogSnapshot) {
       bug_id: request.bugID,
       bot_key: request.newBotKey,
       bot_environment: request.newEnvironment,
-      frontend_entry_id: request.frontendEntryID,
+      frontend_entry_id: request.primaryFrontendEntryID,
+      frontend_entry_ids: request.frontendEntryIDs,
+      primary_frontend_entry_id: request.primaryFrontendEntryID,
       expected_version: 0,
       idempotency_key: request.idempotencyKey,
       actor_id: 'desktop-user',
@@ -856,7 +875,9 @@ async function startNewCase() {
       bug_id: bug.id,
       bot_key: choice.key,
       bot_environment: selectedEnvironment,
-      frontend_entry_id: selectedFrontendEntryID.value,
+      frontend_entry_id: primaryFrontendEntryID.value,
+      frontend_entry_ids: selectedFrontendEntryIDs.value,
+      primary_frontend_entry_id: primaryFrontendEntryID.value,
       expected_version: 0,
       idempotency_key: `start:${candidate}`,
       actor_id: 'desktop-user',
@@ -1229,17 +1250,23 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         <section v-if="tickets.selectedBug.value" class="bot-action-panel" aria-label="故障闭环操作">
           <p class="bot-action-status" role="status">{{ botActionStatus }}</p>
           <section v-if="frontendResolution?.required" class="frontend-entry-resolution" aria-label="前端验证入口">
-            <p class="frontend-entry-title">验证入口</p>
-            <p v-if="frontendResolution.status === 'selected' && frontendResolution.selected" class="frontend-entry-selected">
+            <p class="frontend-entry-title">涉及端（{{ selectedFrontendEntryIDs.length }}）</p>
+            <fieldset v-if="frontendResolution.candidates?.length">
+              <legend>{{ frontendResolution.status === 'ambiguous' ? frontendResolution.message : '确认本次故障涉及的所有端；工单文本仅用于推荐。' }}</legend>
+              <div v-for="candidate in frontendResolution.candidates" :key="candidate.binding.id" class="frontend-entry-option">
+                <label>
+                  <input v-model="selectedFrontendEntryIDs" type="checkbox" :value="candidate.binding.id" />
+                  <span><strong>{{ candidate.binding.name }}</strong><small>{{ candidate.binding.url }}<template v-if="candidate.reasons?.length"> · {{ candidate.reasons.join('、') }}</template></small></span>
+                </label>
+                <label v-if="selectedFrontendEntryIDs.includes(candidate.binding.id)" class="frontend-entry-primary">
+                  <input v-model="primaryFrontendEntryID" type="radio" name="primary-frontend-entry" :value="candidate.binding.id" />
+                  起始端
+                </label>
+              </div>
+            </fieldset>
+            <p v-else-if="frontendResolution.status === 'selected' && frontendResolution.selected" class="frontend-entry-selected">
               {{ frontendResolution.selected.name }} · {{ frontendResolution.selected.url }}
             </p>
-            <fieldset v-else-if="frontendResolution.status === 'ambiguous'">
-              <legend>{{ frontendResolution.message }}</legend>
-              <label v-for="candidate in frontendResolution.candidates || []" :key="candidate.binding.id" class="frontend-entry-option">
-                <input v-model="selectedFrontendEntryID" type="radio" :value="candidate.binding.id" />
-                <span><strong>{{ candidate.binding.name }}</strong><small>{{ candidate.binding.url }}<template v-if="candidate.reasons?.length"> · {{ candidate.reasons.join('、') }}</template></small></span>
-              </label>
-            </fieldset>
             <p v-else class="live-error">{{ frontendResolution.message }}</p>
           </section>
           <div class="bot-action-controls">
@@ -1298,7 +1325,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
           <div><dt>开始阶段</dt><dd>验证</dd></div>
           <div><dt>排障机器人</dt><dd>{{ resetDialog.newBotName }} · {{ botTargetLabel(resetDialog.newBotTarget) }}</dd></div>
           <div><dt>目标环境</dt><dd>{{ resetDialog.newEnvironment }}</dd></div>
-          <div v-if="resetDialog.frontendEntryID"><dt>验证入口</dt><dd>{{ resetDialog.frontendEntryID }}</dd></div>
+          <div v-if="resetDialog.frontendEntryIDs.length"><dt>涉及端</dt><dd>{{ resetDialog.frontendEntryIDs.join('、') }}（起始端：{{ resetDialog.primaryFrontendEntryID }}）</dd></div>
         </dl>
         <p data-reset-error class="reset-live-error" role="status" aria-live="assertive">{{ resetError }}</p>
         <footer>
@@ -1363,8 +1390,10 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
 .frontend-entry-selected { margin-top: 4px; color: var(--c-text); font-size: var(--fs-sm); }
 .frontend-entry-resolution fieldset { min-width: 0; margin: 4px 0 0; padding: 0; border: 0; }
 .frontend-entry-resolution legend { margin-bottom: 7px; color: #92400e; font-size: var(--fs-xs); line-height: 1.45; }
-.frontend-entry-option { min-width: 0; display: flex; align-items: flex-start; gap: 8px; padding: 7px; border-radius: 6px; cursor: pointer; }
+.frontend-entry-option { min-width: 0; display: grid; gap: 5px; padding: 7px; border-radius: 6px; }
 .frontend-entry-option:hover { background: var(--c-surf); }
+.frontend-entry-option > label { min-width: 0; display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.frontend-entry-primary { margin-left: 24px; color: var(--c-muted); font-size: var(--fs-xs); }
 .frontend-entry-option span, .frontend-entry-option small { min-width: 0; display: block; overflow-wrap: anywhere; }
 .frontend-entry-option small { margin-top: 2px; color: var(--c-muted); font-size: 11px; }
 .bot-action-disabled-reason { color: #92400e; }

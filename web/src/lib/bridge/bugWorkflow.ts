@@ -23,6 +23,7 @@ export interface IncidentCase {
   system_id: string
   environment: string
   frontend_entry?: FrontendEntryBinding
+  frontend_entries?: FrontendEntryBinding[]
   status: CaseStatus
   cycle_number: number
   current_attempt_id: string
@@ -44,6 +45,8 @@ export interface FrontendEntryResolution {
   status: 'selected' | 'ambiguous' | 'unavailable'
   required: boolean
   selected?: FrontendEntryBinding
+  selected_entries?: FrontendEntryBinding[]
+  suggested_entry_ids?: string[]
   candidates?: FrontendEntryCandidate[]
   message?: string
 }
@@ -154,8 +157,8 @@ export type IncidentCaseEventPayload = {
 export interface WorkflowCommandInput { case_id: string; expected_version: number; idempotency_key: string; actor_id: string }
 export interface IncidentBrowserCommandInput extends WorkflowCommandInput { attempt_id: string }
 export interface IncidentArtifactPreview { artifact_id: string; mime_type: 'image/png'; base64_data: string; size: number }
-export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: string; bot_key?: string; bot_environment?: string; frontend_entry_id?: string; input_json?: Record<string, unknown> }
-export interface ResetIncidentCaseInput extends WorkflowCommandInput { new_case_id: string; bot_key: string; bot_environment?: string; frontend_entry_id?: string; input_json?: Record<string, unknown> }
+export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: string; bot_key?: string; bot_environment?: string; frontend_entry_id?: string; frontend_entry_ids?: string[]; primary_frontend_entry_id?: string; input_json?: Record<string, unknown> }
+export interface ResetIncidentCaseInput extends WorkflowCommandInput { new_case_id: string; bot_key: string; bot_environment?: string; frontend_entry_id?: string; frontend_entry_ids?: string[]; primary_frontend_entry_id?: string; input_json?: Record<string, unknown> }
 export interface WorkflowWarning { code: string; message: string }
 export interface ResetIncidentCaseResult { case: IncidentCase; warnings: WorkflowWarning[] }
 export type IncidentWorkflowConflictCode = 'case_version_conflict' | 'idempotency_conflict'
@@ -259,7 +262,7 @@ export async function startIncidentCase(input: StartIncidentCaseInput): Promise<
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.StartIncidentCase(input))
 }
-export async function resolveIncidentFrontendEntry(input: { bug_id: string; bot_key: string; bot_environment?: string; frontend_entry_id?: string }): Promise<FrontendEntryResolution> {
+export async function resolveIncidentFrontendEntry(input: { bug_id: string; bot_key: string; bot_environment?: string; frontend_entry_id?: string; frontend_entry_ids?: string[]; primary_frontend_entry_id?: string }): Promise<FrontendEntryResolution> {
   if (!isDesktop()) return { status: 'unavailable', required: true, message: desktopOnly }
   return await App.ResolveIncidentFrontendEntry(input) as FrontendEntryResolution
 }

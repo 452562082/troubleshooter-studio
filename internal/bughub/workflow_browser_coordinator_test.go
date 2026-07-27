@@ -944,6 +944,39 @@ func TestBrowserScenarioContractReplacesHostKeywordClassification(t *testing.T) 
 	}
 }
 
+func TestValidateBrowserPlanFrontendEntryScopeRequiresEverySelectedEnd(t *testing.T) {
+	attempt := PhaseAttempt{InputJSON: mustJSON(map[string]any{
+		"frontend_entries": []FrontendEntryBinding{
+			{ID: "admin", URL: "https://admin.test/", ConfigURL: "https://admin.test/"},
+			{ID: "consumer", URL: "https://m.test/", ConfigURL: "https://m.test/"},
+		},
+	})}
+	plan := BrowserPlan{
+		StartURL: "https://admin.test/",
+		Actions: []BrowserAction{
+			{ID: "admin-submit", Action: "click"},
+			{ID: "open-consumer", Action: "goto", URL: "https://m.test/content/42"},
+			{ID: "consumer-proof", Action: "screenshot"},
+		},
+		ScenarioContract: &BrowserScenarioContract{
+			FrontendEntryIDs: []string{"admin", "consumer"},
+			CausalActionIDs:  []string{"admin-submit", "consumer-proof"},
+		},
+	}
+	if err := validateBrowserPlanFrontendEntryScope(attempt, plan); err != nil {
+		t.Fatal(err)
+	}
+	plan.Actions = plan.Actions[:1]
+	if err := validateBrowserPlanFrontendEntryScope(attempt, plan); err == nil || !strings.Contains(err.Error(), "consumer") {
+		t.Fatalf("error=%v, want missing consumer coverage", err)
+	}
+	plan.Actions = append(plan.Actions, BrowserAction{ID: "open-consumer", Action: "goto", URL: "https://m.test/"})
+	plan.ScenarioContract.FrontendEntryIDs = []string{"consumer", "admin"}
+	if err := validateBrowserPlanFrontendEntryScope(attempt, plan); err == nil || !strings.Contains(err.Error(), "order") {
+		t.Fatalf("error=%v, want ordered entry contract", err)
+	}
+}
+
 func TestBrowserPlannerPromptConsumesInvestigationEvidenceRefreshGaps(t *testing.T) {
 	request := browserCoordinatorRequest(t)
 	request.Attempt.InputJSON = mustJSON(map[string]any{

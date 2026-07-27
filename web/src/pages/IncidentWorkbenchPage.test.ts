@@ -864,6 +864,52 @@ describe('IncidentWorkbenchPage', () => {
     expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({ frontend_entry_id: 'admin' }))
   })
 
+  it('selects every affected configured end and freezes the chosen start end', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([{
+      ...bugA,
+      title: '管理端下架后 C端仍可播放',
+      frontend_url: '',
+      frontend_repo: '',
+      browser: '',
+    }])
+    vi.mocked(resolveIncidentFrontendEntry).mockResolvedValue({
+      status: 'ambiguous',
+      required: true,
+      message: '请确认本次验证涉及的应用',
+      suggested_entry_ids: ['admin', 'consumer'],
+      candidates: [
+        { binding: { id: 'admin', name: '管理端', url: 'https://admin.test/', resolution_source: '' }, score: 20, reasons: ['工单文本命中入口名称/别名'] },
+        { binding: { id: 'consumer', name: 'C 端', url: 'https://m.test/', resolution_source: '' }, score: 20, reasons: ['工单文本命中入口名称/别名'] },
+      ],
+    })
+    const opened = incident('case-multi-frontend', 'validating', '2026-07-13T00:01:00Z', {
+      version: 1,
+      frontend_entry: { id: 'admin', name: '管理端', url: 'https://admin.test/', resolution_source: 'user' },
+      frontend_entries: [
+        { id: 'admin', name: '管理端', url: 'https://admin.test/', resolution_source: 'user' },
+        { id: 'consumer', name: 'C 端', url: 'https://m.test/', resolution_source: 'user' },
+      ],
+    })
+    vi.mocked(startIncidentCase).mockResolvedValue(opened)
+    mockCaseDetails(detail(opened))
+
+    const wrapper = await mountedPage()
+    expect(wrapper.text()).toContain('涉及端（2）')
+    const primaryInputs = wrapper.findAll<HTMLInputElement>('input[name="primary-frontend-entry"]')
+    const adminPrimary = primaryInputs.find(input => input.element.value === 'admin')
+    expect(adminPrimary).toBeTruthy()
+    await adminPrimary!.setValue(true)
+    await wrapper.get('[data-action="start-case"]').trigger('click')
+    await flushPromises()
+
+    expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
+      frontend_entry_id: 'admin',
+      frontend_entry_ids: ['admin', 'consumer'],
+      primary_frontend_entry_id: 'admin',
+    }))
+  })
+
   it('clears Start pending before scrolling and focusing the opened Case', async () => {
     const scrollIntoView = stubIncidentEntry()
     route.query = { bug_id: 'bug-a' }

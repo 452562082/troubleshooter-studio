@@ -58,6 +58,42 @@ func TestIncidentCaseFrontendEntrySurvivesStoreReopen(t *testing.T) {
 	}
 }
 
+func TestIncidentCaseFrontendEntriesSurviveStoreReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "frontend-bindings.db")
+	store, err := OpenCaseStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := []FrontendEntryBinding{
+		{ID: "admin", Name: "管理端", URL: "https://admin.test/", ResolutionSource: "user"},
+		{ID: "consumer", Name: "C 端", URL: "https://m.test/", ResolutionSource: "user"},
+	}
+	want := IncidentCase{
+		ID: "case-multi-frontend-binding", BugID: "bug-multi-frontend-binding", Source: "zentao", SystemID: "base", Environment: "test",
+		FrontendEntry: entries[0], FrontendEntries: newFrontendEntryBindings(entries),
+		Status: CasePendingValidation, CycleNumber: 1, SelectedBotKey: "base|codex", Version: 1,
+	}
+	if err := store.CreateCase(context.Background(), want); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenCaseStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	got, err := store.GetCase(context.Background(), want.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotEntries := got.EffectiveFrontendEntries()
+	if len(gotEntries) != 2 || got.FrontendEntry != entries[0] || gotEntries[0] != entries[0] || gotEntries[1] != entries[1] {
+		t.Fatalf("got primary=%+v entries=%+v", got.FrontendEntry, gotEntries)
+	}
+}
+
 func TestCreateCaseWithIdentityReturnsExistingOpenCaseForBug(t *testing.T) {
 	ctx := context.Background()
 	store := openTestCaseStore(t)

@@ -54,11 +54,89 @@ type FrontendEntryCandidate struct {
 }
 
 type FrontendEntryResolution struct {
-	Status     string                   `json:"status"`
-	Required   bool                     `json:"required"`
-	Selected   *FrontendEntryBinding    `json:"selected,omitempty"`
-	Candidates []FrontendEntryCandidate `json:"candidates,omitempty"`
-	Message    string                   `json:"message,omitempty"`
+	Status            string                   `json:"status"`
+	Required          bool                     `json:"required"`
+	Selected          *FrontendEntryBinding    `json:"selected,omitempty"`
+	SelectedEntries   []FrontendEntryBinding   `json:"selected_entries,omitempty"`
+	SuggestedEntryIDs []string                 `json:"suggested_entry_ids,omitempty"`
+	Candidates        []FrontendEntryCandidate `json:"candidates,omitempty"`
+	Message           string                   `json:"message,omitempty"`
+}
+
+// ResolveFrontendEntries validates an explicit multi-application selection
+// against the configured environment. The primary entry is stored first; Bug
+// text and URLs remain ranking evidence and never create an unmanaged entry.
+func ResolveFrontendEntries(entries []config.FrontendEntry, bug Bug, selectedIDs []string, primaryID string) (FrontendEntryResolution, error) {
+	selectedIDs = uniqueNonBlankStrings(selectedIDs)
+	primaryID = strings.TrimSpace(primaryID)
+	if len(selectedIDs) == 0 {
+		resolution, err := ResolveFrontendEntry(entries, bug, "")
+		if err != nil {
+			return FrontendEntryResolution{}, err
+		}
+		if resolution.Status == FrontendResolutionAmbiguous {
+			for _, candidate := range resolution.Candidates {
+				if candidate.Score >= 20 {
+					resolution.SuggestedEntryIDs = append(resolution.SuggestedEntryIDs, candidate.Binding.ID)
+				}
+			}
+		}
+		return resolution, nil
+	}
+	if primaryID == "" {
+		primaryID = selectedIDs[0]
+	}
+	selectedSet := make(map[string]struct{}, len(selectedIDs))
+	for _, id := range selectedIDs {
+		selectedSet[id] = struct{}{}
+	}
+	if _, ok := selectedSet[primaryID]; !ok {
+		return FrontendEntryResolution{}, errors.New("primary frontend entry must be included in selected frontend entries")
+	}
+	orderedIDs := append([]string{primaryID}, selectedIDs...)
+	orderedIDs = uniqueNonBlankStrings(orderedIDs)
+	bindings := make([]FrontendEntryBinding, 0, len(orderedIDs))
+	var candidates []FrontendEntryCandidate
+	for _, id := range orderedIDs {
+		resolution, err := ResolveFrontendEntry(entries, bug, id)
+		if err != nil {
+			return FrontendEntryResolution{}, err
+		}
+		if resolution.Selected == nil {
+			return FrontendEntryResolution{}, errors.New("selected frontend entry is not available in the current environment")
+		}
+		binding := resolution.Selected.Clone()
+		bindings = append(bindings, binding)
+		if candidates == nil {
+			candidates = resolution.Candidates
+		}
+	}
+	primary := bindings[0].Clone()
+	return FrontendEntryResolution{
+		Status:          FrontendResolutionSelected,
+		Required:        true,
+		Selected:        &primary,
+		SelectedEntries: bindings,
+		Candidates:      candidates,
+		Message:         "已绑定配置中的前端应用",
+	}, nil
+}
+
+func uniqueNonBlankStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 // ResolveFrontendEntry uses only durable ticket/configuration evidence. It is
@@ -186,7 +264,7 @@ func mostSpecificFrontendURLMatch(candidates []FrontendEntryCandidate) (Frontend
 
 func selectedFrontendResolution(binding FrontendEntryBinding, candidates []FrontendEntryCandidate) FrontendEntryResolution {
 	cloned := binding.Clone()
-	return FrontendEntryResolution{Status: FrontendResolutionSelected, Required: true, Selected: &cloned, Candidates: candidates}
+	return FrontendEntryResolution{Status: FrontendResolutionSelected, Required: true, Selected: &cloned, SelectedEntries: []FrontendEntryBinding{cloned}, Candidates: candidates}
 }
 
 func frontendBinding(entry config.FrontendEntry) (FrontendEntryBinding, error) {

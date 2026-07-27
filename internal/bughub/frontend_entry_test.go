@@ -25,6 +25,28 @@ func TestResolveFrontendEntryUsesExplicitDeepLink(t *testing.T) {
 	}
 }
 
+func TestResolveFrontendEntriesBindsConfiguredMultiApplicationScope(t *testing.T) {
+	entries := []config.FrontendEntry{
+		{ID: "consumer", Name: "C 端", URL: "https://m.test/", Aliases: []string{"C端"}},
+		{ID: "admin", Name: "管理端", URL: "https://admin.test/", Aliases: []string{"后台"}},
+	}
+	bug := Bug{Title: "管理端下架后 C端仍可播放"}
+	suggested, err := ResolveFrontendEntries(entries, bug, nil, "")
+	if err != nil || suggested.Status != FrontendResolutionAmbiguous || len(suggested.SuggestedEntryIDs) != 2 {
+		t.Fatalf("suggested=%+v err=%v", suggested, err)
+	}
+	resolution, err := ResolveFrontendEntries(entries, bug, []string{"consumer", "admin"}, "admin")
+	if err != nil || resolution.Selected == nil || resolution.Selected.ID != "admin" || len(resolution.SelectedEntries) != 2 {
+		t.Fatalf("resolution=%+v err=%v", resolution, err)
+	}
+	if resolution.SelectedEntries[0].ID != "admin" || resolution.SelectedEntries[1].ID != "consumer" {
+		t.Fatalf("selected entries=%+v", resolution.SelectedEntries)
+	}
+	if _, err := ResolveFrontendEntries(entries, bug, []string{"consumer"}, "admin"); err == nil {
+		t.Fatal("expected primary entry outside selected scope to be rejected")
+	}
+}
+
 func TestResolveFrontendEntryCanonicalizesSafeTicketQuery(t *testing.T) {
 	entries := []config.FrontendEntry{{ID: "consumer", Name: "C 端", URL: "https://m.test/"}}
 	resolution, err := ResolveFrontendEntry(entries, Bug{FrontendURL: "HTTPS://M.TEST:443/search?q=chengzi"}, "")

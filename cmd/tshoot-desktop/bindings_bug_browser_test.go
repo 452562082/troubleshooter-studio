@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -355,6 +356,29 @@ func TestCaseBrowserPolicyResolverAuthorizesOnlyFrozenFrontendApplication(t *tes
 	for _, origin := range policy.AllowedOrigins {
 		if origin == "https://app.test" {
 			t.Fatalf("unselected legacy frontend was authorized: %+v", policy.AllowedOrigins)
+		}
+	}
+}
+
+func TestCaseBrowserPolicyResolverAuthorizesFrozenMultiFrontendApplications(t *testing.T) {
+	app, _, _, _, incident, _ := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_login_required", "https://login.test")
+	entries := bughub.FrontendEntryBindings{
+		{ID: "consumer", URL: "https://m.test/content", ConfigURL: "https://m.test/"},
+		{ID: "admin", URL: "https://admin.test/console", ConfigURL: "https://admin.test/console"},
+	}
+	incident.FrontendEntry = entries[0]
+	incident.FrontendEntries = &entries
+	policy, err := (caseBrowserPolicyResolver{app: app}).ResolveBrowserPolicy(context.Background(), incident, bughub.Bug{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(policy.ApplicationOrigins, []string{"https://admin.test", "https://m.test"}) ||
+		!reflect.DeepEqual(policy.StartOrigins, []string{"https://m.test"}) {
+		t.Fatalf("policy=%+v", policy)
+	}
+	for _, required := range []string{"https://admin.test", "https://m.test"} {
+		if !slices.Contains(policy.AllowedOrigins, required) {
+			t.Fatalf("allowed origins %v do not contain %s", policy.AllowedOrigins, required)
 		}
 	}
 }

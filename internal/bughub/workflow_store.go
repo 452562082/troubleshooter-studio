@@ -56,17 +56,18 @@ type CaseCreationResult struct {
 // CaseReset identifies one exact request to archive a non-terminal Case and
 // create its pending replacement in the same transaction.
 type CaseReset struct {
-	CaseID                   string
-	NewCaseID                string
-	IdempotencyKey           string
-	ActorID                  string
-	ExpectedVersion          int64
-	SelectedBotKey           string
-	ReplacementBotTarget     string
-	ReplacementSystemID      string
-	ReplacementEnvironment   string
-	ReplacementFrontendEntry FrontendEntryBinding
-	RequestJSON              json.RawMessage
+	CaseID                     string
+	NewCaseID                  string
+	IdempotencyKey             string
+	ActorID                    string
+	ExpectedVersion            int64
+	SelectedBotKey             string
+	ReplacementBotTarget       string
+	ReplacementSystemID        string
+	ReplacementEnvironment     string
+	ReplacementFrontendEntry   FrontendEntryBinding
+	ReplacementFrontendEntries []FrontendEntryBinding
+	RequestJSON                json.RawMessage
 	// replayOnlyLegacyEnvironment is the environment that the pre-selected-Bot
 	// resolver would have used. It is consulted only for an already committed
 	// event and is excluded from new fingerprints, payloads, and writes.
@@ -724,7 +725,7 @@ func (s *CaseStore) CreateCase(ctx context.Context, incident IncidentCase) error
 	if incident.UpdatedAt.IsZero() {
 		incident.UpdatedAt = incident.CreatedAt
 	}
-	frontendEntryJSON, err := json.Marshal(incident.FrontendEntry)
+	frontendEntryJSON, err := marshalIncidentFrontendEntries(incident)
 	if err != nil {
 		return fmt.Errorf("encode incident frontend entry: %w", err)
 	}
@@ -851,7 +852,7 @@ func (s *CaseStore) CreateCaseWithIdentity(ctx context.Context, creation CaseCre
 	if created.UpdatedAt.IsZero() {
 		created.UpdatedAt = created.CreatedAt
 	}
-	createdFrontendJSON, marshalErr := json.Marshal(created.FrontendEntry)
+	createdFrontendJSON, marshalErr := marshalIncidentFrontendEntries(created)
 	if marshalErr != nil {
 		return CaseCreationResult{}, marshalErr
 	}
@@ -876,29 +877,31 @@ func (s *CaseStore) CreateCaseWithIdentity(ctx context.Context, creation CaseCre
 
 func caseCreationFingerprint(creation CaseCreation) (string, error) {
 	identity := struct {
-		CaseID         string               `json:"case_id"`
-		BugID          string               `json:"bug_id"`
-		Source         string               `json:"source"`
-		SystemID       string               `json:"system_id"`
-		Environment    string               `json:"environment"`
-		CycleNumber    int                  `json:"cycle_number"`
-		SelectedBotKey string               `json:"selected_bot_key"`
-		FrontendEntry  FrontendEntryBinding `json:"frontend_entry"`
-		IdempotencyKey string               `json:"idempotency_key"`
-		ActorID        string               `json:"actor_id"`
-		RequestJSON    json.RawMessage      `json:"request_json"`
+		CaseID          string                 `json:"case_id"`
+		BugID           string                 `json:"bug_id"`
+		Source          string                 `json:"source"`
+		SystemID        string                 `json:"system_id"`
+		Environment     string                 `json:"environment"`
+		CycleNumber     int                    `json:"cycle_number"`
+		SelectedBotKey  string                 `json:"selected_bot_key"`
+		FrontendEntry   FrontendEntryBinding   `json:"frontend_entry"`
+		FrontendEntries []FrontendEntryBinding `json:"frontend_entries,omitempty"`
+		IdempotencyKey  string                 `json:"idempotency_key"`
+		ActorID         string                 `json:"actor_id"`
+		RequestJSON     json.RawMessage        `json:"request_json"`
 	}{
-		CaseID:         creation.Case.ID,
-		BugID:          creation.Case.BugID,
-		Source:         creation.Case.Source,
-		SystemID:       creation.Case.SystemID,
-		Environment:    creation.Case.Environment,
-		CycleNumber:    creation.Case.CycleNumber,
-		SelectedBotKey: creation.Case.SelectedBotKey,
-		FrontendEntry:  creation.Case.FrontendEntry.Clone(),
-		IdempotencyKey: creation.IdempotencyKey,
-		ActorID:        creation.ActorID,
-		RequestJSON:    CloneRawMessage(creation.RequestJSON),
+		CaseID:          creation.Case.ID,
+		BugID:           creation.Case.BugID,
+		Source:          creation.Case.Source,
+		SystemID:        creation.Case.SystemID,
+		Environment:     creation.Case.Environment,
+		CycleNumber:     creation.Case.CycleNumber,
+		SelectedBotKey:  creation.Case.SelectedBotKey,
+		FrontendEntry:   creation.Case.FrontendEntry.Clone(),
+		FrontendEntries: creation.Case.EffectiveFrontendEntries(),
+		IdempotencyKey:  creation.IdempotencyKey,
+		ActorID:         creation.ActorID,
+		RequestJSON:     CloneRawMessage(creation.RequestJSON),
 	}
 	encoded, err := json.Marshal(identity)
 	if err != nil {
@@ -1093,6 +1096,7 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 		SystemID:        replacementSystemID,
 		Environment:     reset.ReplacementEnvironment,
 		FrontendEntry:   reset.ReplacementFrontendEntry.Clone(),
+		FrontendEntries: newFrontendEntryBindings(reset.ReplacementFrontendEntries),
 		Status:          CasePendingValidation,
 		CycleNumber:     1,
 		SelectedBotKey:  reset.SelectedBotKey,
@@ -1104,7 +1108,7 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 	if err := replacement.Validate(); err != nil {
 		return result, err
 	}
-	replacementFrontendJSON, marshalErr := json.Marshal(replacement.FrontendEntry)
+	replacementFrontendJSON, marshalErr := marshalIncidentFrontendEntries(replacement)
 	if marshalErr != nil {
 		return result, marshalErr
 	}
@@ -1451,7 +1455,7 @@ func (s *CaseStore) importLegacyBatch(ctx context.Context, batch legacyImportBat
 	}
 	result := LegacyImportResult{}
 	for _, incident := range batch.Cases {
-		frontendEntryJSON, marshalErr := json.Marshal(incident.FrontendEntry)
+		frontendEntryJSON, marshalErr := marshalIncidentFrontendEntries(incident)
 		if marshalErr != nil {
 			return LegacyImportResult{}, marshalErr
 		}
@@ -3232,7 +3236,7 @@ func scanCase(row rowScanner) (IncidentCase, error) {
 		&frontendEntryJSON, &incident.Version, &createdAt, &updatedAt, &closedAt); err != nil {
 		return IncidentCase{}, err
 	}
-	if err := json.Unmarshal([]byte(frontendEntryJSON), &incident.FrontendEntry); err != nil {
+	if err := unmarshalIncidentFrontendEntries([]byte(frontendEntryJSON), &incident); err != nil {
 		return IncidentCase{}, fmt.Errorf("decode stored incident frontend entry: %w", err)
 	}
 	return finishScannedCase(incident, createdAt, updatedAt, closedAt)

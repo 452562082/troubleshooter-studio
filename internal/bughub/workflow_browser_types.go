@@ -40,12 +40,13 @@ type BrowserPlan struct {
 // after parsing so a later user clarification cannot silently reuse a stale
 // contract. Evidence entries only reference host-verifiable assertions.
 type BrowserScenarioContract struct {
-	Version         int                       `yaml:"version" json:"version"`
-	Goal            string                    `yaml:"goal" json:"goal"`
-	Basis           string                    `yaml:"basis" json:"basis"`
-	CausalActionIDs []string                  `yaml:"causal_action_ids" json:"causal_action_ids"`
-	ContextSHA256   string                    `yaml:"context_sha256,omitempty" json:"context_sha256,omitempty"`
-	Evidence        []BrowserScenarioEvidence `yaml:"evidence" json:"evidence"`
+	Version          int                       `yaml:"version" json:"version"`
+	Goal             string                    `yaml:"goal" json:"goal"`
+	Basis            string                    `yaml:"basis" json:"basis"`
+	FrontendEntryIDs []string                  `yaml:"frontend_entry_ids,omitempty" json:"frontend_entry_ids,omitempty"`
+	CausalActionIDs  []string                  `yaml:"causal_action_ids" json:"causal_action_ids"`
+	ContextSHA256    string                    `yaml:"context_sha256,omitempty" json:"context_sha256,omitempty"`
+	Evidence         []BrowserScenarioEvidence `yaml:"evidence" json:"evidence"`
 }
 
 type BrowserScenarioEvidence struct {
@@ -407,6 +408,16 @@ func validateBrowserScenarioContractStructure(plan BrowserPlan) error {
 	}
 	if contract.ContextSHA256 != "" && !validLowerSHA256(contract.ContextSHA256) {
 		return fmt.Errorf("browser plan scenario_contract.context_sha256 is invalid")
+	}
+	seenFrontendEntryIDs := make(map[string]struct{}, len(contract.FrontendEntryIDs))
+	for index, entryID := range contract.FrontendEntryIDs {
+		if err := validateBrowserPlanString(fmt.Sprintf("scenario_contract.frontend_entry_ids[%d]", index), entryID, true); err != nil {
+			return err
+		}
+		if _, duplicate := seenFrontendEntryIDs[entryID]; duplicate {
+			return fmt.Errorf("browser plan scenario_contract.frontend_entry_id %q is duplicated", entryID)
+		}
+		seenFrontendEntryIDs[entryID] = struct{}{}
 	}
 	if len(contract.CausalActionIDs) < 1 || len(contract.CausalActionIDs) > 8 {
 		return fmt.Errorf("browser plan scenario_contract.causal_action_ids must contain 1 to 8 entries")

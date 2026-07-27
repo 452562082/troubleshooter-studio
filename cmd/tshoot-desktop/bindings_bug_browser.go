@@ -244,22 +244,37 @@ func (r caseBrowserPolicyResolver) ResolveBrowserPolicy(ctx context.Context, inc
 	if environment == nil {
 		return bughub.BrowserSecurityPolicy{}, errors.New("incident browser environment is unavailable")
 	}
-	applicationURL := strings.TrimSpace(incident.FrontendEntry.ConfigURL)
-	if applicationURL == "" {
-		applicationURL = strings.TrimSpace(incident.FrontendEntry.URL)
+	applicationURLs := make([]string, 0, len(incident.EffectiveFrontendEntries())+1)
+	for _, entry := range incident.EffectiveFrontendEntries() {
+		applicationURL := strings.TrimSpace(entry.ConfigURL)
+		if applicationURL == "" {
+			applicationURL = strings.TrimSpace(entry.URL)
+		}
+		if applicationURL != "" {
+			applicationURLs = append(applicationURLs, applicationURL)
+		}
 	}
-	if applicationURL == "" {
-		applicationURL = strings.TrimSpace(environment.WebDomain)
+	if len(applicationURLs) == 0 {
+		applicationURLs = append(applicationURLs, strings.TrimSpace(environment.WebDomain))
 	}
-	_, applicationOrigin, err := canonicalIncidentBrowserApplicationURL(applicationURL)
-	if err != nil {
+	applicationOrigins := make([]string, 0, len(applicationURLs))
+	for _, applicationURL := range applicationURLs {
+		_, origin, canonicalErr := canonicalIncidentBrowserApplicationURL(applicationURL)
+		if canonicalErr != nil {
+			return bughub.BrowserSecurityPolicy{}, errors.New("incident browser application origin is invalid")
+		}
+		applicationOrigins = append(applicationOrigins, origin)
+	}
+	application, err := canonicalIncidentBrowserOrigins(applicationOrigins)
+	if err != nil || len(application) == 0 {
 		return bughub.BrowserSecurityPolicy{}, errors.New("incident browser application origin is invalid")
 	}
-	application, err := canonicalIncidentBrowserOrigins([]string{applicationOrigin})
-	if err != nil || len(application) != 1 {
-		return bughub.BrowserSecurityPolicy{}, errors.New("incident browser application origin is invalid")
+	startOrigins, err := canonicalIncidentBrowserOrigins(applicationOrigins[:1])
+	if err != nil || len(startOrigins) != 1 {
+		return bughub.BrowserSecurityPolicy{}, errors.New("incident browser start origin is invalid")
 	}
-	configuredAllowed := append([]string{applicationOrigin, environment.APIDomain}, environment.BrowserAllowedOrigins...)
+	configuredAllowed := append(append([]string(nil), application...), environment.APIDomain)
+	configuredAllowed = append(configuredAllowed, environment.BrowserAllowedOrigins...)
 	allowed, err := canonicalIncidentBrowserOrigins(append(configuredAllowed, environment.BrowserAuthOrigins...))
 	if err != nil || len(allowed) == 0 {
 		return bughub.BrowserSecurityPolicy{}, errors.New("incident browser origins are invalid")
@@ -271,7 +286,7 @@ func (r caseBrowserPolicyResolver) ResolveBrowserPolicy(ctx context.Context, inc
 	return bughub.BrowserSecurityPolicy{
 		AllowedOrigins:     allowed,
 		ApplicationOrigins: application,
-		StartOrigins:       append([]string(nil), application...),
+		StartOrigins:       startOrigins,
 		PrivateOrigins:     append([]string(nil), allowed...),
 		AuthOrigins:        auth,
 		IsProd:             environment.IsProd,

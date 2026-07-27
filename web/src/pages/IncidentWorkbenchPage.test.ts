@@ -1802,7 +1802,7 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
 
     expect(wrapper.get('.status-pill').text()).toBe('等待证据')
-    expect(wrapper.get('[data-browser-action="confirm-login"]').text()).toBe('确认已登录并继续验证')
+    expect(wrapper.get('[data-browser-action="confirm-login"]').text()).toBe('我已完成登录，继续验证')
     expect(getIncidentCase).toHaveBeenCalledTimes(initialReads)
 
     await wrapper.get('[data-browser-action="confirm-login"]').trigger('click')

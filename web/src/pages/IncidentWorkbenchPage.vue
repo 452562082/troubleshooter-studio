@@ -1027,7 +1027,7 @@ async function handleIncidentBrowser(action: IncidentBrowserAction) {
     if (action === 'login') {
       browserLoginConfirmationKey.value = recoveryKey
       if (browserLoginToastID.value !== null) dismissToast(browserLoginToastID.value)
-      browserLoginToastID.value = toast.info('登录会话已保存，请确认页面确实已登录后继续验证。')
+      browserLoginToastID.value = toast.info('浏览器会话快照已保存（未校验登录），请确认你已完成登录后继续验证。')
       return
     }
     clearBrowserLoginConfirmation()

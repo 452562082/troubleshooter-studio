@@ -29,8 +29,8 @@ import {
   EVIDENCE_MAX_RECORDS,
   EVIDENCE_TRUNCATION_MARKER,
   hasVisiblePasswordField,
+  loginCaptureShouldFinish,
   loginOriginForResult,
-  loginSessionStateChanged,
   observeLoginState,
   dialPinnedTarget,
   executeAssertion,
@@ -48,24 +48,26 @@ import {
   validateWorkerRequest,
 } from './browser_worker.mjs';
 
-test('login session completion requires a durable storage-state change', () => {
-  const before = {
-    cookies: [{ name: 'csrf', value: 'same', domain: 'app.test', path: '/' }],
-    origins: [{ origin: 'https://app.test', localStorage: [{ name: 'theme', value: 'dark' }] }],
-  };
-  const reordered = {
-    origins: [{ origin: 'https://app.test', localStorage: [{ value: 'dark', name: 'theme' }] }],
-    cookies: [{ path: '/', domain: 'app.test', value: 'same', name: 'csrf' }],
-  };
-  const authenticated = {
-    ...before,
-    cookies: [...before.cookies, { name: 'session', value: 'opaque', domain: 'app.test', path: '/', httpOnly: true }],
-  };
+test('login capture finishes only when the user closes every validation browser window', () => {
+  assert.equal(loginCaptureShouldFinish(true, 1), false);
+  assert.equal(loginCaptureShouldFinish(true, 2), false);
+  assert.equal(loginCaptureShouldFinish(true, 0), true);
+  assert.equal(loginCaptureShouldFinish(false, 1), true);
+  assert.equal(loginCaptureShouldFinish(true, Number.NaN), true);
+});
 
-  assert.equal(loginSessionStateChanged(before, before), false);
-  assert.equal(loginSessionStateChanged(before, reordered), false);
-  assert.equal(loginSessionStateChanged(before, authenticated), true);
-  assert.equal(loginSessionStateChanged(null, authenticated), false);
+test('login worker captures a snapshot without inferring authentication state', () => {
+  const source = readFileSync(fileURLToPath(new URL('./browser_worker.mjs', import.meta.url)), 'utf8');
+  const start = source.indexOf('async function loginWorker');
+  const end = source.indexOf('async function probeWorker', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const loginWorkerSource = source.slice(start, end);
+
+  assert.match(loginWorkerSource, /loginCaptureShouldFinish/);
+  assert.match(loginWorkerSource, /saveLoginStorageState/);
+  assert.doesNotMatch(loginWorkerSource, /observeLoginState/);
+  assert.doesNotMatch(loginWorkerSource, /loginSessionStateChanged/);
 });
 
 test('login result falls back to the configured application origin when no login page remains open', () => {

@@ -44,8 +44,8 @@ function progressCopy(event: { code: IncidentBrowserProgressCode; current?: numb
   if (event.code === 'browser_runtime_downloading') return `正在下载 Chromium：${event.current ?? 0}%`
   if (event.code === 'browser_runtime_probing') return '正在启动 Chromium 自检'
   if (event.code === 'browser_runtime_ready') return '验证浏览器运行时已就绪'
-  if (event.code === 'browser_login_opened') return '验证浏览器已打开，请完成登录'
-  if (event.code === 'browser_login_completed') return '浏览器登录会话已保存'
+  if (event.code === 'browser_login_opened') return '验证浏览器已打开；完成登录后请关闭窗口'
+  if (event.code === 'browser_login_completed') return '浏览器会话快照已保存（未校验登录）'
   if (event.code === 'browser_action_started' || event.code === 'action_started') return count ? `执行 ${count}：开始页面操作` : '正在执行页面操作'
   if (event.code === 'browser_action_completed' || event.code === 'action_completed') return count ? `执行 ${count}：页面操作完成` : '页面操作已完成'
   if (event.code === 'browser_plan_generating') return '正在生成浏览器验证计划'
@@ -161,8 +161,8 @@ const stateCopy = computed(() => {
   return ({
     assistance: '验证 Agent 无法安全确定下一步，已暂停并提出具体问题。回答后会在当前 Case 中重建 scenario_contract 和完整验证计划。',
     login: props.loginReady
-      ? '登录会话已保存，但验证尚未继续。请确认页面确实已经登录；只有你确认后，Studio 才会创建新的验证。'
-      : '当前验证需要登录。请在 Studio 打开的验证浏览器中完成登录，不要在 Case 中粘贴账号、密码或 Cookie。浏览器打开不代表登录完成。',
+      ? '浏览器会话快照已保存，这是未校验登录的快照。若你确实完成了登录，请确认继续；下一轮验证会用真实页面结果再次检查。'
+      : '当前验证需要登录。请在 Studio 打开的验证浏览器中完成登录，然后主动关闭浏览器窗口。Studio 不通过 Cookie、页面路径或按钮猜测登录状态。',
     runtime: '验证浏览器环境不可用。修复并通过运行时探测后，Studio 会创建一次新的验证继续。',
     validator: '验证机器人尚未部署，浏览器验证不会退回普通排障机器人。请重新部署当前机器人的 validator 角色。',
     quota: '验证机器人用量已达上限。恢复额度或切换到可用机器人后，请重新开始故障闭环。',
@@ -206,8 +206,8 @@ const stateCopy = computed(() => {
     </div>
 
     <div v-if="state === 'login'" class="browser-recovery-actions">
-      <button v-if="loginReady" class="btn primary" type="button" data-browser-action="confirm-login" :disabled="pending" @click="$emit('action', 'confirm-login')">确认已登录并继续验证</button>
-      <button v-else class="btn primary" type="button" data-browser-action="login" :disabled="pending" @click="$emit('action', 'login')">打开验证浏览器完成登录</button>
+      <button v-if="loginReady" class="btn primary" type="button" data-browser-action="confirm-login" :disabled="pending" @click="$emit('action', 'confirm-login')">我已完成登录，继续验证</button>
+      <button v-else class="btn primary" type="button" data-browser-action="login" :disabled="pending" @click="$emit('action', 'login')">打开验证浏览器</button>
       <button class="btn" type="button" data-browser-action="clear-session" :disabled="pending" @click="$emit('action', 'clear-session')">清除此环境登录态</button>
     </div>
     <div v-else-if="state === 'runtime'" class="browser-recovery-actions">

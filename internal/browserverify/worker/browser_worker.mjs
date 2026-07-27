@@ -3330,50 +3330,38 @@ async function loginWorker(request) {
   try {
     launched = await launchPinnedBrowser(chromium, request.policy, false);
     browser = launched.browser;
-    const authFailures = createLoginAuthFailureTracker();
-    const navigationHistory = createLoginNavigationTracker(request.policy);
     const guarded = await createGuardedLoginContext(
       browser,
       await loginStorageStateInput(request.storage_state_path),
       request.policy,
-      {
-        onPage: (currentPage) => navigationHistory.trackPage(currentPage),
-        onRequest: (browserRequest) => navigationHistory.observeRequest(browserRequest),
-        onResponse: (response) => {
-          const status = response.status();
-          authFailures.observeStatus(status);
-          navigationHistory.observeAuthFailure(status);
-        },
-      },
     );
     context = guarded.context;
     const page = guarded.page;
-    emitProgress('browser_login_opened', 'Complete login in the visible validation browser');
+    emitProgress('browser_login_opened', 'Complete login, then close the visible validation browser');
     await assertAllowedURL(request.plan.start_url, request.policy);
     await page.goto(request.plan.start_url, { waitUntil: 'domcontentloaded' });
-    // The failed validation already established that authentication is
-    // required. Custom and localized login pages do not need to expose an
-    // English button or a conventional /login route to preserve that fact.
-    let loginStarted = true;
-    const storageStateBeforeLogin = await context.storageState();
+    let captured = false;
     while (true) {
       if (guarded.blocked()) throw new Error('browser destination was blocked');
-      const pages = context.pages();
+      const connected = browser.isConnected();
+      const pages = connected ? context.pages() : [];
+      if (loginCaptureShouldFinish(connected, pages.length)) break;
       for (const currentPage of pages) {
         const currentURL = currentPage.url();
         if (currentURL && currentURL !== 'about:blank') await assertAllowedURL(currentURL, request.policy);
       }
-      const observed = await observeLoginState(pages, request.policy, loginStarted || navigationHistory.started(), authFailures.active());
-      loginStarted = observed.started;
-      const storageStateAfterLogin = await context.storageState();
-      const sessionChanged = loginSessionStateChanged(storageStateBeforeLogin, storageStateAfterLogin);
-      if (navigationHistory.completionStable(observed.ready && sessionChanged)) {
+      try {
         await saveLoginStorageState(context, request.storage_state_path);
-        emitProgress('browser_login_completed', 'Browser login session saved');
-        return { status: 'completed' };
+        captured = true;
+      } catch (error) {
+        if (loginCaptureShouldFinish(browser.isConnected(), browser.isConnected() ? context.pages().length : 0)) break;
+        throw error;
       }
-      await page.waitForTimeout(250);
+      await new Promise((resolveWait) => setTimeout(resolveWait, 100));
     }
+    if (!captured) throw new Error('browser session was not captured before the window closed');
+    emitProgress('browser_login_completed', 'Browser session snapshot saved after user closed the window');
+    return { status: 'completed' };
   } finally {
     process.off('SIGINT', closeForInterrupt);
     process.off('SIGTERM', closeForInterrupt);
@@ -3383,22 +3371,8 @@ async function loginWorker(request) {
   }
 }
 
-export function loginSessionStateChanged(before, after) {
-  if (!before || !after || typeof before !== 'object' || typeof after !== 'object') return false;
-  const normalize = (state) => ({
-    cookies: Array.isArray(state.cookies)
-      ? [...state.cookies].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))
-      : [],
-    origins: Array.isArray(state.origins)
-      ? state.origins.map((entry) => ({
-        ...entry,
-        localStorage: Array.isArray(entry?.localStorage)
-          ? [...entry.localStorage].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))
-          : [],
-      })).sort((left, right) => String(left?.origin || '').localeCompare(String(right?.origin || '')))
-      : [],
-  });
-  return !isDeepStrictEqual(normalize(before), normalize(after));
+export function loginCaptureShouldFinish(browserConnected, openPageCount) {
+  return browserConnected !== true || !Number.isSafeInteger(openPageCount) || openPageCount < 1;
 }
 
 async function probeWorker(outputPath) {

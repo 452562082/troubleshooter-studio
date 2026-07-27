@@ -80,7 +80,9 @@ describe('BugBrowserProgress', () => {
 
     expect(wrapper.text()).toContain('base · test')
     expect(wrapper.text()).toContain('https://login.test')
-    expect(wrapper.get('[data-browser-action="login"]').text()).toBe('打开验证浏览器完成登录')
+    expect(wrapper.get('[data-browser-action="login"]').text()).toBe('打开验证浏览器')
+    expect(wrapper.text()).toContain('主动关闭浏览器窗口')
+    expect(wrapper.text()).toContain('不通过 Cookie')
     expect(wrapper.get('[data-browser-action="clear-session"]').text()).toBe('清除此环境登录态')
     expect(wrapper.find('input[type="password"]').exists()).toBe(false)
     expect(wrapper.find('textarea').exists()).toBe(false)
@@ -97,9 +99,9 @@ describe('BugBrowserProgress', () => {
       },
     })
 
-    expect(wrapper.text()).toContain('验证尚未继续')
+    expect(wrapper.text()).toContain('未校验登录')
     expect(wrapper.find('[data-browser-action="login"]').exists()).toBe(false)
-    expect(wrapper.get('[data-browser-action="confirm-login"]').text()).toBe('确认已登录并继续验证')
+    expect(wrapper.get('[data-browser-action="confirm-login"]').text()).toBe('我已完成登录，继续验证')
     await wrapper.get('[data-browser-action="confirm-login"]').trigger('click')
     expect(wrapper.emitted('action')).toEqual([['confirm-login']])
   })

@@ -139,6 +139,7 @@ type fakeBrowserVerifier struct {
 type observingBrowserVerifier struct {
 	fakeBrowserVerifier
 	Observation         BrowserVerificationResult
+	Observations        []BrowserVerificationResult
 	ObserveError        error
 	ObserveCalls        int
 	ObservationRequests []BrowserVerificationRequest
@@ -147,6 +148,11 @@ type observingBrowserVerifier struct {
 func (f *observingBrowserVerifier) Observe(_ context.Context, request BrowserVerificationRequest) (BrowserVerificationResult, error) {
 	f.ObserveCalls++
 	f.ObservationRequests = append(f.ObservationRequests, request)
+	if len(f.Observations) != 0 {
+		observation := f.Observations[0]
+		f.Observations = f.Observations[1:]
+		return observation, f.ObserveError
+	}
 	return f.Observation, f.ObserveError
 }
 
@@ -278,6 +284,85 @@ func TestBrowserPlannerPromptIncludesBoundedLiveInitialObservation(t *testing.T)
 	for _, expected := range []string{"initial_page_observation", "https://app.example.com/search", "请输入用户名称", `"role":"button"`} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("planner prompt is missing live observation %q:\n%s", expected, prompt)
+		}
+	}
+}
+
+func TestBrowserCoordinatorObservesEverySelectedFrontendBeforePlanning(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Bug.FrontendURL = "https://consumer.example.com/"
+	request.Bug.Steps = "1. 在管理端打开视频内容管理\n2. 打开熔炉媒资列表\n3. 确认全部媒资已下架"
+	request.Attempt.InputJSON = mustJSON(map[string]any{
+		"mode":               "reproduce",
+		"target_environment": "test",
+		"frontend_entries": []FrontendEntryBinding{
+			{ID: "consumer", Name: "C端", URL: "https://consumer.example.com/", ConfigURL: "https://consumer.example.com/", DeviceProfile: "desktop"},
+			{ID: "admin", Name: "管理端", URL: "https://admin.example.com/", ConfigURL: "https://admin.example.com/", DeviceProfile: "desktop"},
+		},
+	})
+	request.Policy = BrowserSecurityPolicy{
+		AllowedOrigins:     []string{"https://consumer.example.com", "https://admin.example.com"},
+		ApplicationOrigins: []string{"https://consumer.example.com", "https://admin.example.com"},
+		StartOrigins:       []string{"https://consumer.example.com", "https://admin.example.com"},
+	}
+	consumer := completedBrowserResult("browser/consumer.png")
+	consumer.FinalURL = "https://consumer.example.com/"
+	consumer.Title = "PC 首页"
+	consumer.AccessibilitySummary = []BrowserAccessibilityNode{{Role: "main", Name: "PC首页", Visible: true}}
+	admin := completedBrowserResult("browser/admin.png")
+	admin.FinalURL = "https://admin.example.com/"
+	admin.Title = "管理后台"
+	admin.AccessibilitySummary = []BrowserAccessibilityNode{
+		{Role: "link", Name: "视频内容管理", Visible: true},
+		{Role: "link", Name: "熔炉", Visible: true},
+	}
+	verifier := &observingBrowserVerifier{Observations: []BrowserVerificationResult{consumer, admin}}
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: `assistance_status: needs_user_input
+questions:
+  - id: expected_result
+    question: 全部下架后，C端应显示空态还是提示无视频？
+    answer_hint: 请确认业务期望。
+`}}}
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ErrorCode != "browser_validation_needs_user_input" || verifier.ObserveCalls != 2 || executor.Calls != 1 {
+		t.Fatalf("result=%+v observe=%d agent=%d", result, verifier.ObserveCalls, executor.Calls)
+	}
+	if got := []string{
+		verifier.ObservationRequests[0].Plan.StartURL,
+		verifier.ObservationRequests[1].Plan.StartURL,
+	}; !reflect.DeepEqual(got, []string{"https://consumer.example.com/", "https://admin.example.com/"}) {
+		t.Fatalf("observation starts=%v", got)
+	}
+	prompt := executor.Prompts[0]
+	for _, expected := range []string{
+		"configured_frontend_observations",
+		`"entry_id":"consumer"`,
+		`"entry_id":"admin"`,
+		"PC首页",
+		"视频内容管理",
+		"熔炉",
+		"Never ask the user to enumerate controls",
+	} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("planner prompt is missing selected-end observation %q:\n%s", expected, prompt)
+		}
+	}
+}
+
+func TestBrowserAssistanceContractKeepsObservableNavigationSystemOwned(t *testing.T) {
+	contract := browserAssistanceRequestContract()
+	for _, expected := range []string{
+		"Page exploration is Studio's responsibility",
+		"never ask the user for menu names",
+		"button/control text",
+		"how to navigate from a configured frontend entry",
+	} {
+		if !strings.Contains(contract, expected) {
+			t.Fatalf("assistance contract lacks observable-navigation rule %q:\n%s", expected, contract)
 		}
 	}
 }
@@ -444,12 +529,12 @@ func browserCoordinatorRequest(t *testing.T) BrowserCoordinatorRequest {
 }
 
 func TestValidBrowserExecutionIdentityBoundsRepairSlots(t *testing.T) {
-	for _, execution := range []string{browserObservationExecution, browserRefreshObservationExecution, browserPrimaryExecution, "repair-1", "repair-2", "repair-3"} {
+	for _, execution := range []string{browserObservationExecution, "observation-2", "observation-64", browserRefreshObservationExecution, browserPrimaryExecution, "repair-1", "repair-2", "repair-3"} {
 		if !validBrowserExecutionIdentity(execution) {
 			t.Fatalf("valid execution identity rejected: %q", execution)
 		}
 	}
-	for _, execution := range []string{"", "repair-0", "repair-01", "repair-4", "repair--1", "repair-1/child", "../repair-1"} {
+	for _, execution := range []string{"", "observation-1", "observation-02", "observation-65", "observation-2/child", "../observation-2", "repair-0", "repair-01", "repair-4", "repair--1", "repair-1/child", "../repair-1"} {
 		if validBrowserExecutionIdentity(execution) {
 			t.Fatalf("unsafe or unbounded execution identity accepted: %q", execution)
 		}

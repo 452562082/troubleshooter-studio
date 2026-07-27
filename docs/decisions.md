@@ -1432,6 +1432,26 @@ BrowserPlan 的动作和断言是可执行协议，但没有保存验证 Agent �
 
 ---
 
+## 2026-07-27：验证规划先观察全部已选端
+
+### 背景
+
+多端 Case 已把 C 端、管理端等入口都冻结到 `frontend_entries`，但 BrowserCoordinator 在首次规划前只观察 Bug 的起始端。起始端为 C 端、验证步骤涉及管理端时，Agent 只能看到 C 端 accessibility；同时“不得猜测控件”的安全约束会推动 Agent 向用户询问管理端菜单和控件文字。菜单、路由和页面结构本应由 Studio 浏览器自行观察，不属于用户掌握的业务事实。
+
+### 决策
+
+- 没有可复用 recipe 时，BrowserCoordinator 按冻结的 `frontend_entries` 顺序逐一执行只读入口观察；单端 Case 保持原一次观察行为。
+- 每个入口使用独立的受控 execution staging，保留入口 ID、名称、URL、设备类型、最终 URL、标题和有界 accessibility，统一注入 `configured_frontend_observations`。
+- Planner 必须先消费所有已选端观察。工单已经写出菜单或页面名称时，可以用工单原文生成保守的精确文本导航；若现场不匹配，交给既有 locator 观察—修复循环。
+- assistance 只允许询问会改变验证语义的用户业务事实。菜单名、按钮/控件文字、selector、路由、页面结构、控件是否存在以及如何从已配置入口导航，统一视为 Studio 可观察事实，不得转问用户。
+- 同步更新生成物 `bug-verifier` skill；Host 注入协议仍是所有 Codex、Claude Code、OpenClaw 等 validator 目标的共同强约束。
+
+### 结果
+
+多端验证 Agent 在规划前就能看到管理端和 C 端各自的真实入口状态。用户只需要补充业务期望、数据含义或确实存在歧义的跨端业务顺序，不再充当浏览器导航探针。
+
+---
+
 ## 2026-07-27：清除登录态同时作废已捕获的登录恢复
 
 ### 背景

@@ -52,6 +52,24 @@ func browserRepairExecutionName(number int) string {
 	return fmt.Sprintf("repair-%d", number)
 }
 
+func browserObservationExecutionName(index int) string {
+	if index <= 0 {
+		return browserObservationExecution
+	}
+	return fmt.Sprintf("observation-%d", index+1)
+}
+
+func isBrowserObservationExecution(execution string) bool {
+	if execution == browserObservationExecution || execution == browserRefreshObservationExecution {
+		return true
+	}
+	if !strings.HasPrefix(execution, "observation-") {
+		return false
+	}
+	number, err := strconv.Atoi(strings.TrimPrefix(execution, "observation-"))
+	return err == nil && number >= 2 && number <= 64 && execution == fmt.Sprintf("observation-%d", number)
+}
+
 type BrowserCoordinator struct {
 	Executor         PhaseAgentExecutor
 	Verifier         BrowserVerifier
@@ -77,6 +95,15 @@ type BrowserCoordinatorRequest struct {
 	uploadFiles         []BrowserUploadFile
 	uploadManifest      []map[string]string
 	uploadRequired      bool
+	entryObservations   []browserFrontendObservation
+}
+
+type browserFrontendObservation struct {
+	EntryID       string
+	EntryName     string
+	StartURL      string
+	DeviceProfile string
+	Result        BrowserVerificationResult
 }
 
 // BrowserFrozenArtifact is the host-owned immutable copy bound to a verifier
@@ -202,24 +229,36 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 	}
 	if !found {
 		if _, supportsObservation := c.Verifier.(BrowserObserver); supportsObservation {
-			observed, observedFrozen, observeErr := c.executeBrowser(ctx, request, browserObservationPlan(request.Bug.FrontendURL, browserScenarioDeviceProfile(request)), browserObservationExecution)
-			if observeErr != nil {
-				if ctxErr := ctx.Err(); ctxErr != nil {
-					return result, ctxErr
+			targets := browserInitialObservationTargets(request)
+			for index, target := range targets {
+				observed, observedFrozen, observeErr := c.executeBrowser(
+					ctx,
+					request,
+					browserObservationPlan(target.StartURL, target.DeviceProfile),
+					browserObservationExecutionName(index),
+				)
+				if observeErr != nil {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return result, ctxErr
+					}
+					return browserCoordinatorFailure(result, browserVerifierErrorCode(observeErr)), nil
 				}
-				return browserCoordinatorFailure(result, browserVerifierErrorCode(observeErr)), nil
-			}
-			if observed.Status != "completed" {
-				result.BrowserResult = observed
-				result.BrowserArtifacts = appendBrowserArtifacts(result.BrowserArtifacts, observed.Artifacts)
-				code, ok := browserOutcomeCodes[observed.Status]
-				if !ok {
-					code = "browser_verifier_failed"
+				if observed.Status != "completed" {
+					result.BrowserResult = observed
+					result.BrowserArtifacts = appendBrowserArtifacts(result.BrowserArtifacts, observed.Artifacts)
+					code, ok := browserOutcomeCodes[observed.Status]
+					if !ok {
+						code = "browser_verifier_failed"
+					}
+					return browserCoordinatorFailure(result, code), nil
 				}
-				return browserCoordinatorFailure(result, code), nil
+				target.Result = observed
+				request.entryObservations = append(request.entryObservations, target)
+				if index == 0 {
+					observation = &observed
+					observationFrozen = observedFrozen
+				}
 			}
-			observation = &observed
-			observationFrozen = observedFrozen
 		}
 		request.uploadRequired = request.uploadRequired || browserScenarioRequiresFileUpload(request, observation)
 		if request.uploadRequired && len(request.uploadFiles) == 0 {
@@ -1349,7 +1388,7 @@ func (c BrowserCoordinator) executeBrowser(ctx context.Context, request BrowserC
 		},
 	}
 	var result BrowserVerificationResult
-	if execution == browserObservationExecution || execution == browserRefreshObservationExecution {
+	if isBrowserObservationExecution(execution) {
 		observer, ok := c.Verifier.(BrowserObserver)
 		if !ok {
 			return BrowserVerificationResult{}, nil, errors.New("browser observer is unavailable")
@@ -1843,7 +1882,7 @@ func browserExecutionStagingDir(root, execution string) (string, error) {
 }
 
 func validBrowserExecutionIdentity(execution string) bool {
-	if execution == browserObservationExecution || execution == browserRefreshObservationExecution || execution == browserPrimaryExecution {
+	if isBrowserObservationExecution(execution) || execution == browserPrimaryExecution {
 		return true
 	}
 	if !strings.HasPrefix(execution, "repair-") {
@@ -3301,6 +3340,30 @@ func browserObservationPlan(startURL, deviceProfile string) BrowserPlan {
 	}
 }
 
+func browserInitialObservationTargets(request BrowserCoordinatorRequest) []browserFrontendObservation {
+	entries := browserAttemptFrontendEntryBindings(request.Attempt)
+	if len(entries) == 0 {
+		return []browserFrontendObservation{{
+			StartURL:      strings.TrimSpace(request.Bug.FrontendURL),
+			DeviceProfile: browserScenarioDeviceProfile(request),
+		}}
+	}
+	targets := make([]browserFrontendObservation, 0, len(entries))
+	for _, entry := range entries {
+		deviceProfile := strings.TrimSpace(entry.DeviceProfile)
+		if deviceProfile == "" {
+			deviceProfile = browserScenarioDeviceProfile(request)
+		}
+		targets = append(targets, browserFrontendObservation{
+			EntryID:       strings.TrimSpace(entry.ID),
+			EntryName:     strings.TrimSpace(entry.Name),
+			StartURL:      strings.TrimSpace(entry.URL),
+			DeviceProfile: deviceProfile,
+		})
+	}
+	return targets
+}
+
 func browserPlannerPrompt(request BrowserCoordinatorRequest, observation *BrowserVerificationResult) string {
 	refresh := browserValidationEvidenceRefresh(request.Attempt)
 	contextFields := map[string]any{
@@ -3328,6 +3391,21 @@ func browserPlannerPrompt(request BrowserCoordinatorRequest, observation *Browse
 			"accessible_controls": observation.AccessibilitySummary,
 		}
 	}
+	if len(request.entryObservations) != 0 {
+		observations := make([]map[string]any, 0, len(request.entryObservations))
+		for _, item := range request.entryObservations {
+			observations = append(observations, map[string]any{
+				"entry_id":            item.EntryID,
+				"entry_name":          item.EntryName,
+				"start_url":           item.StartURL,
+				"device_profile":      item.DeviceProfile,
+				"final_url":           item.Result.FinalURL,
+				"title":               item.Result.Title,
+				"accessible_controls": item.Result.AccessibilitySummary,
+			})
+		}
+		contextFields["configured_frontend_observations"] = observations
+	}
 	if len(request.uploadManifest) != 0 {
 		contextFields["controlled_upload_files"] = request.uploadManifest
 	}
@@ -3339,7 +3417,8 @@ func browserPlannerPrompt(request BrowserCoordinatorRequest, observation *Browse
 		"When evidence_refresh_gaps is present, it is a mandatory evidence contract produced by the previous investigation. Replay successful_reproduction_recipe actions exactly when that recipe is present, and only augment the version, request_captures, response_assertions, and assertions needed by the contract. Reuse the endpoint, method, parameter names, and field paths already named in those gaps. Do not merely repeat screenshots or a visual-only plan. Never persist a complete request or response body.\n" +
 		"First interpret the current validation scenario using the installed bug-verifier skill, then encode that decision in scenario_contract. Copy scenario_contract_basis exactly into scenario_contract.basis. Omit context_sha256 because Studio binds it after parsing. The contract must name every action that causally produces evidence and must cover every executable UI and response assertion. If the latest user clarification changes the validation idea, derive a new goal, causal action set, and evidence set from that clarification instead of preserving the previous semantic contract.\n" +
 		browserAssistanceRequestContract() +
-		"When configured_frontend_entries contains multiple applications, treat every listed entry as required verification scope. Use the first entry as the start application and explicit goto actions for the others when the scenario crosses applications. scenario_contract.causal_action_ids must include at least one evidence-producing action while each selected entry is active. Do not drop an entry merely because the ticket wording focuses on another end; if the evidence cannot cover one selected entry, return a plan that exposes the gap for user clarification rather than claiming complete verification.\n" +
+		"configured_frontend_observations contains fresh host observations from every selected application, including management/admin applications. Inspect those observations before asking for help. Menu names, visible control text, routes, page structure, and whether a control is currently present are Studio-observable facts, not user-owned business facts. Never ask the user to enumerate controls or explain how to navigate from a configured application landing page. When the Bug steps already name a menu or page, use that exact written text as a conservative exact text locator and let the host observation/locator-repair loop correct it from live evidence if necessary.\n" +
+		"When configured_frontend_entries contains multiple applications, treat every listed entry as required verification scope. Use the first entry as the start application and explicit goto actions for the others when the scenario crosses applications. scenario_contract.causal_action_ids must include at least one evidence-producing action while each selected entry is active. Do not drop an entry merely because the ticket wording focuses on another end. Ask the user only when the missing fact changes the business scenario or success criterion; do not ask because a selected application's current UI has not yet been navigated.\n" +
 		"Choose evidence from the current scenario instead of forcing every Bug into a visual-text check. For H5/mobile scenarios set device_profile: mobile; otherwise set device_profile: desktop. Use UI assertions for observable page state and response assertions for machine-verifiable request outcomes or JSON relationships. Keep browser actions that trigger the real evidence. The worker persists only explicitly listed bounded request fields and response comparison counts, never complete request or response bodies. Credential-like request fields are forbidden.\n" +
 		"Follow every numbered Bug reproduction step in order. Do not skip an explicit open/enter/switch-page step merely because a similarly named input is already visible on the landing page; represent that navigation as its own action before filling. When initial_page_observation contains a visible search textbox for that entry step, copy both its locator_kind and exact observed name, and set exact: true; do not replace it with a generic Search/搜索 navigation label, a different locator kind, or an invented placeholder. Plan actions for stable navigation and input needed to reach the observation page. Every state-changing locator must identify exactly one visible intended control. Use a role locator only when the attached screenshot, written evidence, or an earlier host observation explicitly establishes that ARIA role; never infer link, tab, or searchbox merely from visible text. Otherwise prefer an exact label, placeholder, text, or test_id locator. Never use broad or positional CSS such as input, button, textarea, select, :first, or :nth-child. If observed evidence establishes a separate submit button, click it with an explicit accessible name or test id. Never click generic Search/搜索 text or an unnamed button role after filling a search input; press Enter on the same input locator instead. Every search fill and its immediately following submit action must set screenshot_after: true so the settled input and result states are auditable. For absence Bugs such as 未展示/缺失/不显示, never wait_for the business element or value under test. Do not turn a dynamic business value from expected/actual behavior into a wait_for action merely to prove the outcome; put observable business checks in assertions and capture screenshots around the observation state. A missing business element or failed assertion will be evaluated from the captured evidence.\n" +
 		"For a file-input step, use upload_file only when controlled_upload_files contains the exact file to use. Set file_ref to one listed id; never output a filename or path as file_ref. Locate the actual file input by an exact label/test_id or a strict attribute CSS selector such as input[type=\"file\"][accept*=\".xlsx\"]. Do not click a submit/create action until the upload_file action has completed. A file selection may itself trigger the causal upload/import request: never invent a later submit/create click unless the Bug steps or observed page explicitly establish that separate control. If no controlled_upload_files entry exists, do not invent an upload or skip the prerequisite; Studio will request the missing file before planning.\n" +
@@ -3565,7 +3644,7 @@ func browserRepairPrompt(original BrowserPlan, failed BrowserVerificationResult,
 }
 
 func browserAssistanceRequestContract() string {
-	return "If a missing business fact makes a safe and semantically correct plan impossible, do not guess and do not emit a malformed BrowserPlan. Instead output exactly this alternative YAML shape: {assistance_status: needs_user_input, questions: [{id: <lowercase stable id>, question: <one concrete question>, answer_hint: <what the user should clarify>}]}. Ask 1-3 minimal questions only about the real page flow, business expectation, affected application, test data meaning, or observable success condition. Never ask for passwords, cookies, tokens, OTP, scenario hashes, local paths, deployment metadata, or facts Studio can observe itself. Do not use the assistance response for runtime, provider, attachment, or tool failures.\n"
+	return "If a missing user-owned business fact makes a safe and semantically correct plan impossible, do not guess and do not emit a malformed BrowserPlan. Instead output exactly this alternative YAML shape: {assistance_status: needs_user_input, questions: [{id: <lowercase stable id>, question: <one concrete question>, answer_hint: <what the user should clarify>}]}. Ask 1-3 minimal questions only about an ambiguous business operation order, business expectation, affected application scope, test data meaning, or observable success condition. Page exploration is Studio's responsibility: never ask the user for menu names, button/control text, selectors, routes, page structure, whether a visible control exists, or how to navigate from a configured frontend entry. Never ask for passwords, cookies, tokens, OTP, scenario hashes, local paths, deployment metadata, or other facts Studio can observe itself. Do not use the assistance response for runtime, provider, attachment, or tool failures.\n"
 }
 
 func browserLocatorDecisionContract(statuses string) string {

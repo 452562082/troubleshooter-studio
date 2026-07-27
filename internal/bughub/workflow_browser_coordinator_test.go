@@ -303,7 +303,7 @@ func TestBrowserCoordinatorObservesEverySelectedFrontendBeforePlanning(t *testin
 	request.Policy = BrowserSecurityPolicy{
 		AllowedOrigins:     []string{"https://consumer.example.com", "https://admin.example.com"},
 		ApplicationOrigins: []string{"https://consumer.example.com", "https://admin.example.com"},
-		StartOrigins:       []string{"https://consumer.example.com", "https://admin.example.com"},
+		StartOrigins:       []string{"https://consumer.example.com"},
 	}
 	consumer := completedBrowserResult("browser/consumer.png")
 	consumer.FinalURL = "https://consumer.example.com/"
@@ -336,6 +336,15 @@ questions:
 		verifier.ObservationRequests[1].Plan.StartURL,
 	}; !reflect.DeepEqual(got, []string{"https://consumer.example.com/", "https://admin.example.com/"}) {
 		t.Fatalf("observation starts=%v", got)
+	}
+	if got := []string{
+		verifier.ObservationRequests[0].Policy.StartOrigins[0],
+		verifier.ObservationRequests[1].Policy.StartOrigins[0],
+	}; !reflect.DeepEqual(got, []string{"https://consumer.example.com", "https://admin.example.com"}) {
+		t.Fatalf("observation policy starts=%v", got)
+	}
+	if !reflect.DeepEqual(request.Policy.StartOrigins, []string{"https://consumer.example.com"}) {
+		t.Fatalf("durable validation start policy was mutated: %+v", request.Policy.StartOrigins)
 	}
 	prompt := executor.Prompts[0]
 	for _, expected := range []string{

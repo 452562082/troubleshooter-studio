@@ -1376,10 +1376,33 @@ func (c BrowserCoordinator) executeBrowser(ctx context.Context, request BrowserC
 	// receives only the executable protocol it knows how to enforce.
 	executionPlan := plan
 	executionPlan.ScenarioContract = nil
+	executionPolicy := request.Policy
+	if isBrowserObservationExecution(execution) {
+		_, observationOrigin, originErr := canonicalBrowserURL(plan.StartURL)
+		if originErr != nil {
+			return BrowserVerificationResult{}, nil, originErr
+		}
+		allowedApplication := false
+		for _, configured := range request.Policy.ApplicationOrigins {
+			_, applicationOrigin, applicationErr := canonicalBrowserURL(configured)
+			if applicationErr == nil && applicationOrigin == observationOrigin {
+				allowedApplication = true
+				break
+			}
+		}
+		if !allowedApplication {
+			return BrowserVerificationResult{}, nil, errors.New("browser observation origin is not a selected application")
+		}
+		// Initial observations are read-only probes of already frozen selected
+		// applications. Authorize only this observation's application as its
+		// start origin; keep the durable validation policy pinned to the
+		// user-selected primary entry.
+		executionPolicy.StartOrigins = []string{observationOrigin}
+	}
 	browserRequest := BrowserVerificationRequest{
 		CaseID: request.Attempt.CaseID, CycleNumber: request.Attempt.CycleNumber, AttemptID: request.Attempt.ID,
 		SystemID:    firstNonEmpty(strings.TrimSpace(request.Bug.SystemID), strings.TrimSpace(request.Bot.SystemID)),
-		Environment: environment, Version: version, Policy: request.Policy, Plan: executionPlan,
+		Environment: environment, Version: version, Policy: executionPolicy, Plan: executionPlan,
 		UploadFiles: append([]BrowserUploadFile(nil), request.uploadFiles...), StagingDir: stagingDir,
 		Emit: func(progress BrowserProgress) {
 			if request.Emit != nil {

@@ -1547,3 +1547,27 @@ BrowserPlan 的动作和断言是可执行协议，但没有保存验证 Agent �
 ### 结果
 
 浏览器验证从“一次性计划是否全部执行成功”改成“观察—判断—继续/提问/结论”的受控 Agent 循环。条件式场景可以自然处理：例如内容已下架时目标不存在代表修复成功，仍存在时继续进入详情采证。安全边界仍由 Host 的严格协议与冻结证据校验负责；系统超时和格式错误不会转嫁给用户。
+
+---
+
+## 2026-07-29：验证与回归绑定同一冻结场景合同
+
+### 背景
+
+验证和回归虽然都使用 BrowserCoordinator，但回归 Attempt 过去只绑定通用 `scenario_hash`、原始表现和部署信息。BrowserCoordinator 又会根据回归输入重新计算 recipe 场景摘要；因此同一个 Case 在回归时可能重新调用 planner，生成一个语义相近但操作路径、涉及端或证据判定不同的 `scenario_contract`。这种“重新理解”即使最终显示通过，也不能证明修复前后比较的是同一个业务场景。
+
+同时，凭据语义校验对 token 使用 `auth` 前后缀匹配，把 `author`、`authority` 等普通业务字段误判为认证信息。失败发生在浏览器启动前，却表现为用户可见的“生成计划失败”。
+
+### 决策
+
+- 首次浏览器验证成功后继续使用 Case 级 `ValidationRecipe` 冻结完整 `scenario_contract`、场景 SHA256、计划 SHA256、设备类型和来源 validation attempt。
+- `StartRegression` 从持久化 recipe 构造不可变 `browser_scenario_binding` 并写入回归 Attempt。回归幂等摘要同时包含浏览器场景和计划摘要。
+- 普通回归开始前必须确认当前 recipe 的来源 Attempt、场景摘要、计划摘要、设备类型和合同内容与 binding 完全一致；任一漂移都在浏览器启动前失败。匹配后直接复用首次验证 recipe，不再次让 Agent 自由解释场景。
+- locator 恢复仍可根据新页面调整具体定位，但沿用现有 repair 合同约束，不得改变场景合同。回归产生的安全 locator 修正可以更新 recipe，但来源仍指向原 validation attempt。
+- 用户明确要求调整策略时，以合同修订路径重新观察和规划，并记录基线摘要；修订结果不覆盖原始冻结 recipe，也不声称与原验证完全相同。
+- Agent 生成的 action ID 暂不由 Host 单侧替换，因为 Worker 的失败动作、证据和 locator repair 都依赖该 ID。先把 `auth` 改为仅精确 token 命中，并继续拦截 `authentication`、`authorization`、password、token 等明确凭据语义，从而允许 `author`、`author_name` 和 `authority`。
+- UI 把 BrowserPlan 当作内部执行协议，不再把“重新生成计划”作为用户任务。协议连续失败只提示重试当前验证；只有真实业务语义缺口才要求用户回答。
+
+### 结果
+
+正常回归使用与首次验证完全相同的场景合同和已验证执行策略，同时采集当前部署的新证据；页面改版只允许产生可审计的定位偏差。历史或非浏览器 Case 没有 recipe 时保留原兼容路径。Studio 不再因为“作者”字段误触凭据规则，也不会让用户为内部 YAML、动作字段或计划术语负责。

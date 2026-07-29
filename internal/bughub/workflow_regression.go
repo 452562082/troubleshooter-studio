@@ -181,7 +181,13 @@ func (o *CaseOrchestrator) currentRegressionAttempt(ctx context.Context, inciden
 }
 
 func regressionIdempotencyKey(incident IncidentCase, input RegressionValidationInput) string {
-	material := strings.Join([]string{incident.ID, fmt.Sprint(incident.CycleNumber), input.OriginalScenarioHash, input.DeploymentObservationID, input.ObservedDeploymentVersion}, "\x1f")
+	browserScenarioSHA := ""
+	browserPlanSHA := ""
+	if input.BrowserScenarioBinding != nil {
+		browserScenarioSHA = input.BrowserScenarioBinding.ScenarioSHA256
+		browserPlanSHA = input.BrowserScenarioBinding.PlanSHA256
+	}
+	material := strings.Join([]string{incident.ID, fmt.Sprint(incident.CycleNumber), input.OriginalScenarioHash, browserScenarioSHA, browserPlanSHA, input.DeploymentObservationID, input.ObservedDeploymentVersion}, "\x1f")
 	digest := sha256.Sum256([]byte(material))
 	return "regression:" + incident.ID + ":" + hex.EncodeToString(digest[:])
 }
@@ -237,6 +243,10 @@ func (o *CaseOrchestrator) buildRegressionInput(ctx context.Context, incident In
 	if len(refs) == 0 {
 		return RegressionValidationInput{}, DeploymentReservation{}, ErrRegressionOriginalEvidence
 	}
+	browserBinding, err := o.browserRegressionScenarioBinding(ctx, original)
+	if err != nil {
+		return RegressionValidationInput{}, DeploymentReservation{}, err
+	}
 	return RegressionValidationInput{
 		OriginalValidationAttemptID: original.ID,
 		OriginalReproduction:        reproduction,
@@ -253,7 +263,46 @@ func (o *CaseOrchestrator) buildRegressionInput(ctx context.Context, incident In
 		DeploymentReservationID:     reservation.ReservationID,
 		ObservedDeploymentVersion:   observation.ObservedVersion,
 		TargetEnvironment:           incident.Environment,
+		BrowserScenarioBinding:      browserBinding,
 	}, reservation, nil
+}
+
+func (o *CaseOrchestrator) browserRegressionScenarioBinding(ctx context.Context, original PhaseAttempt) (*BrowserRegressionScenarioBinding, error) {
+	if o == nil || o.store == nil {
+		return nil, errors.New("case store is required")
+	}
+	recipe, found, err := o.store.GetValidationRecipe(ctx, original.CaseID)
+	if err != nil {
+		return nil, fmt.Errorf("load frozen validation scenario: %w", err)
+	}
+	// Legacy and non-browser validations do not have a recipe. They retain the
+	// existing regression path; every browser validation completed by current
+	// Studio versions stores one and therefore receives the hard binding.
+	if !found {
+		return nil, nil
+	}
+	if recipe.SourceAttemptID != original.ID || recipe.Plan.ScenarioContract == nil {
+		return nil, fmt.Errorf("%w: frozen browser scenario does not belong to the selected validation", ErrRegressionOriginalScenario)
+	}
+	if err := recipe.validate(); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRegressionOriginalScenario, err)
+	}
+	contract := *recipe.Plan.ScenarioContract
+	contract.FrontendEntryIDs = append([]string(nil), contract.FrontendEntryIDs...)
+	contract.CausalActionIDs = append([]string(nil), contract.CausalActionIDs...)
+	contract.Evidence = append([]BrowserScenarioEvidence(nil), contract.Evidence...)
+	binding := &BrowserRegressionScenarioBinding{
+		Version:          1,
+		SourceAttemptID:  original.ID,
+		ScenarioSHA256:   recipe.ScenarioSHA256,
+		PlanSHA256:       recipe.PlanSHA256,
+		DeviceProfile:    firstNonEmpty(strings.TrimSpace(recipe.Plan.DeviceProfile), "desktop"),
+		ScenarioContract: contract,
+	}
+	if err := validateBrowserRegressionScenarioBinding(*binding, original.ID); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRegressionOriginalScenario, err)
+	}
+	return binding, nil
 }
 
 func observedCommitsCoverExpected(observation DeploymentObservation, expected map[string]string) bool {
@@ -543,6 +592,11 @@ func bindRegressionCompletionCommand(attempt PhaseAttempt, command *CompleteAtte
 func (o *CaseOrchestrator) validatePersistedRegressionBinding(ctx context.Context, incident IncidentCase, input RegressionValidationInput) error {
 	if input.CycleNumber != incident.CycleNumber || input.TargetEnvironment != incident.Environment {
 		return ErrRegressionBinding
+	}
+	if input.BrowserScenarioBinding != nil {
+		if err := validateBrowserRegressionScenarioBinding(*input.BrowserScenarioBinding, input.OriginalValidationAttemptID); err != nil {
+			return errors.Join(ErrRegressionBinding, err)
+		}
 	}
 	expected, err := o.expectedRegressionCommits(ctx, incident)
 	if err != nil || !equalStringMap(expected, input.ExpectedFixCommits) {

@@ -181,6 +181,19 @@ response_assertions:
 	}
 }
 
+func TestBrowserCredentialSemanticDoesNotConfuseAuthorWithAuthentication(t *testing.T) {
+	for _, safe := range []string{"fill-author-nickname", "author", "author_name", "authority-list"} {
+		if browserStrongCredentialSemantic(safe) {
+			t.Fatalf("ordinary business field %q was classified as credential material", safe)
+		}
+	}
+	for _, unsafe := range []string{"auth", "authentication", "authorization", "auth-token", "password"} {
+		if !browserStrongCredentialSemantic(unsafe) {
+			t.Fatalf("credential field %q was not classified", unsafe)
+		}
+	}
+}
+
 func TestParseBrowserPlanV2AcceptsMobileResponseFieldAssertion(t *testing.T) {
 	plan, err := ParseBrowserPlan([]byte(`version: 2
 device_profile: mobile

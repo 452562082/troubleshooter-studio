@@ -87,8 +87,8 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
       if (verificationNeedsUserEvidence(attempt)) return { kind: 'supply_evidence', label: '补充信息并重试回归' }
       return { kind: 'retry_regression', label: '重试当前回归' }
     }
-    if (code === 'browser_validator_plan_invalid' || code === 'browser_locator_repair_plan_invalid') return { kind: 'retry_validation', label: '重新生成验证计划并重试' }
-    if (code === 'browser_locator_failed') return { kind: 'retry_validation', label: '重新观察页面并生成验证计划' }
+    if (code === 'browser_validator_plan_invalid' || code === 'browser_locator_repair_plan_invalid') return { kind: 'retry_validation', label: '重试当前验证' }
+    if (code === 'browser_locator_failed') return { kind: 'retry_validation', label: '让 Agent 继续验证' }
     if (['browser_validator_failed', 'browser_validator_timeout', 'browser_validator_attachment_failed', 'browser_validator_no_output', 'browser_validator_process_failed', 'browser_validator_configuration_invalid', 'browser_worker_protocol_invalid'].includes(code)) {
       return { kind: 'retry_validation', label: '重试当前验证' }
     }

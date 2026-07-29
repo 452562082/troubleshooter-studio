@@ -48,8 +48,8 @@ function progressCopy(event: { code: IncidentBrowserProgressCode; current?: numb
   if (event.code === 'browser_login_completed') return '浏览器会话快照已保存（未校验登录）'
   if (event.code === 'browser_action_started' || event.code === 'action_started') return count ? `执行 ${count}：开始页面操作` : '正在执行页面操作'
   if (event.code === 'browser_action_completed' || event.code === 'action_completed') return count ? `执行 ${count}：页面操作完成` : '页面操作已完成'
-  if (event.code === 'browser_plan_generating') return '正在生成浏览器验证计划'
-  if (event.code === 'browser_repair_generating') return '正在生成页面定位修复计划'
+  if (event.code === 'browser_plan_generating') return '验证 Agent 正在观察并决定下一步'
+  if (event.code === 'browser_repair_generating') return '验证 Agent 正在根据现场调整策略'
   if (event.code === 'browser_result_evaluating') return '正在判定浏览器验证结果'
   return '浏览器操作进行中'
 }
@@ -92,10 +92,10 @@ const failureStageCopy = computed(() => {
   const stage = props.attempt?.output_json?.failure_stage
   if (typeof stage !== 'string') return ''
   return ({
-    planning: '生成验证计划',
+    planning: '理解场景并决定下一步',
     locator_repair: '根据现场证据决定下一步',
     evaluation: '判定验证结果',
-    plan_validation: '校验验证计划',
+    plan_validation: '校验内部验证策略',
   } as Record<string, string>)[stage] || ''
 })
 
@@ -129,8 +129,8 @@ const loginOrigin = computed(() => {
 
 const stateCopy = computed(() => {
   if (stableErrorCode.value === 'browser_validator_timeout') {
-    if (failureStageCopy.value === '生成验证计划') {
-      return '验证 Agent 在生成计划时超时，尚未开始浏览器执行。可以在当前 Case 重新生成计划，无需重建故障闭环。'
+    if (failureStageCopy.value === '理解场景并决定下一步') {
+      return '验证 Agent 在理解场景和决定下一步时超时，尚未开始浏览器执行。可以在当前 Case 重试，无需重建故障闭环。'
     }
     if (failureStageCopy.value === '根据现场证据决定下一步') {
       return '验证 Agent 在根据页面现场决定下一步时超时。Studio 会改用已冻结证据进入结果判定；若判定也超时，当前 Case 仍保留全部现场证据。'
@@ -141,7 +141,7 @@ const stateCopy = computed(() => {
     return '等待验证 Agent 超时。当前 Case 和已采集的浏览器证据均已保留，可以直接重试，无需补充附件或重建故障闭环。'
   }
   if (stableErrorCode.value === 'browser_locator_repair_plan_invalid') {
-    return '页面定位修复计划未通过协议校验。当前 Case、原计划与现场证据均已保留，可以直接重新生成计划并重试。'
+    return '验证 Agent 根据页面现场给出的后续策略未通过内部协议校验。当前 Case 和现场证据均已保留，可以直接重试。'
   }
   const artifactCopy: Record<string, string> = {
     browser_artifact_staging_invalid: '验证证据暂存目录不可用，失败发生在浏览器启动前。请检查本地磁盘与目录权限后在当前 Case 重试。',
@@ -156,6 +156,7 @@ const stateCopy = computed(() => {
     browser_artifact_evaluator_evidence_invalid: '浏览器操作已完成，但供最终判定使用的证据无法读取。这不是页面定位失败。',
     browser_artifact_evaluator_cleanup_failed: '最终判定证据的临时副本清理失败，Studio 已停止后续执行。',
     browser_artifact_response_assertion_invalid: '接口响应断言证据不完整或与当前执行不一致，Studio 不会改用页面截图猜测结果。',
+    browser_scenario_binding_invalid: '回归场景与首次验证冻结合同不一致，Studio 已在浏览器启动前停止执行，避免用另一个场景误判回归结果。',
   }
   if (artifactCopy[stableErrorCode.value]) return artifactCopy[stableErrorCode.value]
   return ({
@@ -166,10 +167,10 @@ const stateCopy = computed(() => {
     runtime: '验证浏览器环境不可用。修复并通过运行时探测后，Studio 会创建一次新的验证继续。',
     validator: '验证机器人尚未部署，浏览器验证不会退回普通排障机器人。请重新部署当前机器人的 validator 角色。',
     quota: '验证机器人用量已达上限。恢复额度或切换到可用机器人后，请重新开始故障闭环。',
-    locator: '页面定位经过有限次现场修复仍失败。当前 Case 已保留执行证据；请按 Agent 的具体问题说明真实控件或页面流程，回答后会重新观察页面并生成验证计划。',
+    locator: '页面定位经过有限次现场调整仍失败。当前 Case 已保留执行证据；重试后 Agent 会重新观察现场并继续判断，只有业务语义确实不明确时才会向你提问。',
     url: '来源工单缺少 frontend_url。请先在来源工单平台补充页面地址，再前往 Bug 收件箱重新同步该 Bug。',
     business: '页面结果与预期不一致。请补充最小业务预期或测试数据后重试。',
-    plan: '验证机器人连续生成的浏览器计划未通过结构校验。失败规则和可回答的问题会保留在当前 Case 中；你可以说明真实流程后重新生成计划，无需重建故障闭环。',
+    plan: '验证 Agent 的内部执行策略连续未通过协议校验。Studio 已自动纠错并保留当前 Case，无需重建故障闭环；这属于系统执行问题，不要求你补页面控件或协议信息。',
     attachment: '验证机器人无法读取本次截图证据。Studio 会优先使用结构化页面与网络证据降级判定；仍失败时请检查 macOS 文件访问权限后在当前 Case 重试。',
     configuration: '验证机器人启动配置不兼容。请升级或重新启动已修复的 Studio 后，在当前 Case 直接重试验证；无需补充证据或重建故障闭环。',
     process: '验证机器人进程异常退出或没有返回结构化结果。当前 Case 和浏览器证据均已保留，可以直接重试。',

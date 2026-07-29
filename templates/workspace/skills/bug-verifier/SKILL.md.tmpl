@@ -55,6 +55,7 @@ description: Bug 验证 Agent 统一入口。用于主动复现、修复后回�
 - 菜单名称、按钮/控件文字、路由、页面结构、控件当前是否存在，以及从已配置应用入口如何进入目标页面，属于 Studio 浏览器可观察事实，不得转问用户。先读取所有 `configured_frontend_observations`；工单步骤已写出菜单或页面名称时，用原文生成保守导航计划，交给现场观察与定位修复循环校正。
 - 不要向用户询问 Agent 进程、Provider、浏览器运行时、附件读取、工具协议、部署元数据或任何凭据；这些属于 Studio 的系统恢复责任。
 - 用户回复后，把最后一条非空回复视为当前场景修正；重新复述场景、重新生成完整 `scenario_contract`，再制定新的验证策略。不得只换 locator 后沿用旧语义。
+- 回归输入含 `browser_scenario_binding` 时，它是 Studio 从已接受验证中冻结的合同。必须保持同一目标、端范围、业务顺序和证据语义；只能根据当前页面调整定位细节。不得为了更容易通过而换场景、减步骤或降低判定标准。
 - 每轮只解决当前最小阻塞项；仍有困难就再次提出新的具体问题。验证结果由 Studio 留给用户确认，用户不认可时继续按反馈重验，不得自动进入根因分析。
 
 ### Studio 宿主浏览器协议
@@ -143,6 +144,7 @@ gaps: []
 - 只有同一场景在目标修复版本通过时，才能标记 `fixed_verified`。
 - 如果同一故障仍能用新鲜证据观察到，必须标记 `still_reproduces`。
 - 回归输入中的 `original_validation_attempt_id`、`scenario_hash`、`cycle_number`、`deployment_observation_id`、`deployment_reservation_id`、目标环境、可选运行版本和逐仓 commit 是 Studio 从持久化记录生成的完整 scope；不得替换、降级或跨 cycle 复用。
+- `browser_scenario_binding` 中的来源 Attempt、场景摘要、计划摘要和合同同样由 Studio 持有。普通回归直接复用冻结 recipe；页面结构变化交给现场观察与 locator 修正，不能重新解释业务场景。用户明确提出新想法时才进入合同修订，并必须说明它不再等同于原验证基线。
 - 回归证据的 Studio fstat 时间必须晚于当前 attempt 开始时间，`environment` 必须与 Studio 提供的部署观察一致；宿主自动采集到运行版本时 `version` 必须一致，版本不可得时允许留空。新鲜度由当前 attempt、环境、采集时间、artifact 摘要以及本次请求/trace 等宿主事实共同校验；旧 attempt 的 artifact 只能对照，不能复用为新证据。
 - `fixed_verified` 必须有当前 regression attempt 的新 artifact；只有旧验证证据时必须返回 `insufficient_info`。
 - 首次验证的 `reproduced` 证据会成为回归场景基线；缺少完整现象、预期或已注册 artifact 时不得进入排障和修复链。

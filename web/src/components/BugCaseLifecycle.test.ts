@@ -140,10 +140,10 @@ describe('BugCaseLifecycle', () => {
     snapshot.case.current_attempt_id = 'validation-plan'
     snapshot.attempts = [{ id: 'validation-plan', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'reproduce' }, output_json: { error_code: 'browser_validator_plan_invalid' }, parent_attempt_id: '', started_at: '', error_code: 'browser_validator_plan_invalid', error_message: 'raw rejected output', usage: {} }]
 
-    expect(primaryActionFor(snapshot)).toEqual({ kind: 'retry_validation', label: '重新生成验证计划并重试' })
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'retry_validation', label: '重试当前验证' })
     const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
     expect(wrapper.get('[data-browser-state="plan"]').text()).toContain('当前 Case')
-    expect(wrapper.get('.primary-action').text()).toBe('重新生成验证计划并重试')
+    expect(wrapper.get('.primary-action').text()).toBe('重试当前验证')
     await wrapper.get('.primary-action').trigger('click')
     expect(wrapper.emitted('primary')).toEqual([[{ kind: 'retry_validation' }]])
     expect(wrapper.find('#case-supplement').exists()).toBe(false)
@@ -217,9 +217,9 @@ describe('BugCaseLifecycle', () => {
     snapshot.case.current_attempt_id = 'repair-plan'
     snapshot.attempts = [{ id: 'repair-plan', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_locator_repair_plan_invalid' }, parent_attempt_id: '', started_at: '', error_code: 'browser_locator_repair_plan_invalid', error_message: 'raw rejected repair', usage: {} }]
 
-    expect(primaryActionFor(snapshot)).toEqual({ kind: 'retry_validation', label: '重新生成验证计划并重试' })
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'retry_validation', label: '重试当前验证' })
     const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
-    expect(wrapper.get('[data-browser-state="plan"]').text()).toContain('页面定位修复计划')
+    expect(wrapper.get('[data-browser-state="plan"]').text()).toContain('后续策略')
     expect(wrapper.text()).not.toContain('raw rejected repair')
   })
 
@@ -387,7 +387,7 @@ describe('BugCaseLifecycle', () => {
     snapshot.case.current_attempt_id = 'validation-locator'
     snapshot.attempts = [{ id: 'validation-locator', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_locator_failed' }, parent_attempt_id: '', started_at: '', error_code: 'browser_locator_failed', error_message: '', usage: {} }]
 
-    expect(primaryActionFor(snapshot)).toEqual({ kind: 'retry_validation', label: '重新观察页面并生成验证计划' })
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'retry_validation', label: '让 Agent 继续验证' })
     const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
     await wrapper.get('.primary-action').trigger('click')
     expect(wrapper.emitted('primary')).toEqual([[{ kind: 'retry_validation' }]])

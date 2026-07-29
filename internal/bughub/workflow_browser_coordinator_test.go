@@ -2673,6 +2673,119 @@ func TestBrowserCoordinatorReusesFrozenRecipeAcrossAttemptsWithoutPlanner(t *tes
 	}
 }
 
+func TestBrowserCoordinatorRegressionReplaysExactlyBoundValidationRecipe(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	plan, err := ParseBrowserPlan([]byte(validBrowserPlanYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarioSHA := strings.Repeat("b", 64)
+	plan.ScenarioContract.ContextSHA256 = scenarioSHA
+	planSHA, err := durableBrowserPlanSHA256(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceAttemptID := "validation-source"
+	request.Attempt.Phase = PhaseRegression
+	request.Attempt.Mode = AttemptRegression
+	request.Attempt.InputJSON = mustJSON(RegressionValidationInput{
+		OriginalValidationAttemptID: sourceAttemptID,
+		OriginalScenarioHash:        strings.Repeat("c", 64),
+		TargetEnvironment:           "test",
+		BrowserScenarioBinding: &BrowserRegressionScenarioBinding{
+			Version:          1,
+			SourceAttemptID:  sourceAttemptID,
+			ScenarioSHA256:   scenarioSHA,
+			PlanSHA256:       planSHA,
+			DeviceProfile:    "desktop",
+			ScenarioContract: *plan.ScenarioContract,
+		},
+	})
+	recipes := &memoryValidationRecipeStore{recipes: map[string]ValidationRecipe{
+		request.Attempt.CaseID: {
+			CaseID: request.Attempt.CaseID, ScenarioSHA256: scenarioSHA, PlanSHA256: planSHA,
+			Plan: plan, SourceAttemptID: sourceAttemptID,
+		},
+	}}
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: `verification_status: fixed_verified
+environment: test
+observed_behavior: 修复后表现符合冻结场景
+expected_behavior: 搜索结果展示目标用户
+evidence: []
+gaps: []
+`}}}
+	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{completedBrowserResult("browser/final.png")}}
+	events := make([]InvestigationEvent, 0)
+	request.Emit = func(event InvestigationEvent) { events = append(events, event) }
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier, Recipes: recipes}).Execute(context.Background(), request)
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if executor.Calls != 1 || verifier.Calls != 1 {
+		t.Fatalf("planner unexpectedly ran: agent=%d browser=%d", executor.Calls, verifier.Calls)
+	}
+	if got := verifier.Requests[0].Plan; got.ScenarioContract != nil || !reflect.DeepEqual(got.Actions, plan.Actions) {
+		t.Fatalf("regression did not replay the bound recipe: got=%+v want=%+v", got, plan)
+	}
+	foundReplay := false
+	for _, event := range events {
+		if event.Type == "browser_recipe_replayed" && strings.Contains(event.Message, "首次验证冻结") {
+			foundReplay = true
+		}
+	}
+	if !foundReplay {
+		t.Fatalf("events=%+v", events)
+	}
+}
+
+func TestBrowserCoordinatorRejectsRegressionRecipeDriftBeforeBrowser(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	plan, err := ParseBrowserPlan([]byte(validBrowserPlanYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarioSHA := strings.Repeat("d", 64)
+	plan.ScenarioContract.ContextSHA256 = scenarioSHA
+	planSHA, err := durableBrowserPlanSHA256(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceAttemptID := "validation-source"
+	request.Attempt.Phase = PhaseRegression
+	request.Attempt.Mode = AttemptRegression
+	request.Attempt.InputJSON = mustJSON(RegressionValidationInput{
+		OriginalValidationAttemptID: sourceAttemptID,
+		BrowserScenarioBinding: &BrowserRegressionScenarioBinding{
+			Version:          1,
+			SourceAttemptID:  sourceAttemptID,
+			ScenarioSHA256:   scenarioSHA,
+			PlanSHA256:       planSHA,
+			DeviceProfile:    "desktop",
+			ScenarioContract: *plan.ScenarioContract,
+		},
+	})
+	drifted := plan
+	drifted.Actions = append([]BrowserAction(nil), plan.Actions...)
+	drifted.Actions[0].ScreenshotAfter = !drifted.Actions[0].ScreenshotAfter
+	driftedSHA, err := durableBrowserPlanSHA256(drifted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipes := &memoryValidationRecipeStore{recipes: map[string]ValidationRecipe{
+		request.Attempt.CaseID: {
+			CaseID: request.Attempt.CaseID, ScenarioSHA256: scenarioSHA, PlanSHA256: driftedSHA,
+			Plan: drifted, SourceAttemptID: sourceAttemptID,
+		},
+	}}
+	executor := &scriptedPhaseExecutor{}
+	verifier := &fakeBrowserVerifier{}
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier, Recipes: recipes}).Execute(context.Background(), request)
+	if err != nil || result.ErrorCode != "browser_scenario_binding_invalid" || executor.Calls != 0 || verifier.Calls != 0 {
+		t.Fatalf("result=%+v agent=%d browser=%d err=%v", result, executor.Calls, verifier.Calls, err)
+	}
+}
+
 func TestBrowserCoordinatorUserFeedbackRegeneratesScenarioContract(t *testing.T) {
 	recipes := &memoryValidationRecipeStore{}
 	firstRequest := browserCoordinatorRequest(t)

@@ -1163,6 +1163,11 @@ func (r *AgentPhaseRunner) validateRegressionInputBinding(ctx context.Context, a
 			return errors.New("regression expected commits require non-empty repository and commit")
 		}
 	}
+	if input.BrowserScenarioBinding != nil {
+		if err := validateBrowserRegressionScenarioBinding(*input.BrowserScenarioBinding, input.OriginalValidationAttemptID); err != nil {
+			return err
+		}
+	}
 	incident, err := r.store.GetCase(ctx, attempt.CaseID)
 	if err != nil {
 		return err
@@ -1431,22 +1436,23 @@ func equalStringMap(left, right map[string]string) bool {
 }
 
 type RegressionValidationInput struct {
-	OriginalValidationAttemptID string            `json:"original_validation_attempt_id"`
-	OriginalReproduction        string            `json:"original_reproduction"`
-	ExpectedBehavior            string            `json:"expected_behavior"`
-	OriginalObservedBehavior    string            `json:"original_observed_behavior"`
-	OriginalEvidenceReferences  []string          `json:"original_evidence_refs"`
-	OriginalScenarioHash        string            `json:"scenario_hash"`
-	CycleNumber                 int               `json:"cycle_number"`
-	ExpectedFixCommits          map[string]string `json:"expected_fix_commits"`
-	RemediationBindingID        string            `json:"remediation_binding_id,omitempty"`
-	RemediationType             RootCauseType     `json:"remediation_type,omitempty"`
-	RemediationSummary          string            `json:"remediation_summary,omitempty"`
-	DeploymentObservationID     string            `json:"deployment_observation_id"`
-	DeploymentReservationID     string            `json:"deployment_reservation_id"`
-	ObservedDeploymentVersion   string            `json:"observed_deployment_version"`
-	TargetEnvironment           string            `json:"target_environment"`
-	SupplementalEvidence        json.RawMessage   `json:"supplemental_evidence,omitempty"`
+	OriginalValidationAttemptID string                            `json:"original_validation_attempt_id"`
+	OriginalReproduction        string                            `json:"original_reproduction"`
+	ExpectedBehavior            string                            `json:"expected_behavior"`
+	OriginalObservedBehavior    string                            `json:"original_observed_behavior"`
+	OriginalEvidenceReferences  []string                          `json:"original_evidence_refs"`
+	OriginalScenarioHash        string                            `json:"scenario_hash"`
+	CycleNumber                 int                               `json:"cycle_number"`
+	ExpectedFixCommits          map[string]string                 `json:"expected_fix_commits"`
+	RemediationBindingID        string                            `json:"remediation_binding_id,omitempty"`
+	RemediationType             RootCauseType                     `json:"remediation_type,omitempty"`
+	RemediationSummary          string                            `json:"remediation_summary,omitempty"`
+	DeploymentObservationID     string                            `json:"deployment_observation_id"`
+	DeploymentReservationID     string                            `json:"deployment_reservation_id"`
+	ObservedDeploymentVersion   string                            `json:"observed_deployment_version"`
+	TargetEnvironment           string                            `json:"target_environment"`
+	BrowserScenarioBinding      *BrowserRegressionScenarioBinding `json:"browser_scenario_binding,omitempty"`
+	SupplementalEvidence        json.RawMessage                   `json:"supplemental_evidence,omitempty"`
 }
 
 func ParseValidationResult(data []byte) (ValidationResult, error) {
@@ -1794,6 +1800,19 @@ func BuildRegressionValidationPrompt(bug Bug, bot BotRef, input RegressionValida
 		observedVersion = "<未采集；不要猜测，回归证据 version 可留空>"
 	}
 	fmt.Fprintf(&sb, "original_validation_attempt_id: %s\noriginal_reproduction: %s\nexpected_behavior: %s\noriginal_observed_behavior: %s\nscenario_hash: %s\ncycle_number: %d\ntarget_environment: %s\ndeployment_observation_id: %s\ndeployment_reservation_id: %s\nobserved_deployment_version: %s\n", input.OriginalValidationAttemptID, input.OriginalReproduction, input.ExpectedBehavior, input.OriginalObservedBehavior, input.OriginalScenarioHash, input.CycleNumber, input.TargetEnvironment, input.DeploymentObservationID, input.DeploymentReservationID, observedVersion)
+	if input.BrowserScenarioBinding != nil {
+		fmt.Fprintf(
+			&sb,
+			"browser_scenario_binding:\n  version: %d\n  source_attempt_id: %s\n  scenario_sha256: %s\n  plan_sha256: %s\n  device_profile: %s\n  goal: %s\n",
+			input.BrowserScenarioBinding.Version,
+			input.BrowserScenarioBinding.SourceAttemptID,
+			input.BrowserScenarioBinding.ScenarioSHA256,
+			input.BrowserScenarioBinding.PlanSHA256,
+			input.BrowserScenarioBinding.DeviceProfile,
+			input.BrowserScenarioBinding.ScenarioContract.Goal,
+		)
+		sb.WriteString("该 browser_scenario_binding 由 Studio 冻结；回归必须复用同一场景合同。页面定位可基于新现场调整，但不得改变业务目标、涉及端或证据判定语义。\n")
+	}
 	if input.RemediationBindingID != "" {
 		fmt.Fprintf(&sb, "remediation_binding_id: %s\nremediation_type: %s\nremediation_summary: %s\n", input.RemediationBindingID, input.RemediationType, input.RemediationSummary)
 	}

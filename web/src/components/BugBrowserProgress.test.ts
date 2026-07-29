@@ -123,9 +123,9 @@ describe('BugBrowserProgress', () => {
     expect(quota.find('[data-browser-action]').exists()).toBe(false)
 
     const locator = mount(BugBrowserProgress, { props: { attempt: attempt('browser_locator_failed'), events: [], systemID: 'base', environment: 'test' } })
-    expect(locator.text()).toContain('有限次现场修复仍失败')
-    expect(locator.text()).toContain('说明真实控件或页面流程')
-    expect(locator.text()).toContain('重新观察页面')
+    expect(locator.text()).toContain('有限次现场调整仍失败')
+    expect(locator.text()).toContain('Agent 会重新观察现场')
+    expect(locator.text()).toContain('业务语义确实不明确')
     expect(locator.find('[data-browser-action="repair-runtime"]').exists()).toBe(false)
 
     const business = mount(BugBrowserProgress, { props: { attempt: attempt('browser_url_required'), events: [], systemID: 'base', environment: 'test' } })
@@ -149,7 +149,7 @@ describe('BugBrowserProgress', () => {
       plan_validation_code: 'frontend_evidence_incomplete',
       plan_validation_issue: 'Cookie: sid=secret /Users/alice/private/trace.zip',
     }), events: [], systemID: 'base', environment: 'test' } })
-    expect(plan.get('[data-browser-state="plan"]').text()).toContain('未通过结构校验')
+    expect(plan.get('[data-browser-state="plan"]').text()).toContain('未通过协议校验')
     expect(plan.text()).toContain('当前 Case')
     expect(plan.text()).toContain('无需重建故障闭环')
     expect(plan.get('[data-browser-plan-validation-issue]').text()).toContain('至少一个已选择的应用端没有形成可验证证据')
@@ -161,7 +161,7 @@ describe('BugBrowserProgress', () => {
     expect(assistance.find('[data-browser-action]').exists()).toBe(false)
 
     const repairPlan = mount(BugBrowserProgress, { props: { attempt: attempt('browser_locator_repair_plan_invalid'), events: [], systemID: 'base', environment: 'test' } })
-    expect(repairPlan.get('[data-browser-state="plan"]').text()).toContain('页面定位修复计划')
+    expect(repairPlan.get('[data-browser-state="plan"]').text()).toContain('后续策略')
     expect(repairPlan.text()).toContain('现场证据均已保留')
 
     const attachment = mount(BugBrowserProgress, { props: { attempt: attempt('browser_validator_attachment_failed'), events: [], systemID: 'base', environment: 'test' } })
@@ -190,7 +190,7 @@ describe('BugBrowserProgress', () => {
       { type: 'browser_progress', message: '', meta: { browser_code: 'browser_plan_generating' } },
       { type: 'browser_progress', message: '', meta: { browser_code: 'browser_result_evaluating' } },
     ] } })
-    expect(wrapper.text()).toContain('正在生成浏览器验证计划')
+    expect(wrapper.text()).toContain('验证 Agent 正在观察并决定下一步')
     expect(wrapper.text()).toContain('正在判定浏览器验证结果')
   })
 

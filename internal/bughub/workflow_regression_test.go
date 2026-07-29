@@ -41,6 +41,47 @@ func TestRegressionStartBuildsDeterministicCurrentCycleInput(t *testing.T) {
 	}
 }
 
+func TestRegressionStartFreezesAcceptedBrowserScenarioBinding(t *testing.T) {
+	store, incident, original, _ := prepareRegressionCase(t, 1)
+	plan, err := ParseBrowserPlan([]byte(validBrowserPlanYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenarioSHA := strings.Repeat("a", 64)
+	plan.ScenarioContract.ContextSHA256 = scenarioSHA
+	planSHA, err := durableBrowserPlanSHA256(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.StoreValidationRecipe(context.Background(), ValidationRecipe{
+		CaseID:          incident.ID,
+		ScenarioSHA256:  scenarioSHA,
+		PlanSHA256:      planSHA,
+		Plan:            plan,
+		SourceAttemptID: original.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	started, err := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil).StartRegression(context.Background(), incident.ID, incident.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input RegressionValidationInput
+	if err := json.Unmarshal(started.InputJSON, &input); err != nil {
+		t.Fatal(err)
+	}
+	binding := input.BrowserScenarioBinding
+	if binding == nil ||
+		binding.SourceAttemptID != original.ID ||
+		binding.ScenarioSHA256 != scenarioSHA ||
+		binding.PlanSHA256 != planSHA ||
+		binding.ScenarioContract.ContextSHA256 != scenarioSHA ||
+		binding.ScenarioContract.Goal != plan.ScenarioContract.Goal {
+		t.Fatalf("browser scenario binding=%+v", binding)
+	}
+}
+
 func TestRegressionStartsAndRunnerAcceptsUnavailableDeploymentVersion(t *testing.T) {
 	store, incident, _, observation := prepareRegressionCase(t, 1)
 	if _, err := store.db.ExecContext(context.Background(), `UPDATE deployment_observations SET result=?, verified_at=NULL, observed_version='', observed_commits_json='{}' WHERE id=?`, DeploymentResultUnavailable, observation.ID); err != nil {

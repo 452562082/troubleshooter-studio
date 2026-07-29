@@ -49,6 +49,24 @@ type BrowserScenarioContract struct {
 	Evidence         []BrowserScenarioEvidence `yaml:"evidence" json:"evidence"`
 }
 
+// BrowserRegressionScenarioBinding freezes the exact semantic contract and
+// executable recipe that proved the Bug reproducible. A regression attempt
+// carries this value in its immutable input so the coordinator can reject a
+// different Case recipe before any browser action starts.
+//
+// Locator recovery may still adapt the executable plan after a fresh page
+// observation, but it must preserve ScenarioContract. A user-requested
+// scenario revision explicitly opts out of recipe replay and is audited as a
+// new contract instead of silently pretending to be the original regression.
+type BrowserRegressionScenarioBinding struct {
+	Version          int                     `json:"version"`
+	SourceAttemptID  string                  `json:"source_attempt_id"`
+	ScenarioSHA256   string                  `json:"scenario_sha256"`
+	PlanSHA256       string                  `json:"plan_sha256"`
+	DeviceProfile    string                  `json:"device_profile"`
+	ScenarioContract BrowserScenarioContract `json:"scenario_contract"`
+}
+
 type BrowserScenarioEvidence struct {
 	Kind        string `yaml:"kind" json:"kind"`
 	AssertionID string `yaml:"assertion_id,omitempty" json:"assertion_id,omitempty"`

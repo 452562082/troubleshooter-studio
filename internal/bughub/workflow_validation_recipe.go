@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -51,6 +52,48 @@ func (recipe ValidationRecipe) validate() error {
 	actual, err := durableBrowserPlanSHA256(recipe.Plan)
 	if err != nil || actual != recipe.PlanSHA256 {
 		return errors.New("validation recipe plan digest does not match")
+	}
+	return nil
+}
+
+func validateBrowserRegressionScenarioBinding(binding BrowserRegressionScenarioBinding, originalAttemptID string) error {
+	if binding.Version != 1 {
+		return errors.New("browser regression scenario binding version must be 1")
+	}
+	if strings.TrimSpace(binding.SourceAttemptID) == "" || binding.SourceAttemptID != strings.TrimSpace(originalAttemptID) {
+		return errors.New("browser regression scenario binding source attempt does not match")
+	}
+	if !validLowerSHA256(binding.ScenarioSHA256) || !validLowerSHA256(binding.PlanSHA256) {
+		return errors.New("browser regression scenario binding digests are invalid")
+	}
+	if binding.DeviceProfile != "desktop" && binding.DeviceProfile != "mobile" {
+		return errors.New("browser regression scenario binding device profile is invalid")
+	}
+	if binding.ScenarioContract.ContextSHA256 != binding.ScenarioSHA256 {
+		return errors.New("browser regression scenario contract digest does not match")
+	}
+	if strings.TrimSpace(binding.ScenarioContract.Goal) == "" {
+		return errors.New("browser regression scenario contract goal is required")
+	}
+	return nil
+}
+
+func validateRegressionRecipeBinding(binding BrowserRegressionScenarioBinding, recipe ValidationRecipe) error {
+	if err := validateBrowserRegressionScenarioBinding(binding, binding.SourceAttemptID); err != nil {
+		return err
+	}
+	if recipe.SourceAttemptID != binding.SourceAttemptID ||
+		recipe.ScenarioSHA256 != binding.ScenarioSHA256 ||
+		recipe.PlanSHA256 != binding.PlanSHA256 ||
+		!reflect.DeepEqual(recipe.Plan.ScenarioContract, &binding.ScenarioContract) {
+		return errors.New("frozen browser recipe differs from the regression scenario binding")
+	}
+	profile := strings.TrimSpace(recipe.Plan.DeviceProfile)
+	if profile == "" {
+		profile = "desktop"
+	}
+	if profile != binding.DeviceProfile {
+		return errors.New("frozen browser recipe device profile differs from the regression scenario binding")
 	}
 	return nil
 }

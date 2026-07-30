@@ -129,6 +129,34 @@ func TestValidateWorkerPlanShapeAcceptsNegativeTextAssertion(t *testing.T) {
 	}
 }
 
+func TestValidateWorkerPlanShapeAcceptsSingleNamedRoleScope(t *testing.T) {
+	request := validBrowserRequest(t)
+	request.Plan.Version = bughub.BrowserPlanVersion
+	request.Plan.DeviceProfile = "desktop"
+	request.Plan.Actions = []bughub.BrowserAction{{
+		ID:     "view-target-video",
+		Action: "click",
+		Locator: &bughub.BrowserLocator{
+			Kind: "role", Value: "link", Name: "查看",
+			Within: &bughub.BrowserLocator{Kind: "role", Value: "row", Name: "测试都市生活剧"},
+		},
+	}}
+	if err := validateWorkerPlanShape(request.Plan); err != nil {
+		t.Fatalf("scoped locator rejected: %v", err)
+	}
+	request.Plan.Version = bughub.BrowserPlanLegacyVersion
+	request.Plan.DeviceProfile = ""
+	if err := validateWorkerPlanShape(request.Plan); err == nil {
+		t.Fatal("legacy plan scoped locator was accepted")
+	}
+	request.Plan.Version = bughub.BrowserPlanVersion
+	request.Plan.DeviceProfile = "desktop"
+	request.Plan.Actions[0].Locator.Within.Within = &bughub.BrowserLocator{Kind: "role", Value: "region", Name: "内容"}
+	if err := validateWorkerPlanShape(request.Plan); err == nil {
+		t.Fatal("nested scoped locator was accepted")
+	}
+}
+
 func TestHostVerifierAcceptsHTTPStatusRejectedResponseAssertion(t *testing.T) {
 	worker := &fakeWorker{Result: completedWorkerResult()}
 	verifier := newTestHostVerifier(t, worker)

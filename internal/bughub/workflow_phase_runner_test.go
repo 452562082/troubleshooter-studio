@@ -1232,7 +1232,7 @@ func TestAgentPhaseRunnerBrowserLoginStopPersistsOriginalApplicationURLAndAuthen
 func TestBrowserFailureOutcomeSeparatesSystemFailuresFromEvidenceGaps(t *testing.T) {
 	for _, code := range []string{
 		"browser_runtime_broken", "browser_policy_unavailable", "browser_policy_changed",
-		"browser_verifier_failed", "browser_execution_interrupted", "browser_validator_plan_invalid", "browser_locator_repair_plan_invalid",
+		"browser_verifier_failed", "browser_execution_interrupted", "browser_validator_plan_invalid", "browser_locator_repair_plan_invalid", "browser_locator_failed",
 		"browser_worker_protocol_invalid", "browser_artifact_invalid", "browser_artifact_staging_invalid", "browser_artifact_identity_changed",
 		"browser_artifact_manifest_invalid", "browser_artifact_digest_changed", "browser_artifact_sensitive", "browser_artifact_freeze_failed",
 		"browser_artifact_frozen_invalid", "browser_artifact_repair_evidence_invalid", "browser_artifact_repair_cleanup_failed",
@@ -1245,7 +1245,7 @@ func TestBrowserFailureOutcomeSeparatesSystemFailuresFromEvidenceGaps(t *testing
 		}
 	}
 	for _, code := range []string{
-		"browser_validation_needs_user_input", "browser_locator_failed", "browser_login_required",
+		"browser_validation_needs_user_input", "browser_login_required",
 		"browser_login_failed", "browser_assertion_failed", "browser_policy_blocked", "browser_url_required",
 	} {
 		if got := browserFailureOutcome(PhaseValidation, code); got != PhaseOutcomeNeedsEvidence {

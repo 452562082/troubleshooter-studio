@@ -1571,3 +1571,90 @@ BrowserPlan 的动作和断言是可执行协议，但没有保存验证 Agent �
 ### 结果
 
 正常回归使用与首次验证完全相同的场景合同和已验证执行策略，同时采集当前部署的新证据；页面改版只允许产生可审计的定位偏差。历史或非浏览器 Case 没有 recipe 时保留原兼容路径。Studio 不再因为“作者”字段误触凭据规则，也不会让用户为内部 YAML、动作字段或计划术语负责。
+
+---
+
+## 2026-07-29：浏览器定位修复支持命名作用域与自动协议纠错
+
+### 背景
+
+列表和表格中常有多个同名“查看”“编辑”控件。验证 Agent 能从现场识别目标业务行，但原 BrowserPlan locator 只能表达单个扁平控件。Agent 因此生成 `nth-child`、`last-child` 等位置型 CSS 来消除歧义；宿主按安全规则拒绝这类不稳定定位后，只持久化笼统的 `browser_locator_repair_plan_invalid`。用户无法得知具体原因，Agent 也拿不到拒绝诊断，只能在下一次人工重试中重新猜测。
+
+### 决策
+
+- BrowserPlan v2 locator 增加可选 `within`，只允许一层命名 role 作用域。作用域 role 限定为 `row`、`listitem`、`dialog`、`group` 或 `region`，必须带可访问名称；目标 locator 仍使用既有 allowlist。
+- Host 和嵌入 Worker 同步递归校验同一协议。Worker 先解析命名作用域，再在作用域内解析目标控件；嵌套作用域、未命名作用域及位置型 CSS 继续拒绝。
+- locator 修复候选未通过严格协议时，Host 将错误映射为有界安全诊断，连同字段矩阵提示回传给同一 validator 自动纠正一次。协议问题不得转问用户；纠正超时仍可按既有规则转入冻结证据判定。
+- 连续无效时，Attempt 持久化 `failure_stage`、`plan_validation_code` 和安全的 `plan_validation_issue`。前端只展示 allowlist 文案，不回显可能含 URL、selector、Cookie 或本地路径的原始 Agent 输出。
+- 生成物 `bug-verifier` skill 明确要求同名控件优先使用命名 `within`，但真实安全边界仍由 Host/Worker 协议负责，所有 Codex、Claude Code、OpenClaw 等 validator 目标共享相同行为。
+- semantic probe 页面包含两个同名动作和一个命名目标行，并实际构造作用域 locator；Host 同时要求 probe 结果保留规范化后的目标行和重复控件语义，不依赖 DOM `textContent` 是否在单元格间保留空白。probe 合同版本升级为 2。
+- Worker 协议字节发生变化，浏览器运行时升级为 `1.61.1-r34`，避免复用不支持作用域定位的旧安装。
+
+### 结果
+
+“测试都市生活剧”行内的“查看”可以被稳定、可审计地表达，不需要放开位置型 CSS。Agent 的一次协议失误由系统携带明确原因自动纠正；只有连续失败才要求用户重试，并能看到不泄露原始输出的具体诊断。
+
+---
+
+## 2026-07-29：搜索提交由 Host 规范化且定位失败不得伪装为证据不足
+
+> **SUPERSEDED by [2026-07-29：浏览器交互采用通用观察恢复与因果动作改写](#2026-07-29浏览器交互采用通用观察恢复与因果动作改写)**：Host 不再根据“搜索”关键字把点击硬改为 Enter；保留本条作为问题演进记录。
+
+### 背景
+
+验证 Agent 已生成“点击搜索”动作，页面截图也能看到按钮，但组件 DOM 可能把短中文按钮文本拆成嵌套节点或插入布局空白。严格 `text + exact` 定位因此返回 `locator_not_found`。随后 locator repair Agent 又把自身未完成的动作输出为 `insufficient_info`，Studio 便错误地要求用户补充后续头像证据；实际上用户已经说明了搜索流程，页面和搜索控件都属于 Studio 可观察事实。
+
+### 决策
+
+- 所有 BrowserPlan 版本中，搜索输入后紧邻的通用“搜索/Search”文本点击统一规范化为在同一输入框按 Enter；明确命名的独立按钮、test id、label 或稳定 CSS 仍保留按钮意图。
+- Worker 的观察式定位对候选名称做 Unicode NFKC 归一化，并在唯一最佳候选约束下兼容短中文标签内部空白；多个同分控件仍拒绝猜测。
+- locator repair 可以根据冻结证据直接判定 `reproduced` 或 `not_reproduced`，但不得仅因 locator/action 失败返回 `insufficient_info`。此类输出按安全诊断 `locator_repair_strategy_required` 自动纠正一次；连续失败归为系统策略错误，不向用户索要页面控件信息。
+- runtime semantic probe 增加内部空白的“搜索”按钮并实际执行观察式恢复；probe 合同升级为 3，浏览器运行时升级为 `1.61.1-r35`。
+
+### 结果
+
+同类搜索流程优先走已验证可用的输入框提交路径；确需点击按钮时也能容忍组件渲染造成的文本结构差异。验证 Agent 不再把自己没有完成的页面动作包装成用户证据缺口，只有真正缺少用户掌握的业务事实时才暂停询问。
+
+---
+
+## 2026-07-29：浏览器交互采用通用观察恢复与因果动作改写
+
+### 背景
+
+按“搜索”关键词把通用文本点击改写为输入框 Enter 可以绕过一个具体页面的 DOM 歧义，但它把业务控件名称写进 Host 规则：有些页面必须点击独立按钮，有些页面使用 Enter，有些页面则是选择、切换或自定义控件。同类特判会持续积累，而且当 Agent 已根据失败现场提出合理的新交互方式时，原修复协议又禁止修改失败动作本身，只能反复生成无效计划。
+
+### 决策
+
+- 删除 Host 的搜索动作改写，不再根据 action ID、按钮文案或输入框名称推断 click/press。
+- 任意交互定位出现零匹配或多匹配时，Worker 都可以扫描当前页面真实可见的交互控件并进行语义排序；只有唯一最高候选才能执行，最高分并列时保留原始失败，禁止使用 `first()` 猜测。
+- locator repair 的 `causal_repair_action_ids` 包含失败动作。该窗口内允许 Agent 把一种状态动作改为另一种通过 BrowserPlan 字段矩阵校验的状态动作；失败动作之后仍只能改 locator。
+- 场景合同、动作 ID 和顺序、业务值、受控文件、截图策略、断言、origin 与生产限制继续由 Host 冻结。被动动作不能升级为状态动作；降级为 `wait_for` 仍需现有冻结证据授权。
+- Planner 和 repair prompt 只描述“根据观察选择交互方式”的通用原则，不再规定名为 Search/搜索 的控件必须使用 Enter。
+- Worker 字节变化后浏览器运行时升级为 `1.61.1-r36`。
+
+### 结果
+
+按钮、菜单、标签、输入框和自定义组件共享同一恢复机制：宿主先尝试唯一可证明的真实控件，仍无法确定时由 Agent 根据冻结截图、accessibility 和 Network 调整因果动作；只有缺少用户掌握的业务事实才暂停询问。新增页面不需要继续向 Go 或 Worker 中添加业务文案规则。
+
+---
+
+## 2026-07-30：浏览器交互绑定当前顶层作用域并区分执行故障归属
+
+### 背景
+
+页面打开 portal 弹窗或抽屉后，背景页面控件在 DOM 和 Playwright 中仍可能保持 `visible`。原观察恢复在整个 document 中扫描，导致弹窗内“搜索”和背景“搜索”同分歧义；若模型 locator 只命中背景控件，还可能绕过前景浮层。恢复扫描又共享一个 128 项额度，大表单中的 input 会耗尽额度，后续 button、link 和自定义 role 根本没有机会参与匹配。
+
+定位修复耗尽后，最终 evaluator 还可能把“点击没有执行，因此缺少结果证据”输出为 `insufficient_info`。该缺口由 Studio 自身执行失败造成，却被包装成用户需要补充的业务证据，界面因此要求用户提供 Agent 本应自行采集的搜索结果或头像截图。
+
+### 决策
+
+- Worker 根据当前页面的 dialog、alertdialog、`aria-modal`、原生 dialog，以及通用 modal/dialog/drawer/popup/popover 容器识别最上层交互作用域。候选必须真实可见、具有几何范围且包含可见交互控件；纯 mask/backdrop 不作为业务作用域。
+- 模型 locator 的首次解析和观察恢复都在该作用域内进行。没有活动浮层时仍使用整个页面；不读取或执行页面脚本，不放宽任意 JavaScript 安全边界。
+- click 优先扫描 button/link/交互 role，fill/select 等优先扫描输入控件；每个控件族拥有独立的可见候选额度，并对单族扫描设置固定上限。一个控件族不能再饿死其它控件族。
+- 观察恢复发现多项同分时保留 `locator_ambiguous`，不再用原始 `locator_not_found` 覆盖更准确的诊断。
+- 定位修复耗尽后，若冻结证据足以证明业务结果，仍允许 evaluator 返回终态；若 evaluator 只能因为未完成的 locator/action 返回 `insufficient_info`，Host 将其归为 `browser_locator_failed` 系统执行故障，不生成用户问答。真正的登录、权限、外部测试资料和业务歧义继续通过显式 assistance 协议请求用户。
+- runtime probe 增加背景与 modal 同名控件，要求观察恢复只能选择 modal 内目标；浏览器运行时升级为 `1.61.1-r37`。
+
+### 结果
+
+弹窗、抽屉和普通页面使用同一套结构化作用域规则，不再针对“搜索”或具体 Bug 写特判。执行失败与业务证据缺口有了宿主级归属边界：Agent 自己没点成功时系统继续修复或明确报告执行故障，不再要求用户代替 Agent 提供它本应采集的后续证据。

@@ -58,6 +58,43 @@ const EXECUTE_AUTH_MAX_PENDING_REQUESTS = 2_048;
 const INTERACTION_LOCATOR_TIMEOUT_MS = 15_000;
 const INTERACTION_LOCATOR_POLL_MS = 100;
 const INTERACTION_FALLBACK_MAX_CANDIDATES = 128;
+const INTERACTION_FALLBACK_MAX_SCANNED_PER_GROUP = 512;
+const INTERACTION_SURFACE_MAX_CANDIDATES = 64;
+const INTERACTION_SURFACE_SELECTOR = [
+  '[role="dialog"]',
+  '[role="alertdialog"]',
+  '[aria-modal="true"]',
+  'dialog[open]',
+  '[data-slot*="dialog" i]',
+  '[data-slot*="drawer" i]',
+  '[data-slot*="popover" i]',
+  '[class*="modal" i]',
+  '[id*="modal" i]',
+  '[class*="dialog" i]',
+  '[id*="dialog" i]',
+  '[class*="drawer" i]',
+  '[id*="drawer" i]',
+  '[class*="popup" i]',
+  '[id*="popup" i]',
+  '[class*="popover" i]',
+  '[id*="popover" i]',
+].join(',');
+const INTERACTION_SURFACE_CONTROL_SELECTOR = [
+  'input',
+  'textarea',
+  'select',
+  'button',
+  'a',
+  '[role="button"]',
+  '[role="link"]',
+  '[role="tab"]',
+  '[role="option"]',
+  '[role="menuitem"]',
+  '[role="textbox"]',
+  '[role="searchbox"]',
+  '[role="combobox"]',
+  '[contenteditable="true"]',
+].join(',');
 const DOM_OBSTRUCTION_MAX_CANDIDATES = 128;
 const DOM_OBSTRUCTION_MAX_DISMISSALS = 2;
 const DOM_OBSTRUCTION_SELECTOR = [
@@ -274,15 +311,23 @@ function validatePolicy(policy) {
   if (typeof policy.is_prod !== 'boolean') throw new Error('policy is_prod must be boolean');
 }
 
-function validateLocator(locator, label) {
+function validateLocator(locator, label, allowWithin = true) {
   if (!locator || typeof locator !== 'object' || Array.isArray(locator)) throw new Error(`${label} locator is required`);
-  ownKeys(locator, new Set(['kind', 'value', 'name', 'exact']), `${label} locator`);
+  ownKeys(locator, new Set(['kind', 'value', 'name', 'exact', 'within']), `${label} locator`);
   if (!ALLOWED_LOCATORS.has(locator.kind)) throw new Error(`${label} locator kind is not supported`);
   requiredString(locator.value, `${label} locator value`);
   if (locator.name !== undefined) requiredString(locator.name, `${label} locator name`);
   if (locator.exact !== undefined && typeof locator.exact !== 'boolean') throw new Error(`${label} locator exact must be boolean`);
   if (locator.exact !== undefined && (locator.kind === 'test_id' || locator.kind === 'css' || (locator.kind === 'role' && locator.name === undefined))) {
     throw new Error(`${label} locator exact is not meaningful`);
+  }
+  if (locator.within !== undefined) {
+    if (!allowWithin) throw new Error(`${label} locator scope cannot be nested`);
+    validateLocator(locator.within, `${label} locator scope`, false);
+    if (locator.within.kind !== 'role' || locator.within.name === undefined ||
+      !new Set(['row', 'listitem', 'dialog', 'group', 'region']).has(locator.within.value)) {
+      throw new Error(`${label} locator scope must be a named supported role`);
+    }
   }
 }
 
@@ -360,7 +405,12 @@ export function validateWorkerRequest(request) {
     if (action.action === 'screenshot' && action.screenshot_after === true) throw new Error('screenshot_after is forbidden for screenshot action');
 
     const locatorActions = new Set(['click', 'fill', 'press', 'select', 'upload_file', 'wait_for']);
-    if (locatorActions.has(action.action)) validateLocator(action.locator, action.id);
+    if (locatorActions.has(action.action)) {
+      validateLocator(action.locator, action.id);
+      if (request.plan.version !== 2 && action.locator?.within !== undefined) {
+        throw new Error(`${action.id} locator scope requires plan version 2`);
+      }
+    }
     else if (action.locator !== undefined) throw new Error(`${action.action} locator is forbidden`);
     if (action.action === 'goto') parseHTTPURL(action.url);
     else if (action.url !== undefined) throw new Error(`${action.action} URL is forbidden`);
@@ -1513,28 +1563,33 @@ export async function createSupervisedBrowserContext(browser, {
   return { context, page, blocked: () => blockedNavigation };
 }
 
-export function buildLocator(page, locator) {
-  validateLocator(locator, 'action');
+function buildUnscopedLocator(root, locator) {
   const exact = locator.exact === true;
   switch (locator.kind) {
-    case 'role': return page.getByRole(locator.value, locator.name ? { name: locator.name, exact } : {});
-    case 'label': return page.getByLabel(locator.value, { exact });
+    case 'role': return root.getByRole(locator.value, locator.name ? { name: locator.name, exact } : {});
+    case 'label': return root.getByLabel(locator.value, { exact });
     // Accessibility summaries expose aria-label names alongside visible text.
     // A repair agent cannot otherwise distinguish the two, so a text hint may
     // safely match either user-visible text or the same accessible label.
     case 'text': return exact
-      ? page.getByText(locator.value, { exact: true })
-      : page.getByText(locator.value, { exact: false }).or(page.getByLabel(locator.value, { exact: false }));
+      ? root.getByText(locator.value, { exact: true })
+      : root.getByText(locator.value, { exact: false }).or(root.getByLabel(locator.value, { exact: false }));
     // Search inputs often replace rotating placeholders after hydration while
     // keeping a stable accessible label. Treat the declared placeholder text
     // as an accessibility hint too, without expanding beyond native locators.
     case 'placeholder': return exact
-      ? page.getByPlaceholder(locator.value, { exact: true })
-      : page.getByPlaceholder(locator.value, { exact: false }).or(page.getByLabel(locator.value, { exact: false }));
-    case 'test_id': return page.getByTestId(locator.value);
-    case 'css': return page.locator(`css=${locator.value}`);
+      ? root.getByPlaceholder(locator.value, { exact: true })
+      : root.getByPlaceholder(locator.value, { exact: false }).or(root.getByLabel(locator.value, { exact: false }));
+    case 'test_id': return root.getByTestId(locator.value);
+    case 'css': return root.locator(`css=${locator.value}`);
     default: throw new Error('action locator kind is not supported');
   }
+}
+
+export function buildLocator(page, locator) {
+  validateLocator(locator, 'action');
+  const root = locator.within ? buildUnscopedLocator(page, locator.within) : page;
+  return buildUnscopedLocator(root, locator);
 }
 
 class BrowserInteractionError extends Error {
@@ -1546,7 +1601,11 @@ class BrowserInteractionError extends Error {
 }
 
 function normalizedInteractionText(value) {
-  return String(value ?? '').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
+  return String(value ?? '').normalize('NFKC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase();
+}
+
+function compactInteractionText(value) {
+  return normalizedInteractionText(value).replace(/\s+/gu, '');
 }
 
 function implicitInteractionRole(snapshot) {
@@ -1608,6 +1667,13 @@ function interactionCandidateScore(action, snapshot) {
     .filter(Boolean);
   if (names.includes(hint)) return score + 60;
   if (names.some((name) => name.includes(hint) || hint.includes(name))) return score + 25;
+  // Component libraries may split short CJK labels across nested spans or
+  // insert layout whitespace. Keep recovery deterministic by accepting the
+  // compact form only through the existing unique-best-candidate gate.
+  const compactHint = compactInteractionText(hint);
+  const compactNames = names.map(compactInteractionText).filter(Boolean);
+  if (compactHint && compactNames.includes(compactHint)) return score + 55;
+  if (compactHint && compactNames.some((name) => name.includes(compactHint) || compactHint.includes(name))) return score + 20;
   return -1;
 }
 
@@ -1634,6 +1700,70 @@ async function interactionCandidateSnapshot(candidate, tagHint = '') {
     contentEditable: String(contentEditable || '').toLowerCase() === 'true',
     disabled: Boolean(disabled || String(ariaDisabled || '').toLowerCase() === 'true'),
   };
+}
+
+async function interactionSurfaceSnapshot(candidate, index) {
+  const [role, ariaModal, className, id, box] = await Promise.all([
+    candidate.getAttribute('role').catch(() => ''),
+    candidate.getAttribute('aria-modal').catch(() => ''),
+    candidate.getAttribute('class').catch(() => ''),
+    candidate.getAttribute('id').catch(() => ''),
+    candidate.boundingBox().catch(() => null),
+  ]);
+  if (!box || box.width <= 0 || box.height <= 0) return null;
+  const normalizedRole = String(role || '').toLowerCase();
+  const modalSemantic = String(ariaModal || '').toLowerCase() === 'true'
+    || normalizedRole === 'dialog'
+    || normalizedRole === 'alertdialog';
+  const structuralName = `${className || ''} ${id || ''}`;
+  if (!modalSemantic && /(mask|backdrop|scrim)/i.test(structuralName)) return null;
+
+  const descendants = candidate.locator(INTERACTION_SURFACE_CONTROL_SELECTOR);
+  const count = Math.min(
+    await descendants.count().catch(() => 0),
+    INTERACTION_FALLBACK_MAX_SCANNED_PER_GROUP,
+  );
+  let visibleControls = 0;
+  for (let controlIndex = 0; controlIndex < count; controlIndex += 1) {
+    if (!await descendants.nth(controlIndex).isVisible().catch(() => false)) continue;
+    visibleControls += 1;
+    if (visibleControls >= INTERACTION_FALLBACK_MAX_CANDIDATES) break;
+  }
+  if (visibleControls === 0) return null;
+  return {
+    candidate,
+    modalSemantic,
+    visibleControls,
+    area: box.width * box.height,
+    index,
+  };
+}
+
+// Portal-mounted dialogs and drawers leave the underlying page visible in the
+// DOM. Playwright therefore considers both the background and foreground
+// controls visible. Resolve interactions inside the top active surface first;
+// otherwise a perfectly valid foreground button can become ambiguous with a
+// background button, or a unique background control can be clicked through an
+// open modal. This is based only on current DOM semantics and geometry.
+export async function resolveActiveInteractionScope(page) {
+  if (!page || typeof page.locator !== 'function') return page;
+  const surfaces = page.locator(INTERACTION_SURFACE_SELECTOR);
+  const count = Math.min(
+    await surfaces.count().catch(() => 0),
+    INTERACTION_SURFACE_MAX_CANDIDATES,
+  );
+  const ranked = [];
+  for (let index = 0; index < count; index += 1) {
+    const candidate = surfaces.nth(index);
+    if (!await candidate.isVisible().catch(() => false)) continue;
+    const snapshot = await interactionSurfaceSnapshot(candidate, index).catch(() => null);
+    if (snapshot) ranked.push(snapshot);
+  }
+  ranked.sort((left, right) => Number(right.modalSemantic) - Number(left.modalSemantic)
+    || right.visibleControls - left.visibleControls
+    || left.area - right.area
+    || right.index - left.index);
+  return ranked[0]?.candidate ?? page;
 }
 
 function normalizedObstructionName(value) {
@@ -1924,36 +2054,51 @@ export async function resolveObservedInteractionLocator(page, action) {
   if (!page || typeof page.locator !== 'function') {
     throw new BrowserInteractionError('locator_not_found', 'interaction locator did not match a visible element');
   }
+  const root = await resolveActiveInteractionScope(page);
   const ranked = [];
-  const groups = [
-    ['input', 'input'],
-    ['textarea', 'textarea'],
-    ['select', 'select'],
-    ['button', 'button'],
-    ['a', 'a'],
-    ['[role]:not(input):not(textarea):not(select):not(button):not(a)', ''],
-    ['[contenteditable="true"]:not([role])', ''],
-  ];
-  let inspected = 0;
+  const actionName = String(action?.action || '').toLowerCase();
+  const groups = actionName === 'click'
+    ? [
+      ['button', 'button'],
+      ['a', 'a'],
+      ['[role]:not(input):not(textarea):not(select):not(button):not(a)', ''],
+      ['input', 'input'],
+      ['select', 'select'],
+      ['textarea', 'textarea'],
+      ['[contenteditable="true"]:not([role])', ''],
+    ]
+    : [
+      ['input', 'input'],
+      ['textarea', 'textarea'],
+      ['select', 'select'],
+      ['[contenteditable="true"]:not([role])', ''],
+      ['[role]:not(input):not(textarea):not(select):not(button):not(a)', ''],
+      ['button', 'button'],
+      ['a', 'a'],
+    ];
   for (const [selector, tagHint] of groups) {
-    const controls = page.locator(selector);
-    const count = Math.min(await controls.count().catch(() => 0), INTERACTION_FALLBACK_MAX_CANDIDATES - inspected);
+    const controls = root.locator(selector);
+    const count = Math.min(
+      await controls.count().catch(() => 0),
+      INTERACTION_FALLBACK_MAX_SCANNED_PER_GROUP,
+    );
+    let inspectedVisible = 0;
     for (let index = 0; index < count; index += 1) {
-      inspected += 1;
       const candidate = controls.nth(index);
       if (!await candidate.isVisible().catch(() => false)) continue;
+      inspectedVisible += 1;
       const snapshot = await interactionCandidateSnapshot(candidate, tagHint).catch(() => null);
       if (!snapshot) continue;
       const score = interactionCandidateScore(action, snapshot);
       if (score >= 0) ranked.push({ candidate, score });
+      if (inspectedVisible >= INTERACTION_FALLBACK_MAX_CANDIDATES) break;
     }
-    if (inspected >= INTERACTION_FALLBACK_MAX_CANDIDATES) break;
   }
   ranked.sort((left, right) => right.score - left.score);
   if (ranked.length === 0) {
     const textHint = interactionLocatorHint(action?.locator);
-    if (textHint && ['click', 'wait_for'].includes(String(action?.action || '').toLowerCase()) && typeof page.getByText === 'function') {
-      const textMatches = page.getByText(textHint, { exact: true });
+    if (textHint && ['click', 'wait_for'].includes(actionName) && typeof root.getByText === 'function') {
+      const textMatches = root.getByText(textHint, { exact: true });
       const visible = [];
       const count = Math.min(await textMatches.count().catch(() => 0), INTERACTION_FALLBACK_MAX_CANDIDATES);
       for (let index = 0; index < count; index += 1) {
@@ -2592,7 +2737,8 @@ export async function resolveVisibleInteractionLocator(page, locatorSpec, {
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || !Number.isFinite(pollMs) || pollMs <= 0) {
     throw new Error('interaction locator wait options are invalid');
   }
-  const candidates = buildLocator(page, locatorSpec);
+  const root = await resolveActiveInteractionScope(page);
+  const candidates = buildLocator(root, locatorSpec);
   const startedAt = now();
   while (true) {
     const count = await candidates.count();
@@ -2746,11 +2892,23 @@ export async function executeAction(page, action, request, index, captureScreens
             try {
               locator = await resolveVisibleInteractionLocator(page, action.locator, locatorOptions);
             } catch (error) {
-              // Ambiguity is never auto-recovered because choosing a different
-              // control could mutate the wrong business state. A zero-match result
-              // may safely use the observed-document resolver below.
-              if (error?.code !== 'locator_not_found') throw error;
-              locator = await resolveObservedInteractionLocator(page, action);
+              // A broad model locator may match duplicate wrappers or text nodes
+              // even when the live document has one uniquely compatible control.
+              // The observed resolver ranks only visible interactive controls and
+              // still rejects equal top candidates, so it can safely narrow both
+              // zero-match and ambiguous hints without guessing with first().
+              if (error?.code !== 'locator_not_found' && error?.code !== 'locator_ambiguous') throw error;
+              try {
+                locator = await resolveObservedInteractionLocator(page, action);
+              } catch (observedError) {
+                // Preserve the most informative category. In particular, an
+                // observed ambiguity explains why no safe click was made and
+                // must not be hidden behind the original zero-match hint.
+                if (error?.code === 'locator_not_found' && observedError?.code === 'locator_ambiguous') {
+                  throw observedError;
+                }
+                throw error?.code ? error : observedError;
+              }
               if (typeof onLocatorRecovered === 'function') onLocatorRecovered(action);
             }
           }
@@ -3380,7 +3538,7 @@ async function probeWorker(outputPath) {
   const multibyteText = '中文页面'.repeat(1024);
   const server = createServer((_request, response) => {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    response.end(`<!doctype html><html><head><title>tshoot browser runtime probe</title></head><body><main><p>${multibyteText}</p><input type="search" placeholder="请输入搜索关键字"></main></body></html>`);
+    response.end(`<!doctype html><html><head><title>tshoot browser runtime probe</title></head><body><main><p>${multibyteText}</p><button data-probe-target="background"><span>搜</span> <span>索</span></button><table><tbody><tr role="row"><td>其他剧</td><td><a href="#other">查看</a></td></tr><tr role="row"><td>测试都市生活剧</td><td><a href="#target">查看</a></td></tr></tbody></table></main><section role="dialog" aria-modal="true"><input type="search" placeholder="请输入搜索关键字"><button data-probe-target="modal"><span>搜</span> <span>索</span></button></section></body></html>`);
   });
   await new Promise((resolveListen, reject) => {
     server.once('error', reject);
@@ -3400,6 +3558,21 @@ async function probeWorker(outputPath) {
     try {
       const page = supervised.page;
       await page.goto(`${origin}/`, { waitUntil: 'domcontentloaded' });
+      const scopedTarget = buildLocator(page, {
+        kind: 'role',
+        value: 'link',
+        name: '查看',
+        exact: true,
+        within: { kind: 'role', value: 'row', name: '测试都市生活剧 查看', exact: true },
+      });
+      if (await scopedTarget.count() !== 1) throw new Error('runtime probe scoped locator semantics are invalid');
+      const observedSubmit = await resolveObservedInteractionLocator(page, {
+        action: 'click',
+        locator: { kind: 'text', value: '搜索', exact: true },
+      });
+      if (await observedSubmit.getAttribute('data-probe-target') !== 'modal') {
+        throw new Error('runtime probe active interaction surface semantics are invalid');
+      }
       await page.screenshot({ path: outputPath, type: 'png' });
       workerResult = {
         status: 'completed',
@@ -3421,7 +3594,7 @@ async function probeWorker(outputPath) {
   return {
     status: 'ready',
     sha256: createHash('sha256').update(content).digest('hex'),
-    protocol_version: 1,
+    protocol_version: 3,
     worker_result: workerResult,
   };
 }

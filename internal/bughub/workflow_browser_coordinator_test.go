@@ -1342,6 +1342,27 @@ func TestEnforceBrowserRequestFactCompletenessBlocksMissingParameters(t *testing
 	}
 }
 
+func TestBrowserExecutionOwnsLocatorCausedEvidenceGap(t *testing.T) {
+	if !browserExecutionOwnsEvidenceGap(
+		BrowserVerificationResult{Status: "locator_failed"},
+		ValidationResult{VerificationStatus: "insufficient_info"},
+	) {
+		t.Fatal("locator-caused evidence gap was not kept system-owned")
+	}
+	for _, test := range []struct {
+		current    BrowserVerificationResult
+		validation ValidationResult
+	}{
+		{BrowserVerificationResult{Status: "completed"}, ValidationResult{VerificationStatus: "insufficient_info"}},
+		{BrowserVerificationResult{Status: "locator_failed"}, ValidationResult{VerificationStatus: "reproduced"}},
+		{BrowserVerificationResult{Status: "assertion_failed"}, ValidationResult{VerificationStatus: "insufficient_info"}},
+	} {
+		if browserExecutionOwnsEvidenceGap(test.current, test.validation) {
+			t.Fatalf("business or terminal result was misclassified: current=%+v validation=%+v", test.current, test.validation)
+		}
+	}
+}
+
 func TestBrowserCoordinatorAPIEvidenceUsesMachineVerdictWithoutEvaluator(t *testing.T) {
 	request := browserCoordinatorRequest(t)
 	request.Bug.Expected = "nick_name 与 text 不相等"
@@ -1453,6 +1474,16 @@ assertions:
 	plan.Actions[0].Locator.Value = `input[name="keyword"]`
 	if err := validateDurableBrowserPlan(plan); err != nil {
 		t.Fatalf("specific interaction selector was rejected: %v", err)
+	}
+}
+
+func TestValidateDurableBrowserPlanRejectsScopedLocatorOnLegacyPlan(t *testing.T) {
+	locator := &BrowserLocator{
+		Kind: "role", Value: "link", Name: "查看",
+		Within: &BrowserLocator{Kind: "role", Value: "row", Name: "测试都市生活剧"},
+	}
+	if err := validateDurableBrowserLocator(BrowserPlanLegacyVersion, "view-target-video", locator); err == nil || !strings.Contains(err.Error(), "requires plan version 2") {
+		t.Fatalf("legacy scoped locator error=%v", err)
 	}
 }
 
@@ -1934,14 +1965,14 @@ func TestValidateBrowserRepairAllowsCausalClickToSameOriginGoto(t *testing.T) {
 	}
 }
 
-func TestBrowserRepairPromptExplainsSemanticSubmissionRecovery(t *testing.T) {
+func TestBrowserRepairPromptExplainsGeneralCausalActionRecovery(t *testing.T) {
 	original := BrowserPlan{Version: 1, StartURL: "https://app.example.com", Actions: []BrowserAction{
 		{ID: "fill-keyword", Action: "fill", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索"}, Value: "chengzi"},
 		{ID: "submit-search", Action: "press", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索"}, Key: "Enter"},
 		{ID: "wait-user-tab", Action: "wait_for", Locator: &BrowserLocator{Kind: "role", Value: "tab", Name: "用户"}},
 	}}
 	prompt := browserRepairPrompt(original, BrowserVerificationResult{FailedActionID: "wait-user-tab", ErrorCode: "locator_failed"}, browserEvaluatorEvidence{}, &BrowserVerificationResult{FinalURL: "https://app.example.com", AccessibilitySummary: []BrowserAccessibilityNode{{Role: "textbox", Name: "请输入搜索关键字", Visible: true}}}, []string{"failed_final:browser/failure.png", "initial_page:browser/initial.png"})
-	for _, required := range []string{"mechanically completed", "expected business request", "press to become click", "ambiguous Search/搜索 click", "must become Enter", "passive_downgrade", "initial_page_observation", "failed_final:browser/failure.png", "never invent a placeholder", "fill-keyword", "exact is also accepted when repairing a stored version 1 plan"} {
+	for _, required := range []string{"mechanically completed", "expected business request", "including failed_action_id", "state-changing action type", "Actions after failed_action_id may change locators only", "passive_downgrade", "initial_page_observation", "failed_final:browser/failure.png", "never invent a placeholder", "fill-keyword", "exact is also accepted when repairing a stored version 1 plan"} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("repair prompt is missing %q: %s", required, prompt)
 		}
@@ -1983,9 +2014,9 @@ func TestBrowserRepairEvidenceAttachesFailedAndInitialPageScreenshots(t *testing
 	}
 }
 
-func TestBrowserPlannerPromptRequiresDeterministicSearchSubmission(t *testing.T) {
+func TestBrowserPlannerPromptRequiresObservedInteractionPlanning(t *testing.T) {
 	prompt := browserPlannerPrompt(browserCoordinatorRequest(t), nil)
-	for _, required := range []string{"Follow every numbered Bug reproduction step in order", "Do not skip an explicit open/enter/switch-page step", "copy both its locator_kind and exact observed name", "explicit accessible name or test id", "Never click generic Search/搜索 text", "press Enter on the same input locator", "Every search fill and its immediately following submit action must set screenshot_after: true"} {
+	for _, required := range []string{"Follow every numbered Bug reproduction step in order", "Do not skip an explicit open/enter/switch-page step", "copy both its locator_kind and exact observed name", "Choose click, fill, press, or select from the observed control", "do not substitute one interaction type merely because of a control keyword", "Capture screenshots after causal state-changing actions"} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("planner prompt is missing %q: %s", required, prompt)
 		}
@@ -2198,6 +2229,53 @@ assertions:
 	}
 }
 
+func TestValidateBrowserRepairAllowsFailedStateChangingActionReplacement(t *testing.T) {
+	exact := true
+	original := BrowserPlan{
+		Version: BrowserPlanVersion, DeviceProfile: "desktop", StartURL: "https://app.example.com/users",
+		Actions: []BrowserAction{
+			{
+				ID: "submit-profile", Action: "click", ScreenshotAfter: true,
+				Locator: &BrowserLocator{Kind: "role", Value: "button", Name: "提交", Exact: &exact},
+			},
+			{ID: "capture-profile", Action: "screenshot"},
+		},
+		Assertions: []BrowserAssertion{{Kind: "visible_text", Value: "保存成功"}},
+	}
+	repaired := original
+	repaired.Actions = append([]BrowserAction(nil), original.Actions...)
+	repaired.Actions[0] = BrowserAction{
+		ID: "submit-profile", Action: "press",
+		Locator: &BrowserLocator{Kind: "role", Value: "button", Name: "提交", Exact: &exact},
+		Key:     "Enter", ScreenshotAfter: true,
+	}
+	failed := BrowserVerificationResult{
+		Status: "locator_failed", ErrorCode: "locator_ambiguous", FailedActionID: "submit-profile",
+	}
+
+	if err := validateBrowserRepairWithEvidence(original, failed, browserEvaluatorEvidence{}, repaired); err != nil {
+		t.Fatalf("failed causal state-changing action replacement was rejected: %v", err)
+	}
+
+	unsafe := original
+	unsafe.Actions = append([]BrowserAction(nil), original.Actions...)
+	unsafe.Actions[0] = BrowserAction{ID: "submit-profile", Action: "wait_for", Locator: original.Actions[0].Locator, ScreenshotAfter: true}
+	if err := validateBrowserRepairWithEvidence(original, failed, browserEvaluatorEvidence{}, unsafe); err == nil {
+		t.Fatal("state-changing action was downgraded without passive evidence")
+	}
+}
+
+func TestBrowserPlanValidationDiagnosticDistinguishesRepairTransitionFailure(t *testing.T) {
+	transition := browserPlanValidationDiagnosticFor(errors.New("browser repair changed an action outside the causal interaction window"))
+	if transition.Code != "repair_action_transition_forbidden" || transition.Message == "" {
+		t.Fatalf("transition diagnostic=%+v", transition)
+	}
+	noEffect := browserPlanValidationDiagnosticFor(errors.New("browser repair did not change the failed causal interaction chain"))
+	if noEffect.Code != "repair_strategy_no_effect" || noEffect.Message == "" {
+		t.Fatalf("no-effect diagnostic=%+v", noEffect)
+	}
+}
+
 func TestBrowserCoordinatorAcceptsPlannerExplicitEmptyOptionalCollections(t *testing.T) {
 	plan := validBrowserPlanYAML() + "request_captures: []\nresponse_assertions: []\n"
 	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
@@ -2336,6 +2414,38 @@ gaps: []
 	if !strings.Contains(executor.Prompts[1], "observation checkpoint") ||
 		!strings.Contains(executor.Prompts[1], "Do not force a click") {
 		t.Fatalf("locator decision prompt is not evidence-driven: %s", executor.Prompts[1])
+	}
+}
+
+func TestBrowserCoordinatorLocatorRepairRejectsPrematureInsufficientInfoAndRetriesStrategy(t *testing.T) {
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: validBrowserPlanYAML()},
+		{FinalYAML: `verification_status: insufficient_info
+environment: test
+observed_behavior: 搜索动作因定位不到控件而失败。
+expected_behavior: 点击搜索后展示用户结果。
+evidence: []
+gaps:
+  - 搜索动作未完成，无法继续验证。
+`},
+		{FinalYAML: repairedRemainingPlanYAML()},
+		{FinalYAML: reproducedValidationYAML("repair-1/browser/final.png")},
+	}}
+	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{
+		failedBrowserResult("locator_failed", "open-users", "browser/failure.png"),
+		completedBrowserResult("repair-1/browser/final.png"),
+	}}
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), browserCoordinatorRequest(t))
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if executor.Calls != 4 || verifier.Calls != 2 || result.RepairCount != 1 {
+		t.Fatalf("agent=%d browser=%d result=%+v", executor.Calls, verifier.Calls, result)
+	}
+	if !strings.Contains(executor.Prompts[2], "must return a repaired BrowserPlan") ||
+		!strings.Contains(executor.Prompts[2], "insufficient_info") {
+		t.Fatalf("repair retry prompt did not reject premature evidence-gap conclusion: %s", executor.Prompts[2])
 	}
 }
 
@@ -3023,69 +3133,6 @@ assertions:
 	}
 }
 
-func TestNormalizeBrowserSearchSubmissionsReusesFilledInputForGenericClick(t *testing.T) {
-	plan := BrowserPlan{Actions: []BrowserAction{
-		{ID: "enter-username", Action: "fill", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索"}, Value: "chengzi"},
-		{ID: "activate-control", Action: "click", Locator: &BrowserLocator{Kind: "text", Value: "搜索"}, ScreenshotAfter: true},
-	}}
-
-	normalized := normalizeBrowserSearchSubmissions(plan)
-	if !normalized.Actions[0].ScreenshotAfter {
-		t.Fatalf("search fill did not retain settled-state evidence: %+v", normalized.Actions[0])
-	}
-	submit := normalized.Actions[1]
-	if submit.Action != "press" || submit.Key != "Enter" || submit.Locator == nil || !reflect.DeepEqual(*submit.Locator, *plan.Actions[0].Locator) {
-		t.Fatalf("submit=%+v", submit)
-	}
-	if !submit.ScreenshotAfter || plan.Actions[1].Action != "click" {
-		t.Fatalf("normalization mutated immutable fields or input plan: normalized=%+v original=%+v", submit, plan.Actions[1])
-	}
-}
-
-func TestNormalizeBrowserSearchSubmissionsPreservesExplicitNamedButton(t *testing.T) {
-	plan := BrowserPlan{Actions: []BrowserAction{
-		{ID: "enter-query", Action: "fill", Locator: &BrowserLocator{Kind: "placeholder", Value: "Search"}, Value: "chengzi"},
-		{ID: "submit-search", Action: "click", Locator: &BrowserLocator{Kind: "role", Value: "button", Name: "Search users"}},
-	}}
-
-	normalized := normalizeBrowserSearchSubmissions(plan)
-	if normalized.Actions[1].Action != "click" || normalized.Actions[1].Locator == nil || normalized.Actions[1].Locator.Name != "Search users" || !normalized.Actions[0].ScreenshotAfter || !normalized.Actions[1].ScreenshotAfter {
-		t.Fatalf("explicit submit button was not preserved with evidence capture: %+v", normalized.Actions)
-	}
-	if plan.Actions[0].ScreenshotAfter || plan.Actions[1].ScreenshotAfter {
-		t.Fatalf("input plan was mutated: %+v", plan.Actions)
-	}
-}
-
-func TestNormalizeBrowserSearchSubmissionsAddsEvidenceToExistingEnterPlan(t *testing.T) {
-	locator := &BrowserLocator{Kind: "placeholder", Value: "搜索"}
-	plan := BrowserPlan{Actions: []BrowserAction{
-		{ID: "enter-user-name", Action: "fill", Locator: locator, Value: "chengzi"},
-		{ID: "submit-search", Action: "press", Locator: locator, Key: "Enter"},
-	}}
-
-	normalized := normalizeBrowserSearchSubmissions(plan)
-	if !normalized.Actions[0].ScreenshotAfter || !normalized.Actions[1].ScreenshotAfter {
-		t.Fatalf("search chain lacks settled evidence: %+v", normalized.Actions)
-	}
-}
-
-func TestNormalizeBrowserSearchSubmissionsDoesNotRewriteVersionTwoIntent(t *testing.T) {
-	exact := true
-	plan := BrowserPlan{Version: BrowserPlanVersion, Actions: []BrowserAction{
-		{ID: "enter-user", Action: "fill", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索", Exact: &exact}, Value: "chengzi"},
-		{ID: "submit-user-search", Action: "click", Locator: &BrowserLocator{Kind: "text", Value: "搜索", Exact: &exact}},
-	}}
-
-	normalized := normalizeBrowserSearchSubmissions(plan)
-	if normalized.Actions[1].Action != "click" || normalized.Actions[1].Key != "" || normalized.Actions[1].Locator == nil || normalized.Actions[1].Locator.Exact == nil || !*normalized.Actions[1].Locator.Exact {
-		t.Fatalf("v2 interaction intent was rewritten: %+v", normalized.Actions[1])
-	}
-	if !normalized.Actions[0].ScreenshotAfter || !normalized.Actions[1].ScreenshotAfter {
-		t.Fatalf("v2 search chain lost evidence capture: %+v", normalized.Actions)
-	}
-}
-
 func TestBrowserCoordinatorRegeneratesPlanThatSkipsExplicitSearchPageEntry(t *testing.T) {
 	request := browserCoordinatorRequest(t)
 	request.Bug.Steps = "1. 打开 H5 并进入搜索页面\n2. 输入用户名称并执行搜索"
@@ -3097,10 +3144,12 @@ actions:
     action: fill
     locator: {kind: placeholder, value: 搜索}
     value: chengzi
+    screenshot_after: true
   - id: submit-search
     action: press
     locator: {kind: placeholder, value: 搜索}
     key: Enter
+    screenshot_after: true
 assertions:
   - kind: visible_text
     value: chengzi
@@ -3116,10 +3165,12 @@ actions:
     action: fill
     locator: {kind: placeholder, value: 搜索}
     value: chengzi
+    screenshot_after: true
   - id: submit-search
     action: press
     locator: {kind: placeholder, value: 搜索}
     key: Enter
+    screenshot_after: true
 assertions:
   - kind: visible_text
     value: chengzi
@@ -3143,7 +3194,7 @@ assertions:
 	}
 }
 
-func TestBrowserCoordinatorNormalizesGenericSearchClickBeforeExecution(t *testing.T) {
+func TestBrowserCoordinatorPreservesPlannerInteractionTypeBeforeExecution(t *testing.T) {
 	request := browserCoordinatorRequest(t)
 	plan := `version: 1
 start_url: "https://app.example.com/users"
@@ -3176,7 +3227,7 @@ assertions:
 		t.Fatalf("browser calls=%d requests=%d", verifier.Calls, len(verifier.Requests))
 	}
 	submit := verifier.Requests[0].Plan.Actions[1]
-	if submit.Action != "press" || submit.Key != "Enter" || submit.Locator == nil || submit.Locator.Kind != "placeholder" || submit.Locator.Value != "搜索" {
+	if submit.Action != "click" || submit.Key != "" || submit.Locator == nil || submit.Locator.Kind != "text" || submit.Locator.Value != "搜索" {
 		t.Fatalf("submit=%+v", submit)
 	}
 }
@@ -3395,6 +3446,22 @@ func TestBrowserCoordinatorEvaluatesAssertionAndExhaustedLocatorEvidence(t *test
 				{FinalYAML: repairedRemainingPlanYAML()},
 				{FinalYAML: "verification_status: not_reproduced\nenvironment: test\nobserved_behavior: 目标控件在当前页面不存在\nexpected_behavior: 目标控件不存在\nevidence: []\ngaps: []\n"},
 			},
+			wantAgents: 3,
+			wantCalls:  2,
+			wantRepair: 1,
+		},
+		{
+			name: "repeated locator cannot become a user evidence gap",
+			results: []BrowserVerificationResult{
+				failedBrowserResult("locator_failed", "open-users", "browser/primary-failure.png"),
+				failedBrowserResult("locator_failed", "open-users", "browser/repair-failure.png"),
+			},
+			plans: []PhaseExecutionResult{
+				{FinalYAML: validBrowserPlanYAML()},
+				{FinalYAML: repairedRemainingPlanYAML()},
+				{FinalYAML: "verification_status: insufficient_info\nenvironment: test\nobserved_behavior: 搜索动作未执行成功\nexpected_behavior: 搜索后展示目标作者\nevidence: []\ngaps:\n  - 缺少搜索提交成功及结果出现的证据\n"},
+			},
+			wantCode:   "browser_locator_failed",
 			wantAgents: 3,
 			wantCalls:  2,
 			wantRepair: 1,
@@ -3675,7 +3742,7 @@ func TestBrowserCoordinatorRecordsAgentFailureStageWithoutProviderDetails(t *tes
 	}
 }
 
-func TestBrowserStopOutputAsksForActionableValidationClarification(t *testing.T) {
+func TestBrowserStopOutputKeepsLocatorFailureSystemOwned(t *testing.T) {
 	result := BrowserCoordinatorResult{
 		ErrorCode:    "browser_locator_failed",
 		ErrorMessage: "页面定位经过有限次现场修复仍失败",
@@ -3684,20 +3751,15 @@ func TestBrowserStopOutputAsksForActionableValidationClarification(t *testing.T)
 		},
 	}
 	var output struct {
-		Questions []struct {
-			ID         string `json:"id"`
-			Question   string `json:"question"`
-			AnswerHint string `json:"answer_hint"`
-		} `json:"validation_questions"`
-		ContinuationStrategy string `json:"continuation_strategy"`
+		SystemFailure        bool                `json:"system_failure"`
+		EvidenceLimitation   bool                `json:"evidence_limitation"`
+		Questions            []map[string]string `json:"validation_questions"`
+		ContinuationStrategy string              `json:"continuation_strategy"`
 	}
 	if err := json.Unmarshal(browserStopOutput(result), &output); err != nil {
 		t.Fatal(err)
 	}
-	if len(output.Questions) != 1 || output.Questions[0].ID != "clarify_validation_strategy" ||
-		!strings.Contains(output.Questions[0].Question, "submit-again") ||
-		!strings.Contains(output.Questions[0].AnswerHint, "不存在第二次提交") ||
-		output.ContinuationStrategy != "collect_user_feedback_and_regenerate_scenario_contract" {
+	if !output.SystemFailure || output.EvidenceLimitation || len(output.Questions) != 0 || output.ContinuationStrategy != "" {
 		t.Fatalf("output=%+v", output)
 	}
 }
@@ -3754,14 +3816,77 @@ assertions:
   - kind: visible_text
     value: 汤圆
 `
-	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{{FinalYAML: original}, {FinalYAML: failedSecond}}}
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: original},
+		{FinalYAML: failedSecond},
+		{FinalYAML: failedSecond},
+	}}
 	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{{Status: "locator_failed", FailedActionID: "wait-results"}}}
 	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), browserCoordinatorRequest(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ErrorCode != "browser_locator_repair_plan_invalid" || result.FailureStage != "locator_repair" || verifier.Calls != 1 {
-		t.Fatalf("browser=%d result=%+v", verifier.Calls, result)
+	if result.ErrorCode != "browser_locator_repair_plan_invalid" || result.FailureStage != "locator_repair" ||
+		result.PlanValidationCode != "plan_structure_invalid" || verifier.Calls != 1 || executor.Calls != 3 {
+		t.Fatalf("agent=%d browser=%d result=%+v", executor.Calls, verifier.Calls, result)
+	}
+}
+
+func TestBrowserCoordinatorCorrectsRejectedPositionalRepairWithNamedRowScope(t *testing.T) {
+	original := `version: 2
+device_profile: desktop
+start_url: https://app.example.com/users
+actions:
+  - id: view-target-video
+    action: click
+    locator: {kind: text, value: 查看, exact: true}
+    screenshot_after: true
+assertions:
+  - kind: visible_text
+    value: 视频详情
+`
+	positionalRepair := strings.Replace(
+		original,
+		`locator: {kind: text, value: 查看, exact: true}`,
+		`locator: {kind: css, value: 'tbody tr:nth-child(2) td:last-child a'}`,
+		1,
+	)
+	scopedRepair := strings.Replace(
+		original,
+		`locator: {kind: text, value: 查看, exact: true}`,
+		`locator: {kind: role, value: link, name: 查看, exact: true, within: {kind: role, value: row, name: 测试都市生活剧, exact: false}}`,
+		1,
+	)
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: original},
+		{FinalYAML: positionalRepair},
+		{FinalYAML: scopedRepair},
+		{FinalYAML: reproducedValidationYAML("repair-2/browser/final.png")},
+	}}
+	failed := failedBrowserResult("locator_failed", "view-target-video", "browser/final.png")
+	failed.AccessibilitySummary = []BrowserAccessibilityNode{
+		{Role: "row", Name: "测试都市生活剧 查看", Visible: true},
+		{Role: "link", Name: "查看", Visible: true},
+	}
+	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{
+		failed,
+		completedBrowserResult("browser/final.png"),
+	}}
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), browserCoordinatorRequest(t))
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if executor.Calls != 4 || verifier.Calls != 2 {
+		t.Fatalf("agent=%d browser=%d", executor.Calls, verifier.Calls)
+	}
+	if !strings.Contains(executor.Prompts[2], "locator_positional_css_forbidden") ||
+		!strings.Contains(executor.Prompts[2], "named role within scope") {
+		t.Fatalf("correction prompt lacks bounded host diagnostic: %s", executor.Prompts[2])
+	}
+	locator := verifier.Requests[1].Plan.Actions[0].Locator
+	if locator == nil || locator.Within == nil || locator.Within.Value != "row" || locator.Within.Name != "测试都市生活剧" {
+		t.Fatalf("scoped repair locator=%+v", locator)
 	}
 }
 

@@ -196,40 +196,149 @@ func validateFrozenBrowserArtifacts(references []BrowserArtifactReference, froze
 }
 
 func prepareBrowserEvaluatorEvidence(result BrowserVerificationResult, frozen []browserFrozenArtifact) (string, string, func() error, error) {
-	evidence, err := parseFrozenBrowserStructuredEvidence(frozen)
+	currentFrozen := currentBrowserEvaluatorArtifacts(result, frozen)
+	evidence, err := parseFrozenBrowserStructuredEvidence(currentFrozen)
 	if err != nil {
 		return "", "", func() error { return nil }, err
 	}
-	encoded, err := json.Marshal(evidence)
+	encoded, err := marshalBoundedBrowserEvaluatorEvidence(evidence)
 	if err != nil {
 		return "", "", func() error { return nil }, err
-	}
-	encoded = []byte(redactSensitiveText(string(encoded)))
-	if len(encoded) > maxEvaluatorBrowserJSONBytes || containsSensitiveData(encoded) {
-		return "", "", func() error { return nil }, errors.New("bounded evaluator browser evidence is unsafe")
 	}
 
 	cleanup := func() error { return nil }
 	screenshotPath := ""
 	if strings.TrimSpace(result.FinalScreenshotPath) != "" {
 		var screenshot *browserFrozenArtifact
-		for index := range frozen {
-			if frozen[index].Kind == "screenshot" && frozen[index].ReferencePath == result.FinalScreenshotPath {
+		for index := range currentFrozen {
+			if currentFrozen[index].Kind == "screenshot" && currentFrozen[index].ReferencePath == result.FinalScreenshotPath {
 				if screenshot != nil {
-					return "", "", cleanup, errors.New("final browser screenshot is ambiguous")
+					screenshot = nil
+					break
 				}
-				screenshot = &frozen[index]
+				screenshot = &currentFrozen[index]
 			}
 		}
-		if screenshot == nil {
-			return "", "", cleanup, errors.New("final browser screenshot was not frozen")
-		}
-		screenshotPath, cleanup, err = createBrowserEvaluatorScreenshotView(screenshot.Content)
-		if err != nil {
-			return "", "", func() error { return nil }, err
+		// The verified browser result remains authoritative even if a later
+		// evidence aggregation bug loses or duplicates the screenshot reference.
+		// Continuing without a visual attachment is safe: the evaluator is told
+		// to return insufficient_info when structured evidence cannot prove the
+		// visual fact, while the original locator/assertion failure remains
+		// available instead of being overwritten by a secondary host error.
+		if screenshot != nil {
+			screenshotPath, cleanup, err = createBrowserEvaluatorScreenshotView(screenshot.Content)
+			if err != nil {
+				return "", "", func() error { return nil }, err
+			}
 		}
 	}
 	return screenshotPath, string(encoded), cleanup, nil
+}
+
+func currentBrowserEvaluatorArtifacts(result BrowserVerificationResult, frozen []browserFrozenArtifact) []browserFrozenArtifact {
+	if len(result.Artifacts) == 0 {
+		return append([]browserFrozenArtifact(nil), frozen...)
+	}
+	currentPaths := make(map[string]struct{}, len(result.Artifacts))
+	for _, artifact := range result.Artifacts {
+		if strings.TrimSpace(artifact.Path) != "" {
+			currentPaths[artifact.Path] = struct{}{}
+		}
+	}
+	selected := make([]browserFrozenArtifact, 0, len(currentPaths))
+	for _, item := range frozen {
+		if _, current := currentPaths[item.ReferencePath]; current {
+			selected = append(selected, item)
+		}
+	}
+	return selected
+}
+
+func marshalBoundedBrowserEvaluatorEvidence(evidence browserEvaluatorEvidence) ([]byte, error) {
+	for {
+		encoded, err := json.Marshal(evidence)
+		if err != nil {
+			return nil, err
+		}
+		encoded = []byte(redactSensitiveText(string(encoded)))
+		if containsSensitiveData(encoded) {
+			return nil, errors.New("bounded evaluator browser evidence is unsafe")
+		}
+		if len(encoded) <= maxEvaluatorBrowserJSONBytes {
+			return encoded, nil
+		}
+		if !truncateLargestBrowserEvaluatorEvidence(&evidence) {
+			return nil, errors.New("bounded evaluator browser evidence exceeds its byte limit")
+		}
+	}
+}
+
+func truncateLargestBrowserEvaluatorEvidence(evidence *browserEvaluatorEvidence) bool {
+	if evidence == nil {
+		return false
+	}
+	type candidate struct {
+		kind string
+		size int
+		drop func()
+	}
+	candidates := make([]candidate, 0, 6)
+	add := func(kind string, value any, length int, drop func()) {
+		if length == 0 {
+			return
+		}
+		encoded, err := json.Marshal(value)
+		if err == nil {
+			candidates = append(candidates, candidate{kind: kind, size: len(encoded), drop: drop})
+		}
+	}
+	add("network", evidence.Network, len(evidence.Network), func() {
+		evidence.Network = dropOldestBrowserEvidence(evidence.Network)
+	})
+	add("console", evidence.Console, len(evidence.Console), func() {
+		evidence.Console = dropOldestBrowserEvidence(evidence.Console)
+	})
+	if len(evidence.BrowserActions) > 1 {
+		add("browser_actions", evidence.BrowserActions, len(evidence.BrowserActions), func() {
+			evidence.BrowserActions = dropOldestBrowserEvidence(evidence.BrowserActions)
+		})
+	}
+	add("request_facts", evidence.RequestFacts, len(evidence.RequestFacts), func() {
+		evidence.RequestFacts = dropOldestBrowserEvidence(evidence.RequestFacts)
+	})
+	add("response_facts", evidence.ResponseFacts, len(evidence.ResponseFacts), func() {
+		evidence.ResponseFacts = dropOldestBrowserEvidence(evidence.ResponseFacts)
+	})
+	add("response_assertions", evidence.ResponseAssertions, len(evidence.ResponseAssertions), func() {
+		evidence.ResponseAssertions = dropOldestBrowserEvidence(evidence.ResponseAssertions)
+	})
+	if len(candidates) == 0 {
+		return false
+	}
+	sort.Slice(candidates, func(left, right int) bool {
+		if candidates[left].size == candidates[right].size {
+			return candidates[left].kind < candidates[right].kind
+		}
+		return candidates[left].size > candidates[right].size
+	})
+	candidates[0].drop()
+	markBrowserEvaluatorEvidenceTruncated(evidence, candidates[0].kind)
+	return true
+}
+
+func dropOldestBrowserEvidence[T any](records []T) []T {
+	drop := max(1, len(records)/2)
+	return append([]T(nil), records[drop:]...)
+}
+
+func markBrowserEvaluatorEvidenceTruncated(evidence *browserEvaluatorEvidence, kind string) {
+	for _, existing := range evidence.TruncatedKinds {
+		if existing == kind {
+			return
+		}
+	}
+	evidence.TruncatedKinds = append(evidence.TruncatedKinds, kind)
+	sort.Strings(evidence.TruncatedKinds)
 }
 
 func parseFrozenBrowserStructuredEvidence(frozen []browserFrozenArtifact) (browserEvaluatorEvidence, error) {

@@ -194,6 +194,61 @@ func TestBrowserCredentialSemanticDoesNotConfuseAuthorWithAuthentication(t *test
 	}
 }
 
+func TestParseBrowserPlanV2AcceptsNamedRoleScopeForRepeatedControls(t *testing.T) {
+	plan, err := ParseBrowserPlan([]byte(`version: 2
+device_profile: desktop
+start_url: https://app.example.com/videos
+actions:
+  - id: view-target-video
+    action: click
+    locator:
+      kind: role
+      value: link
+      name: 查看
+      exact: true
+      within:
+        kind: role
+        value: row
+        name: 测试都市生活剧
+        exact: false
+assertions:
+  - kind: visible_text
+    value: 视频详情
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	locator := plan.Actions[0].Locator
+	if locator == nil || locator.Within == nil || locator.Within.Value != "row" || locator.Within.Name != "测试都市生活剧" {
+		t.Fatalf("scoped locator=%+v", locator)
+	}
+}
+
+func TestParseBrowserPlanRejectsLegacyOrNestedLocatorScope(t *testing.T) {
+	legacy := `version: 1
+start_url: https://app.example.com/videos
+actions:
+  - id: view-target-video
+    action: click
+    locator:
+      kind: role
+      value: link
+      name: 查看
+      within: {kind: role, value: row, name: 测试都市生活剧}
+assertions:
+  - kind: visible_text
+    value: 视频详情
+`
+	if _, err := ParseBrowserPlan([]byte(legacy)); err == nil || !strings.Contains(err.Error(), "requires a non-nested version 2 locator") {
+		t.Fatalf("legacy scoped locator error=%v", err)
+	}
+	nested := strings.Replace(legacy, "version: 1", "version: 2\ndevice_profile: desktop", 1)
+	nested = strings.Replace(nested, "within: {kind: role, value: row, name: 测试都市生活剧}", "within: {kind: role, value: row, name: 测试都市生活剧, within: {kind: role, value: region, name: 内容}}", 1)
+	if _, err := ParseBrowserPlan([]byte(nested)); err == nil || !strings.Contains(err.Error(), "requires a non-nested version 2 locator") {
+		t.Fatalf("nested scoped locator error=%v", err)
+	}
+}
+
 func TestParseBrowserPlanV2AcceptsMobileResponseFieldAssertion(t *testing.T) {
 	plan, err := ParseBrowserPlan([]byte(`version: 2
 device_profile: mobile

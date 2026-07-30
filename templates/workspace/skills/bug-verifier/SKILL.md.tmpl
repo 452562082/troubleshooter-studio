@@ -66,7 +66,7 @@ description: Bug 验证 Agent 统一入口。用于主动复现、修复后回�
    Studio 会先观察全部已选端并注入 `configured_frontend_observations`。只有缺少用户掌握的真实业务流程、业务期望、跨端业务顺序、测试数据含义或可观察成功条件，导致无法安全生成计划时，才使用 `assistance_status: needs_user_input` 严格协议提出 1–3 个最小问题。不得向用户询问 Studio 可以自行观察的菜单、控件或页面导航；用户回复后会在同一 Case 创建父链明确的新 attempt，并重建完整 `scenario_contract`。
 2. 计划只能使用 Studio 允许的导航、点击、填充、按键、选择、受控文件上传、等待和截图动作，不得携带 Cookie、Authorization、账号、密码、宿主路径或任意 JavaScript。`upload_file.file_ref` 必须来自 Studio 注入的 `controlled_upload_files`；没有受控输入时返回真实业务资料缺口，不得编造路径、跳过前置上传或把提交按钮当成文件控件。
 3. Studio 校验 BrowserPlan 后在宿主 Chromium 执行、脱敏 Network / console / action trace，并冻结当前 attempt 的 artifact；这些宿主证据和渲染截图是权威事实，Agent 不得改写路径或伪造引用。
-4. locator 首次失败时，Studio 只允许 validator 修正失败步骤及后续步骤一次，不得重复已完成动作。
+4. locator 首次失败时，先使用冻结截图、accessibility、动作和 Network 证据判断失败因果链。Studio 会在任何零匹配或多匹配定位上尝试选择唯一最高分的真实可交互控件；并列时拒绝猜测。validator 可以在 `causal_repair_action_ids`（包括失败动作）内修改 locator，或把一种状态动作改为另一种符合 BrowserPlan 字段矩阵的状态动作；不得根据“搜索”“提交”等控件关键词机械指定 click/press。失败动作之后只改 locator，不得重复已完成动作。同名控件出现在多行或多个区域时，优先使用 BrowserPlan v2 的命名 role `within` 作用域（先锁定已观察到的 row/listitem/dialog/group/region，再定位内部控件），不得输出 `nth-child`、`last-child`、`first` 等位置型 CSS。若候选计划被宿主协议拒绝，Studio 会回传安全诊断并要求自动纠正一次；这是系统协议问题，不得转问用户，也不得仅因 locator/action 失败返回 `insufficient_info`。
 5. Studio 最后一次调用 validator 时注入执行报告和精确 artifact 引用；此时才按 `ValidationResult` 输出契约给出结论。Web 成功结论必须绑定 Studio 提供的最终渲染截图。
 
 #### scenario_contract 语义合同

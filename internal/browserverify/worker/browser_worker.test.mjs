@@ -1646,6 +1646,50 @@ test('buildLocator honors exact locator semantics without broad accessibility un
   ]);
 });
 
+test('buildLocator scopes a repeated control to its named accessible row', () => {
+  const calls = [];
+  const row = {
+    getByRole: (...args) => {
+      calls.push(['row-role', ...args]);
+      return { scoped: true };
+    },
+  };
+  const page = {
+    getByRole: (...args) => {
+      calls.push(['page-role', ...args]);
+      return row;
+    },
+  };
+  const result = buildLocator(page, {
+    kind: 'role',
+    value: 'link',
+    name: '查看',
+    exact: true,
+    within: {
+      kind: 'role',
+      value: 'row',
+      name: '测试都市生活剧',
+      exact: false,
+    },
+  });
+  assert.deepEqual(result, { scoped: true });
+  assert.deepEqual(calls, [
+    ['page-role', 'row', { name: '测试都市生活剧', exact: false }],
+    ['row-role', 'link', { name: '查看', exact: true }],
+  ]);
+  assert.throws(() => buildLocator(page, {
+    kind: 'role',
+    value: 'link',
+    name: '查看',
+    within: {
+      kind: 'role',
+      value: 'row',
+      name: '测试都市生活剧',
+      within: { kind: 'role', value: 'region', name: '内容' },
+    },
+  }), /cannot be nested/);
+});
+
 test('login detection checks every password field, including a visible field after a hidden one', async () => {
   const visibility = [false, true];
   const page = {
@@ -1897,6 +1941,47 @@ test('executeAction rejects an interaction locator with multiple visible matches
   );
 });
 
+test('executeAction narrows an ambiguous locator to one uniquely compatible observed control', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let clicks = 0;
+  let recovered = 0;
+  const duplicateTextNodes = [
+    { isVisible: async () => true },
+    { isVisible: async () => true },
+  ];
+  const ambiguousText = {
+    count: async () => duplicateTextNodes.length,
+    nth: (index) => duplicateTextNodes[index],
+  };
+  const submitButton = {
+    isVisible: async () => true,
+    getAttribute: async (name) => name === 'role' ? 'button' : '',
+    textContent: async () => '提交',
+    isDisabled: async () => false,
+    click: async () => { clicks += 1; },
+  };
+  const submitControls = { count: async () => 1, nth: () => submitButton };
+  const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const page = {
+    getByText: () => ambiguousText,
+    locator: (selector) => selector === 'button' ? submitControls : empty,
+  };
+
+  await worker.executeAction(
+    page,
+    { id: 'submit-form', action: 'click', locator: { kind: 'text', value: '提交', exact: true } },
+    baseRequest(),
+    0,
+    async () => ({ loginRequired: false, path: '' }),
+    null,
+    () => { recovered += 1; },
+    { timeoutMs: 0, pollMs: 1 },
+  );
+
+  assert.equal(clicks, 1);
+  assert.equal(recovered, 1);
+});
+
 test('interaction locator waits for a uniquely visible control rendered after SPA hydration', async () => {
   const worker = await import('./browser_worker.mjs');
   let countCalls = 0;
@@ -1989,6 +2074,152 @@ test('observed-document recovery selects the only compatible hydrated search inp
     { action: 'fill', locator: { kind: 'role', value: 'searchbox' }, value: 'test' },
   );
   assert.equal(resolved, candidates[1]);
+});
+
+test('observed-document recovery matches a uniquely visible button despite internal CJK spacing', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const searchButton = {
+    isVisible: async () => true,
+    getAttribute: async (name) => name === 'role' ? 'button' : '',
+    textContent: async () => '搜 索',
+    isDisabled: async () => false,
+  };
+  const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const page = {
+    locator: (selector) => selector === 'button'
+      ? { count: async () => 1, nth: () => searchButton }
+      : empty,
+    getByText: () => empty,
+  };
+
+  const resolved = await worker.resolveObservedInteractionLocator(
+    page,
+    { action: 'click', locator: { kind: 'text', value: '搜索', exact: true } },
+  );
+
+  assert.equal(resolved, searchButton);
+});
+
+test('interaction recovery scopes foreground controls to the active modal surface', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const makeButton = (text) => ({
+    isVisible: async () => true,
+    getAttribute: async (name) => name === 'role' ? 'button' : '',
+    textContent: async () => text,
+    isDisabled: async () => false,
+  });
+  const backgroundSearch = makeButton('搜索');
+  const modalSearch = makeButton('搜索');
+  const modalInput = {
+    isVisible: async () => true,
+    getAttribute: async () => '',
+    textContent: async () => '',
+    isDisabled: async () => false,
+  };
+  const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const list = (nodes) => ({ count: async () => nodes.length, nth: (index) => nodes[index] });
+  const modal = {
+    isVisible: async () => true,
+    getAttribute: async (name) => ({ role: 'dialog', 'aria-modal': 'true', class: 'ant-modal' })[name] ?? '',
+    boundingBox: async () => ({ x: 300, y: 150, width: 680, height: 420 }),
+    locator: (selector) => {
+      if (selector.includes('[role="searchbox"]')) return list([modalInput, modalSearch]);
+      if (selector === 'button') return list([modalSearch]);
+      if (selector === 'input') return list([modalInput]);
+      return empty;
+    },
+    getByText: () => list([modalSearch]),
+    getByRole: () => list([modalSearch]),
+  };
+  const page = {
+    locator: (selector) => {
+      if (selector.includes('[aria-modal="true"]')) return list([modal]);
+      if (selector === 'button') return list([backgroundSearch, modalSearch]);
+      return empty;
+    },
+    getByText: () => list([backgroundSearch, modalSearch]),
+    getByRole: () => list([backgroundSearch, modalSearch]),
+  };
+
+  assert.equal(
+    await worker.resolveVisibleInteractionLocator(
+      page,
+      { kind: 'role', value: 'button', name: '搜索', exact: true },
+      { timeoutMs: 0, pollMs: 1 },
+    ),
+    modalSearch,
+  );
+  assert.equal(
+    await worker.resolveObservedInteractionLocator(
+      page,
+      { action: 'click', locator: { kind: 'text', value: '搜索', exact: true } },
+    ),
+    modalSearch,
+  );
+});
+
+test('observed-document recovery budgets each control family independently', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const unrelatedInputs = Array.from({ length: 128 }, (_, index) => ({
+    isVisible: async () => true,
+    getAttribute: async (name) => name === 'placeholder' ? `字段 ${index}` : (name === 'type' ? 'text' : ''),
+    textContent: async () => '',
+    isDisabled: async () => false,
+  }));
+  const target = {
+    isVisible: async () => true,
+    getAttribute: async (name) => name === 'placeholder' ? '问题描述' : '',
+    textContent: async () => '',
+    isDisabled: async () => false,
+  };
+  const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const list = (nodes) => ({ count: async () => nodes.length, nth: (index) => nodes[index] });
+  const page = {
+    locator: (selector) => {
+      if (selector.includes('[aria-modal="true"]')) return empty;
+      if (selector === 'input') return list(unrelatedInputs);
+      if (selector === 'textarea') return list([target]);
+      return empty;
+    },
+  };
+
+  assert.equal(
+    await worker.resolveObservedInteractionLocator(
+      page,
+      { action: 'fill', locator: { kind: 'placeholder', value: '问题描述', exact: true }, value: '复现步骤' },
+    ),
+    target,
+  );
+});
+
+test('executeAction reports observed ambiguity instead of hiding it as not found', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const buttons = ['搜索', '搜索'].map((text) => ({
+    isVisible: async () => true,
+    getAttribute: async (name) => name === 'role' ? 'button' : '',
+    textContent: async () => text,
+    isDisabled: async () => false,
+  }));
+  const missing = { count: async () => 0, nth: () => assert.fail('missing locator has no candidates') };
+  const controls = { count: async () => buttons.length, nth: (index) => buttons[index] };
+  const page = {
+    getByRole: () => missing,
+    locator: (selector) => selector === 'button' ? controls : missing,
+  };
+
+  await assert.rejects(
+    worker.executeAction(
+      page,
+      { id: 'search', action: 'click', locator: { kind: 'role', value: 'button', name: '搜索' } },
+      baseRequest(),
+      0,
+      async () => ({ loginRequired: false, path: '' }),
+      null,
+      null,
+      { timeoutMs: 0, pollMs: 1 },
+    ),
+    (error) => error?.code === 'locator_ambiguous',
+  );
 });
 
 test('observed-document recovery refuses equally plausible state-changing controls', async () => {

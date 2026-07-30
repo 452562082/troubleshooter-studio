@@ -157,6 +157,103 @@ func TestPrepareBrowserEvaluatorEvidenceUsesStrictRedactedBoundedContent(t *test
 	}
 }
 
+func TestPrepareBrowserEvaluatorEvidenceUsesOnlyCurrentExecutionArtifacts(t *testing.T) {
+	historicalNetwork := []byte(`[{"action_id":"historical-search","method":"GET","url":"https://app.example.com/api/historical","resource_type":"xhr","outcome":"response","status":200}]`)
+	currentNetwork := []byte(`[{"action_id":"current-search","method":"GET","url":"https://app.example.com/api/current","resource_type":"xhr","outcome":"response","status":200}]`)
+	_, historicalFrozen := frozenBrowserFixture(t, "network", "browser-executions/primary/browser/network.json", historicalNetwork)
+	currentRef, currentFrozen := frozenBrowserFixture(t, "network", "browser-executions/repair-3/browser/network.json", currentNetwork)
+	result := BrowserVerificationResult{Artifacts: []BrowserArtifactReference{currentRef}}
+
+	_, structured, cleanup, err := prepareBrowserEvaluatorEvidence(result, []browserFrozenArtifact{historicalFrozen, currentFrozen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cleanup() }()
+	if !strings.Contains(structured, "current-search") || strings.Contains(structured, "historical-search") {
+		t.Fatalf("evaluator evidence was not scoped to the current execution: %s", structured)
+	}
+}
+
+func TestPrepareBrowserEvaluatorEvidenceBoundsLargeCurrentExecution(t *testing.T) {
+	longPath := "data." + strings.Repeat("a", 60) + "." + strings.Repeat("b", 60) + "." + strings.Repeat("c", 60)
+	records := make([]browserResponseFactEvidence, 40)
+	for index := range records {
+		fields := make([]browserResponseFactFieldEvidence, 64)
+		for fieldIndex := range fields {
+			fields[fieldIndex] = browserResponseFactFieldEvidence{
+				Path: longPath, ValueType: "string", Occurrences: 1, UniqueValues: 1,
+			}
+		}
+		records[index] = browserResponseFactEvidence{
+			ActionID: "search-users", Method: "GET", URL: "https://app.example.com/api/users",
+			Status: 200, Fields: fields,
+		}
+	}
+	responseContent, err := json.Marshal(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	responseRef, responseFrozen := frozenBrowserFixture(t, "response_facts", "browser-executions/repair-3/browser/response-facts.json", responseContent)
+	actionContent := []byte(`[{"id":"search-users","action":"press","locator_kind":"label","started_at":"2026-07-29T10:00:00Z","duration_ms":1,"result":"completed","error_code":""}]`)
+	actionRef, actionFrozen := frozenBrowserFixture(t, "browser_actions", "browser-executions/repair-3/browser/browser-actions.json", actionContent)
+	result := BrowserVerificationResult{Artifacts: []BrowserArtifactReference{responseRef, actionRef}}
+
+	_, structured, cleanup, err := prepareBrowserEvaluatorEvidence(result, []browserFrozenArtifact{responseFrozen, actionFrozen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cleanup() }()
+	if len(structured) > maxEvaluatorBrowserJSONBytes {
+		t.Fatalf("bounded evaluator evidence bytes=%d", len(structured))
+	}
+	if !strings.Contains(structured, `"id":"search-users"`) || !strings.Contains(structured, `"truncated_kinds":["response_facts"]`) {
+		t.Fatalf("large evidence did not preserve the action or record deterministic truncation: %s", structured)
+	}
+}
+
+func TestPrepareBrowserEvaluatorEvidenceContinuesWithoutUnmatchedFinalScreenshot(t *testing.T) {
+	actionContent := []byte(`[{"id":"search-users","action":"press","locator_kind":"label","started_at":"2026-07-29T10:00:00Z","duration_ms":1,"result":"failed","error_code":"locator_ambiguous"}]`)
+	actionRef, actionFrozen := frozenBrowserFixture(t, "browser_actions", "browser-executions/repair-3/browser/browser-actions.json", actionContent)
+	result := BrowserVerificationResult{
+		Status: "locator_failed", ErrorCode: "locator_ambiguous", FailedActionID: "search-users",
+		FinalScreenshotPath: "browser-executions/repair-3/browser/failure.png",
+		Artifacts:           []BrowserArtifactReference{actionRef},
+	}
+
+	path, structured, cleanup, err := prepareBrowserEvaluatorEvidence(result, []browserFrozenArtifact{actionFrozen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cleanup() }()
+	if path != "" || !strings.Contains(structured, `"error_code":"locator_ambiguous"`) {
+		t.Fatalf("missing final screenshot did not degrade to structured evidence: path=%q evidence=%s", path, structured)
+	}
+}
+
+func TestBrowserEvaluatorPromptPreservesOriginalBrowserFailure(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	actionContent := []byte(`[{"id":"search-author","action":"press","locator_kind":"label","started_at":"2026-07-29T10:00:00Z","duration_ms":1,"result":"failed","error_code":"locator_ambiguous"}]`)
+	actionRef, actionFrozen := frozenBrowserFixture(t, "browser_actions", "browser-executions/repair-3/browser/browser-actions.json", actionContent)
+	result := BrowserVerificationResult{
+		Status: "locator_failed", ErrorCode: "locator_ambiguous", FailedActionID: "search-author",
+		Artifacts: []BrowserArtifactReference{actionRef},
+	}
+
+	prompt, attachments, cleanup, err := browserEvaluatorPrompt(request, result, []BrowserArtifactReference{actionRef}, []browserFrozenArtifact{actionFrozen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cleanup() }()
+	if len(attachments) != 0 {
+		t.Fatalf("attachments=%+v", attachments)
+	}
+	for _, expected := range []string{`"status":"locator_failed"`, `"error_code":"locator_ambiguous"`, `"failed_action_id":"search-author"`} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("evaluator prompt lost original browser failure %s: %s", expected, prompt)
+		}
+	}
+}
+
 func TestBrowserEvaluatorAttachesCurrentSearchActionScreenshotsBeforeHistoricalEvidence(t *testing.T) {
 	request := browserCoordinatorRequest(t)
 	request.Bot.Target = "codex"

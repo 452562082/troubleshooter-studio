@@ -110,6 +110,11 @@ func runtimeProbeWorkerResultFixture() workerResult {
 		AccessibilitySummary: []bughub.BrowserAccessibilityNode{
 			{Role: "document", Name: strings.Repeat("中文页面", 170), Visible: true},
 			{Role: "searchbox", Name: "请输入搜索关键字", LocatorKind: "placeholder", Visible: true},
+			{Role: "element", Name: "搜 索", LocatorKind: "text", Visible: true},
+			{Role: "row", Name: "其他剧查看", LocatorKind: "role", Visible: true},
+			{Role: "link", Name: "查看", LocatorKind: "text", Visible: true},
+			{Role: "row", Name: "测试都市生活剧查看", LocatorKind: "role", Visible: true},
+			{Role: "link", Name: "查看", LocatorKind: "text", Visible: true},
 		},
 		Artifacts: []workerArtifact{},
 	}
@@ -837,6 +842,38 @@ func TestRuntimeManagerRejectsProbeWorkerProtocolMismatchWithoutPublishing(t *te
 	manager := NewRuntimeManager(t.TempDir(), &recordingCommandRunner{ProbeWorkerResult: &invalid})
 	if _, err := manager.Ensure(context.Background(), nil); err == nil {
 		t.Fatal("expected worker protocol mismatch")
+	}
+	if status := manager.Status(); status.State != RuntimeBroken || status.ErrorCode != "browser_runtime_probe_failed" {
+		t.Fatalf("status = %+v", status)
+	}
+	if _, err := os.Stat(manager.currentDir()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("protocol-incompatible runtime was published: %v", err)
+	}
+	assertRuntimeInstallLockAvailable(t, manager)
+}
+
+func TestRuntimeManagerRejectsProbeWithoutScopedLocatorSemantics(t *testing.T) {
+	invalid := runtimeProbeWorkerResultFixture()
+	invalid.AccessibilitySummary = invalid.AccessibilitySummary[:3]
+	manager := NewRuntimeManager(t.TempDir(), &recordingCommandRunner{ProbeWorkerResult: &invalid})
+	if _, err := manager.Ensure(context.Background(), nil); err == nil {
+		t.Fatal("expected scoped locator semantic probe mismatch")
+	}
+	if status := manager.Status(); status.State != RuntimeBroken || status.ErrorCode != "browser_runtime_probe_failed" {
+		t.Fatalf("status = %+v", status)
+	}
+	if _, err := os.Stat(manager.currentDir()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("protocol-incompatible runtime was published: %v", err)
+	}
+	assertRuntimeInstallLockAvailable(t, manager)
+}
+
+func TestRuntimeManagerRejectsProbeWithoutObservedSearchControlRecovery(t *testing.T) {
+	invalid := runtimeProbeWorkerResultFixture()
+	invalid.AccessibilitySummary = append(invalid.AccessibilitySummary[:2], invalid.AccessibilitySummary[3:]...)
+	manager := NewRuntimeManager(t.TempDir(), &recordingCommandRunner{ProbeWorkerResult: &invalid})
+	if _, err := manager.Ensure(context.Background(), nil); err == nil {
+		t.Fatal("expected observed search control semantic probe mismatch")
 	}
 	if status := manager.Status(); status.State != RuntimeBroken || status.ErrorCode != "browser_runtime_probe_failed" {
 		t.Fatalf("status = %+v", status)

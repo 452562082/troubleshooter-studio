@@ -69,6 +69,7 @@ const stableErrorCode = computed(() => {
 
 const planValidationIssueCopy: Record<string, string> = {
   plan_not_canonical: '计划包含与持久化协议不一致的空字段或默认值',
+  locator_positional_css_forbidden: '同名控件使用了不稳定的位置型 CSS；Studio 未能自动转换为行内结构化定位',
   frontend_scope_incomplete: '场景合同未覆盖全部已选择的应用端',
   frontend_scope_order_invalid: '场景合同中的应用端顺序与用户选择不一致',
   frontend_entry_not_visited: '计划没有访问全部已选择的应用端',
@@ -82,7 +83,7 @@ const planValidationIssueCopy: Record<string, string> = {
   plan_structure_invalid: '动作、断言或必填字段不符合浏览器计划协议',
 }
 const planValidationIssue = computed(() => {
-  if (stableErrorCode.value !== 'browser_validator_plan_invalid') return ''
+  if (stableErrorCode.value !== 'browser_validator_plan_invalid' && stableErrorCode.value !== 'browser_locator_repair_plan_invalid') return ''
   const value = props.attempt?.output_json?.plan_validation_code
   if (typeof value !== 'string' || !/^[a-z0-9_]{1,128}$/.test(value)) return ''
   return planValidationIssueCopy[value] || ''
@@ -141,7 +142,7 @@ const stateCopy = computed(() => {
     return '等待验证 Agent 超时。当前 Case 和已采集的浏览器证据均已保留，可以直接重试，无需补充附件或重建故障闭环。'
   }
   if (stableErrorCode.value === 'browser_locator_repair_plan_invalid') {
-    return '验证 Agent 根据页面现场给出的后续策略未通过内部协议校验。当前 Case 和现场证据均已保留，可以直接重试。'
+    return '验证 Agent 根据页面现场给出的后续策略连续未通过内部协议校验。Studio 已先自动纠正一次；当前 Case 和现场证据均已保留，可以直接重试。'
   }
   const artifactCopy: Record<string, string> = {
     browser_artifact_staging_invalid: '验证证据暂存目录不可用，失败发生在浏览器启动前。请检查本地磁盘与目录权限后在当前 Case 重试。',

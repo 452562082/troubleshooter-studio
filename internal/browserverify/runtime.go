@@ -23,8 +23,8 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 )
 
-const browserRuntimeVersion = "1.61.1-r33"
-const browserRuntimeProtocolProbeVersion = 1
+const browserRuntimeVersion = "1.61.1-r37"
+const browserRuntimeProtocolProbeVersion = 3
 
 // BrowserRuntimeVersion is the immutable Playwright runtime version bundled by
 // desktop release artifacts. Packaging and runtime discovery must agree on it.
@@ -780,16 +780,27 @@ func validateRuntimeProbeWorkerResult(result workerResult) error {
 	}
 	documentFound := false
 	searchFound := false
+	searchSubmitFound := false
+	scopeFound := false
+	repeatedActionCount := 0
 	for _, node := range result.AccessibilitySummary {
 		switch {
 		case node.Role == "document" && node.Visible && strings.Contains(node.Name, "中文页面") && len(node.Name) >= 1024:
 			documentFound = true
 		case (node.Role == "textbox" || node.Role == "searchbox") && node.Name == "请输入搜索关键字" && node.LocatorKind == "placeholder" && node.Visible && !node.Disabled:
 			searchFound = true
+		case (node.Role == "button" || node.Role == "element") &&
+			strings.Join(strings.Fields(node.Name), "") == "搜索" &&
+			node.LocatorKind == "text" && node.Visible && !node.Disabled:
+			searchSubmitFound = true
+		case node.Role == "row" && strings.Join(strings.Fields(node.Name), "") == "测试都市生活剧查看" && node.LocatorKind == "role" && node.Visible:
+			scopeFound = true
+		case node.Role == "link" && node.Name == "查看" && node.Visible:
+			repeatedActionCount++
 		}
 	}
-	if !documentFound || !searchFound {
-		return errors.New("probe worker result lacks multilingual document or search control semantics")
+	if !documentFound || !searchFound || !searchSubmitFound || !scopeFound || repeatedActionCount < 2 {
+		return errors.New("probe worker result lacks multilingual document, search control recovery, or scoped locator semantics")
 	}
 	return nil
 }

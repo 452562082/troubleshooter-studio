@@ -160,9 +160,15 @@ describe('BugBrowserProgress', () => {
     expect(assistance.text()).toContain('重建 scenario_contract')
     expect(assistance.find('[data-browser-action]').exists()).toBe(false)
 
-    const repairPlan = mount(BugBrowserProgress, { props: { attempt: attempt('browser_locator_repair_plan_invalid'), events: [], systemID: 'base', environment: 'test' } })
+    const repairPlan = mount(BugBrowserProgress, { props: { attempt: attempt('browser_locator_repair_plan_invalid', {
+      error_code: 'browser_locator_repair_plan_invalid',
+      plan_validation_code: 'locator_positional_css_forbidden',
+      plan_validation_issue: 'tbody tr:nth-child(2) Cookie: sid=secret',
+    }), events: [], systemID: 'base', environment: 'test' } })
     expect(repairPlan.get('[data-browser-state="plan"]').text()).toContain('后续策略')
     expect(repairPlan.text()).toContain('现场证据均已保留')
+    expect(repairPlan.get('[data-browser-plan-validation-issue]').text()).toContain('行内结构化定位')
+    expect(repairPlan.text()).not.toMatch(/nth-child|Cookie|secret/)
 
     const attachment = mount(BugBrowserProgress, { props: { attempt: attempt('browser_validator_attachment_failed'), events: [], systemID: 'base', environment: 'test' } })
     expect(attachment.get('[data-browser-state="attachment"]').text()).toContain('无法读取本次截图证据')

@@ -854,13 +854,8 @@ func validateWorkerPlanShape(plan bughub.BrowserPlan) error {
 			return errors.New("browser controlled file reference is invalid")
 		}
 		if action.Locator != nil {
-			if _, allowed := locators[action.Locator.Kind]; !allowed || strings.TrimSpace(action.Locator.Value) == "" {
-				return errors.New("browser locator is invalid")
-			}
-			if action.Locator.Exact != nil {
-				if action.Locator.Kind == "test_id" || action.Locator.Kind == "css" || (action.Locator.Kind == "role" && strings.TrimSpace(action.Locator.Name) == "") {
-					return errors.New("browser locator exact mode is invalid")
-				}
+			if err := validateWorkerLocatorShape(action.Locator, locators, plan.Version == bughub.BrowserPlanVersion); err != nil {
+				return err
 			}
 		}
 	}
@@ -897,6 +892,30 @@ func validateWorkerPlanShape(plan bughub.BrowserPlan) error {
 		}
 	}
 	return nil
+}
+
+func validateWorkerLocatorShape(locator *bughub.BrowserLocator, allowed map[string]struct{}, allowWithin bool) error {
+	if locator == nil {
+		return errors.New("browser locator is invalid")
+	}
+	if _, ok := allowed[locator.Kind]; !ok || strings.TrimSpace(locator.Value) == "" {
+		return errors.New("browser locator is invalid")
+	}
+	if locator.Exact != nil && (locator.Kind == "test_id" || locator.Kind == "css" || (locator.Kind == "role" && strings.TrimSpace(locator.Name) == "")) {
+		return errors.New("browser locator exact mode is invalid")
+	}
+	if locator.Within == nil {
+		return nil
+	}
+	if !allowWithin || locator.Within.Kind != "role" || strings.TrimSpace(locator.Within.Name) == "" {
+		return errors.New("browser locator scope is invalid")
+	}
+	switch locator.Within.Value {
+	case "row", "listitem", "dialog", "group", "region":
+	default:
+		return errors.New("browser locator scope role is invalid")
+	}
+	return validateWorkerLocatorShape(locator.Within, allowed, false)
 }
 
 func browserPlanSHA256(plan bughub.BrowserPlan) (string, error) {

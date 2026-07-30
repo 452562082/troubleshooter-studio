@@ -145,10 +145,11 @@ func validBrowserAssistanceText(value string, limit int) bool {
 }
 
 type BrowserLocator struct {
-	Kind  string `yaml:"kind" json:"kind"`
-	Value string `yaml:"value" json:"value"`
-	Name  string `yaml:"name,omitempty" json:"name,omitempty"`
-	Exact *bool  `yaml:"exact,omitempty" json:"exact,omitempty"`
+	Kind   string          `yaml:"kind" json:"kind"`
+	Value  string          `yaml:"value" json:"value"`
+	Name   string          `yaml:"name,omitempty" json:"name,omitempty"`
+	Exact  *bool           `yaml:"exact,omitempty" json:"exact,omitempty"`
+	Within *BrowserLocator `yaml:"within,omitempty" json:"within,omitempty"`
 }
 
 type BrowserAction struct {
@@ -807,6 +808,10 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 }
 
 func decodeBrowserLocatorYAML(version int, field string, node yaml.Node) (*BrowserLocator, error) {
+	return decodeBrowserLocatorYAMLDepth(version, field, node, true)
+}
+
+func decodeBrowserLocatorYAMLDepth(version int, field string, node yaml.Node, allowWithin bool) (*BrowserLocator, error) {
 	if !browserYAMLFieldPresent(node) {
 		return nil, nil
 	}
@@ -821,7 +826,7 @@ func decodeBrowserLocatorYAML(version int, field string, node yaml.Node) (*Brows
 			return nil, fmt.Errorf("browser plan %s has a non-scalar field name", field)
 		}
 		switch key.Value {
-		case "kind", "value", "name", "exact":
+		case "kind", "value", "name", "exact", "within":
 		default:
 			return nil, fmt.Errorf("browser plan %s has unknown field %q", field, key.Value)
 		}
@@ -863,7 +868,26 @@ func decodeBrowserLocatorYAML(version int, field string, node yaml.Node) (*Brows
 		}
 		exact = &value
 	}
-	return &BrowserLocator{Kind: kind, Value: value, Name: name, Exact: exact}, nil
+	withinNode, withinPresent := fields["within"]
+	if withinPresent && (!allowWithin || version != BrowserPlanVersion) {
+		return nil, fmt.Errorf("browser plan %s.within requires a non-nested version %d locator", field, BrowserPlanVersion)
+	}
+	var within *BrowserLocator
+	if withinPresent {
+		within, err = decodeBrowserLocatorYAMLDepth(version, field+".within", withinNode, false)
+		if err != nil {
+			return nil, err
+		}
+		if within == nil || within.Kind != "role" || strings.TrimSpace(within.Name) == "" {
+			return nil, fmt.Errorf("browser plan %s.within must be a named role locator", field)
+		}
+		switch within.Value {
+		case "row", "listitem", "dialog", "group", "region":
+		default:
+			return nil, fmt.Errorf("browser plan %s.within role %q is not a supported interaction scope", field, within.Value)
+		}
+	}
+	return &BrowserLocator{Kind: kind, Value: value, Name: name, Exact: exact, Within: within}, nil
 }
 
 func validateBrowserPlanString(field, value string, required bool) error {

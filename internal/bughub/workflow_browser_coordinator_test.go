@@ -1972,7 +1972,7 @@ func TestBrowserRepairPromptExplainsGeneralCausalActionRecovery(t *testing.T) {
 		{ID: "wait-user-tab", Action: "wait_for", Locator: &BrowserLocator{Kind: "role", Value: "tab", Name: "用户"}},
 	}}
 	prompt := browserRepairPrompt(original, BrowserVerificationResult{FailedActionID: "wait-user-tab", ErrorCode: "locator_failed"}, browserEvaluatorEvidence{}, &BrowserVerificationResult{FinalURL: "https://app.example.com", AccessibilitySummary: []BrowserAccessibilityNode{{Role: "textbox", Name: "请输入搜索关键字", Visible: true}}}, []string{"failed_final:browser/failure.png", "initial_page:browser/initial.png"})
-	for _, required := range []string{"mechanically completed", "expected business request", "including failed_action_id", "state-changing action type", "Actions after failed_action_id may change locators only", "passive_downgrade", "initial_page_observation", "failed_final:browser/failure.png", "never invent a placeholder", "fill-keyword", "exact is also accepted when repairing a stored version 1 plan"} {
+	for _, required := range []string{"mechanically completed", "expected business request", "including failed_action_id", "state-changing action type", "Actions after failed_action_id may change locators only", "passive_downgrade", "initial_page_observation", "failed_final:browser/failure.png", "never invent a placeholder", "fill-keyword", "exact is also accepted when repairing a stored version 1 plan", "multiple plausible business continuations", "blocked checkpoint"} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("repair prompt is missing %q: %s", required, prompt)
 		}
@@ -3742,7 +3742,7 @@ func TestBrowserCoordinatorRecordsAgentFailureStageWithoutProviderDetails(t *tes
 	}
 }
 
-func TestBrowserStopOutputKeepsLocatorFailureSystemOwned(t *testing.T) {
+func TestBrowserStopOutputTurnsExhaustedLocatorRecoveryIntoAnAssistedPause(t *testing.T) {
 	result := BrowserCoordinatorResult{
 		ErrorCode:    "browser_locator_failed",
 		ErrorMessage: "页面定位经过有限次现场修复仍失败",
@@ -3759,8 +3759,14 @@ func TestBrowserStopOutputKeepsLocatorFailureSystemOwned(t *testing.T) {
 	if err := json.Unmarshal(browserStopOutput(result), &output); err != nil {
 		t.Fatal(err)
 	}
-	if !output.SystemFailure || output.EvidenceLimitation || len(output.Questions) != 0 || output.ContinuationStrategy != "" {
+	if output.SystemFailure || !output.EvidenceLimitation || len(output.Questions) != 1 ||
+		output.ContinuationStrategy != "collect_user_feedback_and_regenerate_scenario_contract" {
 		t.Fatalf("output=%+v", output)
+	}
+	if !strings.Contains(output.Questions[0]["question"], "submit-again") ||
+		!strings.Contains(output.Questions[0]["question"], "已经到达") ||
+		!strings.Contains(output.Questions[0]["answer_hint"], "无需提供") {
+		t.Fatalf("locator assistance is not actionable: %+v", output.Questions)
 	}
 }
 

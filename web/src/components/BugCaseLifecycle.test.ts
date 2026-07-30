@@ -382,16 +382,17 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.find('[data-browser-action="repair-runtime"]').exists()).toBe(false)
   })
 
-  it('retries live observation after the single locator repair is exhausted', async () => {
+  it('asks for a business-state decision after locator recovery is exhausted', async () => {
     const snapshot = detail('waiting_evidence')
     snapshot.case.current_attempt_id = 'validation-locator'
     snapshot.attempts = [{ id: 'validation-locator', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_locator_failed' }, parent_attempt_id: '', started_at: '', error_code: 'browser_locator_failed', error_message: '', usage: {} }]
 
-    expect(primaryActionFor(snapshot)).toEqual({ kind: 'retry_validation', label: '让 Agent 继续验证' })
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'supply_evidence', label: '回答 Agent 并调整验证策略' })
     const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
     await wrapper.get('.primary-action').trigger('click')
-    expect(wrapper.emitted('primary')).toEqual([[{ kind: 'retry_validation' }]])
-    expect(wrapper.find('#case-supplement').exists()).toBe(false)
+    expect(wrapper.get('[role="dialog"]').text()).toContain('当前页面是否已经到达')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('无需提供按钮名称')
+    expect(wrapper.find('#case-supplement').exists()).toBe(true)
   })
 
   it('shows the Agent question and waits for a user answer before replanning', async () => {

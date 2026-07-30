@@ -1658,3 +1658,43 @@ BrowserPlan 的动作和断言是可执行协议，但没有保存验证 Agent �
 ### 结果
 
 弹窗、抽屉和普通页面使用同一套结构化作用域规则，不再针对“搜索”或具体 Bug 写特判。执行失败与业务证据缺口有了宿主级归属边界：Agent 自己没点成功时系统继续修复或明确报告执行故障，不再要求用户代替 Agent 提供它本应采集的后续证据。
+
+---
+
+## 2026-07-30：活动交互作用域必须与浏览器视口和显式关闭状态一致
+
+### 背景
+
+组件库常把 Drawer、Popover 等 portal 容器永久挂在 DOM 中，关闭时仅用 transform 将面板移出视口，或通过 `aria-hidden`、`data-state`、内联样式标记为关闭。Playwright 的 `isVisible()` 只判断节点是否具有渲染盒，不保证该盒或其交互控件仍位于用户可操作的视口内。上一条决策只检查容器几何和后代 `isVisible()`，可能把关闭抽屉误判为当前作用域，导致页面侧栏等真实控件稳定地返回 `locator_not_found`，后续重试也会落入同一错误作用域。
+
+### 决策
+
+- 活动浮层候选除 `isVisible()` 外，必须与当前 viewport 相交；其至少一个可见交互控件也必须与 viewport 相交。只有 portal 外壳覆盖页面、实际面板和控件已移出屏幕时，不再劫持页面定位。
+- `aria-hidden=true`、`hidden`、`data-state=closed|closing|hidden|inactive`、`data-open=false`，以及明确的内联 `display:none`、`visibility:hidden`、`pointer-events:none`、`opacity:0` 都视为非活动状态。
+- 已打开且位于视口内的 drawer/popover 仍作为当前作用域；语义 modal 仍优先于普通结构候选，禁止透过真实前台弹层点击背景业务控件。
+- runtime probe 同时验证“关闭抽屉不影响整页菜单定位”和“打开 modal 内同名控件优先”两条语义；Worker 字节变化后浏览器运行时升级为 `1.61.1-r38`。
+
+### 结果
+
+作用域选择由“DOM 中看起来可见”收紧为“用户当前确实可交互”。该规则不依赖页面文案、Bug 标题或具体组件实例，适用于所有永久挂载、关闭后离屏的 Drawer、Popover 和 Popup，同时保留真实前台浮层的安全隔离。
+
+---
+
+## 2026-07-30：页面自主恢复耗尽后转为结构化协助
+
+### 背景
+
+验证 Agent 在定位失败后会基于冻结页面证据调整交互策略，但有限次自主恢复耗尽时，Host 仍将 `browser_locator_failed` 归为不可交互的系统失败。即使 Agent 无法区分“目标业务状态已经到达”和“仍需执行另一条合理业务路径”，界面也只提供机械重试。用户既看不到 Agent 的决策缺口，也无法在当前 Case 内提供业务判断，导致同一现场被反复执行并再次失败。
+
+### 决策
+
+- 运行时、provider、协议、附件和证据完整性错误继续由系统负责，不得向用户转嫁。
+- 页面观察和安全交互策略均已耗尽，且仍存在多个合理业务后续时，允许 validator 使用既有 `assistance_status: needs_user_input` 协议询问 1–3 个最小业务问题。问题必须说明受阻的业务检查点以及用户回答会改变的决策。
+- validator 仍不得询问菜单、按钮文案、selector、路由、页面结构、账号、密码或其他 Studio 可自行观察的信息。
+- 若 validator 未生成可用问题，Host 为 `browser_locator_failed` 生成安全的结构化兜底问题，询问当前业务状态与期望下一步；稳定错误码保留用于诊断，但 Phase outcome 改为 `NeedsEvidence`。
+- 前端只要检测到有效 `validation_questions`，必须优先展示“等待 Agent 问题答复”状态，不能再被底层 locator 错误码覆盖。用户回答后在同一 Case 内修订 `scenario_contract` 并重建完整验证计划；不重建故障闭环。
+- 对升级前已经持久化且尚无 `validation_questions` 的 `browser_locator_failed` Attempt，前端提供同一份受限业务问题作为兼容兜底，使现有 Case 无需先重复失败一次即可继续。
+
+### 结果
+
+定位问题仍由 Agent 先自主观察和修复；只有无法安全决定业务下一步时才暂停求助。用户可以直接告诉 Agent “当前状态已经满足，继续验证结果”或补充真实业务意图，验证流程据此调整，而不是在无解释的机械重试中循环。

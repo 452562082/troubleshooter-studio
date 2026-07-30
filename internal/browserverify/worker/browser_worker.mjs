@@ -1702,15 +1702,55 @@ async function interactionCandidateSnapshot(candidate, tagHint = '') {
   };
 }
 
-async function interactionSurfaceSnapshot(candidate, index) {
-  const [role, ariaModal, className, id, box] = await Promise.all([
+function interactionBoxIntersectsViewport(box, viewport) {
+  if (!box || box.width <= 0 || box.height <= 0) return false;
+  if (!viewport || viewport.width <= 0 || viewport.height <= 0) return true;
+  return box.x < viewport.width
+    && box.y < viewport.height
+    && box.x + box.width > 0
+    && box.y + box.height > 0;
+}
+
+function interactionSurfaceInlineStyleIsInactive(style) {
+  return /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)|pointer-events\s*:\s*none|opacity\s*:\s*0(?:[;\s]|$))/i
+    .test(String(style || ''));
+}
+
+function interactionSurfaceStateIsClosed(value) {
+  return /^(?:closed|closing|hidden|inactive|exited?)$/i.test(String(value || '').trim());
+}
+
+async function interactionSurfaceSnapshot(candidate, index, viewport) {
+  const [
+    role,
+    ariaModal,
+    ariaHidden,
+    hidden,
+    dataState,
+    dataOpen,
+    style,
+    className,
+    id,
+    box,
+  ] = await Promise.all([
     candidate.getAttribute('role').catch(() => ''),
     candidate.getAttribute('aria-modal').catch(() => ''),
+    candidate.getAttribute('aria-hidden').catch(() => null),
+    candidate.getAttribute('hidden').catch(() => null),
+    candidate.getAttribute('data-state').catch(() => ''),
+    candidate.getAttribute('data-open').catch(() => ''),
+    candidate.getAttribute('style').catch(() => ''),
     candidate.getAttribute('class').catch(() => ''),
     candidate.getAttribute('id').catch(() => ''),
     candidate.boundingBox().catch(() => null),
   ]);
-  if (!box || box.width <= 0 || box.height <= 0) return null;
+  if (!interactionBoxIntersectsViewport(box, viewport)) return null;
+  if (String(ariaHidden || '').toLowerCase() === 'true' || hidden !== null) return null;
+  if (interactionSurfaceStateIsClosed(dataState)
+    || String(dataOpen || '').toLowerCase() === 'false'
+    || interactionSurfaceInlineStyleIsInactive(style)) {
+    return null;
+  }
   const normalizedRole = String(role || '').toLowerCase();
   const modalSemantic = String(ariaModal || '').toLowerCase() === 'true'
     || normalizedRole === 'dialog'
@@ -1725,7 +1765,10 @@ async function interactionSurfaceSnapshot(candidate, index) {
   );
   let visibleControls = 0;
   for (let controlIndex = 0; controlIndex < count; controlIndex += 1) {
-    if (!await descendants.nth(controlIndex).isVisible().catch(() => false)) continue;
+    const control = descendants.nth(controlIndex);
+    if (!await control.isVisible().catch(() => false)) continue;
+    const controlBox = await control.boundingBox().catch(() => null);
+    if (!interactionBoxIntersectsViewport(controlBox, viewport)) continue;
     visibleControls += 1;
     if (visibleControls >= INTERACTION_FALLBACK_MAX_CANDIDATES) break;
   }
@@ -1747,6 +1790,9 @@ async function interactionSurfaceSnapshot(candidate, index) {
 // open modal. This is based only on current DOM semantics and geometry.
 export async function resolveActiveInteractionScope(page) {
   if (!page || typeof page.locator !== 'function') return page;
+  const viewport = typeof page.viewportSize === 'function'
+    ? page.viewportSize()
+    : null;
   const surfaces = page.locator(INTERACTION_SURFACE_SELECTOR);
   const count = Math.min(
     await surfaces.count().catch(() => 0),
@@ -1756,7 +1802,7 @@ export async function resolveActiveInteractionScope(page) {
   for (let index = 0; index < count; index += 1) {
     const candidate = surfaces.nth(index);
     if (!await candidate.isVisible().catch(() => false)) continue;
-    const snapshot = await interactionSurfaceSnapshot(candidate, index).catch(() => null);
+    const snapshot = await interactionSurfaceSnapshot(candidate, index, viewport).catch(() => null);
     if (snapshot) ranked.push(snapshot);
   }
   ranked.sort((left, right) => Number(right.modalSemantic) - Number(left.modalSemantic)
@@ -3536,9 +3582,10 @@ export function loginCaptureShouldFinish(browserConnected, openPageCount) {
 async function probeWorker(outputPath) {
   const { chromium } = await import('playwright');
   const multibyteText = '中文页面'.repeat(1024);
-  const server = createServer((_request, response) => {
+  const server = createServer((request, response) => {
+    const showModal = new URL(request.url || '/', 'http://127.0.0.1').searchParams.has('modal');
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    response.end(`<!doctype html><html><head><title>tshoot browser runtime probe</title></head><body><main><p>${multibyteText}</p><button data-probe-target="background"><span>搜</span> <span>索</span></button><table><tbody><tr role="row"><td>其他剧</td><td><a href="#other">查看</a></td></tr><tr role="row"><td>测试都市生活剧</td><td><a href="#target">查看</a></td></tr></tbody></table></main><section role="dialog" aria-modal="true"><input type="search" placeholder="请输入搜索关键字"><button data-probe-target="modal"><span>搜</span> <span>索</span></button></section></body></html>`);
+    response.end(`<!doctype html><html><head><title>tshoot browser runtime probe</title></head><body><main><p>${multibyteText}</p><button role="menuitem" data-probe-target="page-menu">内容管理</button><button data-probe-target="background"><span>搜</span> <span>索</span></button><table><tbody><tr role="row"><td>其他剧</td><td><a href="#other">查看</a></td></tr><tr role="row"><td>测试都市生活剧</td><td><a href="#target">查看</a></td></tr></tbody></table></main><aside class="ant-drawer ant-drawer-right" aria-hidden="true" style="position:fixed;inset:0;pointer-events:none"><button style="position:absolute;left:calc(100vw + 100px)">主题设置</button></aside>${showModal ? '<section role="dialog" aria-modal="true" style="position:fixed;top:120px;left:300px;width:640px;height:320px;background:white"><input type="search" placeholder="请输入搜索关键字"><button data-probe-target="modal"><span>搜</span> <span>索</span></button></section>' : ''}</body></html>`);
   });
   await new Promise((resolveListen, reject) => {
     server.once('error', reject);
@@ -3566,6 +3613,16 @@ async function probeWorker(outputPath) {
         within: { kind: 'role', value: 'row', name: '测试都市生活剧 查看', exact: true },
       });
       if (await scopedTarget.count() !== 1) throw new Error('runtime probe scoped locator semantics are invalid');
+      const pageMenu = await resolveVisibleInteractionLocator(page, {
+        kind: 'role',
+        value: 'menuitem',
+        name: '内容管理',
+        exact: true,
+      }, { timeoutMs: 0, pollMs: 1 });
+      if (await pageMenu.getAttribute('data-probe-target') !== 'page-menu') {
+        throw new Error('runtime probe inactive interaction surface semantics are invalid');
+      }
+      await page.goto(`${origin}/?modal=1`, { waitUntil: 'domcontentloaded' });
       const observedSubmit = await resolveObservedInteractionLocator(page, {
         action: 'click',
         locator: { kind: 'text', value: '搜索', exact: true },

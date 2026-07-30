@@ -28,7 +28,7 @@ function isRootCauseDispute(detail: ActionDetail | undefined): boolean {
 function structuredEvidenceGaps(output: Record<string, unknown> | undefined): string[] {
   const gaps = Array.isArray(output?.gaps) ? output.gaps : []
   const questions = Array.isArray(output?.validation_questions) ? output.validation_questions : []
-  return [...new Set([...gaps, ...questions]
+  const structured = [...new Set([...gaps, ...questions]
     .map(value => {
       if (typeof value === 'string') return value.trim()
       if (!value || typeof value !== 'object') return ''
@@ -37,6 +37,10 @@ function structuredEvidenceGaps(output: Record<string, unknown> | undefined): st
       return [typeof question === 'string' ? question.trim() : '', typeof hint === 'string' ? hint.trim() : ''].filter(Boolean).join(' ')
     })
     .filter(Boolean))]
+  if (structured.length === 0 && output?.error_code === 'browser_locator_failed') {
+    structured.push('验证 Agent 已尝试多种页面策略仍无法继续。请确认当前页面是否已经到达应继续验证的业务状态，并说明下一步应验证什么；如果尚未到达，请说明这一步的真实业务意图。无需提供按钮名称、选择器、账号或密码。')
+  }
+  return structured
     .slice(0, 8)
     .map(value => value.slice(0, 500))
 }
@@ -45,7 +49,11 @@ function verificationNeedsUserEvidence(attempt: ActionDetail['attempts'][number]
   return Boolean(
     attempt &&
     ['validation', 'regression'].includes(attempt.phase) &&
-    (attempt.output_json?.verification_status === 'insufficient_info' || Array.isArray(attempt.output_json?.validation_questions)) &&
+    (
+      attempt.output_json?.verification_status === 'insufficient_info' ||
+      Array.isArray(attempt.output_json?.validation_questions) ||
+      attempt.output_json?.error_code === 'browser_locator_failed'
+    ) &&
     structuredEvidenceGaps(attempt.output_json).length > 0,
   )
 }

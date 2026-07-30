@@ -123,9 +123,8 @@ describe('BugBrowserProgress', () => {
     expect(quota.find('[data-browser-action]').exists()).toBe(false)
 
     const locator = mount(BugBrowserProgress, { props: { attempt: attempt('browser_locator_failed'), events: [], systemID: 'base', environment: 'test' } })
-    expect(locator.text()).toContain('有限次现场调整仍失败')
-    expect(locator.text()).toContain('Agent 会重新观察现场')
-    expect(locator.text()).toContain('业务语义确实不明确')
+    expect(locator.get('[data-browser-state="assistance"]').text()).toContain('无法安全确定下一步')
+    expect(locator.text()).toContain('重建 scenario_contract')
     expect(locator.find('[data-browser-action="repair-runtime"]').exists()).toBe(false)
 
     const business = mount(BugBrowserProgress, { props: { attempt: attempt('browser_url_required'), events: [], systemID: 'base', environment: 'test' } })
@@ -159,6 +158,18 @@ describe('BugBrowserProgress', () => {
     expect(assistance.get('[data-browser-state="assistance"]').text()).toContain('无法安全确定下一步')
     expect(assistance.text()).toContain('重建 scenario_contract')
     expect(assistance.find('[data-browser-action]').exists()).toBe(false)
+
+    const assistedLocator = mount(BugBrowserProgress, { props: { attempt: attempt('browser_locator_failed', {
+      error_code: 'browser_locator_failed',
+      validation_questions: [{
+        id: 'clarify_business_state',
+        question: '当前页面是否已经到达应继续验证的业务状态？',
+        answer_hint: '请说明当前业务状态和期望的下一步结果。',
+      }],
+    }), events: [], systemID: 'base', environment: 'test' } })
+    expect(assistedLocator.get('[data-browser-state="assistance"]').text()).toContain('无法安全确定下一步')
+    expect(assistedLocator.text()).toContain('重建 scenario_contract')
+    expect(assistedLocator.find('[data-browser-state="locator"]').exists()).toBe(false)
 
     const repairPlan = mount(BugBrowserProgress, { props: { attempt: attempt('browser_locator_repair_plan_invalid', {
       error_code: 'browser_locator_repair_plan_invalid',

@@ -1779,7 +1779,7 @@ func browserPublicErrorMessage(code string) string {
 	case "browser_runtime_broken":
 		return "验证浏览器运行环境不可用"
 	case "browser_locator_failed":
-		return "页面定位经过有限次现场修复仍失败，请重新观察页面并生成验证计划"
+		return "验证 Agent 已尝试多种页面策略仍无法继续，需要用户确认当前业务状态后调整策略"
 	case "browser_assertion_failed":
 		return "页面断言未通过，需要补充业务证据"
 	case "browser_policy_blocked":
@@ -1944,6 +1944,9 @@ func browserValidationQuestions(result BrowserCoordinatorResult) []map[string]st
 	question := ""
 	hint := ""
 	switch result.ErrorCode {
+	case "browser_locator_failed":
+		question = fmt.Sprintf("验证 Agent 在%s处尝试了多种页面策略仍无法继续。当前页面是否已经到达应继续验证的业务状态？如果已经到达，请说明下一步应验证什么；如果尚未到达，请说明这一步的真实业务意图。", action)
+		hint = "请描述当前业务状态和期望流程，例如“已经进入目标列表，继续搜索并核对结果”；无需提供按钮名称、选择器、账号或密码。"
 	case "browser_assertion_failed":
 		question = fmt.Sprintf("%s后的现象与当前业务预期不一致。你期望看到的页面状态或接口结果具体是什么？", action)
 		hint = "请给出可观察的文案、页面状态、请求结果或字段关系。"
@@ -1963,7 +1966,7 @@ func browserValidationQuestions(result BrowserCoordinatorResult) []map[string]st
 
 func browserBusinessEvidenceFailure(code string) bool {
 	switch code {
-	case "browser_validation_needs_user_input", "browser_assertion_failed",
+	case "browser_validation_needs_user_input", "browser_locator_failed", "browser_assertion_failed",
 		"browser_policy_blocked", "browser_url_required":
 		return true
 	default:
@@ -3788,13 +3791,13 @@ func browserRepairPrompt(original BrowserPlan, failed BrowserVerificationResult,
 }
 
 func browserAssistanceRequestContract() string {
-	return "If a missing user-owned business fact makes a safe and semantically correct plan impossible, do not guess and do not emit a malformed BrowserPlan. Instead output exactly this alternative YAML shape: {assistance_status: needs_user_input, questions: [{id: <lowercase stable id>, question: <one concrete question>, answer_hint: <what the user should clarify>}]}. Ask 1-3 minimal questions only about an ambiguous business operation order, business expectation, affected application scope, test data meaning, or observable success condition. Page exploration is Studio's responsibility: never ask the user for menu names, button/control text, selectors, routes, page structure, whether a visible control exists, or how to navigate from a configured frontend entry. Never ask for passwords, cookies, tokens, OTP, scenario hashes, local paths, deployment metadata, or other facts Studio can observe itself. Do not use the assistance response for runtime, provider, attachment, or tool failures.\n"
+	return "If a missing user-owned business fact makes a safe and semantically correct plan impossible, do not guess and do not emit a malformed BrowserPlan. After inspecting the frozen observation and trying the available safe strategies, also use assistance when you still cannot distinguish whether the intended business state has already been reached or which of multiple plausible business continuations the user intends. Instead output exactly this alternative YAML shape: {assistance_status: needs_user_input, questions: [{id: <lowercase stable id>, question: <one concrete question>, answer_hint: <what the user should clarify>}]}. Ask 1-3 minimal questions only about an ambiguous business operation order, current business state, business expectation, affected application scope, test data meaning, intended next outcome, or observable success condition. State the blocked checkpoint, what action led there, and what decision the answer will change. Page exploration is Studio's responsibility: never ask the user for menu names, button/control text, selectors, routes, page structure, whether a visible control exists, or how to navigate from a configured frontend entry. Never ask for passwords, cookies, tokens, OTP, scenario hashes, local paths, deployment metadata, or other facts Studio can observe itself. Do not use the assistance response for runtime, provider, attachment, or tool failures.\n"
 }
 
 func browserLocatorDecisionContract(statuses string) string {
 	return "\nThe failed action and its frozen screenshot, accessibility, action, console, and network facts are an observation checkpoint, not automatically a system error. Choose one outcome:\n" +
 		"1. Return a repaired BrowserPlan only when another safe browser action is genuinely needed and is grounded in observed evidence.\n" +
-		"2. Return assistance_status: needs_user_input only when a user-owned business fact is missing.\n" +
+		"2. Return assistance_status: needs_user_input when a user-owned business fact is missing, or after safe autonomous strategies are exhausted and the observed page still supports multiple plausible business continuations. Explain the blocked checkpoint and ask only for the business-state decision that changes the next plan.\n" +
 		"3. Return ValidationResult only when the current frozen evidence already proves reproduced/still_reproduces or not_reproduced/fixed. In particular, an expected element being absent may prove not_reproduced/fixed instead of requiring locator repair; an unexpectedly present element may already prove reproduced/still_reproduces. Do not force a click merely to satisfy the old plan. Never return insufficient_info merely because the locator or browser action failed; repair the executable strategy instead.\n" +
 		validationOutputContractFor(statuses)
 }

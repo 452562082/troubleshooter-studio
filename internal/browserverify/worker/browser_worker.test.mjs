@@ -2104,6 +2104,7 @@ test('interaction recovery scopes foreground controls to the active modal surfac
   const worker = await import('./browser_worker.mjs');
   const makeButton = (text) => ({
     isVisible: async () => true,
+    boundingBox: async () => ({ x: 420, y: 240, width: 96, height: 36 }),
     getAttribute: async (name) => name === 'role' ? 'button' : '',
     textContent: async () => text,
     isDisabled: async () => false,
@@ -2112,6 +2113,7 @@ test('interaction recovery scopes foreground controls to the active modal surfac
   const modalSearch = makeButton('搜索');
   const modalInput = {
     isVisible: async () => true,
+    boundingBox: async () => ({ x: 420, y: 190, width: 240, height: 36 }),
     getAttribute: async () => '',
     textContent: async () => '',
     isDisabled: async () => false,
@@ -2120,7 +2122,7 @@ test('interaction recovery scopes foreground controls to the active modal surfac
   const list = (nodes) => ({ count: async () => nodes.length, nth: (index) => nodes[index] });
   const modal = {
     isVisible: async () => true,
-    getAttribute: async (name) => ({ role: 'dialog', 'aria-modal': 'true', class: 'ant-modal' })[name] ?? '',
+    getAttribute: async (name) => ({ role: 'dialog', 'aria-modal': 'true', class: 'ant-modal' })[name] ?? null,
     boundingBox: async () => ({ x: 300, y: 150, width: 680, height: 420 }),
     locator: (selector) => {
       if (selector.includes('[role="searchbox"]')) return list([modalInput, modalSearch]);
@@ -2132,6 +2134,7 @@ test('interaction recovery scopes foreground controls to the active modal surfac
     getByRole: () => list([modalSearch]),
   };
   const page = {
+    viewportSize: () => ({ width: 1280, height: 720 }),
     locator: (selector) => {
       if (selector.includes('[aria-modal="true"]')) return list([modal]);
       if (selector === 'button') return list([backgroundSearch, modalSearch]);
@@ -2155,6 +2158,133 @@ test('interaction recovery scopes foreground controls to the active modal surfac
       { action: 'click', locator: { kind: 'text', value: '搜索', exact: true } },
     ),
     modalSearch,
+  );
+});
+
+test('interaction recovery ignores an offscreen closed drawer whose portal remains visible to Playwright', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const sidebarMenuItem = {
+    isVisible: async () => true,
+    getAttribute: async (name) => name === 'role' ? 'menuitem' : '',
+    textContent: async () => '内容管理',
+    isDisabled: async () => false,
+  };
+  const offscreenDrawerButton = {
+    isVisible: async () => true,
+    boundingBox: async () => ({ x: 1380, y: 120, width: 96, height: 36 }),
+    getAttribute: async (name) => name === 'role' ? 'button' : '',
+    textContent: async () => '主题设置',
+    isDisabled: async () => false,
+  };
+  const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const list = (nodes) => ({ count: async () => nodes.length, nth: (index) => nodes[index] });
+  const closedDrawer = {
+    isVisible: async () => true,
+    getAttribute: async (name) => ({
+      class: 'ant-drawer ant-drawer-right',
+      style: 'position: fixed; inset: 0;',
+    })[name] ?? null,
+    // Component-library portal roots may still cover the viewport while their
+    // interactive panel and controls are translated completely offscreen.
+    boundingBox: async () => ({ x: 0, y: 0, width: 1280, height: 720 }),
+    locator: (selector) => selector === 'button' || selector.startsWith('input,textarea')
+      ? list([offscreenDrawerButton])
+      : empty,
+    getByRole: () => empty,
+  };
+  const page = {
+    viewportSize: () => ({ width: 1280, height: 720 }),
+    locator: (selector) => selector.includes('[class*="drawer" i]') ? list([closedDrawer]) : empty,
+    getByRole: (role, options) => role === 'menuitem' && options?.name === '内容管理'
+      ? list([sidebarMenuItem])
+      : empty,
+  };
+
+  assert.equal(
+    await worker.resolveVisibleInteractionLocator(
+      page,
+      { kind: 'role', value: 'menuitem', name: '内容管理', exact: true },
+      { timeoutMs: 0, pollMs: 1 },
+    ),
+    sidebarMenuItem,
+  );
+});
+
+test('interaction recovery ignores an aria-hidden surface even when its geometry remains in the viewport', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const hiddenControl = {
+    isVisible: async () => true,
+    boundingBox: async () => ({ x: 1030, y: 180, width: 96, height: 36 }),
+  };
+  const list = (nodes) => ({ count: async () => nodes.length, nth: (index) => nodes[index] });
+  const hiddenDrawer = {
+    isVisible: async () => true,
+    getAttribute: async (name) => ({
+      class: 'ant-drawer ant-drawer-right',
+      'aria-hidden': 'true',
+    })[name] ?? null,
+    boundingBox: async () => ({ x: 960, y: 0, width: 320, height: 720 }),
+    locator: () => list([hiddenControl]),
+  };
+  const page = {
+    viewportSize: () => ({ width: 1280, height: 720 }),
+    locator: () => list([hiddenDrawer]),
+  };
+
+  assert.equal(await worker.resolveActiveInteractionScope(page), page);
+});
+
+test('interaction recovery keeps an in-viewport open drawer as the active surface', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const makeButton = (text, x) => ({
+    isVisible: async () => true,
+    boundingBox: async () => ({ x, y: 180, width: 96, height: 36 }),
+    getAttribute: async (name) => name === 'role' ? 'button' : '',
+    textContent: async () => text,
+    isDisabled: async () => false,
+  });
+  const backgroundSearch = makeButton('搜索', 120);
+  const drawerSearch = makeButton('搜索', 1030);
+  const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const list = (nodes) => ({ count: async () => nodes.length, nth: (index) => nodes[index] });
+  const openDrawer = {
+    isVisible: async () => true,
+    getAttribute: async (name) => ({
+      class: 'ant-drawer ant-drawer-right ant-drawer-open',
+      'data-state': 'open',
+    })[name] ?? null,
+    boundingBox: async () => ({ x: 960, y: 0, width: 320, height: 720 }),
+    locator: (selector) => selector === 'button' || selector.startsWith('input,textarea')
+      ? list([drawerSearch])
+      : empty,
+    getByRole: () => list([drawerSearch]),
+    getByText: () => list([drawerSearch]),
+  };
+  const page = {
+    viewportSize: () => ({ width: 1280, height: 720 }),
+    locator: (selector) => {
+      if (selector.includes('[class*="drawer" i]')) return list([openDrawer]);
+      if (selector === 'button') return list([backgroundSearch, drawerSearch]);
+      return empty;
+    },
+    getByRole: () => list([backgroundSearch, drawerSearch]),
+    getByText: () => list([backgroundSearch, drawerSearch]),
+  };
+
+  assert.equal(
+    await worker.resolveVisibleInteractionLocator(
+      page,
+      { kind: 'role', value: 'button', name: '搜索', exact: true },
+      { timeoutMs: 0, pollMs: 1 },
+    ),
+    drawerSearch,
+  );
+  assert.equal(
+    await worker.resolveObservedInteractionLocator(
+      page,
+      { action: 'click', locator: { kind: 'text', value: '搜索', exact: true } },
+    ),
+    drawerSearch,
   );
 });
 

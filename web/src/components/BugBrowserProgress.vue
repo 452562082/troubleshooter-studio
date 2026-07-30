@@ -67,6 +67,16 @@ const stableErrorCode = computed(() => {
   return value.startsWith('browser_') || value === 'validator_not_installed' ? value : ''
 })
 
+const hasValidationQuestions = computed(() => {
+  const questions = props.attempt?.output_json?.validation_questions
+  const hasQuestions = Array.isArray(questions) && questions.some(value => {
+    if (!value || typeof value !== 'object') return false
+    const question = (value as Record<string, unknown>).question
+    return typeof question === 'string' && question.trim().length > 0
+  })
+  return hasQuestions || stableErrorCode.value === 'browser_locator_failed'
+})
+
 const planValidationIssueCopy: Record<string, string> = {
   plan_not_canonical: '计划包含与持久化协议不一致的空字段或默认值',
   locator_positional_css_forbidden: '同名控件使用了不稳定的位置型 CSS；Studio 未能自动转换为行内结构化定位',
@@ -102,6 +112,7 @@ const failureStageCopy = computed(() => {
 
 const state = computed<'progress' | 'assistance' | 'login' | 'runtime' | 'validator' | 'quota' | 'locator' | 'url' | 'business' | 'plan' | 'attachment' | 'configuration' | 'process' | 'retry' | 'system' | ''>(() => {
   const code = stableErrorCode.value
+  if (hasValidationQuestions.value) return 'assistance'
   if (code === 'browser_validation_needs_user_input') return 'assistance'
   if (code === 'browser_login_required') return 'login'
   if (code === 'browser_runtime_broken') return 'runtime'

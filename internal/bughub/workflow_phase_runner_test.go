@@ -1237,7 +1237,7 @@ func TestBrowserFailureOutcomeSeparatesSystemFailuresFromEvidenceGaps(t *testing
 		"browser_artifact_manifest_invalid", "browser_artifact_digest_changed", "browser_artifact_sensitive", "browser_artifact_freeze_failed",
 		"browser_artifact_frozen_invalid", "browser_artifact_repair_evidence_invalid", "browser_artifact_repair_cleanup_failed",
 		"browser_artifact_evaluator_evidence_invalid", "browser_artifact_evaluator_cleanup_failed", "browser_artifact_response_assertion_invalid",
-		"browser_validator_failed", "browser_validator_timeout",
+		"browser_validator_failed", "browser_validator_timeout", "browser_validator_transport_failed",
 		"browser_validator_attachment_failed", "browser_validator_no_output", "browser_validator_process_failed", "browser_validator_configuration_invalid",
 	} {
 		if got := browserFailureOutcome(PhaseValidation, code); got != PhaseOutcomeSystemFailed {

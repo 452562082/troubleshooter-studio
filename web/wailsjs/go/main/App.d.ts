@@ -55,6 +55,8 @@ export function ClearBugPlatformLogin(arg1:main.BugLoginInput):Promise<main.BugL
 
 export function ClearIncidentBrowserSession(arg1:main.IncidentBrowserCommandInput):Promise<void>;
 
+export function CaptureIncidentManualReproduction(arg1:main.IncidentBrowserCommandInput):Promise<main.IncidentManualReproductionResult>;
+
 export function CompleteIncidentRemediation(arg1:main.CompleteIncidentRemediationInput):Promise<bughub.IncidentCase>;
 
 export function ConfirmIncidentBrowserLogin(arg1:main.IncidentBrowserCommandInput):Promise<bughub.IncidentCase>;

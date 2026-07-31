@@ -2977,6 +2977,29 @@ export namespace main {
 	        this.actor_id = source["actor_id"];
 	    }
 	}
+
+	export class IncidentManualReproductionResult {
+		artifact_ids: Array<string>;
+		screenshot_artifact_ids: Array<string>;
+		action_count: number;
+		final_url: string;
+		title: string;
+		summary: string;
+
+		static createFrom(source: any = {}) {
+			return new IncidentManualReproductionResult(source);
+		}
+
+		constructor(source: any = {}) {
+			if ('string' === typeof source) source = JSON.parse(source);
+			this.artifact_ids = source["artifact_ids"];
+			this.screenshot_artifact_ids = source["screenshot_artifact_ids"];
+			this.action_count = source["action_count"];
+			this.final_url = source["final_url"];
+			this.title = source["title"];
+			this.summary = source["summary"];
+		}
+	}
 	export class IncidentBugTicketResolution {
 	    state: string;
 	    source_status?: string;

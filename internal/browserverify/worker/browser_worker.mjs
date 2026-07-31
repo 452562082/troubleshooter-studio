@@ -94,9 +94,13 @@ const INTERACTION_SURFACE_CONTROL_SELECTOR = [
   '[role="searchbox"]',
   '[role="combobox"]',
   '[contenteditable="true"]',
+  '[onclick]',
+  '[tabindex]:not([tabindex="-1"])',
 ].join(',');
 const DOM_OBSTRUCTION_MAX_CANDIDATES = 128;
 const DOM_OBSTRUCTION_MAX_DISMISSALS = 2;
+const SAFE_DISMISS_CLICK_TIMEOUT_MS = 2_000;
+const SAFE_DISMISS_SETTLE_MS = 150;
 const DOM_OBSTRUCTION_SELECTOR = [
   'button',
   '[role="button"]',
@@ -335,7 +339,7 @@ export function validateWorkerRequest(request) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('worker request must be an object');
   ownKeys(request, new Set(['mode', 'plan', 'policy', 'staging_dir', 'upload_files', 'storage_state_path', 'headless']), 'request');
 
-  if (request.mode !== 'execute' && request.mode !== 'login') throw new Error('worker request mode is not supported');
+  if (!['execute', 'login', 'record'].includes(request.mode)) throw new Error('worker request mode is not supported');
   if (typeof request.headless !== 'boolean') throw new Error('headless must be boolean');
   validatePolicy(request.policy);
 
@@ -363,6 +367,24 @@ export function validateWorkerRequest(request) {
         throw new Error('login application URL contains credential material');
       }
     }
+    return;
+  }
+
+  if (request.mode === 'record') {
+    if (!applicationOrigins.has(start.origin)) throw new Error('browser application origin is not configured');
+    if (!startOrigins.has(start.origin)) throw new Error('browser start origin is not configured');
+    if (request.policy.is_prod) throw new Error('manual browser recording is blocked in production');
+    if (request.headless !== false) throw new Error('manual browser recording must be visible');
+    if (!isAbsolute(requiredString(request.staging_dir, 'staging_dir'))) throw new Error('staging_dir must be absolute');
+    if (request.storage_state_path !== undefined && !isAbsolute(requiredString(request.storage_state_path, 'storage_state_path'))) {
+      throw new Error('storage_state_path must be absolute');
+    }
+    if (!Array.isArray(plan.actions) || plan.actions.length !== 0) throw new Error('manual browser recording plan actions are forbidden');
+    if (!Array.isArray(plan.assertions) || plan.assertions.length !== 0) throw new Error('manual browser recording plan assertions are forbidden');
+    if ((plan.request_captures?.length ?? 0) !== 0 || (plan.response_assertions?.length ?? 0) !== 0) {
+      throw new Error('manual browser recording plan extensions are forbidden');
+    }
+    if (request.upload_files !== undefined) throw new Error('manual browser recording upload files are forbidden');
     return;
   }
 
@@ -404,11 +426,18 @@ export function validateWorkerRequest(request) {
     if (action.screenshot_after !== undefined && typeof action.screenshot_after !== 'boolean') throw new Error('screenshot_after must be boolean');
     if (action.action === 'screenshot' && action.screenshot_after === true) throw new Error('screenshot_after is forbidden for screenshot action');
 
+    const locatorFreeEscape = action.action === 'press'
+      && request.plan.version === 2
+      && action.locator === undefined
+      && typeof action.key === 'string'
+      && action.key.trim().toLowerCase() === 'escape';
     const locatorActions = new Set(['click', 'fill', 'press', 'select', 'upload_file', 'wait_for']);
     if (locatorActions.has(action.action)) {
-      validateLocator(action.locator, action.id);
-      if (request.plan.version !== 2 && action.locator?.within !== undefined) {
-        throw new Error(`${action.id} locator scope requires plan version 2`);
+      if (!locatorFreeEscape) {
+        validateLocator(action.locator, action.id);
+        if (request.plan.version !== 2 && action.locator?.within !== undefined) {
+          throw new Error(`${action.id} locator scope requires plan version 2`);
+        }
       }
     }
     else if (action.locator !== undefined) throw new Error(`${action.action} locator is forbidden`);
@@ -416,7 +445,13 @@ export function validateWorkerRequest(request) {
     else if (action.url !== undefined) throw new Error(`${action.action} URL is forbidden`);
     if (action.action === 'fill' || action.action === 'select') requiredString(action.value, `${action.action} value`);
     else if (action.value !== undefined) throw new Error(`${action.action} value is forbidden`);
-    if (action.action === 'press') requiredString(action.key, 'press key', 128);
+    if (action.action === 'press') {
+      if (locatorFreeEscape) {
+        if (Buffer.byteLength(action.key, 'utf8') > 128) throw new Error('press key is too long');
+      } else {
+        requiredString(action.key, 'press key', 128);
+      }
+    }
     else if (action.key !== undefined) throw new Error(`${action.action} key is forbidden`);
     if (action.action === 'upload_file') {
       const fileRef = requiredString(action.file_ref, 'upload file_ref', 256);
@@ -1641,7 +1676,8 @@ function interactionActionCompatible(action, snapshot) {
   if (action.action === 'click') {
     return snapshot.tag === 'button'
       || snapshot.tag === 'a'
-      || ['button', 'link', 'tab', 'option', 'menuitem'].includes(snapshot.role);
+      || ['button', 'link', 'tab', 'option', 'menuitem'].includes(snapshot.role)
+      || snapshot.programmaticClick;
   }
   return action.action === 'wait_for';
 }
@@ -1678,7 +1714,7 @@ function interactionCandidateScore(action, snapshot) {
 }
 
 async function interactionCandidateSnapshot(candidate, tagHint = '') {
-  const [type, role, ariaLabel, placeholder, name, contentEditable, ariaDisabled, text, disabled] = await Promise.all([
+  const [type, role, ariaLabel, placeholder, name, contentEditable, ariaDisabled, onclick, tabindex, text, disabled] = await Promise.all([
     candidate.getAttribute('type').catch(() => ''),
     candidate.getAttribute('role').catch(() => ''),
     candidate.getAttribute('aria-label').catch(() => ''),
@@ -1686,6 +1722,8 @@ async function interactionCandidateSnapshot(candidate, tagHint = '') {
     candidate.getAttribute('name').catch(() => ''),
     candidate.getAttribute('contenteditable').catch(() => ''),
     candidate.getAttribute('aria-disabled').catch(() => ''),
+    candidate.getAttribute('onclick').catch(() => null),
+    candidate.getAttribute('tabindex').catch(() => null),
     candidate.textContent().catch(() => ''),
     candidate.isDisabled().catch(() => false),
   ]);
@@ -1698,6 +1736,8 @@ async function interactionCandidateSnapshot(candidate, tagHint = '') {
     name: String(name || ''),
     text: String(text || ''),
     contentEditable: String(contentEditable || '').toLowerCase() === 'true',
+    programmaticClick: String(onclick || '').trim() !== ''
+      || (tabindex !== null && String(tabindex).trim() !== '' && String(tabindex).trim() !== '-1'),
     disabled: Boolean(disabled || String(ariaDisabled || '').toLowerCase() === 'true'),
   };
 }
@@ -1728,6 +1768,8 @@ async function interactionSurfaceSnapshot(candidate, index, viewport) {
     hidden,
     dataState,
     dataOpen,
+    open,
+    popover,
     style,
     className,
     id,
@@ -1739,6 +1781,8 @@ async function interactionSurfaceSnapshot(candidate, index, viewport) {
     candidate.getAttribute('hidden').catch(() => null),
     candidate.getAttribute('data-state').catch(() => ''),
     candidate.getAttribute('data-open').catch(() => ''),
+    candidate.getAttribute('open').catch(() => null),
+    candidate.getAttribute('popover').catch(() => null),
     candidate.getAttribute('style').catch(() => ''),
     candidate.getAttribute('class').catch(() => ''),
     candidate.getAttribute('id').catch(() => ''),
@@ -1757,6 +1801,14 @@ async function interactionSurfaceSnapshot(candidate, index, viewport) {
     || normalizedRole === 'alertdialog';
   const structuralName = `${className || ''} ${id || ''}`;
   if (!modalSemantic && /(mask|backdrop|scrim)/i.test(structuralName)) return null;
+  const normalizedState = String(dataState || '').trim().toLowerCase();
+  const explicitOpenState = ['open', 'opened', 'active', 'entered', 'visible', 'shown'].includes(normalizedState)
+    || String(dataOpen || '').toLowerCase() === 'true'
+    || String(ariaHidden || '').toLowerCase() === 'false'
+    || open !== null
+    || popover !== null
+    || /(?:^|[\s_-])(?:is-)?(?:open|opened|active|entered|visible|shown)(?:$|[\s_-])/i.test(structuralName);
+  if (!modalSemantic && !explicitOpenState) return null;
 
   const descendants = candidate.locator(INTERACTION_SURFACE_CONTROL_SELECTOR);
   const count = Math.min(
@@ -2112,6 +2164,8 @@ export async function resolveObservedInteractionLocator(page, action) {
       ['select', 'select'],
       ['textarea', 'textarea'],
       ['[contenteditable="true"]:not([role])', ''],
+      ['[onclick]:not(button):not(a):not([role])', ''],
+      ['[tabindex]:not([tabindex="-1"]):not(button):not(a):not(input):not(textarea):not(select):not([role]):not([onclick])', ''],
     ]
     : [
       ['input', 'input'],
@@ -2762,7 +2816,7 @@ const CANONICAL_PRESS_KEYS = new Map([
 ]);
 
 function canonicalPressKey(rawKey) {
-  const key = requiredString(rawKey, 'press key', 128);
+  const key = requiredString(typeof rawKey === 'string' ? rawKey.trim() : rawKey, 'press key', 128);
   return CANONICAL_PRESS_KEYS.get(key.toLowerCase()) ?? key;
 }
 
@@ -2783,8 +2837,24 @@ export async function resolveVisibleInteractionLocator(page, locatorSpec, {
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || !Number.isFinite(pollMs) || pollMs <= 0) {
     throw new Error('interaction locator wait options are invalid');
   }
-  const root = await resolveActiveInteractionScope(page);
-  const candidates = buildLocator(root, locatorSpec);
+  const activeRoot = await resolveActiveInteractionScope(page);
+  let candidates;
+  if (locatorSpec?.within) {
+    // An explicit `within` identifies its container from the document root.
+    // Applying the automatic active-surface scope first would search for that
+    // same dialog/drawer *inside itself*. Playwright locators do not include
+    // their root node, so a valid `within: role=dialog` locator would
+    // deterministically resolve to zero elements.
+    candidates = buildLocator(page, locatorSpec);
+    if (activeRoot !== page) {
+      // Resolving from the document must not become a way to click through an
+      // open modal. Intersect the explicit result with descendants of the
+      // current foreground surface.
+      candidates = candidates.and(activeRoot.locator('*'));
+    }
+  } else {
+    candidates = buildLocator(activeRoot, locatorSpec);
+  }
   const startedAt = now();
   while (true) {
     const count = await candidates.count();
@@ -2885,6 +2955,77 @@ function isDOMObstructionInteractionError(error) {
     .test(String(error?.message || error || ''));
 }
 
+async function activeSurfaceWasDismissed(page, surface, settleMs = SAFE_DISMISS_SETTLE_MS) {
+  await page.waitForTimeout?.(settleMs);
+  return !await surface?.isVisible?.().catch(() => false);
+}
+
+async function freezeInteractionSurface(surface) {
+  if (!surface || typeof surface.elementHandle !== 'function') return surface;
+  return await surface.elementHandle().catch(() => null) ?? surface;
+}
+
+async function releaseInteractionSurface(surface, identity) {
+  if (!identity || identity === surface || typeof identity.dispose !== 'function') return;
+  await identity.dispose().catch(() => {});
+}
+
+// A close/dismiss action is already an explicit user-approved navigation
+// intent. If Playwright cannot perform the ordinary click because the modal is
+// animated or covered by its own portal mask, recover inside the trusted host
+// instead of asking the model to invent another locator. Recovery is bounded
+// to one currently active foreground surface and verifies that it disappeared.
+export async function recoverActiveSurfaceDismissal(page, preferredLocator) {
+  const surface = await resolveActiveInteractionScope(page);
+  if (!surface || surface === page) return false;
+  const surfaceIdentity = await freezeInteractionSurface(surface);
+
+  try {
+    if (preferredLocator) {
+      try {
+        await preferredLocator.click({ timeout: SAFE_DISMISS_CLICK_TIMEOUT_MS, force: true });
+        if (await activeSurfaceWasDismissed(page, surfaceIdentity)) return true;
+      } catch {
+        // Continue to the host-owned safe candidate and Escape fallbacks.
+      }
+    }
+
+    if (await dismissSafeDOMObstructions(page, { maxDismissals: 1, settleMs: SAFE_DISMISS_SETTLE_MS }) > 0 &&
+        await activeSurfaceWasDismissed(page, surfaceIdentity, 0)) {
+      return true;
+    }
+
+    if (typeof page.keyboard?.press !== 'function') return false;
+    try {
+      await page.keyboard.press('Escape');
+    } catch {
+      return false;
+    }
+    return activeSurfaceWasDismissed(page, surfaceIdentity);
+  } finally {
+    await releaseInteractionSurface(surface, surfaceIdentity);
+  }
+}
+
+export async function pressGlobalEscapeToDismissSurface(page) {
+  const surface = await resolveActiveInteractionScope(page);
+  if (!surface || surface === page) {
+    throw new BrowserInteractionError('active_surface_not_found', 'global Escape requires an active dialog, drawer, or popover');
+  }
+  if (typeof page.keyboard?.press !== 'function') {
+    throw new BrowserInteractionError('active_surface_dismissal_failed', 'active surface does not support global Escape');
+  }
+  const surfaceIdentity = await freezeInteractionSurface(surface);
+  try {
+    await page.keyboard.press('Escape');
+    if (!await activeSurfaceWasDismissed(page, surfaceIdentity)) {
+      throw new BrowserInteractionError('active_surface_dismissal_failed', 'active surface remained visible after global Escape');
+    }
+  } finally {
+    await releaseInteractionSurface(surface, surfaceIdentity);
+  }
+}
+
 async function reusableInteractionBinding(binding, action, index) {
   if (!binding || binding.action !== 'fill' || action.action !== 'press') return null;
   if (binding.index + 1 !== index || binding.key !== interactionBindingKey(action.locator)) return null;
@@ -2919,6 +3060,16 @@ export async function executeAction(page, action, request, index, captureScreens
       default: {
         if (action.action === 'wait_for') {
           await buildLocator(page, action.locator).first().waitFor({ state: 'visible' });
+          return { loginRequired: false, path: '' };
+        }
+        if (action.action === 'press' && !action.locator) {
+          if (canonicalPressKey(action.key) !== 'Escape') {
+            throw new BrowserInteractionError('global_press_forbidden', 'only global Escape is supported without a locator');
+          }
+          if (request.policy.is_prod) {
+            throw new BrowserInteractionError('global_press_forbidden', 'global Escape is forbidden in production');
+          }
+          await pressGlobalEscapeToDismissSurface(page);
           return { loginRequired: false, path: '' };
         }
         const dismissObstructions = async () => {
@@ -2960,7 +3111,13 @@ export async function executeAction(page, action, request, index, captureScreens
           }
         }
         const applyInteraction = async () => {
-          if (action.action === 'click') await locator.click();
+          if (action.action === 'click') {
+            if (actionTargetsSafeDismissal(action)) {
+              await locator.click({ timeout: SAFE_DISMISS_CLICK_TIMEOUT_MS });
+            } else {
+              await locator.click();
+            }
+          }
           else if (action.action === 'fill') {
             const type = String(await locator.getAttribute('type').catch(() => '') ?? '').toLowerCase();
             if (type === 'password') throw new Error('password input is not allowed');
@@ -2988,6 +3145,11 @@ export async function executeAction(page, action, request, index, captureScreens
         try {
           await applyInteraction();
         } catch (error) {
+          if (!request.policy.is_prod && actionTargetsSafeDismissal(action) &&
+              await recoverActiveSurfaceDismissal(page, locator)) {
+            if (typeof onLocatorRecovered === 'function') onLocatorRecovered(action);
+            return { loginRequired: false, path: '' };
+          }
           // Pointer interception means Chromium did not deliver the business
           // action, so one retry is safe after dismissing a newly appeared
           // interstitial. Never retry navigation/timeouts or arbitrary errors.
@@ -3022,11 +3184,20 @@ export async function settleBrowserInteraction(page, action, delayMs = 150, inte
   }
 }
 
-function browserActionFailureCode(error, destinationBlocked = false) {
+export function browserActionFailureCode(error, destinationBlocked = false) {
   if (destinationBlocked) return 'browser_destination_blocked';
   if (error?.code === 'locator_ambiguous') return 'locator_ambiguous';
   if (error?.code === 'locator_not_found') return 'locator_not_found';
   if (error?.code === 'input_value_not_persisted') return 'input_value_not_persisted';
+  if (error?.code === 'active_surface_not_found') return 'active_surface_not_found';
+  if (error?.code === 'active_surface_dismissal_failed') return 'active_surface_dismissal_failed';
+  if (error?.code === 'global_press_forbidden') return 'global_press_forbidden';
+  const message = String(error?.message || error || '');
+  if (isDOMObstructionInteractionError(error)) return 'element_click_intercepted';
+  if (error?.name === 'TimeoutError' || /(?:timed?\s*out|timeout\s+\d+ms\s+exceeded)/i.test(message)) return 'element_action_timeout';
+  if (/(?:not attached|detached from|element was detached)/i.test(message)) return 'element_detached';
+  if (/(?:not stable|element is moving)/i.test(message)) return 'element_not_stable';
+  if (/(?:not enabled|element is disabled)/i.test(message)) return 'element_not_enabled';
   return 'browser_action_failed';
 }
 
@@ -3036,6 +3207,14 @@ function browserActionFailureMessage(code) {
     case 'locator_not_found': return 'browser action did not match a visible control';
     case 'input_value_not_persisted': return 'browser input value did not persist';
     case 'browser_destination_blocked': return 'browser destination was blocked';
+    case 'active_surface_not_found': return 'global Escape did not find an active foreground surface';
+    case 'active_surface_dismissal_failed': return 'active foreground surface could not be dismissed';
+    case 'global_press_forbidden': return 'global browser key press was not allowed';
+    case 'element_click_intercepted': return 'browser control was covered by another element';
+    case 'element_action_timeout': return 'browser control did not become actionable before timeout';
+    case 'element_detached': return 'browser control was replaced while the action was running';
+    case 'element_not_stable': return 'browser control did not become stable';
+    case 'element_not_enabled': return 'browser control was disabled';
     default: return 'browser action failed';
   }
 }
@@ -3193,6 +3372,179 @@ async function writeEvidenceFiles(request, networkCollector, consoleCollector, a
   if (responseFactJSON) artifacts.push({ kind: 'response_facts', path: 'browser/response-facts.json' });
   if (responseAssertionJSON) artifacts.push({ kind: 'response_assertions', path: 'browser/response-assertions.json' });
   return artifacts;
+}
+
+function safeManualInteraction(payload, pageURL, index) {
+  const raw = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
+  const allowedEvents = new Set(['click', 'change', 'submit']);
+  const event = allowedEvents.has(raw.event) ? raw.event : 'click';
+  return {
+    id: `manual-${String(index).padStart(3, '0')}`,
+    action: event,
+    locator_kind: 'manual_observation',
+    role: boundedUTF8(redactConsoleText(String(raw.role ?? '').trim()), 64),
+    tag: boundedUTF8(String(raw.tag ?? '').toLowerCase().replace(/[^a-z0-9-]/g, ''), 32),
+    label: boundedUTF8(redactConsoleText(String(raw.label ?? '').trim()), 256),
+    input_type: boundedUTF8(String(raw.input_type ?? '').toLowerCase().replace(/[^a-z0-9-]/g, ''), 32),
+    url: sanitizeURL(pageURL),
+    started_at: new Date().toISOString(),
+    duration_ms: 0,
+    result: 'observed',
+  };
+}
+
+async function recordWorker(request) {
+  validateWorkerRequest(request);
+  await mkdir(request.staging_dir, { recursive: true, mode: 0o700 });
+  const { chromium } = await import('playwright');
+  emitProgress('browser_manual_recording_opened', 'Use the visible browser to reproduce the issue, then close every validation browser window');
+  const launched = await launchPinnedBrowser(chromium, request.policy, false);
+  const browser = launched.browser;
+  let context;
+  const screenshots = [];
+  const actions = [];
+  const network = createBoundedRecordCollector();
+  const consoleRecords = createBoundedRecordCollector();
+  const artifactBudget = createArtifactBudget();
+  const requestFacts = createRequestFactCollector([]);
+  const responseFacts = createAutomaticResponseFactCollector();
+  const responseAssertions = createResponseAssertionCollector([]);
+  const requestStarted = new WeakMap();
+  let screenshotSequence = 0;
+  let screenshotQueue = Promise.resolve();
+  let finalURL = '';
+  let finalTitle = '';
+  let interrupted = false;
+  const closeForInterrupt = () => {
+    if (interrupted) return;
+    interrupted = true;
+    void context?.close().catch(() => {});
+  };
+  process.once('SIGINT', closeForInterrupt);
+  process.once('SIGTERM', closeForInterrupt);
+  try {
+    const supervised = await createSupervisedBrowserContext(browser, {
+      storageStateInput: request.storage_state_path ? { storageState: request.storage_state_path } : {},
+      policy: request.policy,
+      deviceProfile: request.plan.device_profile || 'desktop',
+      hooks: {
+        onRequest: (browserRequest) => requestStarted.set(browserRequest, Date.now()),
+        onRequestFailed: (browserRequest) => {
+          if (network.isStopped()) return;
+          network.add(safeResponseRecord({
+            action_id: actions.at(-1)?.id ?? 'manual-start',
+            started_at: new Date(requestStarted.get(browserRequest) ?? Date.now()).toISOString(),
+            method: browserRequest.method?.() ?? '',
+            url: browserRequest.url?.() ?? '',
+            resource_type: browserRequest.resourceType?.() ?? '',
+            outcome: 'failed',
+            failure_reason: browserRequest.failure?.() ?? 'request failed',
+            duration_ms: Math.max(0, Date.now() - (requestStarted.get(browserRequest) ?? Date.now())),
+            headers: {},
+          }));
+        },
+        onResponse: (response) => {
+          if (network.isStopped()) return;
+          const browserRequest = response.request();
+          network.add(safeResponseRecord({
+            action_id: actions.at(-1)?.id ?? 'manual-start',
+            started_at: new Date(requestStarted.get(browserRequest) ?? Date.now()).toISOString(),
+            method: browserRequest.method(),
+            url: response.url(),
+            resource_type: browserRequest.resourceType?.() ?? '',
+            outcome: 'response',
+            status: response.status(),
+            duration_ms: Math.max(0, Date.now() - (requestStarted.get(browserRequest) ?? Date.now())),
+            headers: {},
+          }));
+        },
+        onConsole: (message) => {
+          if (!consoleRecords.isStopped()) {
+            consoleRecords.add({ type: String(message.type()).slice(0, 32), text: redactConsoleText(message.text()), timestamp: new Date().toISOString() });
+          }
+        },
+      },
+    });
+    context = supervised.context;
+    const scheduleScreenshot = (page) => {
+      // Login and interstitial pages may intentionally be excluded by
+      // captureSafePNG. Keep enough observation attempts available after
+      // those pages while still bounding persisted screenshots.
+      if (!page || screenshotSequence >= 24 || screenshots.length >= 12) return;
+      screenshotSequence += 1;
+      const name = `manual-${String(screenshotSequence).padStart(3, '0')}.png`;
+      screenshotQueue = screenshotQueue.then(async () => {
+        if (screenshots.length >= 12) return;
+        if (page.isClosed()) return;
+        await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+        if (page.isClosed()) return;
+        const captured = await captureSafePNG(page, request, name, () => false, undefined, () => context.pages()).catch(() => ({ loginRequired: false, path: '' }));
+        if (captured.path) screenshots.push(captured.path);
+      });
+    };
+    await context.exposeBinding('__tshootRecordInteraction', async ({ page }, payload) => {
+      if (!page || page.isClosed() || actions.length >= 40) return;
+      finalURL = page.url();
+      finalTitle = await page.title().catch(() => finalTitle);
+      actions.push(safeManualInteraction(payload, finalURL, actions.length + 1));
+      scheduleScreenshot(page);
+    });
+    await context.addInitScript(() => {
+      const describe = (target) => {
+        const element = target instanceof Element ? target.closest('button,a,input,textarea,select,[role],[contenteditable="true"],form') : null;
+        if (!element) return null;
+        const tag = element.tagName.toLowerCase();
+        const inputType = tag === 'input' ? String(element.getAttribute('type') || 'text').toLowerCase() : '';
+        const rawLabel = inputType === 'password'
+          ? '密码输入框'
+          : element.getAttribute('aria-label') || element.getAttribute('placeholder') || element.getAttribute('name') || element.textContent || '';
+        return { tag, role: element.getAttribute('role') || '', label: String(rawLabel).trim().slice(0, 256), input_type: inputType };
+      };
+      for (const eventName of ['click', 'change', 'submit']) {
+        document.addEventListener(eventName, (event) => {
+          const description = describe(event.target);
+          if (description && typeof window.__tshootRecordInteraction === 'function') {
+            void window.__tshootRecordInteraction({ event: eventName, ...description });
+          }
+        }, true);
+      }
+    });
+    const page = supervised.page;
+    await assertAllowedURL(request.plan.start_url, request.policy);
+    await page.goto(request.plan.start_url, { waitUntil: 'domcontentloaded' });
+    finalURL = page.url();
+    finalTitle = await page.title().catch(() => '');
+    scheduleScreenshot(page);
+    while (browser.isConnected() && context.pages().length > 0 && !interrupted) {
+      if (supervised.blocked()) throw new Error('browser destination was blocked');
+      for (const currentPage of context.pages()) {
+        const currentURL = currentPage.url();
+        if (currentURL && currentURL !== 'about:blank') {
+          await assertAllowedURL(currentURL, request.policy);
+          finalURL = currentURL;
+          finalTitle = await currentPage.title().catch(() => finalTitle);
+        }
+      }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    }
+    await screenshotQueue;
+    if (interrupted) throw new Error('manual browser recording was interrupted');
+    if (screenshots.length === 0) throw new Error('manual browser recording produced no safe screenshot');
+    const evidence = await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseFacts, responseAssertions, artifactBudget);
+    emitProgress('browser_manual_recording_completed', 'Manual reproduction evidence was captured');
+    return {
+      status: 'completed',
+      final_url: finalURL,
+      title: finalTitle,
+      final_screenshot_path: screenshots.at(-1),
+      artifacts: [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...evidence],
+    };
+  } finally {
+    process.off('SIGINT', closeForInterrupt);
+    process.off('SIGTERM', closeForInterrupt);
+    if (context) await context.close().catch(() => {});
+    await launched.close().catch(() => {});
+  }
 }
 
 async function executeWorker(request) {
@@ -3585,7 +3937,7 @@ async function probeWorker(outputPath) {
   const server = createServer((request, response) => {
     const showModal = new URL(request.url || '/', 'http://127.0.0.1').searchParams.has('modal');
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    response.end(`<!doctype html><html><head><title>tshoot browser runtime probe</title></head><body><main><p>${multibyteText}</p><button role="menuitem" data-probe-target="page-menu">内容管理</button><button data-probe-target="background"><span>搜</span> <span>索</span></button><table><tbody><tr role="row"><td>其他剧</td><td><a href="#other">查看</a></td></tr><tr role="row"><td>测试都市生活剧</td><td><a href="#target">查看</a></td></tr></tbody></table></main><aside class="ant-drawer ant-drawer-right" aria-hidden="true" style="position:fixed;inset:0;pointer-events:none"><button style="position:absolute;left:calc(100vw + 100px)">主题设置</button></aside>${showModal ? '<section role="dialog" aria-modal="true" style="position:fixed;top:120px;left:300px;width:640px;height:320px;background:white"><input type="search" placeholder="请输入搜索关键字"><button data-probe-target="modal"><span>搜</span> <span>索</span></button></section>' : ''}</body></html>`);
+    response.end(`<!doctype html><html><head><title>tshoot browser runtime probe</title></head><body><main><p>${multibyteText}</p><button role="menuitem" data-probe-target="page-menu">内容管理</button><button data-probe-target="background"><span>搜</span> <span>索</span></button><table><tbody><tr role="row"><td>其他剧</td><td><a href="#other">查看</a></td></tr><tr role="row"><td>测试都市生活剧</td><td><a href="#target">查看</a></td></tr></tbody></table></main><aside class="ant-drawer ant-drawer-right" aria-hidden="true" style="position:fixed;inset:0;pointer-events:none"><button style="position:absolute;left:calc(100vw + 100px)">主题设置</button></aside>${showModal ? '<section role="dialog" aria-label="作者用户选择" aria-modal="true" data-probe-target="child-dialog" style="position:fixed;z-index:2;top:120px;left:300px;width:640px;height:320px;background:white"><label for="probe-user-nickname">用户昵称</label><input id="probe-user-nickname" data-probe-target="modal-input" type="search" placeholder="请输入搜索关键字"><button data-probe-target="modal"><span>搜</span> <span>索</span></button><button data-probe-target="modal-close">关闭</button></section><section role="dialog" aria-label="视频编辑" aria-modal="true" data-probe-target="parent-dialog" style="position:fixed;z-index:1;top:60px;left:120px;width:1000px;height:600px;background:white"><button>保存</button></section><script>document.addEventListener("keydown",(event)=>{if(event.key==="Escape")document.querySelector("[data-probe-target=child-dialog]")?.remove()})</script>' : ''}</body></html>`);
   });
   await new Promise((resolveListen, reject) => {
     server.once('error', reject);
@@ -3630,12 +3982,59 @@ async function probeWorker(outputPath) {
       if (await observedSubmit.getAttribute('data-probe-target') !== 'modal') {
         throw new Error('runtime probe active interaction surface semantics are invalid');
       }
+      const explicitlyScopedInput = await resolveVisibleInteractionLocator(page, {
+        kind: 'label',
+        value: '用户昵称',
+        exact: true,
+        within: {
+          kind: 'role',
+          value: 'dialog',
+          name: '作者用户选择',
+          exact: true,
+        },
+      }, { timeoutMs: 0, pollMs: 1 });
+      if (await explicitlyScopedInput.getAttribute('data-probe-target') !== 'modal-input') {
+        throw new Error('runtime probe explicit interaction scope semantics are invalid');
+      }
+      // Preserve the original semantic-probe evidence before exercising the
+      // dismissal path: closing the modal intentionally removes the search
+      // input and submit control that validateRuntimeProbeWorkerResult checks.
+      const semanticProbeSummary = await accessibilitySummary(page);
+      const dismissalRequest = {
+        mode: 'execute',
+        plan: {
+          version: 2,
+          start_url: `${origin}/?modal=1`,
+          actions: [{ id: 'probe-dismiss-dialog', action: 'press', key: 'Escape' }],
+          assertions: [{ kind: 'visible_text', value: '中文页面' }],
+        },
+        policy,
+        staging_dir: resolve(dirname(outputPath)),
+        headless: true,
+      };
+      validateWorkerRequest(dismissalRequest);
+      validateWorkerRequest({
+        mode: 'record',
+        plan: { version: 2, device_profile: 'desktop', start_url: `${origin}/`, actions: [], assertions: [] },
+        policy,
+        staging_dir: resolve(dirname(outputPath)),
+        headless: false,
+      });
+      await executeAction(page, dismissalRequest.plan.actions[0], dismissalRequest, 0, async () => {
+        throw new Error('runtime probe global Escape unexpectedly captured a screenshot');
+      }, null);
+      if (await page.getByRole('dialog', { name: '作者用户选择', exact: true }).isVisible().catch(() => false)) {
+        throw new Error('runtime probe global Escape dismissal semantics are invalid');
+      }
+      if (!await page.getByRole('dialog', { name: '视频编辑', exact: true }).isVisible().catch(() => false)) {
+        throw new Error('runtime probe global Escape dismissed the underlying parent surface');
+      }
       await page.screenshot({ path: outputPath, type: 'png' });
       workerResult = {
         status: 'completed',
         final_url: page.url(),
         title: await page.title(),
-        accessibility_summary: await accessibilitySummary(page),
+        accessibility_summary: semanticProbeSummary,
         artifacts: [],
       };
       if (launched.proxy.stats().http < 1) throw new Error('runtime probe bypassed the pinned browser proxy');
@@ -3683,6 +4082,10 @@ async function main() {
     const request = await readSingleRequest();
     if (request.mode !== mode) throw new Error('worker request mode does not match CLI mode');
     result = await loginWorker(request);
+  } else if (mode === 'record') {
+    const request = await readSingleRequest();
+    if (request.mode !== mode) throw new Error('worker request mode does not match CLI mode');
+    result = await recordWorker(request);
   } else {
     throw new Error('worker mode is not supported');
   }

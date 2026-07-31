@@ -857,7 +857,8 @@ describe('IncidentWorkbenchPage', () => {
 
     const start = wrapper.get<HTMLButtonElement>('[data-action="start-case"]')
     expect(start.element.disabled).toBe(true)
-    expect(wrapper.get('.frontend-entry-resolution').text()).toContain('请选择本次验证对应的应用')
+    expect(wrapper.findAll('.frontend-entry-toggle').map(toggle => toggle.text())).toEqual(['C 端 H5', '管理端'])
+    expect(wrapper.get('.frontend-entry-resolution').text()).not.toContain('请选择本次验证对应的应用')
 
     const admin = wrapper.findAll<HTMLInputElement>('.frontend-entry-option input').find(input => input.element.value === 'admin')
     expect(admin).toBeTruthy()
@@ -902,10 +903,15 @@ describe('IncidentWorkbenchPage', () => {
 
     const wrapper = await mountedPage()
     expect(wrapper.text()).toContain('涉及端（2）')
-    const primaryInputs = wrapper.findAll<HTMLInputElement>('input[name="primary-frontend-entry"]')
-    const adminPrimary = primaryInputs.find(input => input.element.value === 'admin')
-    expect(adminPrimary).toBeTruthy()
-    await adminPrimary!.setValue(true)
+    const endpointToggles = wrapper.findAll('.frontend-entry-toggle')
+    expect(endpointToggles).toHaveLength(2)
+    expect(endpointToggles.map(toggle => toggle.text())).toEqual(['管理端', 'C 端'])
+    const endpointPanel = wrapper.get('.frontend-entry-resolution')
+    expect(endpointPanel.find('input[type="radio"]').exists()).toBe(false)
+    expect(endpointPanel.text()).not.toContain('https://admin.test/')
+    expect(endpointPanel.text()).not.toContain('https://m.test/')
+    expect(endpointPanel.text()).not.toContain('工单文本命中入口名称/别名')
+    expect(endpointPanel.text()).not.toContain('起始端')
     await wrapper.get('[data-action="start-case"]').trigger('click')
     await flushPromises()
 
@@ -914,6 +920,15 @@ describe('IncidentWorkbenchPage', () => {
       frontend_entry_ids: ['admin', 'consumer'],
       primary_frontend_entry_id: 'admin',
     }))
+  })
+
+  it('gives endpoint checkboxes a centered visual control and a full touch target', () => {
+    const source = readFileSync('src/pages/IncidentWorkbenchPage.vue', 'utf8')
+
+    expect(source).toContain('class="frontend-entry-toggle"')
+    expect(source).toMatch(/\.frontend-entry-toggle\s*\{[^}]*min-height:\s*44px[^}]*align-items:\s*center/)
+    expect(source).toMatch(/\.frontend-entry-toggle input\[type="checkbox"\]\s*\{[^}]*width:\s*20px[^}]*height:\s*20px/)
+    expect(source).toMatch(/\.frontend-entry-toggle input\[type="checkbox"\][^}]*margin:\s*0/)
   })
 
   it('clears Start pending before scrolling and focusing the opened Case', async () => {

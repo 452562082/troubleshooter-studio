@@ -127,6 +127,14 @@ describe('BugBrowserProgress', () => {
     expect(locator.text()).toContain('重建 scenario_contract')
     expect(locator.find('[data-browser-action="repair-runtime"]').exists()).toBe(false)
 
+    const clarifiedLocator = mount(BugBrowserProgress, { props: { attempt: attempt('browser_locator_failed', {
+      error_code: 'browser_locator_failed',
+      user_clarification_applied: true,
+    }), events: [], systemID: 'base', environment: 'test' } })
+    expect(clarifiedLocator.get('[data-browser-state="locator"]').text()).toContain('已采用你补充的真实流程')
+    expect(clarifiedLocator.text()).toContain('无需再次回答相同问题')
+    expect(clarifiedLocator.find('[data-browser-state="assistance"]').exists()).toBe(false)
+
     const business = mount(BugBrowserProgress, { props: { attempt: attempt('browser_url_required'), events: [], systemID: 'base', environment: 'test' } })
     expect(business.text()).toContain('来源工单')
     expect(business.text()).toContain('frontend_url')
@@ -200,6 +208,16 @@ describe('BugBrowserProgress', () => {
     expect(timeout.get('[data-browser-state="process"]').text()).toContain('自动重试判定后仍超时')
     expect(timeout.text()).toContain('浏览器步骤和证据均已保留')
     expect(timeout.get('[data-browser-failure-stage]').text()).toBe('发生阶段：判定验证结果')
+
+    const transport = mount(BugBrowserProgress, { props: { attempt: attempt('browser_validator_transport_failed', {
+      error_code: 'browser_validator_transport_failed',
+      failure_stage: 'planning',
+      transport_retry_count: 1,
+    }), events: [], systemID: 'base', environment: 'test' } })
+    expect(transport.get('[data-browser-state="transport"]').text()).toContain('模型服务连接')
+    expect(transport.text()).toContain('自动重试 1 次')
+    expect(transport.text()).toContain('无需补充附件')
+    expect(transport.text()).not.toContain('Playwright 未安装')
   })
 
   it('shows planner and evaluator work after browser actions complete', () => {

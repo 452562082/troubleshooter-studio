@@ -1698,3 +1698,130 @@ BrowserPlan 的动作和断言是可执行协议，但没有保存验证 Agent �
 ### 结果
 
 定位问题仍由 Agent 先自主观察和修复；只有无法安全决定业务下一步时才暂停求助。用户可以直接告诉 Agent “当前状态已经满足，继续验证结果”或补充真实业务意图，验证流程据此调整，而不是在无解释的机械重试中循环。
+
+---
+
+## 2026-07-31：验证 Agent 传输故障采用同阶段有界重试
+
+### 背景
+
+验证 Agent 调用模型服务时，可能在内部重连耗尽后返回连接重置、TLS 握手 EOF、响应流中断、DNS 失败或网络不可达。旧 BrowserCoordinator 将这些错误统一归为 `browser_validator_failed` 并立即结束 Attempt，页面只显示“执行异常”。即使浏览器现场和冻结证据仍然完整，用户也无法区分模型连接故障与业务验证失败，只能机械重试。
+
+### 决策
+
+- 在 BrowserCoordinator 的公共 Agent 执行层识别传输故障，不依赖 Codex、Claude Code 或 OpenClaw 的某个命令格式，也不匹配具体模型服务域名。
+- 规划、页面现场策略调整和最终判定统一使用同阶段有界重试。首次传输失败后，复用完全相同的 prompt、附件和冻结证据重新调用一次；不重新执行已经完成的浏览器操作。
+- 自动重试只覆盖连接重置、TLS/HTTP 响应流中断、DNS 和网络不可达等瞬时传输错误。额度、配置、附件权限、进程退出、超时和普通 Provider 错误继续保留原分类，避免无意义或有副作用的重试。
+- 第二次仍失败时返回稳定错误码 `browser_validator_transport_failed`，记录 `failure_stage` 与 `transport_retry_count`，并归为系统故障。原始 Provider 文本不进入用户界面。
+- 前端明确说明模型连接在自动重试后仍中断，并为验证和回归分别提供“重新连接并继续”入口；当前 Case、浏览器现场和证据继续保留，不要求用户补附件或重建闭环。
+
+### 结果
+
+短暂网络抖动可以在当前阶段自动恢复；持续连接故障也不再伪装成无法解释的验证异常。所有接入 BrowserCoordinator 的验证平台共享同一恢复策略，验证和回归使用一致的错误分类与继续入口。
+
+---
+
+## 2026-07-31：页面定位恢复禁止策略循环并只限域到显式活动浮层
+
+### 背景
+
+用户已经补充“进入内容管理、搜索目标内容、点击查看”的真实流程后，验证 Agent 仍可能在第一个菜单动作上把 role locator 改为 text locator，再改回原 role locator。旧 Host 只比较候选与它的直接前序计划，因此这种 A→B→A 循环能通过校验并再次执行。与此同时，一些组件库会把 Popover、Drawer 外壳永久留在 DOM 中；外壳可见且含有控件，但并未真正打开，旧 Worker 仍可能把它选为当前作用域，从而屏蔽整页侧栏中的真实菜单。恢复耗尽后，Host 又生成与用户上次回复相同的兜底问题，造成“已经告诉 Agent 怎么操作，它仍不执行并继续询问”的体验。
+
+### 决策
+
+- BrowserCoordinator 以失败动作 ID 为边界，对该动作的完整因果交互窗口生成 SHA-256 指纹。每次浏览器确认失败后记录指纹；后续 repair 若重复任一已失败指纹，在执行前以 `repair_strategy_repeated` 拒绝，并把安全诊断交给 Agent 自动纠正一次。
+- 指纹不依赖 Bug 标题、菜单文案或具体 locator 种类，防止 role/text/CSS 等表现层改写形成循环，同时允许真正改变导航或交互方式的策略继续执行。
+- 普通 modal/dialog/drawer/popup/popover 结构名不再单独证明其处于活动状态。除 dialog、alertdialog、`aria-modal=true` 外，候选还必须具有 `data-state=open|active|visible`、`data-open=true`、原生 open/popover 语义、`aria-hidden=false` 或明确 open/active 类名之一。
+- 观察恢复把带 `onclick` 或可聚焦 `tabindex` 的唯一自定义控件纳入 click 候选；仍沿用唯一最高候选约束，不执行模糊匹配。
+- Attempt 明确标记 `user_clarification_applied`。若当前计划已采用用户澄清但最终只剩 locator 执行失败，结果归为系统恢复，不再生成相同兜底问题；界面提供“重新观察并继续验证”。
+- Worker 字节和交互语义变化后，浏览器运行时升级为 `1.61.1-r39`。
+
+### 结果
+
+用户给出的业务路径会真实进入新场景合同，页面执行器不会再把同一失败策略换皮重跑；永久挂载但未打开的浮层也不会劫持整页菜单定位。只有 Agent 提出了新的业务歧义问题时才再次请求用户协助，纯执行失败留在当前 Case 内重新观察和恢复。
+
+---
+
+## 2026-07-31：显式 within 定位只解析一次并与前景浮层取交集
+
+### 背景
+
+验证计划进入弹窗后通常会同时携带两层信息：Worker 根据现场自动识别当前活动 dialog，动作 locator 也通过 `within: role=dialog` 明确指定弹窗。旧实现先把查找根节点切到活动 dialog，再从这个根节点执行 `within`，等价于“在弹窗内部再次查找弹窗自身”。Playwright locator 不包含根节点本身，因此即使弹窗和目标输入框都清晰可见，定位仍会稳定返回零匹配。Bug #1550 的真实执行证据显示，专辑搜索、查看和打开作者弹窗均已成功，三次执行都在同一个 `fill-author-nickname` 动作上耗尽。
+
+### 决策
+
+- 没有显式 `within` 的动作继续由 Worker 自动绑定当前最上层活动浮层。
+- 带显式 `within` 的动作从 document 根解析完整 locator，只解析一次容器，不再把同一活动浮层嵌套到自身内部。
+- 当页面存在活动浮层时，显式 locator 的最终候选必须与该浮层的后代集合取交集。显式 `within` 不能用于穿透 dialog/drawer 操作背景页面。
+- 增加回归测试，同时证明弹窗内目标可被解析、背景表单目标仍被拒绝。
+- Worker 字节变化后浏览器运行时升级为 `1.61.1-r40`。
+
+### 结果
+
+弹窗、抽屉和普通页面仍共享统一的安全作用域机制；Agent 可以稳定执行自己生成的结构化 `within` locator，而不会因为 Host 重复限域必然失败，也不会降低前景浮层隔离。
+
+---
+
+## 2026-07-31：活动浮层关闭由 Host 确定性恢复并受限支持全局 Escape
+
+### 背景
+
+验证 Agent 已完成目标数据搜索并取得截图后，可能只在关闭 dialog 的最后一步失败。Playwright 普通点击会因为 portal 遮罩、退出动画或控件可操作性检查等待约 30 秒；旧 Worker 将原始异常统一压缩为 `browser_action_failed`。随后 Agent 即使合理地把关闭动作改为全局 `Escape`，BrowserPlan 又因 `press` 缺少 locator 被宿主拒绝，形成“业务步骤已经完成但修复计划仍失败”的循环。
+
+### 决策
+
+- “关闭/关闭弹窗/close/dismiss”等显式关闭动作已经表达了安全退出当前浮层的意图。普通点击失败后，Worker 只在当前明确活动的 dialog、drawer 或 popover 内执行确定性恢复：对已唯一解析的关闭控件做 2 秒受限强制点击，再尝试既有安全关闭控件，最后发送 `Escape`；每一步都必须确认原活动浮层已经不可见。
+- BrowserPlan v2 允许 `press` 在 `key: Escape` 时省略 locator，但 Worker 只有在检测到活动前景浮层时才执行。Legacy plan、无活动浮层、生产环境以及 Enter 等其他全局按键继续拒绝。
+- 点击遮挡、动作超时、元素脱离、元素不稳定、元素禁用和浮层关闭失败使用独立脱敏错误码持久化；不保存原始页面或 Provider 异常文本。
+- runtime probe 增加真实活动 dialog 的全局 Escape 关闭校验，Worker 运行时升级为 `1.61.1-r41`。
+
+### 结果
+
+关闭弹窗不再依赖 Agent 反复改写 role/text locator，也不会因合理的全局 Escape 被协议层拒绝。Host 只对已经明确的关闭意图做有界恢复，普通业务点击和普通按键仍保持严格 locator 约束；若恢复仍失败，界面能展示具体的可操作性分类，而不是无信息的通用失败。
+
+---
+
+## 2026-07-31：BrowserPlan 协议能力必须通过 Worker 请求入口探针
+
+### 背景
+
+BrowserPlan v2 已在 Go 解析器和 Host 校验器中允许无 locator 的全局 `Escape`，JS Worker 的执行函数和 runtime probe 也能关闭真实 dialog，但 Worker 最外层请求校验仍把所有 `press` 统一视为必须带 locator。结果是同一份计划在 Go 侧通过后，在浏览器启动前被 JS 入口拒绝；原 probe 直接调用内部关闭 helper，未覆盖这个协议分叉。
+
+### 决策
+
+- JS Worker 请求校验与 Go/Host 使用同一规则：只有 BrowserPlan v2、非生产环境下的 `press Escape` 可以省略 locator；legacy plan、其他按键和普通交互仍必须提供 locator。
+- runtime probe 不再直接调用全局 Escape helper。探针先构造真实 v2 Worker request，通过 `validateWorkerRequest`，再经 `executeAction` 在真实 Chromium dialog 上执行并验证浮层消失。
+- 增加 Worker 请求入口回归测试，分别覆盖 v2 Escape 成功、大小写兼容、v1 拒绝和无 locator Enter 拒绝。
+- Worker 字节与协议探针变化后，浏览器运行时升级为 `1.61.1-r42`。
+
+### 结果
+
+协议能力不再由 Go、Worker 入口和 Worker 内部执行器各自推断。任何未来的 BrowserPlan 扩展都必须同时穿过外部请求校验和真实浏览器执行链路，避免内部 helper 测试通过、实际 Case 仍在启动前失败。
+
+---
+
+## 2026-07-31：浮层关闭结果必须绑定冻结的元素身份
+
+### 背景
+
+Bug #1550 的验证流程已经按用户澄清完成专辑搜索、打开记录、打开作者弹窗、搜索作者和截图，最后关闭作者子弹窗时仍返回 `active_surface_dismissal_failed`。失败截图显示作者子弹窗实际上已经消失，底层视频编辑父弹窗仍正常保留。原因是 Playwright `locator(...).nth(index)` 是活查询：子弹窗移除后，同一 Locator 下标自动重绑定到父弹窗，Worker 因而把“父弹窗仍可见”误判为“刚才的子弹窗仍可见”。
+
+### 决策
+
+- 在执行关闭控件恢复或全局 Escape 前，通过 `elementHandle()` 冻结当前活动浮层的 DOM 元素身份；关闭结果只检查该元素是否仍可见，不再检查可重绑定的 Locator 下标。
+- 冻结句柄在每次恢复结束后主动释放；测试替身不提供句柄时保留原 Locator 兼容路径。
+- runtime probe 使用真实 Chromium 构造父编辑弹窗和作者子弹窗。Escape 后必须同时满足“子弹窗消失”和“父弹窗仍可见”，覆盖活 Locator 下标重绑定场景。
+- Worker 字节和探针语义变化后，浏览器运行时升级为 `1.61.1-r43`。
+
+### ADR：用户手动复现作为浏览器验证的正式证据兜底（2026-07-31）
+
+- 当验证 Agent 在非生产环境无法稳定完成页面复现时，用户可以在同一个 Case、同一个失败的验证 Attempt 上启动 Studio 受控浏览器手动复现。
+- 手动复现仍使用固化 Chromium、域名白名单、固定代理、加密登录态和证据大小/敏感信息校验；生产环境禁止该交互式录制。
+- Studio 只记录脱敏后的点击、变更、提交语义，不记录输入值、密码、Cookie 或 Token；同时冻结页面截图、Network、Console 和操作轨迹。
+- 采集完成不会直接宣告“已复现”，也不会跳过用户确认。证据绑定当前 Attempt，用户补充实际现象后在同一 Case 继续，验证 Agent 必须据此重建 `scenario_contract`。
+- 手动截图以 `user_screenshot` 注册，使后续验证 Attempt 通过既有补充证据通道获得现场；结构化浏览器证据保留原 kind 供审计和排障使用。
+- Worker 新增 `record` 协议模式，运行时探针校验该请求形状；浏览器运行时升级为 `1.61.1-r44`。
+
+### 结果
+
+嵌套弹窗的关闭判断从“这个查询下标现在是否还能找到可见元素”改为“刚才关闭的那个 DOM 元素是否仍可见”。成功关闭子弹窗不再因为父弹窗继续存在而中断后续验证步骤，且不会误把关闭父弹窗当成成功。

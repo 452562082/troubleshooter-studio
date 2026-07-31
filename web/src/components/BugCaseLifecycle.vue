@@ -37,7 +37,9 @@ function structuredEvidenceGaps(output: Record<string, unknown> | undefined): st
       return [typeof question === 'string' ? question.trim() : '', typeof hint === 'string' ? hint.trim() : ''].filter(Boolean).join(' ')
     })
     .filter(Boolean))]
-  if (structured.length === 0 && output?.error_code === 'browser_locator_failed') {
+  if (structured.length === 0 &&
+    output?.error_code === 'browser_locator_failed' &&
+    output?.user_clarification_applied !== true) {
     structured.push('验证 Agent 已尝试多种页面策略仍无法继续。请确认当前页面是否已经到达应继续验证的业务状态，并说明下一步应验证什么；如果尚未到达，请说明这一步的真实业务意图。无需提供按钮名称、选择器、账号或密码。')
   }
   return structured
@@ -52,7 +54,8 @@ function verificationNeedsUserEvidence(attempt: ActionDetail['attempts'][number]
     (
       attempt.output_json?.verification_status === 'insufficient_info' ||
       Array.isArray(attempt.output_json?.validation_questions) ||
-      attempt.output_json?.error_code === 'browser_locator_failed'
+      attempt.output_json?.error_code === 'browser_locator_failed' &&
+        attempt.output_json?.user_clarification_applied !== true
     ) &&
     structuredEvidenceGaps(attempt.output_json).length > 0,
   )
@@ -93,10 +96,19 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
       if (code === 'browser_login_required' || code === 'browser_runtime_broken' || code === 'browser_url_required' || code === 'validator_not_installed') return undefined
       if (code === 'browser_assertion_failed') return { kind: 'supply_evidence', label: '补充业务预期并重试' }
       if (verificationNeedsUserEvidence(attempt)) return { kind: 'supply_evidence', label: '补充信息并重试回归' }
+      if (code === 'browser_validator_transport_failed') return { kind: 'retry_regression', label: '重新连接并继续回归' }
       return { kind: 'retry_regression', label: '重试当前回归' }
     }
     if (code === 'browser_validator_plan_invalid' || code === 'browser_locator_repair_plan_invalid') return { kind: 'retry_validation', label: '重试当前验证' }
-    if (code === 'browser_locator_failed') return { kind: 'retry_validation', label: '让 Agent 继续验证' }
+    if (code === 'browser_validator_transport_failed') return { kind: 'retry_validation', label: '重新连接并继续验证' }
+    if (code === 'browser_locator_failed') {
+      return {
+        kind: 'retry_validation',
+        label: attempt?.output_json?.user_clarification_applied === true
+          ? '重新观察并继续验证'
+          : '让 Agent 继续验证',
+      }
+    }
     if (['browser_validator_failed', 'browser_validator_timeout', 'browser_validator_attachment_failed', 'browser_validator_no_output', 'browser_validator_process_failed', 'browser_validator_configuration_invalid', 'browser_worker_protocol_invalid'].includes(code)) {
       return { kind: 'retry_validation', label: '重试当前验证' }
     }
@@ -126,7 +138,7 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import type { CaseStatus, IncidentCaseDetail, IncidentPhaseEvent } from '../lib/bridge/bugWorkflow'
+import { getIncidentArtifactPreview, type CaseStatus, type IncidentArtifact, type IncidentCaseDetail, type IncidentPhaseEvent } from '../lib/bridge/bugWorkflow'
 import BugAgentProgress from './BugAgentProgress.vue'
 import BugCaseArtifacts from './BugCaseArtifacts.vue'
 import BugBrowserProgress from './BugBrowserProgress.vue'
@@ -143,7 +155,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   refresh: []
   primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; images?: IncidentEvidenceImageInput[]; files?: IncidentEvidenceFileInput[]; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }]
-  browser: [action: 'login' | 'confirm-login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url']
+  browser: [action: 'login' | 'confirm-login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url' | 'manual-reproduce']
 }>()
 
 const dialogOpen = ref(false)
@@ -166,6 +178,9 @@ const dialogBranchOptions = ref<Record<string, string[]>>({})
 const dialogBranchOptionsLoading = ref(false)
 const dialogBranchOptionsError = ref('')
 let dialogBranchLoadGeneration = 0
+const assistanceSceneURL = ref('')
+const assistanceSceneState = ref<'idle' | 'loading' | 'ready' | 'missing' | 'failed'>('idle')
+let assistanceSceneLoadGeneration = 0
 const currentCase = computed(() => props.detail?.case)
 const TIMELINE_PREVIEW_COUNT = 3
 const timelineExpanded = ref(false)
@@ -185,9 +200,35 @@ watch(() => props.detail?.events.length ?? 0, count => {
 })
 const action = computed(() => props.detail ? primaryActionFor(props.detail) : undefined)
 const currentAttempt = computed(() => props.detail?.attempts.find(item => item.id === props.detail?.case.current_attempt_id) || null)
+const canCaptureManualReproduction = computed(() => {
+  const attempt = currentAttempt.value
+  if (!attempt || props.detail?.case.status !== 'waiting_evidence' || attempt.status !== 'failed') return false
+  if (!['validation', 'regression'].includes(attempt.phase)) return false
+  const code = (attempt.error_code || (typeof attempt.output_json?.error_code === 'string' ? attempt.output_json.error_code : '')).trim()
+  return code.startsWith('browser_') && ![
+    'browser_login_required', 'browser_runtime_broken', 'browser_url_required',
+    'browser_manual_prod_blocked', 'browser_artifact_sensitive',
+  ].includes(code)
+})
 const evidenceGaps = computed(() => dialogAction.value?.kind === 'supply_evidence'
   ? structuredEvidenceGaps(currentAttempt.value?.output_json)
   : [])
+const assistanceNeedsScene = computed(() =>
+  dialogAction.value?.kind === 'supply_evidence' &&
+  verificationNeedsUserEvidence(currentAttempt.value || undefined),
+)
+const assistanceSceneArtifact = computed<IncidentArtifact | null>(() => {
+  const attemptID = currentAttempt.value?.id
+  if (!attemptID) return null
+  return (props.detail?.artifacts || [])
+    .map((artifact, index) => ({ artifact, index, capturedAt: Date.parse(artifact.captured_at) }))
+    .filter(item => item.artifact.kind === 'screenshot' && item.artifact.attempt_id === attemptID)
+    .sort((left, right) => {
+      const leftTime = Number.isNaN(left.capturedAt) ? 0 : left.capturedAt
+      const rightTime = Number.isNaN(right.capturedAt) ? 0 : right.capturedAt
+      return rightTime - leftTime || right.index - left.index
+    })[0]?.artifact || null
+})
 const remediationReassessment = computed(() => isRemediationReassessment(props.detail || undefined))
 const rootCauseDispute = computed(() => isRootCauseDispute(props.detail || undefined))
 const validationEvidenceRefresh = computed(() => currentAttempt.value?.phase === 'validation' && typeof currentAttempt.value.input_json?.source_investigation_attempt_id === 'string')
@@ -404,12 +445,57 @@ async function openAction(event: MouseEvent) {
   dialogFiles.value = []
   dialogFileError.value = ''
   dialogOpen.value = true
+  void loadAssistanceScene()
   await nextTick()
   if (action.value.kind === 'approve_fix' && (!sourceBaselinesValid.value || dialogBranchOptionsLoading.value)) {
     const firstEmpty = [...(dialogElement.value?.querySelectorAll<HTMLInputElement | HTMLSelectElement>('.source-baseline-row input, .source-baseline-row select') || [])].find(input => !input.value.trim())
     setTimeout(() => firstEmpty?.focus(), 0)
   } else {
     confirmButton.value?.focus()
+  }
+}
+
+async function openManualReproductionEvidence(summary: string) {
+  if (props.pending || props.detail?.case.status !== 'waiting_evidence' || !summary.trim()) return
+  dialogAction.value = { kind: 'supply_evidence', label: '提交手动复现结果并继续' }
+  actionTrigger.value = null
+  dialogCaseVersion.value = undefined
+  dialogRootCauseAttemptID.value = ''
+  dialogSourceBaselines.value = []
+  dialogInput.value = summary.trim()
+  dialogEvidence.value = ''
+  dialogImages.value = []
+  dialogImageError.value = ''
+  dialogFiles.value = []
+  dialogFileError.value = ''
+  dialogOpen.value = true
+  void loadAssistanceScene()
+  await nextTick()
+  confirmButton.value?.focus()
+}
+
+defineExpose({ openManualReproductionEvidence })
+
+async function loadAssistanceScene(): Promise<void> {
+  const generation = ++assistanceSceneLoadGeneration
+  assistanceSceneURL.value = ''
+  assistanceSceneState.value = 'idle'
+  if (!assistanceNeedsScene.value) return
+  const artifact = assistanceSceneArtifact.value
+  const caseID = props.detail?.case.id || ''
+  if (!artifact || !caseID) {
+    assistanceSceneState.value = 'missing'
+    return
+  }
+  assistanceSceneState.value = 'loading'
+  try {
+    const preview = await getIncidentArtifactPreview(caseID, artifact.id)
+    if (generation !== assistanceSceneLoadGeneration || !dialogOpen.value || assistanceSceneArtifact.value?.id !== artifact.id) return
+    assistanceSceneURL.value = `data:image/png;base64,${preview.base64_data}`
+    assistanceSceneState.value = 'ready'
+  } catch {
+    if (generation !== assistanceSceneLoadGeneration || !dialogOpen.value) return
+    assistanceSceneState.value = 'failed'
   }
 }
 
@@ -499,6 +585,9 @@ async function openFixRework(event: MouseEvent) {
 function closeDialog() {
   if (props.pending) return
   dialogBranchLoadGeneration++
+  assistanceSceneLoadGeneration++
+  assistanceSceneURL.value = ''
+  assistanceSceneState.value = 'idle'
   dialogBranchOptionsLoading.value = false
   dialogOpen.value = false
   nextTick(() => actionTrigger.value?.focus())
@@ -535,6 +624,9 @@ function confirmAction() {
   }
   emit('primary', payload)
   dialogBranchLoadGeneration++
+  assistanceSceneLoadGeneration++
+  assistanceSceneURL.value = ''
+  assistanceSceneState.value = 'idle'
   dialogBranchOptionsLoading.value = false
   dialogOpen.value = false
   nextTick(() => actionTrigger.value?.focus())
@@ -738,6 +830,9 @@ function dialogTitle(): string {
             <p v-else>第 {{ detail.case.cycle_number }} 轮 · {{ detail.case.environment || '环境未知' }}</p>
           </div>
           <div class="current-action-controls">
+            <button v-if="canCaptureManualReproduction" class="btn dispute-action" type="button" data-browser-action="manual-reproduce" :disabled="pending" @click="emit('browser', 'manual-reproduce')">
+              我来手动复现
+            </button>
             <button v-if="detail.case.status === 'reproduced'" class="btn dispute-action" type="button" :disabled="pending" @click="openValidationRevision">
               验证结果有问题
             </button>
@@ -817,7 +912,7 @@ function dialogTitle(): string {
     </aside>
 
     <div v-if="dialogOpen && dialogAction" class="dialog-backdrop" @click.self="closeDialog" @keydown.esc="closeDialog">
-      <section ref="dialogElement" role="dialog" aria-modal="true" aria-labelledby="case-action-dialog-title" class="approval-dialog" @keydown="trapDialogFocus">
+      <section ref="dialogElement" role="dialog" aria-modal="true" aria-labelledby="case-action-dialog-title" class="approval-dialog" :class="{ 'has-assistance-scene': assistanceNeedsScene }" @keydown="trapDialogFocus">
         <header><h2 id="case-action-dialog-title">{{ dialogTitle() }}</h2></header>
         <template v-if="dialogAction.kind === 'approve_fix'">
           <p>将授权修复 Agent 基于当前根因和证据创建最小修复。修复仓库由已确认的修复建议确定，你只需确认对应的开发基线；留空时默认使用当前环境对应的分支。修复分支会从确认后的基线创建，后续分别合并并推送到开发基线和环境分支。</p>
@@ -893,6 +988,18 @@ function dialogTitle(): string {
         </dl>
         <p v-if="dialogAction.kind === 'notify_deployed' && automaticDeploymentVerification">无需手工填写版本号或 commit。只有明确检测到运行版本与本次修复不一致时，流程才会停下。</p>
         <p v-else-if="dialogAction.kind === 'notify_deployed'">无需填写版本号或 commit；本次只记录部署确认，最终以回归结果为准。</p>
+        <section v-if="assistanceNeedsScene" class="assistance-scene" aria-labelledby="assistance-scene-title">
+          <header>
+            <div>
+              <h3 id="assistance-scene-title">Agent 遇到问题时的页面现场</h3>
+              <p>这是当前验证 Attempt 最后保存的页面，请结合现场判断 Agent 接下来应该做什么。</p>
+            </div>
+          </header>
+          <div v-if="assistanceSceneState === 'loading'" class="assistance-scene-status" role="status">正在加载现场截图…</div>
+          <img v-else-if="assistanceSceneState === 'ready'" :src="assistanceSceneURL" alt="验证 Agent 请求协助时的页面现场">
+          <p v-else-if="assistanceSceneState === 'failed'" class="assistance-scene-status" role="status">现场截图暂时无法预览，不影响回答 Agent。</p>
+          <p v-else-if="assistanceSceneState === 'missing'" class="assistance-scene-status" role="status">本次求助没有可用的页面现场截图，请根据 Agent 的问题补充说明。</p>
+        </section>
         <section v-if="dialogAction.kind === 'supply_evidence' && evidenceGaps.length" class="evidence-gap-summary" aria-labelledby="evidence-gap-title">
           <h3 id="evidence-gap-title">Agent 还缺少以下信息</h3>
           <ul>
@@ -1025,6 +1132,7 @@ h2, h3, p { margin: 0; }
 .empty-state { padding: var(--sp-4); border: 1px dashed var(--c-line-2); border-radius: var(--r-md); color: var(--c-muted); text-align: center; font-size: var(--fs-sm); }
 .dialog-backdrop { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: var(--sp-4); background: rgba(15, 23, 42, .56); }
 .approval-dialog { width: min(520px, 100%); max-height: calc(100vh - 32px); overflow: auto; box-sizing: border-box; display: grid; gap: var(--sp-3); padding: var(--sp-5); border: 1px solid var(--c-line-2); border-radius: var(--r-lg); background: var(--c-surf); box-shadow: 0 18px 50px rgba(15, 23, 42, .24); }
+.approval-dialog.has-assistance-scene { width: min(760px, 100%); }
 .approval-dialog h2 { color: var(--c-ink); font-size: var(--fs-lg); }
 .approval-dialog p, .approval-dialog label { color: var(--c-text); font-size: var(--fs-base); line-height: 1.6; }
 .approval-dialog label { font-weight: 600; }
@@ -1034,6 +1142,12 @@ h2, h3, p { margin: 0; }
 .deployment-preview dd { min-width: 0; margin: 0; color: var(--c-ink); font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .deployment-preview code { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .approval-dialog input, .approval-dialog textarea { min-height: 44px; }
+.assistance-scene { min-width: 0; display: grid; gap: var(--sp-2); padding: var(--sp-3); border: 1px solid #93c5fd; border-radius: var(--r-md); background: #f8fbff; }
+.assistance-scene header { min-width: 0; }
+.assistance-scene h3 { color: var(--c-ink); font-size: var(--fs-base); }
+.assistance-scene header p { margin-top: 2px; color: var(--c-muted); font-size: var(--fs-xs); line-height: 1.5; }
+.assistance-scene img { width: 100%; max-height: 380px; border: 1px solid var(--c-line); border-radius: var(--r-sm); background: var(--c-surf); object-fit: contain; }
+.assistance-scene-status { min-height: 96px; display: grid; place-items: center; margin: 0; padding: var(--sp-3); border: 1px dashed var(--c-line-2); border-radius: var(--r-sm); background: var(--c-surf); color: var(--c-muted) !important; text-align: center; font-size: var(--fs-sm) !important; }
 .evidence-gap-summary { display: grid; gap: var(--sp-2); padding: var(--sp-3); border: 1px solid #fdba74; border-radius: var(--r-md); background: #fff7ed; }
 .evidence-gap-summary h3 { color: #9a3412; font-size: var(--fs-base); }
 .evidence-gap-summary ul { display: grid; gap: 6px; margin: 0; padding-left: 22px; color: var(--c-text); font-size: var(--fs-sm); line-height: 1.55; }

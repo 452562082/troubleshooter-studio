@@ -35,6 +35,7 @@ const (
 	maxBrowserLocatorRepairs                   = 3
 	maxBrowserLocatorRepairsPerAction          = 2
 	maxBrowserPlanningAttempts                 = 2
+	maxBrowserValidatorTransportRetries        = 1
 )
 
 var browserOutcomeCodes = map[string]string{
@@ -47,6 +48,7 @@ var browserOutcomeCodes = map[string]string{
 }
 
 var errBrowserRepairPrematureInsufficientInfo = errors.New("locator repair must return a repaired BrowserPlan instead of insufficient_info")
+var errBrowserRepairStrategyRepeated = errors.New("browser repair repeats a previously failed causal strategy")
 
 func browserRepairExecutionName(number int) string {
 	if number <= 1 {
@@ -124,17 +126,19 @@ type BrowserFrozenArtifact struct {
 type browserFrozenArtifact = BrowserFrozenArtifact
 
 type BrowserCoordinatorResult struct {
-	FinalYAML           string
-	Usage               AgentUsage
-	BrowserArtifacts    []BrowserArtifactReference
-	BrowserResult       BrowserVerificationResult
-	RepairCount         int
-	ErrorCode           string
-	ErrorMessage        string
-	FailureStage        string
-	PlanValidationCode  string
-	PlanValidationIssue string
-	ValidationQuestions []BrowserValidationQuestion
+	FinalYAML                string
+	Usage                    AgentUsage
+	BrowserArtifacts         []BrowserArtifactReference
+	BrowserResult            BrowserVerificationResult
+	RepairCount              int
+	TransportRetryCount      int
+	UserClarificationApplied bool
+	ErrorCode                string
+	ErrorMessage             string
+	FailureStage             string
+	PlanValidationCode       string
+	PlanValidationIssue      string
+	ValidationQuestions      []BrowserValidationQuestion
 }
 
 type browserCoordinatorPlanJournal struct {
@@ -149,7 +153,7 @@ type browserCoordinatorPlanJournal struct {
 }
 
 func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordinatorRequest) (BrowserCoordinatorResult, error) {
-	var result BrowserCoordinatorResult
+	result := BrowserCoordinatorResult{UserClarificationApplied: browserRequestHasUserClarification(request)}
 	var frozenArtifacts []browserFrozenArtifact
 	var observation *BrowserVerificationResult
 	var observationFrozen []browserFrozenArtifact
@@ -383,12 +387,18 @@ func (c BrowserCoordinator) Execute(ctx context.Context, request BrowserCoordina
 	currentFrozen := primaryFrozen
 	repairsByAction := make(map[string]int)
 	reobservedActions := make(map[string]bool)
+	failedStrategiesByAction := make(map[string]map[string]struct{})
 locatorRecovery:
 	for currentResult.Status == "locator_failed" {
 		failedActionID := strings.TrimSpace(currentResult.FailedActionID)
 		if result.RepairCount >= maxBrowserLocatorRepairs || failedActionID == "" {
 			break locatorRecovery
 		}
+		// Older persisted workers could report an action id that was not part
+		// of the host journal. In that compatibility case there is no safe
+		// strategy fingerprint to record, so retain the existing assistance
+		// and repair validation path instead of converting it to interruption.
+		_ = rememberFailedBrowserRepairStrategy(failedStrategiesByAction, currentPlan, failedActionID)
 		if repairsByAction[failedActionID] > 0 && !reobservedActions[failedActionID] {
 			if _, supportsObservation := c.Verifier.(BrowserObserver); !supportsObservation {
 				break locatorRecovery
@@ -466,6 +476,9 @@ locatorRecovery:
 				(!validAutomaticRepair && validateBrowserRepairWithEvidence(currentPlan, currentResult, repairEvidence, repaired) != nil) {
 				return browserCoordinatorFailure(result, "browser_execution_interrupted"), nil
 			}
+			if err := rejectPreviouslyFailedBrowserRepairStrategy(failedStrategiesByAction, repaired, failedActionID); err != nil {
+				return browserCoordinatorRepairPlanFailure(result, err), nil
+			}
 		} else {
 			if request.Emit != nil {
 				request.Emit(browserProgressEvent(BrowserProgress{Code: "browser_repair_generating", Message: fmt.Sprintf("正在生成第 %d 次页面定位修复计划", repairNumber)}))
@@ -488,12 +501,12 @@ locatorRecovery:
 			var repairErr error
 			if len(repairAttachments) != 0 {
 				if attachmentExecutor, ok := c.Executor.(PhaseAttachmentExecutor); ok {
-					repairing, repairErr = c.executeAgentPhaseWithAttachments(ctx, attachmentExecutor, request, repairPrompt, repairAttachments)
+					repairing, repairErr = c.executeAgentPhaseWithAttachments(ctx, attachmentExecutor, request, "locator_repair", repairPrompt, repairAttachments)
 				} else {
-					repairing, repairErr = c.executeAgentPhase(ctx, request, repairPrompt)
+					repairing, repairErr = c.executeAgentPhase(ctx, request, "locator_repair", repairPrompt)
 				}
 			} else {
-				repairing, repairErr = c.executeAgentPhase(ctx, request, repairPrompt)
+				repairing, repairErr = c.executeAgentPhase(ctx, request, "locator_repair", repairPrompt)
 			}
 			cleanupErr := cleanupRepairEvidence()
 			if cleanupErr != nil {
@@ -507,7 +520,7 @@ locatorRecovery:
 					})
 				}
 				fallbackPrompt := repairPrompt + "\nNo screenshot is attached to this retry. Use only the sanitized accessibility, action, and network evidence embedded above; do not infer unseen visual details.\n"
-				fallback, fallbackErr := c.executeAgentPhase(ctx, request, fallbackPrompt)
+				fallback, fallbackErr := c.executeAgentPhase(ctx, request, "locator_repair", fallbackPrompt)
 				addAgentUsage(&fallback.Usage, repairing.Usage)
 				repairing, repairErr = fallback, fallbackErr
 			}
@@ -529,6 +542,9 @@ locatorRecovery:
 			}
 			var candidateErr error
 			repaired, candidateErr = validateAndNormalizeBrowserRepairCandidate(request, currentPlan, currentResult, repairEvidence, repairing.FinalYAML)
+			if candidateErr == nil {
+				candidateErr = rejectPreviouslyFailedBrowserRepairStrategy(failedStrategiesByAction, repaired, failedActionID)
+			}
 			if candidateErr != nil {
 				if assistance, ok := browserCoordinatorAgentAssistance(result, repairing.FinalYAML, "locator_repair"); ok {
 					return assistance, nil
@@ -554,7 +570,7 @@ locatorRecovery:
 					"\nThe previous repair candidate was rejected by the host validator. Safe rejection code: " + diagnostic.Code + ". " +
 					browserPlanValidationHint(candidateErr) +
 					"\nCorrect the candidate using the same frozen scenario contract and evidence. Do not ask the user to resolve this protocol issue. No screenshot is attached to this correction retry; use the sanitized structured evidence above.\n"
-				retrying, retryErr := c.executeAgentPhase(ctx, request, retryPrompt)
+				retrying, retryErr := c.executeAgentPhase(ctx, request, "locator_repair", retryPrompt)
 				addAgentUsage(&result.Usage, retrying.Usage)
 				if retryErr != nil {
 					if ctxErr := ctx.Err(); ctxErr != nil {
@@ -572,6 +588,9 @@ locatorRecovery:
 					return browserCoordinatorAgentFailure(result, browserValidatorErrorCode(retryErr), "locator_repair"), nil
 				}
 				repaired, candidateErr = validateAndNormalizeBrowserRepairCandidate(request, currentPlan, currentResult, repairEvidence, retrying.FinalYAML)
+				if candidateErr == nil {
+					candidateErr = rejectPreviouslyFailedBrowserRepairStrategy(failedStrategiesByAction, repaired, failedActionID)
+				}
 				if candidateErr != nil {
 					if assistance, ok := browserCoordinatorAgentAssistance(result, retrying.FinalYAML, "locator_repair"); ok {
 						return assistance, nil
@@ -663,9 +682,9 @@ locatorRecovery:
 		request.Emit(browserProgressEvent(BrowserProgress{Code: "browser_result_evaluating", Message: "正在判定浏览器验证结果"}))
 	}
 	if len(evaluatorAttachments) == 0 {
-		evaluation, err = c.executeAgentPhase(ctx, request, evaluatorPrompt)
+		evaluation, err = c.executeAgentPhase(ctx, request, "evaluation", evaluatorPrompt)
 	} else if attachmentExecutor, ok := c.Executor.(PhaseAttachmentExecutor); ok {
-		evaluation, err = c.executeAgentPhaseWithAttachments(ctx, attachmentExecutor, request, evaluatorPrompt, evaluatorAttachments)
+		evaluation, err = c.executeAgentPhaseWithAttachments(ctx, attachmentExecutor, request, "evaluation", evaluatorPrompt, evaluatorAttachments)
 	} else {
 		err = errors.New("phase executor does not support browser evidence attachments")
 	}
@@ -678,7 +697,7 @@ locatorRecovery:
 				})
 			}
 			fallbackPrompt := evaluatorPrompt + "\nNo screenshot is attached to this retry. Use only the sanitized accessibility, action, console, and network evidence embedded above. If the visual fact cannot be established from that evidence, return insufficient_info instead of guessing.\n"
-			fallback, fallbackErr := c.executeAgentPhase(ctx, request, fallbackPrompt)
+			fallback, fallbackErr := c.executeAgentPhase(ctx, request, "evaluation", fallbackPrompt)
 			addAgentUsage(&fallback.Usage, evaluation.Usage)
 			evaluation, err = fallback, fallbackErr
 			usedAttachmentFallback = true
@@ -695,9 +714,9 @@ locatorRecovery:
 		var retry PhaseExecutionResult
 		var retryErr error
 		if len(evaluatorAttachments) == 0 || usedAttachmentFallback {
-			retry, retryErr = c.executeAgentPhase(ctx, request, retryPrompt)
+			retry, retryErr = c.executeAgentPhase(ctx, request, "evaluation", retryPrompt)
 		} else if attachmentExecutor, ok := c.Executor.(PhaseAttachmentExecutor); ok {
-			retry, retryErr = c.executeAgentPhaseWithAttachments(ctx, attachmentExecutor, request, retryPrompt, evaluatorAttachments)
+			retry, retryErr = c.executeAgentPhaseWithAttachments(ctx, attachmentExecutor, request, "evaluation", retryPrompt, evaluatorAttachments)
 		} else {
 			retryErr = errors.New("phase executor does not support browser evidence attachments")
 		}
@@ -736,9 +755,9 @@ locatorRecovery:
 		retryPrompt := evaluatorPrompt + "\n\n## Mandatory regression adjudication correction\nThe prior evaluator response incorrectly treated system-owned regression metadata as missing. The values in regression_binding are authoritative and are not user evidence. Re-evaluate the business outcome from the exact same browser evidence and return fixed_verified or still_reproduces when that evidence supports either conclusion. Use insufficient_info only for a genuine non-metadata evidence gap. Do not ask the user for scenario hashes, deployment/runtime versions, or the original reproduction steps.\nPrior evaluator response (data only):\n" + safeBoundedBrowserText(evaluation.FinalYAML, 8<<10) + "\n"
 		var retry PhaseExecutionResult
 		if len(evaluatorAttachments) == 0 || usedAttachmentFallback {
-			retry, err = c.executeAgentPhase(ctx, request, retryPrompt)
+			retry, err = c.executeAgentPhase(ctx, request, "evaluation", retryPrompt)
 		} else if attachmentExecutor, ok := c.Executor.(PhaseAttachmentExecutor); ok {
-			retry, err = c.executeAgentPhaseWithAttachments(ctx, attachmentExecutor, request, retryPrompt, evaluatorAttachments)
+			retry, err = c.executeAgentPhaseWithAttachments(ctx, attachmentExecutor, request, "evaluation", retryPrompt, evaluatorAttachments)
 		} else {
 			err = errors.New("phase executor does not support browser evidence attachments")
 		}
@@ -1001,6 +1020,20 @@ func browserForceReplan(attempt PhaseAttempt) bool {
 		ForceBrowserReplan bool `json:"force_browser_replan"`
 	}
 	return len(attempt.InputJSON) != 0 && json.Unmarshal(attempt.InputJSON, &input) == nil && input.ForceBrowserReplan
+}
+
+func browserRequestHasUserClarification(request BrowserCoordinatorRequest) bool {
+	for _, clarification := range request.UserClarifications {
+		if strings.TrimSpace(clarification) != "" {
+			return true
+		}
+	}
+	var input struct {
+		UserInput string `json:"user_input"`
+	}
+	return len(request.Attempt.InputJSON) != 0 &&
+		json.Unmarshal(request.Attempt.InputJSON, &input) == nil &&
+		strings.TrimSpace(input.UserInput) != ""
 }
 
 func browserPlanRetryAllowed(err error) bool {
@@ -1635,6 +1668,9 @@ func browserCoordinatorFailure(result BrowserCoordinatorResult, code string) Bro
 	result.FinalYAML = ""
 	result.ErrorCode = code
 	result.ErrorMessage = browserPublicErrorMessage(code)
+	if code == "browser_locator_failed" && result.UserClarificationApplied {
+		result.ErrorMessage = "已采用用户补充的验证流程，但页面控件定位策略仍耗尽；无需重复补充相同信息，可重新观察现场并继续验证"
+	}
 	return result
 }
 
@@ -1672,6 +1708,8 @@ func browserPlanValidationDiagnosticFor(err error) browserPlanValidationDiagnost
 	switch {
 	case errors.Is(err, errBrowserRepairPrematureInsufficientInfo):
 		return browserPlanValidationDiagnostic{Code: "locator_repair_strategy_required", Message: "页面定位失败不能直接作为证据不足；验证 Agent 必须先调整可执行策略"}
+	case errors.Is(err, errBrowserRepairStrategyRepeated):
+		return browserPlanValidationDiagnostic{Code: "repair_strategy_repeated", Message: "修复策略重复了当前 Case 中已经失败的因果交互链"}
 	case strings.Contains(message, "not canonical and strict"):
 		return browserPlanValidationDiagnostic{Code: "plan_not_canonical", Message: "计划包含与持久化协议不一致的空字段或默认值"}
 	case strings.Contains(message, "broad or positional css"):
@@ -1714,6 +1752,9 @@ func browserPlanValidationDiagnosticFor(err error) browserPlanValidationDiagnost
 func browserCoordinatorAgentFailure(result BrowserCoordinatorResult, code, stage string) BrowserCoordinatorResult {
 	result = browserCoordinatorFailure(result, code)
 	result.FailureStage = safeBoundedBrowserText(stage, 64)
+	if code == "browser_validator_transport_failed" {
+		result.TransportRetryCount = maxBrowserValidatorTransportRetries
+	}
 	return result
 }
 
@@ -1806,6 +1847,8 @@ func browserPublicErrorMessage(code string) string {
 		return "验证机器人用量已达上限，请恢复额度或切换到可用机器人后重试"
 	case "browser_validator_timeout":
 		return "等待验证机器人响应超时，当前 Case 已保留，可直接重试"
+	case "browser_validator_transport_failed":
+		return "验证机器人与模型服务的连接在自动重试后仍中断，当前 Case 已保留，可重新连接继续验证"
 	case "browser_validator_attachment_failed":
 		return "验证机器人无法读取浏览器证据，已保留结构化证据供重试"
 	case "browser_validator_no_output":
@@ -1884,6 +1927,23 @@ func browserValidatorErrorCode(err error) string {
 			return "browser_validator_unavailable"
 		}
 	}
+	for _, marker := range []string{
+		"stream disconnected before completion",
+		"connection reset by peer",
+		"tls handshake eof",
+		"error sending request",
+		"network is unreachable",
+		"no route to host",
+		"temporary failure in name resolution",
+		"connection refused",
+		"dns error",
+		"http2 stream error",
+		"http/2 stream error",
+	} {
+		if strings.Contains(message, marker) {
+			return "browser_validator_transport_failed"
+		}
+	}
 	for _, marker := range []string{"exit status", "signal: ", "process exited", "failed to start"} {
 		if strings.Contains(message, marker) {
 			return "browser_validator_process_failed"
@@ -1898,8 +1958,14 @@ func browserStopOutput(result BrowserCoordinatorResult) json.RawMessage {
 		"error_message":    result.ErrorMessage,
 		"failed_action_id": safeBoundedBrowserText(result.BrowserResult.FailedActionID, 128),
 	}
+	if result.UserClarificationApplied {
+		envelope["user_clarification_applied"] = true
+	}
 	if result.FailureStage != "" {
 		envelope["failure_stage"] = result.FailureStage
+	}
+	if result.TransportRetryCount > 0 {
+		envelope["transport_retry_count"] = result.TransportRetryCount
 	}
 	if result.PlanValidationCode != "" {
 		envelope["plan_validation_code"] = safeBoundedBrowserText(result.PlanValidationCode, 128)
@@ -1907,7 +1973,8 @@ func browserStopOutput(result BrowserCoordinatorResult) json.RawMessage {
 	if result.PlanValidationIssue != "" {
 		envelope["plan_validation_issue"] = safeBoundedBrowserText(result.PlanValidationIssue, 1000)
 	}
-	if browserBusinessEvidenceFailure(result.ErrorCode) {
+	if browserBusinessEvidenceFailure(result.ErrorCode) &&
+		!(result.ErrorCode == "browser_locator_failed" && result.UserClarificationApplied) {
 		envelope["evidence_limitation"] = true
 	} else {
 		envelope["system_failure"] = true
@@ -1935,6 +2002,9 @@ func browserValidationQuestions(result BrowserCoordinatorResult) []map[string]st
 			})
 		}
 		return questions
+	}
+	if result.ErrorCode == "browser_locator_failed" && result.UserClarificationApplied {
+		return nil
 	}
 	actionID := safeBoundedBrowserText(result.BrowserResult.FailedActionID, 128)
 	action := "当前操作"
@@ -3289,6 +3359,52 @@ func browserRepairCausalStart(plan BrowserPlan, failedIndex int) int {
 	return start
 }
 
+func browserRepairStrategyFingerprint(plan BrowserPlan, failedActionID string) (string, error) {
+	failedIndex := -1
+	for index, action := range plan.Actions {
+		if action.ID == failedActionID {
+			failedIndex = index
+			break
+		}
+	}
+	if failedIndex < 0 {
+		return "", errors.New("failed browser action is not part of the repair strategy")
+	}
+	repairStart := browserRepairCausalStart(plan, failedIndex)
+	if repairStart < 0 || repairStart > failedIndex {
+		return "", errors.New("browser repair causal strategy is invalid")
+	}
+	encoded, err := json.Marshal(plan.Actions[repairStart : failedIndex+1])
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", digest[:]), nil
+}
+
+func rememberFailedBrowserRepairStrategy(seen map[string]map[string]struct{}, plan BrowserPlan, failedActionID string) error {
+	fingerprint, err := browserRepairStrategyFingerprint(plan, failedActionID)
+	if err != nil {
+		return err
+	}
+	if seen[failedActionID] == nil {
+		seen[failedActionID] = make(map[string]struct{})
+	}
+	seen[failedActionID][fingerprint] = struct{}{}
+	return nil
+}
+
+func rejectPreviouslyFailedBrowserRepairStrategy(seen map[string]map[string]struct{}, plan BrowserPlan, failedActionID string) error {
+	fingerprint, err := browserRepairStrategyFingerprint(plan, failedActionID)
+	if err != nil {
+		return err
+	}
+	if _, found := seen[failedActionID][fingerprint]; found {
+		return errBrowserRepairStrategyRepeated
+	}
+	return nil
+}
+
 // Each verifier execution starts from a fresh isolated browser context. Older
 // repair journals and repair agents returned only the failed action and its
 // suffix, which made the second execution skip every navigation action that
@@ -3566,7 +3682,7 @@ func browserPlannerPrompt(request BrowserCoordinatorRequest, observation *Browse
 		"- goto: requires url; forbids locator, value, and key; screenshot_after is optional.\n" +
 		"- click or wait_for: requires locator; forbids url, value, and key; screenshot_after is optional.\n" +
 		"- fill or select: requires locator and value; forbids url and key; screenshot_after is optional.\n" +
-		"- press: requires locator and key; forbids url and value; screenshot_after is optional.\n" +
+		"- press: requires key and normally requires locator; only version 2 Escape may omit locator to dismiss the currently active dialog, drawer, or popover. Other keys without locator are forbidden. url and value are forbidden; screenshot_after is optional.\n" +
 		"- upload_file: requires locator and file_ref; forbids url, value, and key; screenshot_after is optional. file_ref must be an id from controlled_upload_files.\n" +
 		"- screenshot: output only id and action; omit locator, url, value, key, and screenshot_after.\n" +
 		browserPlanLocatorContract() +
@@ -3629,7 +3745,7 @@ func (c BrowserCoordinator) executeBrowserPlanner(ctx context.Context, request B
 	}
 	attachmentExecutor, supportsAttachments := c.Executor.(PhaseAttachmentExecutor)
 	if !supportsAttachments {
-		return c.executeAgentPhase(ctx, request, prompt)
+		return c.executeAgentPhase(ctx, request, "planning", prompt)
 	}
 	limit := maxPhaseAttachments
 	if strings.EqualFold(strings.TrimSpace(request.Bot.Target), "openclaw") {
@@ -3637,10 +3753,10 @@ func (c BrowserCoordinator) executeBrowserPlanner(ctx context.Context, request B
 	}
 	attachments, manifest, cleanup := prepareBrowserBugEvidence(request.Bug, limit, nil)
 	if len(attachments) == 0 {
-		return c.executeAgentPhase(ctx, request, prompt)
+		return c.executeAgentPhase(ctx, request, "planning", prompt)
 	}
 	attachmentPrompt := prompt + browserPlannerBugEvidencePrompt(manifest)
-	result, executeErr := c.executeAgentPhaseWithAttachments(ctx, attachmentExecutor, request, attachmentPrompt, attachments)
+	result, executeErr := c.executeAgentPhaseWithAttachments(ctx, attachmentExecutor, request, "planning", attachmentPrompt, attachments)
 	cleanupErr := cleanup()
 	if cleanupErr != nil {
 		return PhaseExecutionResult{}, cleanupErr
@@ -3657,23 +3773,55 @@ func (c BrowserCoordinator) executeBrowserPlanner(ctx context.Context, request B
 				Message: "历史截图读取失败，已降级为工单文本规划",
 			})
 		}
-		fallback, fallbackErr := c.executeAgentPhase(ctx, request, prompt)
+		fallback, fallbackErr := c.executeAgentPhase(ctx, request, "planning", prompt)
 		addAgentUsage(&fallback.Usage, result.Usage)
 		return fallback, fallbackErr
 	}
 	return result, executeErr
 }
 
-func (c BrowserCoordinator) executeAgentPhase(ctx context.Context, request BrowserCoordinatorRequest, prompt string) (PhaseExecutionResult, error) {
-	callCtx, cancel := context.WithTimeout(ctx, c.agentCallTimeout())
-	defer cancel()
-	return c.Executor.ExecutePhase(callCtx, request.Attempt.ID, request.Bot, prompt, request.Emit)
+func (c BrowserCoordinator) executeAgentPhase(ctx context.Context, request BrowserCoordinatorRequest, stage, prompt string) (PhaseExecutionResult, error) {
+	return c.executeAgentPhaseWithTransportRetry(ctx, request, stage, func(callCtx context.Context) (PhaseExecutionResult, error) {
+		return c.Executor.ExecutePhase(callCtx, request.Attempt.ID, request.Bot, prompt, request.Emit)
+	})
 }
 
-func (c BrowserCoordinator) executeAgentPhaseWithAttachments(ctx context.Context, executor PhaseAttachmentExecutor, request BrowserCoordinatorRequest, prompt string, attachments []PhaseAttachment) (PhaseExecutionResult, error) {
+func (c BrowserCoordinator) executeAgentPhaseWithAttachments(ctx context.Context, executor PhaseAttachmentExecutor, request BrowserCoordinatorRequest, stage, prompt string, attachments []PhaseAttachment) (PhaseExecutionResult, error) {
+	return c.executeAgentPhaseWithTransportRetry(ctx, request, stage, func(callCtx context.Context) (PhaseExecutionResult, error) {
+		return executor.ExecutePhaseWithAttachments(callCtx, request.Attempt.ID, request.Bot, prompt, attachments, request.Emit)
+	})
+}
+
+func (c BrowserCoordinator) executeAgentPhaseWithTransportRetry(
+	ctx context.Context,
+	request BrowserCoordinatorRequest,
+	stage string,
+	execute func(context.Context) (PhaseExecutionResult, error),
+) (PhaseExecutionResult, error) {
+	result, err := c.executeAgentPhaseOnce(ctx, execute)
+	if err == nil || browserValidatorErrorCode(err) != "browser_validator_transport_failed" || ctx.Err() != nil {
+		return result, err
+	}
+	if request.Emit != nil {
+		request.Emit(InvestigationEvent{
+			Type:    "browser_validator_transport_retry",
+			Message: "验证 Agent 与模型服务的连接中断，正在保留当前现场并重试本阶段",
+			Meta: map[string]any{
+				"failure_stage": stage,
+				"retry_attempt": 1,
+				"retry_limit":   maxBrowserValidatorTransportRetries,
+			},
+		})
+	}
+	retry, retryErr := c.executeAgentPhaseOnce(ctx, execute)
+	addAgentUsage(&retry.Usage, result.Usage)
+	return retry, retryErr
+}
+
+func (c BrowserCoordinator) executeAgentPhaseOnce(ctx context.Context, execute func(context.Context) (PhaseExecutionResult, error)) (PhaseExecutionResult, error) {
 	callCtx, cancel := context.WithTimeout(ctx, c.agentCallTimeout())
 	defer cancel()
-	return executor.ExecutePhaseWithAttachments(callCtx, request.Attempt.ID, request.Bot, prompt, attachments, request.Emit)
+	return execute(callCtx)
 }
 
 func (c BrowserCoordinator) agentCallTimeout() time.Duration {
@@ -3705,6 +3853,8 @@ func browserPlanValidationHint(validationErr error) string {
 	switch {
 	case errors.Is(validationErr, errBrowserRepairPrematureInsufficientInfo):
 		return "A locator or action failure is not a user evidence gap. You must return a repaired BrowserPlan grounded in the frozen page evidence; do not return insufficient_info from locator repair."
+	case errors.Is(validationErr, errBrowserRepairStrategyRepeated):
+		return "This causal interaction strategy already failed in the current Case. Re-observe the frozen page and return a genuinely different executable strategy; do not cycle between role and text locators or ask the user to repeat the same navigation instructions."
 	case strings.Contains(message, "credential"), strings.Contains(message, "sensitive"):
 		return "Do not include credentials or authentication steps. Use neutral business-field locators and values only; Studio owns login and host-generated action identities."
 	case strings.Contains(message, "scenario_contract.context_sha256"):

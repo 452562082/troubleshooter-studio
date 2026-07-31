@@ -412,6 +412,27 @@ const baseLoginRequest = () => ({
   headless: false,
 });
 
+const baseRecordRequest = () => ({
+  mode: 'record',
+  plan: {
+    version: 2,
+    device_profile: 'desktop',
+    start_url: 'https://app.test/users',
+    actions: [],
+    assertions: [],
+  },
+  policy: {
+    allowed_origins: ['https://app.test'],
+    application_origins: ['https://app.test'],
+    start_origins: ['https://app.test'],
+    private_origins: [],
+    auth_origins: ['https://login.test'],
+    is_prod: false,
+  },
+  staging_dir: '/opaque/manual-browser',
+  headless: false,
+});
+
 test('browser worker loads and validates offline without importing Playwright', () => {
   assert.doesNotThrow(() => validateWorkerRequest(baseRequest()));
 });
@@ -691,6 +712,21 @@ test('login worker requires visible mode, one absolute state path, and an origin
   }
 });
 
+test('manual recording requires a visible non-production browser and forbids model-authored steps', () => {
+  assert.doesNotThrow(() => validateWorkerRequest(baseRecordRequest()));
+  for (const mutate of [
+    (request) => { request.headless = true; },
+    (request) => { request.policy.is_prod = true; },
+    (request) => { request.staging_dir = 'relative'; },
+    (request) => { request.plan.actions = [{ id: 'click', action: 'click', locator: { kind: 'text', value: '提交' } }]; },
+    (request) => { request.plan.assertions = [{ kind: 'visible_text', value: '完成' }]; },
+  ]) {
+    const invalid = baseRecordRequest();
+    mutate(invalid);
+    assert.throws(() => validateWorkerRequest(invalid));
+  }
+});
+
 test('worker forbids API and identity-provider origins from owning execute or login starts', () => {
   for (const origin of ['https://api.test', 'https://login.test']) {
     const execute = baseRequest();
@@ -737,6 +773,25 @@ test('browser worker accepts exactly eight actions and six locator kinds', () =>
     invalid.plan.actions = [{ id: 'bad', action: 'click', locator: { kind, value: '//button' } }];
     assert.throws(() => validateWorkerRequest(invalid), /locator/);
   }
+});
+
+test('browser worker request protocol accepts only v2 locator-free Escape', () => {
+  const request = baseRequest();
+  request.plan.version = 2;
+  request.plan.actions = [{ id: 'close-dialog', action: 'press', key: 'Escape' }];
+  assert.doesNotThrow(() => validateWorkerRequest(request));
+
+  const lowercase = structuredClone(request);
+  lowercase.plan.actions[0].key = ' escape ';
+  assert.doesNotThrow(() => validateWorkerRequest(lowercase));
+
+  const legacy = structuredClone(request);
+  legacy.plan.version = 1;
+  assert.throws(() => validateWorkerRequest(legacy), /locator/);
+
+  const enter = structuredClone(request);
+  enter.plan.actions[0].key = 'Enter';
+  assert.throws(() => validateWorkerRequest(enter), /locator/);
 });
 
 test('browser worker rejects production interaction before browser launch', () => {
@@ -1916,6 +1971,291 @@ test('executeAction canonicalizes case-insensitive named keys for Playwright', a
   assert.equal(pressed, 'Enter');
 });
 
+test('executeAction sends a locator-free Escape only to an active interaction surface', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let visible = true;
+  const control = {
+    isVisible: async () => visible,
+    boundingBox: async () => ({ x: 760, y: 620, width: 100, height: 36 }),
+  };
+  const controls = { count: async () => 1, nth: () => control };
+  const dialog = {
+    isVisible: async () => visible,
+    getAttribute: async (name) => ({
+      role: 'dialog',
+      'aria-modal': 'true',
+      class: 'ant-modal',
+    })[name] ?? null,
+    boundingBox: async () => ({ x: 180, y: 100, width: 760, height: 560 }),
+    locator: () => controls,
+  };
+  const dialogs = { count: async () => 1, nth: () => dialog };
+  const page = {
+    viewportSize: () => ({ width: 1280, height: 720 }),
+    locator: () => dialogs,
+    keyboard: {
+      press: async (key) => {
+        assert.equal(key, 'Escape');
+        visible = false;
+      },
+    },
+    waitForTimeout: async () => {},
+  };
+
+  await worker.executeAction(
+    page,
+    { id: 'dismiss-dialog', action: 'press', key: ' escape ' },
+    baseRequest(),
+    0,
+    async () => ({ loginRequired: false, path: '' }),
+    null,
+  );
+  assert.equal(visible, false);
+
+  const noSurfacePage = {
+    ...page,
+    locator: () => ({ count: async () => 0, nth: () => assert.fail('no active surface') }),
+  };
+  await assert.rejects(
+    worker.executeAction(
+      noSurfacePage,
+      { id: 'unsafe-global-enter', action: 'press', key: 'Enter' },
+      baseRequest(),
+      0,
+      async () => ({ loginRequired: false, path: '' }),
+      null,
+    ),
+    /global Escape/i,
+  );
+  await assert.rejects(
+    worker.executeAction(
+      noSurfacePage,
+      { id: 'dismiss-missing-dialog', action: 'press', key: 'Escape' },
+      baseRequest(),
+      0,
+      async () => ({ loginRequired: false, path: '' }),
+      null,
+    ),
+    /requires an active dialog/i,
+  );
+});
+
+test('global Escape tracks the dismissed surface identity instead of a live locator index', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let childVisible = true;
+  const controls = {
+    count: async () => 1,
+    nth: () => ({
+      isVisible: async () => true,
+      boundingBox: async () => ({ x: 300, y: 180, width: 100, height: 36 }),
+    }),
+  };
+  const childHandle = {
+    isVisible: async () => childVisible,
+    dispose: async () => {},
+  };
+  const parentHandle = {
+    isVisible: async () => true,
+    dispose: async () => {},
+  };
+  const child = {
+    handle: childHandle,
+    getAttribute: async (name) => ({
+      role: 'dialog',
+      'aria-modal': 'true',
+      class: 'author-dialog',
+    })[name] ?? null,
+    boundingBox: async () => ({ x: 160, y: 100, width: 760, height: 520 }),
+    locator: () => controls,
+  };
+  const parent = {
+    handle: parentHandle,
+    getAttribute: async (name) => ({
+      role: 'dialog',
+      'aria-modal': 'true',
+      class: 'video-editor-dialog',
+    })[name] ?? null,
+    boundingBox: async () => ({ x: 80, y: 40, width: 1120, height: 640 }),
+    locator: () => controls,
+  };
+  const nodes = () => childVisible ? [child, parent] : [parent];
+  const liveLocator = (index) => ({
+    isVisible: async () => Boolean(nodes()[index]),
+    getAttribute: async (name) => nodes()[index]?.getAttribute(name) ?? null,
+    boundingBox: async () => nodes()[index]?.boundingBox() ?? null,
+    locator: (selector) => nodes()[index]?.locator(selector) ?? {
+      count: async () => 0,
+      nth: () => assert.fail('missing surface controls'),
+    },
+    elementHandle: async () => nodes()[index]?.handle ?? null,
+  });
+  const page = {
+    viewportSize: () => ({ width: 1280, height: 720 }),
+    locator: () => ({
+      count: async () => nodes().length,
+      nth: (index) => liveLocator(index),
+    }),
+    keyboard: {
+      press: async (key) => {
+        assert.equal(key, 'Escape');
+        childVisible = false;
+      },
+    },
+    waitForTimeout: async () => {},
+  };
+
+  await assert.doesNotReject(worker.pressGlobalEscapeToDismissSurface(page));
+  assert.equal(childVisible, false);
+});
+
+test('executeAction recovers an explicit close action with a bounded forced click inside the active dialog', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let visible = true;
+  const clickOptions = [];
+  const close = {
+    isVisible: async () => visible,
+    isDisabled: async () => false,
+    boundingBox: async () => ({ x: 760, y: 620, width: 100, height: 36 }),
+    click: async (options) => {
+      clickOptions.push(options ?? null);
+      if (!options?.force) {
+        const error = new Error('locator.click: Timeout 30000ms exceeded');
+        error.name = 'TimeoutError';
+        throw error;
+      }
+      visible = false;
+    },
+  };
+  const closeList = {
+    count: async () => 1,
+    nth: () => close,
+    and: () => closeList,
+  };
+  const dialog = {
+    isVisible: async () => visible,
+    getAttribute: async (name) => ({
+      role: 'dialog',
+      'aria-modal': 'true',
+      class: 'ant-modal',
+    })[name] ?? null,
+    boundingBox: async () => ({ x: 180, y: 100, width: 760, height: 560 }),
+    locator: () => closeList,
+    getByRole: (role, options) => {
+      assert.equal(role, 'button');
+      assert.equal(options?.name, '关闭');
+      return closeList;
+    },
+  };
+  const dialogs = { count: async () => 1, nth: () => dialog };
+  const page = {
+    viewportSize: () => ({ width: 1280, height: 720 }),
+    locator: (selector) => selector.includes('dialog') || selector.includes('modal') ? dialogs : closeList,
+    waitForTimeout: async () => {},
+    keyboard: { press: async () => assert.fail('forced close should succeed before Escape fallback') },
+  };
+
+  await worker.executeAction(
+    page,
+    {
+      id: 'close-author-dialog',
+      action: 'click',
+      locator: { kind: 'role', value: 'button', name: '关闭', exact: true },
+    },
+    baseRequest(),
+    0,
+    async () => ({ loginRequired: false, path: '' }),
+    null,
+    null,
+    { timeoutMs: 0, pollMs: 1 },
+  );
+
+  assert.equal(visible, false);
+  assert.deepEqual(clickOptions, [{ timeout: 2_000 }, { timeout: 2_000, force: true }]);
+});
+
+test('executeAction falls back to Escape when an explicit close control remains unclickable', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let visible = true;
+  let escapeCount = 0;
+  const close = {
+    isVisible: async () => visible,
+    isDisabled: async () => false,
+    boundingBox: async () => ({ x: 760, y: 620, width: 100, height: 36 }),
+    click: async () => {
+      const error = new Error('another element intercepts pointer events');
+      error.name = 'TimeoutError';
+      throw error;
+    },
+    getAttribute: async () => '',
+    textContent: async () => '关闭',
+  };
+  const closeList = {
+    count: async () => 1,
+    nth: () => close,
+    and: () => closeList,
+  };
+  const dialog = {
+    isVisible: async () => visible,
+    getAttribute: async (name) => ({
+      role: 'dialog',
+      'aria-modal': 'true',
+      class: 'ant-modal',
+    })[name] ?? null,
+    textContent: async () => '作者用户选择',
+    boundingBox: async () => ({ x: 180, y: 100, width: 760, height: 560 }),
+    locator: () => closeList,
+    getByRole: () => closeList,
+  };
+  const dialogs = { count: async () => 1, nth: () => dialog };
+  const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const page = {
+    viewportSize: () => ({ width: 1280, height: 720 }),
+    locator: (selector) => selector.includes('dialog') || selector.includes('modal') ? dialogs : closeList,
+    getByLabel: () => empty,
+    getByText: () => empty,
+    waitForTimeout: async () => {},
+    keyboard: {
+      press: async (key) => {
+        assert.equal(key, 'Escape');
+        escapeCount += 1;
+        visible = false;
+      },
+    },
+  };
+
+  await worker.executeAction(
+    page,
+    {
+      id: 'close-author-dialog',
+      action: 'click',
+      locator: { kind: 'role', value: 'button', name: '关闭', exact: true },
+    },
+    baseRequest(),
+    0,
+    async () => ({ loginRequired: false, path: '' }),
+    null,
+    null,
+    { timeoutMs: 0, pollMs: 1 },
+  );
+  assert.equal(escapeCount, 1);
+  assert.equal(visible, false);
+});
+
+test('browser action failures preserve safe structured actionability categories', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const timeout = new Error('locator.click: Timeout 30000ms exceeded');
+  timeout.name = 'TimeoutError';
+  assert.equal(worker.browserActionFailureCode(timeout), 'element_action_timeout');
+  assert.equal(
+    worker.browserActionFailureCode(new Error('another element intercepts pointer events')),
+    'element_click_intercepted',
+  );
+  assert.equal(
+    worker.browserActionFailureCode(new Error('element is not attached to the DOM')),
+    'element_detached',
+  );
+});
+
 test('executeAction rejects an interaction locator with multiple visible matches', async () => {
   const worker = await import('./browser_worker.mjs');
   const nodes = [
@@ -2161,6 +2501,99 @@ test('interaction recovery scopes foreground controls to the active modal surfac
   );
 });
 
+test('an explicit within locator is resolved from the document instead of being nested inside the active dialog twice', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const input = {
+    isVisible: async () => true,
+    boundingBox: async () => ({ x: 260, y: 160, width: 220, height: 36 }),
+  };
+  const backgroundInput = {
+    isVisible: async () => true,
+    boundingBox: async () => ({ x: 40, y: 40, width: 220, height: 36 }),
+  };
+  const empty = {
+    count: async () => 0,
+    nth: () => assert.fail('empty locator'),
+    getByLabel: () => empty,
+  };
+  const list = (nodes, extra = {}) => {
+    const locator = {
+      __nodes: nodes,
+      count: async () => nodes.length,
+      nth: (index) => nodes[index],
+      and: (other) => list(nodes.filter((node) => other.__nodes?.includes(node))),
+      ...extra,
+    };
+    return locator;
+  };
+  const inputList = list([input]);
+  const dialog = {
+    isVisible: async () => true,
+    getAttribute: async (name) => ({
+      role: 'dialog',
+      'aria-modal': 'true',
+      class: 'ant-modal',
+    })[name] ?? null,
+    boundingBox: async () => ({ x: 180, y: 100, width: 760, height: 520 }),
+    locator: (selector) => selector === '*' || selector.includes('[role="searchbox"]') ? inputList : empty,
+    // A locator rooted at the dialog does not include the dialog itself.
+    getByRole: () => empty,
+  };
+  const dialogLocator = list([dialog], {
+    getByLabel: (name) => name === '用户昵称' ? inputList : empty,
+  });
+  const backgroundScopeLocator = list([{}], {
+    getByLabel: (name) => name === '用户昵称' ? list([backgroundInput]) : empty,
+  });
+  const page = {
+    viewportSize: () => ({ width: 1280, height: 720 }),
+    locator: (selector) => selector.includes('[aria-modal="true"]') ? list([dialog]) : empty,
+    getByRole: (role, options) => {
+      if (role === 'dialog' && options?.name === '作者用户选择') return dialogLocator;
+      if (role === 'region' && options?.name === '背景表单') return backgroundScopeLocator;
+      return empty;
+    },
+  };
+
+  assert.equal(
+    await worker.resolveVisibleInteractionLocator(
+      page,
+      {
+        kind: 'label',
+        value: '用户昵称',
+        exact: true,
+        within: {
+          kind: 'role',
+          value: 'dialog',
+          name: '作者用户选择',
+          exact: true,
+        },
+      },
+      { timeoutMs: 0, pollMs: 1 },
+    ),
+    input,
+  );
+
+  await assert.rejects(
+    worker.resolveVisibleInteractionLocator(
+      page,
+      {
+        kind: 'label',
+        value: '用户昵称',
+        exact: true,
+        within: {
+          kind: 'role',
+          value: 'region',
+          name: '背景表单',
+          exact: true,
+        },
+      },
+      { timeoutMs: 0, pollMs: 1 },
+    ),
+    /exactly one visible element/,
+  );
+});
+
 test('interaction recovery ignores an offscreen closed drawer whose portal remains visible to Playwright', async () => {
   const worker = await import('./browser_worker.mjs');
   const sidebarMenuItem = {
@@ -2288,6 +2721,40 @@ test('interaction recovery keeps an in-viewport open drawer as the active surfac
   );
 });
 
+test('interaction recovery ignores a visible portal shell without explicit open state', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const shellButton = {
+    isVisible: async () => true,
+    boundingBox: async () => ({ x: 980, y: 120, width: 100, height: 36 }),
+  };
+  const sidebarItem = { isVisible: async () => true };
+  const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const list = (nodes) => ({ count: async () => nodes.length, nth: (index) => nodes[index] });
+  const dormantPopoverShell = {
+    isVisible: async () => true,
+    getAttribute: async (name) => name === 'class' ? 'header-popover-shell' : null,
+    boundingBox: async () => ({ x: 940, y: 80, width: 300, height: 300 }),
+    locator: () => list([shellButton]),
+  };
+  const page = {
+    viewportSize: () => ({ width: 1280, height: 720 }),
+    locator: (selector) => selector.includes('[class*="popover" i]') ? list([dormantPopoverShell]) : empty,
+    getByRole: (role, options) => role === 'menuitem' && options?.name === '内容管理'
+      ? list([sidebarItem])
+      : empty,
+  };
+
+  assert.equal(await worker.resolveActiveInteractionScope(page), page);
+  assert.equal(
+    await worker.resolveVisibleInteractionLocator(
+      page,
+      { kind: 'role', value: 'menuitem', name: '内容管理', exact: true },
+      { timeoutMs: 0, pollMs: 1 },
+    ),
+    sidebarItem,
+  );
+});
+
 test('observed-document recovery budgets each control family independently', async () => {
   const worker = await import('./browser_worker.mjs');
   const unrelatedInputs = Array.from({ length: 128 }, (_, index) => ({
@@ -2396,6 +2863,29 @@ test('observed-document recovery supports one exact visible custom tab and rejec
       { action: 'click', locator: { kind: 'text', value: '用户' } },
     ),
     /multiple visible elements/,
+  );
+});
+
+test('observed-document recovery can click a unique keyboard-focusable custom control', async () => {
+  const worker = await import('./browser_worker.mjs');
+  const customMenu = {
+    isVisible: async () => true,
+    getAttribute: async (name) => name === 'tabindex' ? '0' : null,
+    textContent: async () => '内容管理',
+    isDisabled: async () => false,
+  };
+  const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const list = (nodes) => ({ count: async () => nodes.length, nth: (index) => nodes[index] });
+  const page = {
+    locator: (selector) => selector.startsWith('[tabindex]') ? list([customMenu]) : empty,
+  };
+
+  assert.equal(
+    await worker.resolveObservedInteractionLocator(
+      page,
+      { action: 'click', locator: { kind: 'text', value: '内容管理', exact: true } },
+    ),
+    customMenu,
   );
 });
 
@@ -3791,16 +4281,16 @@ test('worker source has no arbitrary script, upload path, HAR, trace, body, or r
   assert.equal(source.includes('locator.setInputFiles(request.upload_files[action.file_ref])'), true);
   assert.equal(source.includes('setInputFiles(action.value)'), false);
   assert.equal(source.includes('setInputFiles(action.path)'), false);
-  assert.equal((source.match(/import\('playwright'\)/g) ?? []).length, 3);
+  assert.equal((source.match(/import\('playwright'\)/g) ?? []).length, 4);
   assert.equal(source.includes("from 'playwright'"), false);
   assert.equal(source.includes("context.route('**/*'"), true);
 });
 
-test('execute, login, and probe can only launch Chromium through the pinned proxy helper', () => {
+test('execute, login, manual record, and probe can only launch Chromium through the pinned proxy helper', () => {
   const workerPath = fileURLToPath(new URL('./browser_worker.mjs', import.meta.url));
   const source = readFileSync(workerPath, 'utf8');
   assert.equal((source.match(/chromium\.launch\(/g) ?? []).length, 1);
-  assert.equal((source.match(/launchPinnedBrowser\(chromium,/g) ?? []).length, 4);
+  assert.equal((source.match(/launchPinnedBrowser\(chromium,/g) ?? []).length, 5);
 });
 
 test('unsupported CLI mode emits exactly one final JSON object and no progress on stdout', () => {

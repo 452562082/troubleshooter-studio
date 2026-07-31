@@ -47,13 +47,29 @@ type IncidentBrowserCommandInput struct {
 	ActorID         string `json:"actor_id"`
 }
 
+type IncidentManualReproductionResult struct {
+	ArtifactIDs           []string `json:"artifact_ids"`
+	ScreenshotArtifactIDs []string `json:"screenshot_artifact_ids"`
+	ActionCount           int      `json:"action_count"`
+	FinalURL              string   `json:"final_url"`
+	Title                 string   `json:"title"`
+	Summary               string   `json:"summary"`
+}
+
 type incidentBrowserController interface {
 	bughub.BrowserVerifier
+	CaptureManual(context.Context, browserverify.BrowserManualCaptureRequest) (bughub.BrowserVerificationResult, error)
 	Prepare(context.Context, func(bughub.BrowserProgress)) error
 	Login(context.Context, browserverify.BrowserLoginRequest) error
 	ClearSession(context.Context, browserverify.SessionKey) error
 	Repair(context.Context, func(bughub.BrowserProgress)) error
 	Status() browserverify.RuntimeStatus
+}
+
+type incidentManualAction struct {
+	Action string `json:"action"`
+	Label  string `json:"label"`
+	URL    string `json:"url"`
 }
 
 func (a *App) GetIncidentBrowserRuntimeStatus() browserverify.RuntimeStatus {
@@ -480,6 +496,153 @@ func incidentArtifactDefaultFilename(kind string) string {
 	default:
 		return "incident-evidence.bin"
 	}
+}
+
+// CaptureIncidentManualReproduction lets the user reproduce a browser Bug in
+// Studio's constrained browser and freezes the resulting objective evidence
+// onto the current failed validation attempt. It deliberately does not advance
+// the Case: the user still states the observed outcome through ContinueCase.
+func (a *App) CaptureIncidentManualReproduction(input IncidentBrowserCommandInput) (IncidentManualReproductionResult, error) {
+	a.workflowBrowserMu.Lock()
+	defer a.workflowBrowserMu.Unlock()
+	if err := validateWorkflowCommandScalars(input.CaseID, input.ExpectedVersion, input.IdempotencyKey, input.ActorID); err != nil {
+		return IncidentManualReproductionResult{}, err
+	}
+	caseID := strings.TrimSpace(input.CaseID)
+	attemptID := strings.TrimSpace(input.AttemptID)
+	if attemptID == "" {
+		return IncidentManualReproductionResult{}, errors.New("attempt_id is required")
+	}
+	store, _, err := a.workflowComponents()
+	if err != nil {
+		return IncidentManualReproductionResult{}, err
+	}
+	ctx := a.workflowCommandContext()
+	incident, err := store.GetCase(ctx, caseID)
+	if err != nil {
+		return IncidentManualReproductionResult{}, err
+	}
+	attempt, err := store.GetAttempt(ctx, attemptID)
+	if err != nil || incident.Version != input.ExpectedVersion || incident.CurrentAttemptID != attemptID ||
+		incident.CycleNumber != attempt.CycleNumber || attempt.CaseID != incident.ID || attempt.Status != bughub.AttemptStatusFailed ||
+		(attempt.Phase != bughub.PhaseValidation && attempt.Phase != bughub.PhaseRegression) ||
+		(incident.Status != bughub.CaseWaitingEvidence && incident.Status != bughub.CaseNotReproduced) {
+		return IncidentManualReproductionResult{}, errors.New("manual reproduction requires the current failed validation attempt")
+	}
+	entries := incident.EffectiveFrontendEntries()
+	if len(entries) == 0 || strings.TrimSpace(entries[0].URL) == "" {
+		return IncidentManualReproductionResult{}, errors.New("manual reproduction has no configured frontend entry")
+	}
+	controller := a.incidentBrowserController()
+	if controller == nil {
+		return IncidentManualReproductionResult{}, errors.New("incident browser is unavailable")
+	}
+	bug, _, err := a.loadIncidentContext(caseID)
+	if err != nil {
+		return IncidentManualReproductionResult{}, errors.New("incident browser Case context is unavailable")
+	}
+	policy, err := (caseBrowserPolicyResolver{app: a}).ResolveBrowserPolicy(ctx, incident, bug)
+	if err != nil {
+		return IncidentManualReproductionResult{}, err
+	}
+	stagingParent := filepath.Join(a.workflowRoot, "manual-browser")
+	if err := os.MkdirAll(stagingParent, 0o700); err != nil {
+		return IncidentManualReproductionResult{}, errors.New("manual reproduction staging is unavailable")
+	}
+	staging, err := os.MkdirTemp(stagingParent, "capture-")
+	if err != nil {
+		return IncidentManualReproductionResult{}, errors.New("manual reproduction staging is unavailable")
+	}
+	defer os.RemoveAll(staging)
+	result, err := controller.CaptureManual(ctx, browserverify.BrowserManualCaptureRequest{
+		CaseID: incident.ID, CycleNumber: incident.CycleNumber, AttemptID: attempt.ID,
+		SystemID: incident.SystemID, Environment: incident.Environment, StartURL: entries[0].URL,
+		Policy: policy, StagingDir: staging, Timeout: 20 * time.Minute,
+		Emit: func(progress bughub.BrowserProgress) { a.emitIncidentBrowserProgress(caseID, progress) },
+	})
+	if err != nil {
+		return IncidentManualReproductionResult{}, errors.New("manual reproduction capture failed")
+	}
+	output := IncidentManualReproductionResult{FinalURL: result.FinalURL, Title: result.Title}
+	var actions []incidentManualAction
+	for _, reference := range result.Artifacts {
+		path, err := safeIncidentManualArtifactPath(staging, reference.Path)
+		if err != nil {
+			return IncidentManualReproductionResult{}, err
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return IncidentManualReproductionResult{}, errors.New("manual reproduction evidence is unavailable")
+		}
+		kind := reference.Kind
+		if kind == "screenshot" {
+			kind = "user_screenshot"
+		} else if reference.Kind == "browser_actions" {
+			_ = json.Unmarshal(content, &actions)
+		}
+		artifact, err := bughub.RegisterArtifactBytes(ctx, store, bughub.ArtifactInput{
+			ArtifactsRoot: filepath.Join(a.workflowRoot, "artifacts"), CaseID: incident.ID, AttemptID: attempt.ID,
+			Kind: kind, CapturedAt: time.Now().UTC(), Environment: incident.Environment, Version: reference.Version,
+			RequestID: reference.RequestID, TraceID: reference.TraceID,
+			RedactionStatus: bughub.RedactionStatusNotRequired, RejectSensitive: true,
+		}, content)
+		if err != nil {
+			return IncidentManualReproductionResult{}, fmt.Errorf("store manual reproduction evidence: %w", err)
+		}
+		output.ArtifactIDs = append(output.ArtifactIDs, artifact.ID)
+		if kind == "user_screenshot" {
+			output.ScreenshotArtifactIDs = append(output.ScreenshotArtifactIDs, artifact.ID)
+		}
+	}
+	output.ActionCount = len(actions)
+	output.Summary = incidentManualReproductionSummary(actions, output)
+	return output, nil
+}
+
+func safeIncidentManualArtifactPath(staging, reference string) (string, error) {
+	if reference == "" || filepath.IsAbs(reference) || strings.Contains(reference, "\\") || strings.ContainsRune(reference, '\x00') {
+		return "", errors.New("manual reproduction artifact path is invalid")
+	}
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(reference)))
+	if clean != reference || !strings.HasPrefix(clean, "browser/") {
+		return "", errors.New("manual reproduction artifact path is invalid")
+	}
+	path := filepath.Join(staging, filepath.FromSlash(clean))
+	root := filepath.Clean(staging) + string(os.PathSeparator)
+	if !strings.HasPrefix(filepath.Clean(path)+string(os.PathSeparator), root) {
+		return "", errors.New("manual reproduction artifact escaped staging")
+	}
+	return path, nil
+}
+
+func incidentManualReproductionSummary(actions []incidentManualAction, result IncidentManualReproductionResult) string {
+	var builder strings.Builder
+	builder.WriteString("我已在 Studio 验证浏览器中手动复现，系统已冻结本次页面截图、操作轨迹、Network 和 Console。请基于这些现场证据重新生成 scenario_contract 并继续验证。\n")
+	if result.Title != "" {
+		fmt.Fprintf(&builder, "最终页面：%s\n", result.Title)
+	}
+	if result.FinalURL != "" {
+		fmt.Fprintf(&builder, "最终地址：%s\n", result.FinalURL)
+	}
+	if len(actions) > 0 {
+		builder.WriteString("已记录的操作：\n")
+		limit := len(actions)
+		if limit > 20 {
+			limit = 20
+		}
+		for index := 0; index < limit; index++ {
+			label := strings.TrimSpace(actions[index].Label)
+			if label == "" {
+				label = "未命名控件"
+			}
+			fmt.Fprintf(&builder, "%d. %s：%s\n", index+1, actions[index].Action, label)
+		}
+		if len(actions) > limit {
+			fmt.Fprintf(&builder, "另有 %d 个操作已保存在结构化证据中。\n", len(actions)-limit)
+		}
+	}
+	fmt.Fprintf(&builder, "截图证据：%d 张；全部证据 ID：%s\n请补充：实际现象是什么，以及你认为 Bug 是否已经复现。", len(result.ScreenshotArtifactIDs), strings.Join(result.ArtifactIDs, ", "))
+	return builder.String()
 }
 
 func (a *App) OpenIncidentBrowserLogin(input IncidentBrowserCommandInput) (bughub.IncidentCase, error) {

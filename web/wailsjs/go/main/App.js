@@ -82,6 +82,10 @@ export function ClearIncidentBrowserSession(arg1) {
   return window['go']['main']['App']['ClearIncidentBrowserSession'](arg1);
 }
 
+export function CaptureIncidentManualReproduction(arg1) {
+  return window['go']['main']['App']['CaptureIncidentManualReproduction'](arg1);
+}
+
 export function CompleteIncidentRemediation(arg1) {
   return window['go']['main']['App']['CompleteIncidentRemediation'](arg1);
 }

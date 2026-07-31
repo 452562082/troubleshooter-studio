@@ -67,6 +67,71 @@ func TestParseBrowserPlanAcceptsExactActionMatrix(t *testing.T) {
 	}
 }
 
+func TestParseBrowserPlanV2AcceptsGlobalEscapeWithoutLocator(t *testing.T) {
+	plan, err := ParseBrowserPlan([]byte(`version: 2
+device_profile: desktop
+scenario_contract:
+  version: 1
+  goal: 关闭当前活动弹窗后继续验证
+  basis: bug
+  causal_action_ids: [dismiss-dialog]
+  evidence:
+    - kind: ui_assertions
+start_url: https://test.example.com/users
+actions:
+  - id: dismiss-dialog
+    action: press
+    key: Escape
+assertions:
+  - kind: visible_text
+    value: 用户管理
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Actions) != 1 || plan.Actions[0].Locator != nil || plan.Actions[0].Key != "Escape" {
+		t.Fatalf("plan=%+v", plan)
+	}
+}
+
+func TestParseBrowserPlanRejectsUnsafeGlobalPressWithoutLocator(t *testing.T) {
+	tests := []string{
+		`version: 1
+start_url: https://test.example.com/users
+actions:
+  - id: dismiss-dialog
+    action: press
+    key: Escape
+assertions:
+  - kind: visible_text
+    value: 用户管理
+`,
+		`version: 2
+device_profile: desktop
+scenario_contract:
+  version: 1
+  goal: 提交搜索
+  basis: bug
+  causal_action_ids: [submit-search]
+  evidence:
+    - kind: ui_assertions
+start_url: https://test.example.com/users
+actions:
+  - id: submit-search
+    action: press
+    key: Enter
+assertions:
+  - kind: visible_text
+    value: 用户管理
+`,
+	}
+	for _, raw := range tests {
+		if _, err := ParseBrowserPlan([]byte(raw)); err == nil || !strings.Contains(err.Error(), "locator") {
+			t.Fatalf("expected locator validation failure, got %v", err)
+		}
+	}
+}
+
 func TestParseBrowserPlanAcceptsPositiveAndNegativeTextAssertions(t *testing.T) {
 	plan, err := ParseBrowserPlan([]byte(`version: 1
 start_url: https://test.example.com/users

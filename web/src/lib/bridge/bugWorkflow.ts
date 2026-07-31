@@ -132,6 +132,8 @@ export const incidentBrowserProgressCodes = [
   'browser_result_evaluating',
   'browser_login_opened',
   'browser_login_completed',
+  'browser_manual_recording_opened',
+  'browser_manual_recording_completed',
   'browser_runtime_installing',
   'browser_runtime_importing',
   'browser_runtime_dependencies_installing',
@@ -157,6 +159,7 @@ export type IncidentCaseEventPayload = {
 export interface WorkflowCommandInput { case_id: string; expected_version: number; idempotency_key: string; actor_id: string }
 export interface IncidentBrowserCommandInput extends WorkflowCommandInput { attempt_id: string }
 export interface IncidentArtifactPreview { artifact_id: string; mime_type: 'image/png'; base64_data: string; size: number }
+export interface IncidentManualReproductionResult { artifact_ids: string[]; screenshot_artifact_ids: string[]; action_count: number; final_url: string; title: string; summary: string }
 export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: string; bot_key?: string; bot_environment?: string; frontend_entry_id?: string; frontend_entry_ids?: string[]; primary_frontend_entry_id?: string; input_json?: Record<string, unknown> }
 export interface ResetIncidentCaseInput extends WorkflowCommandInput { new_case_id: string; bot_key: string; bot_environment?: string; frontend_entry_id?: string; frontend_entry_ids?: string[]; primary_frontend_entry_id?: string; input_json?: Record<string, unknown> }
 export interface WorkflowWarning { code: string; message: string }
@@ -366,6 +369,23 @@ export async function repairIncidentBrowserRuntime(input: IncidentBrowserCommand
 export async function clearIncidentBrowserSession(input: IncidentBrowserCommandInput): Promise<void> {
   if (!isDesktop()) throw new Error(desktopOnly)
   await App.ClearIncidentBrowserSession(input)
+}
+export async function captureIncidentManualReproduction(input: IncidentBrowserCommandInput): Promise<IncidentManualReproductionResult> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  const raw = record(await App.CaptureIncidentManualReproduction(input))
+  const artifactIDs = Array.isArray(raw.artifact_ids) ? raw.artifact_ids.filter(value => typeof value === 'string') : []
+  const screenshotIDs = Array.isArray(raw.screenshot_artifact_ids) ? raw.screenshot_artifact_ids.filter(value => typeof value === 'string') : []
+  if (typeof raw.summary !== 'string' || !raw.summary.trim() || artifactIDs.length === 0 || screenshotIDs.length === 0) {
+    throw new Error('手动复现没有生成完整证据')
+  }
+  return {
+    artifact_ids: artifactIDs,
+    screenshot_artifact_ids: screenshotIDs,
+    action_count: typeof raw.action_count === 'number' ? raw.action_count : 0,
+    final_url: typeof raw.final_url === 'string' ? raw.final_url : '',
+    title: typeof raw.title === 'string' ? raw.title : '',
+    summary: raw.summary,
+  }
 }
 export async function getIncidentArtifactPreview(caseID: string, artifactID: string): Promise<IncidentArtifactPreview> {
   if (!isDesktop()) throw new Error(desktopOnly)

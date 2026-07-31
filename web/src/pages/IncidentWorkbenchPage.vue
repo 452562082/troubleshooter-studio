@@ -10,6 +10,7 @@ import {
   approveIncidentFix,
   approveIncidentMerge,
   cancelIncidentAttempt,
+  captureIncidentManualReproduction,
   clearIncidentBrowserSession,
   completeIncidentRemediation,
   confirmIncidentBrowserLogin,
@@ -74,6 +75,7 @@ const starting = ref(false)
 const workflowNotice = ref('')
 const browserLoginConfirmationKey = ref('')
 const browserLoginToastID = ref<number | null>(null)
+const lifecycleComponent = ref<{ openManualReproductionEvidence: (summary: string) => Promise<void> } | null>(null)
 const browserRuntimeStatus = ref<IncidentBrowserRuntimeStatus>({
   state: 'installing',
   version: '',
@@ -941,7 +943,7 @@ async function refreshIncidentWorkflow() {
   }
 }
 
-type IncidentBrowserAction = 'login' | 'confirm-login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url'
+type IncidentBrowserAction = 'login' | 'confirm-login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url' | 'manual-reproduce'
 
 const browserKey = (kind: string, detail: NonNullable<typeof displayedDetail.value>) =>
   `${kind}:${detail.case.id}:${detail.case.current_attempt_id}:v${detail.case.version}`
@@ -996,7 +998,12 @@ async function handleIncidentBrowser(action: IncidentBrowserAction) {
   if (!detail?.case.current_attempt_id) return
   const incident = detail.case
   const context: IncidentBrowserContext = { bugID: tickets.selectedID.value, caseID: incident.id, attemptID: incident.current_attempt_id, version: incident.version }
-  const key = browserKey(action, detail)
+  // A user may need more than one manual observation of the same blocked
+  // attempt. Deduplicate concurrent clicks, but do not reuse an earlier
+  // recording as if it were a fresh reproduction.
+  const key = action === 'manual-reproduce'
+    ? `${browserKey(action, detail)}:${Date.now()}`
+    : browserKey(action, detail)
   const recoveryKey = action === 'confirm-login' ? browserKey('login', detail) : key
   const input = {
     case_id: incident.id,
@@ -1008,6 +1015,16 @@ async function handleIncidentBrowser(action: IncidentBrowserAction) {
   incidentWorkflow.error.value = ''
   workflowNotice.value = ''
   try {
+    if (action === 'manual-reproduce') {
+      const captured = await incidentWorkflow.runOnce(key, () => captureIncidentManualReproduction(input))
+      if (!isSameBlockedBrowserAttempt(context)) return
+      await refreshCaseSnapshotIfCurrent(context.caseID, () => isSameBrowserCase(context))
+      if (!isSameBlockedBrowserAttempt(context)) return
+      await nextTick()
+      await lifecycleComponent.value?.openManualReproductionEvidence(captured.summary)
+      toast.success(`已采集手动复现现场（${captured.screenshot_artifact_ids.length} 张截图、${captured.action_count} 个操作）`)
+      return
+    }
     if (action === 'clear-session') {
       await incidentWorkflow.runOnce(key, () => clearIncidentBrowserSession(input))
       if (!isSameBlockedBrowserAttempt(context)) return
@@ -1041,6 +1058,8 @@ async function handleIncidentBrowser(action: IncidentBrowserAction) {
         ? '登录确认失败，验证尚未继续，请刷新 Case 后重试。'
       : action === 'repair-runtime'
         ? '浏览器环境修复失败，请稍后重试。'
+        : action === 'manual-reproduce'
+          ? '手动复现现场采集失败，Case 未改变，请关闭残留的验证浏览器后重试。'
         : '清除浏览器登录态失败，请稍后重试。'
     incidentWorkflow.error.value = message
     toast.error(message)
@@ -1280,21 +1299,16 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
           <p class="bot-action-status" role="status">{{ botActionStatus }}</p>
           <section v-if="frontendResolution?.required" class="frontend-entry-resolution" aria-label="前端验证入口">
             <p class="frontend-entry-title">涉及端（{{ selectedFrontendEntryIDs.length }}）</p>
-            <fieldset v-if="frontendResolution.candidates?.length">
-              <legend>{{ frontendResolution.status === 'ambiguous' ? frontendResolution.message : '确认本次故障涉及的所有端；工单文本仅用于推荐。' }}</legend>
+            <fieldset v-if="frontendResolution.candidates?.length" aria-label="选择本次故障涉及的端">
               <div v-for="candidate in frontendResolution.candidates" :key="candidate.binding.id" class="frontend-entry-option">
-                <label>
+                <label class="frontend-entry-toggle">
                   <input v-model="selectedFrontendEntryIDs" type="checkbox" :value="candidate.binding.id" />
-                  <span><strong>{{ candidate.binding.name }}</strong><small>{{ candidate.binding.url }}<template v-if="candidate.reasons?.length"> · {{ candidate.reasons.join('、') }}</template></small></span>
-                </label>
-                <label v-if="selectedFrontendEntryIDs.includes(candidate.binding.id)" class="frontend-entry-primary">
-                  <input v-model="primaryFrontendEntryID" type="radio" name="primary-frontend-entry" :value="candidate.binding.id" />
-                  起始端
+                  <span><strong>{{ candidate.binding.name }}</strong></span>
                 </label>
               </div>
             </fieldset>
             <p v-else-if="frontendResolution.status === 'selected' && frontendResolution.selected" class="frontend-entry-selected">
-              {{ frontendResolution.selected.name }} · {{ frontendResolution.selected.url }}
+              {{ frontendResolution.selected.name }}
             </p>
             <p v-else class="live-error">{{ frontendResolution.message }}</p>
           </section>
@@ -1323,6 +1337,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
     <div v-if="displayedCase" ref="lifecycleRegion" class="lifecycle-region">
       <BugCaseLifecycle
         v-if="displayedDetail"
+        ref="lifecycleComponent"
         :detail="displayedDetail"
         :bug-title="tickets.selectedBug.value?.title || ''"
         :pending="incidentWorkflow.pending.value || starting"
@@ -1418,14 +1433,15 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
 .frontend-entry-title, .frontend-entry-selected { margin: 0; overflow-wrap: anywhere; }
 .frontend-entry-title { color: var(--c-muted); font-size: var(--fs-xs); font-weight: 700; }
 .frontend-entry-selected { margin-top: 4px; color: var(--c-text); font-size: var(--fs-sm); }
-.frontend-entry-resolution fieldset { min-width: 0; margin: 4px 0 0; padding: 0; border: 0; }
-.frontend-entry-resolution legend { margin-bottom: 7px; color: #92400e; font-size: var(--fs-xs); line-height: 1.45; }
-.frontend-entry-option { min-width: 0; display: grid; gap: 5px; padding: 7px; border-radius: 6px; }
+.frontend-entry-resolution fieldset { min-width: 0; display: grid; gap: 2px; margin: 4px 0 0; padding: 0; border: 0; }
+.frontend-entry-option { min-width: 0; padding: 2px; border-radius: 6px; }
 .frontend-entry-option:hover { background: var(--c-surf); }
-.frontend-entry-option > label { min-width: 0; display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
-.frontend-entry-primary { margin-left: 24px; color: var(--c-muted); font-size: var(--fs-xs); }
-.frontend-entry-option span, .frontend-entry-option small { min-width: 0; display: block; overflow-wrap: anywhere; }
-.frontend-entry-option small { margin-top: 2px; color: var(--c-muted); font-size: 11px; }
+.frontend-entry-option > label { min-width: 0; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.frontend-entry-toggle { min-height: 44px; box-sizing: border-box; align-items: center; gap: 10px !important; padding: 3px 2px; border-radius: 6px; }
+.frontend-entry-toggle input[type="checkbox"] { width: 20px; height: 20px; flex: 0 0 20px; margin: 0; accent-color: #2563eb; cursor: pointer; }
+.frontend-entry-toggle input[type="checkbox"]:focus-visible { outline: 2px solid #1d4ed8; outline-offset: 2px; }
+.frontend-entry-toggle span { flex: 1 1 auto; line-height: 1.35; }
+.frontend-entry-option span { min-width: 0; display: block; overflow-wrap: anywhere; }
 .bot-action-disabled-reason { color: #92400e; }
 .bot-action-controls { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .bot-action-controls .btn { flex: 1 1 160px; min-height: 44px; transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease; }

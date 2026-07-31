@@ -726,8 +726,20 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 			return BrowserAction{}, err
 		}
 	case "press":
-		if err := require("locator", locatorPresent); err != nil {
-			return BrowserAction{}, err
+		// BrowserPlan v2 may use a locator-free Escape only to dismiss the
+		// currently active dialog/drawer/popover. The worker verifies that such
+		// a foreground surface exists before sending the key. Every other key,
+		// and every legacy plan, remains bound to one explicit control.
+		if !locatorPresent {
+			key, err := decodeBrowserPlanYAMLString(prefix+".key", raw.Key, true)
+			if err != nil {
+				return BrowserAction{}, err
+			}
+			if version != BrowserPlanVersion || !strings.EqualFold(strings.TrimSpace(key), "escape") {
+				if err := require("locator", locatorPresent); err != nil {
+					return BrowserAction{}, err
+				}
+			}
 		}
 		if err := require("key", keyPresent); err != nil {
 			return BrowserAction{}, err

@@ -255,7 +255,8 @@ func TestBrowserPlannerPromptExplainsStrictScreenshotFieldMatrix(t *testing.T) {
 		"goto: requires url; forbids locator, value, and key",
 		"click or wait_for: requires locator; forbids url, value, and key",
 		"fill or select: requires locator and value; forbids url and key",
-		"press: requires locator and key; forbids url and value",
+		"press: requires key and normally requires locator",
+		"only version 2 Escape may omit locator",
 		"screenshot: output only id and action; omit locator, url, value, key, and screenshot_after",
 		"Assertion schema: kind must be exactly visible_text or not_visible_text",
 		"Use visible_text when text must appear; use not_visible_text only when the expected observation is that text must not appear",
@@ -1965,6 +1966,47 @@ func TestValidateBrowserRepairAllowsCausalClickToSameOriginGoto(t *testing.T) {
 	}
 }
 
+func TestValidateBrowserRepairAllowsV2ClickToGlobalEscapeForActiveSurfaceDismissal(t *testing.T) {
+	exact := true
+	original := BrowserPlan{
+		Version:       BrowserPlanVersion,
+		DeviceProfile: "desktop",
+		StartURL:      "https://app.example.com/users",
+		ScenarioContract: &BrowserScenarioContract{
+			Version:         1,
+			Goal:            "关闭作者弹窗后继续核对用户头像",
+			Basis:           "latest_user_clarification",
+			CausalActionIDs: []string{"close-author-dialog"},
+			ContextSHA256:   strings.Repeat("a", 64),
+			Evidence:        []BrowserScenarioEvidence{{Kind: "ui_assertions"}},
+		},
+		Actions: []BrowserAction{{
+			ID:     "close-author-dialog",
+			Action: "click",
+			Locator: &BrowserLocator{
+				Kind: "role", Value: "button", Name: "关闭", Exact: &exact,
+			},
+		}},
+		Assertions: []BrowserAssertion{{Kind: "visible_text", Value: "用户信息管理"}},
+	}
+	repaired := original
+	repaired.Actions = append([]BrowserAction(nil), original.Actions...)
+	repaired.Actions[0].Action = "press"
+	repaired.Actions[0].Locator = nil
+	repaired.Actions[0].Key = "Escape"
+
+	if err := validateBrowserRepairWithEvidence(
+		original,
+		BrowserVerificationResult{
+			Status: "locator_failed", ErrorCode: "element_action_timeout", FailedActionID: "close-author-dialog",
+		},
+		browserEvaluatorEvidence{},
+		repaired,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBrowserRepairPromptExplainsGeneralCausalActionRecovery(t *testing.T) {
 	original := BrowserPlan{Version: 1, StartURL: "https://app.example.com", Actions: []BrowserAction{
 		{ID: "fill-keyword", Action: "fill", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索"}, Value: "chengzi"},
@@ -2446,6 +2488,61 @@ gaps:
 	if !strings.Contains(executor.Prompts[2], "must return a repaired BrowserPlan") ||
 		!strings.Contains(executor.Prompts[2], "insufficient_info") {
 		t.Fatalf("repair retry prompt did not reject premature evidence-gap conclusion: %s", executor.Prompts[2])
+	}
+}
+
+func TestBrowserCoordinatorRejectsPreviouslyFailedLocatorStrategyBeforeExecution(t *testing.T) {
+	distinctRepair := strings.Replace(repairedRemainingPlanYAML(), "用户管理", "成员管理", 1)
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: validBrowserPlanYAML()},
+		{FinalYAML: repairedRemainingPlanYAML()},
+		// Cycling back to the primary role/text strategy must be rejected by
+		// the host before it reaches the browser a third time.
+		{FinalYAML: validBrowserPlanYAML()},
+		{FinalYAML: distinctRepair},
+		{FinalYAML: reproducedValidationYAML("repair-2/browser/final.png")},
+	}}
+	observation := completedBrowserResult("browser/observation.png")
+	verifier := &observingBrowserVerifier{
+		Observations: []BrowserVerificationResult{observation, observation},
+		fakeBrowserVerifier: fakeBrowserVerifier{Results: []BrowserVerificationResult{
+			failedBrowserResult("locator_failed", "open-users", "browser/primary-failure.png"),
+			failedBrowserResult("locator_failed", "open-users", "browser/repair-1-failure.png"),
+			completedBrowserResult("repair-2/browser/final.png"),
+		}},
+	}
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), browserCoordinatorRequest(t))
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if result.RepairCount != 2 || verifier.Calls != 3 || executor.Calls != 5 {
+		t.Fatalf("repair=%d browser=%d agent=%d result=%+v", result.RepairCount, verifier.Calls, executor.Calls, result)
+	}
+	if !strings.Contains(executor.Prompts[3], "repair_strategy_repeated") ||
+		!strings.Contains(executor.Prompts[3], "already failed in the current Case") {
+		t.Fatalf("correction prompt did not explain the rejected cycle: %s", executor.Prompts[3])
+	}
+}
+
+func TestBrowserRepairStrategyFingerprintTracksTheWholeCausalWindow(t *testing.T) {
+	primary, err := ParseBrowserPlan([]byte(validBrowserPlanYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := ParseBrowserPlan([]byte(repairedRemainingPlanYAML()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string]map[string]struct{})
+	if err := rememberFailedBrowserRepairStrategy(seen, primary, "open-users"); err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectPreviouslyFailedBrowserRepairStrategy(seen, primary, "open-users"); !errors.Is(err, errBrowserRepairStrategyRepeated) {
+		t.Fatalf("same strategy error=%v", err)
+	}
+	if err := rejectPreviouslyFailedBrowserRepairStrategy(seen, repaired, "open-users"); err != nil {
+		t.Fatalf("different strategy rejected: %v", err)
 	}
 }
 
@@ -3542,6 +3639,80 @@ func TestBrowserCoordinatorReturnsBoundedValidatorFailure(t *testing.T) {
 	if result.ErrorCode != "browser_validator_failed" || result.Usage.InputTokens != 4 || strings.Contains(result.ErrorMessage, "planner-secret") {
 		t.Fatalf("result=%+v", result)
 	}
+	if executor.Calls != 1 {
+		t.Fatalf("non-transport validator failure must not be retried: calls=%d", executor.Calls)
+	}
+}
+
+func TestBrowserCoordinatorRetriesPlannerTransportFailureInSameStage(t *testing.T) {
+	executor := &scriptedPhaseExecutor{
+		Results: []PhaseExecutionResult{
+			{Usage: AgentUsage{InputTokens: 3}},
+			{FinalYAML: validBrowserPlanYAML(), Usage: AgentUsage{InputTokens: 5}},
+			{FinalYAML: reproducedValidationYAML("browser/final.png")},
+		},
+		Errors: []error{
+			errors.New("stream disconnected before completion: connection reset by peer"),
+			nil,
+			nil,
+		},
+	}
+	var events []InvestigationEvent
+	request := browserCoordinatorRequest(t)
+	request.Emit = func(event InvestigationEvent) { events = append(events, event) }
+
+	result, err := (BrowserCoordinator{
+		Executor: executor,
+		Verifier: &fakeBrowserVerifier{Results: []BrowserVerificationResult{completedBrowserResult("browser/final.png")}},
+	}).Execute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ErrorCode != "" || executor.Calls != 3 || result.Usage.InputTokens != 8 {
+		t.Fatalf("calls=%d result=%+v", executor.Calls, result)
+	}
+	if executor.Prompts[0] != executor.Prompts[1] {
+		t.Fatal("transport retry must reuse the exact same frozen planning prompt")
+	}
+	if !slices.ContainsFunc(events, func(event InvestigationEvent) bool {
+		return event.Type == "browser_validator_transport_retry" &&
+			event.Meta["failure_stage"] == "planning" &&
+			event.Meta["retry_attempt"] == 1
+	}) {
+		t.Fatalf("transport retry event missing: %+v", events)
+	}
+}
+
+func TestBrowserCoordinatorClassifiesExhaustedTransportRetry(t *testing.T) {
+	executor := &scriptedPhaseExecutor{
+		Results: []PhaseExecutionResult{
+			{Usage: AgentUsage{InputTokens: 3}},
+			{Usage: AgentUsage{OutputTokens: 4}},
+		},
+		Errors: []error{
+			errors.New("error sending request to model endpoint: tls handshake eof"),
+			errors.New("stream disconnected before completion"),
+		},
+	}
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: &fakeBrowserVerifier{}}).Execute(context.Background(), browserCoordinatorRequest(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ErrorCode != "browser_validator_transport_failed" ||
+		result.FailureStage != "planning" ||
+		result.TransportRetryCount != 1 ||
+		result.Usage.InputTokens != 3 ||
+		result.Usage.OutputTokens != 4 ||
+		executor.Calls != 2 {
+		t.Fatalf("calls=%d result=%+v", executor.Calls, result)
+	}
+	var output map[string]any
+	if err := json.Unmarshal(browserStopOutput(result), &output); err != nil {
+		t.Fatal(err)
+	}
+	if output["transport_retry_count"] != float64(1) || output["system_failure"] != true {
+		t.Fatalf("output=%+v", output)
+	}
 }
 
 func TestBrowserCoordinatorTimesOutSilentPlannerAndReturnsRetryableFailure(t *testing.T) {
@@ -3590,6 +3761,46 @@ func TestBrowserCoordinatorRetriesTimedOutEvaluatorWithSameFrozenEvidence(t *tes
 	if !strings.Contains(executor.Prompts[2], "same frozen evidence") ||
 		!slices.ContainsFunc(events, func(event InvestigationEvent) bool { return event.Type == "browser_evaluator_timeout_retry" }) {
 		t.Fatalf("retry prompt/events missing: prompts=%v events=%+v", executor.Prompts, events)
+	}
+}
+
+func TestBrowserCoordinatorRetriesTransportFailedEvaluatorWithSameFrozenEvidence(t *testing.T) {
+	executor := &scriptedPhaseExecutor{
+		Results: []PhaseExecutionResult{
+			{FinalYAML: validBrowserPlanYAML()},
+			{Usage: AgentUsage{InputTokens: 7}},
+			{FinalYAML: reproducedValidationYAML("browser/final.png"), Usage: AgentUsage{OutputTokens: 2}},
+		},
+		Errors: []error{
+			nil,
+			errors.New("stream disconnected before completion: tls handshake eof"),
+			nil,
+		},
+	}
+	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{
+		completedBrowserResult("browser/final.png"),
+	}}
+	var events []InvestigationEvent
+	request := browserCoordinatorRequest(t)
+	request.Emit = func(event InvestigationEvent) { events = append(events, event) }
+
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ErrorCode != "" || executor.Calls != 3 || verifier.Calls != 1 ||
+		result.Usage.InputTokens != 7 || result.Usage.OutputTokens != 2 {
+		t.Fatalf("agent=%d browser=%d result=%+v", executor.Calls, verifier.Calls, result)
+	}
+	if executor.Prompts[1] != executor.Prompts[2] ||
+		len(executor.Attachments) != 2 ||
+		!reflect.DeepEqual(executor.Attachments[0], executor.Attachments[1]) {
+		t.Fatalf("evaluator transport retry changed frozen input: prompts=%v attachments=%v", executor.Prompts, executor.Attachments)
+	}
+	if !slices.ContainsFunc(events, func(event InvestigationEvent) bool {
+		return event.Type == "browser_validator_transport_retry" && event.Meta["failure_stage"] == "evaluation"
+	}) {
+		t.Fatalf("transport retry event missing: %+v", events)
 	}
 }
 
@@ -3691,8 +3902,12 @@ func TestBrowserValidatorErrorsKeepActionableFailureClass(t *testing.T) {
 		"operation not permitted while reading evidence attachment":                  "browser_validator_attachment_failed",
 		"agent returned no final structured result":                                  "browser_validator_no_output",
 		"exec: claude: executable file not found":                                    "browser_validator_unavailable",
-		"exit status 1":            "browser_validator_process_failed",
-		"private provider failure": "browser_validator_failed",
+		"exit status 1": "browser_validator_process_failed",
+		"stream disconnected before completion: connection reset by peer":       "browser_validator_transport_failed",
+		"error sending request to model endpoint: tls handshake eof":            "browser_validator_transport_failed",
+		"network is unreachable while opening provider response stream":         "browser_validator_transport_failed",
+		"temporary failure in name resolution for the configured model service": "browser_validator_transport_failed",
+		"private provider failure":                                              "browser_validator_failed",
 	}
 	for message, want := range tests {
 		err := errors.New(message)
@@ -3767,6 +3982,31 @@ func TestBrowserStopOutputTurnsExhaustedLocatorRecoveryIntoAnAssistedPause(t *te
 		!strings.Contains(output.Questions[0]["question"], "已经到达") ||
 		!strings.Contains(output.Questions[0]["answer_hint"], "无需提供") {
 		t.Fatalf("locator assistance is not actionable: %+v", output.Questions)
+	}
+}
+
+func TestBrowserStopOutputDoesNotRepeatAClarificationAlreadyApplied(t *testing.T) {
+	result := browserCoordinatorFailure(BrowserCoordinatorResult{
+		UserClarificationApplied: true,
+		BrowserResult: BrowserVerificationResult{
+			FailedActionID: "open-content-management",
+		},
+	}, "browser_locator_failed")
+	var output struct {
+		SystemFailure            bool                `json:"system_failure"`
+		EvidenceLimitation       bool                `json:"evidence_limitation"`
+		UserClarificationApplied bool                `json:"user_clarification_applied"`
+		Questions                []map[string]string `json:"validation_questions"`
+		ErrorMessage             string              `json:"error_message"`
+	}
+	if err := json.Unmarshal(browserStopOutput(result), &output); err != nil {
+		t.Fatal(err)
+	}
+	if !output.SystemFailure || output.EvidenceLimitation || !output.UserClarificationApplied || len(output.Questions) != 0 {
+		t.Fatalf("output=%+v", output)
+	}
+	if !strings.Contains(output.ErrorMessage, "无需重复补充相同信息") {
+		t.Fatalf("error message=%q", output.ErrorMessage)
 	}
 }
 

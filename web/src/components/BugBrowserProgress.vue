@@ -67,6 +67,8 @@ const stableErrorCode = computed(() => {
   return value.startsWith('browser_') || value === 'validator_not_installed' ? value : ''
 })
 
+const userClarificationApplied = computed(() => props.attempt?.output_json?.user_clarification_applied === true)
+
 const hasValidationQuestions = computed(() => {
   const questions = props.attempt?.output_json?.validation_questions
   const hasQuestions = Array.isArray(questions) && questions.some(value => {
@@ -74,7 +76,7 @@ const hasValidationQuestions = computed(() => {
     const question = (value as Record<string, unknown>).question
     return typeof question === 'string' && question.trim().length > 0
   })
-  return hasQuestions || stableErrorCode.value === 'browser_locator_failed'
+  return hasQuestions || stableErrorCode.value === 'browser_locator_failed' && !userClarificationApplied.value
 })
 
 const planValidationIssueCopy: Record<string, string> = {
@@ -90,6 +92,7 @@ const planValidationIssueCopy: Record<string, string> = {
   frontend_origin_invalid: '计划入口不属于本次已配置的应用范围',
   sensitive_plan_rejected: '计划包含凭据语义或其他不允许持久化的敏感内容',
   locator_contract_invalid: '页面控件定位方式不符合浏览器协议',
+  repair_strategy_repeated: '页面策略重复了当前 Case 中已经失败的因果交互链',
   plan_structure_invalid: '动作、断言或必填字段不符合浏览器计划协议',
 }
 const planValidationIssue = computed(() => {
@@ -110,7 +113,12 @@ const failureStageCopy = computed(() => {
   } as Record<string, string>)[stage] || ''
 })
 
-const state = computed<'progress' | 'assistance' | 'login' | 'runtime' | 'validator' | 'quota' | 'locator' | 'url' | 'business' | 'plan' | 'attachment' | 'configuration' | 'process' | 'retry' | 'system' | ''>(() => {
+const transportRetryCount = computed(() => {
+  const value = props.attempt?.output_json?.transport_retry_count
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= 3 ? value : 0
+})
+
+const state = computed<'progress' | 'assistance' | 'login' | 'runtime' | 'validator' | 'quota' | 'locator' | 'url' | 'business' | 'plan' | 'attachment' | 'configuration' | 'process' | 'transport' | 'retry' | 'system' | ''>(() => {
   const code = stableErrorCode.value
   if (hasValidationQuestions.value) return 'assistance'
   if (code === 'browser_validation_needs_user_input') return 'assistance'
@@ -125,6 +133,7 @@ const state = computed<'progress' | 'assistance' | 'login' | 'runtime' | 'valida
   if (code === 'browser_validator_attachment_failed') return 'attachment'
   if (code === 'browser_validator_configuration_invalid') return 'configuration'
   if (code === 'browser_validator_timeout' || code === 'browser_validator_no_output' || code === 'browser_validator_process_failed') return 'process'
+  if (code === 'browser_validator_transport_failed') return 'transport'
   if (code === 'browser_validator_failed') return 'retry'
   if (code.startsWith('browser_')) return 'system'
   return safeEvents.value.length > 0 ? 'progress' : ''
@@ -154,6 +163,13 @@ const stateCopy = computed(() => {
   }
   if (stableErrorCode.value === 'browser_locator_repair_plan_invalid') {
     return '验证 Agent 根据页面现场给出的后续策略连续未通过内部协议校验。Studio 已先自动纠正一次；当前 Case 和现场证据均已保留，可以直接重试。'
+  }
+  if (stableErrorCode.value === 'browser_validator_transport_failed') {
+    const retryCopy = transportRetryCount.value > 0 ? `自动重试 ${transportRetryCount.value} 次后` : '自动重试后'
+    return `验证 Agent 与模型服务连接中断，Studio 在同一阶段保留输入并${retryCopy}仍未恢复。当前 Case 和已采集现场均已保留，可重新连接继续验证；无需补充附件或重建故障闭环。`
+  }
+  if (stableErrorCode.value === 'browser_locator_failed' && userClarificationApplied.value) {
+    return '验证 Agent 已采用你补充的真实流程，但页面控件定位策略仍然耗尽。无需再次回答相同问题；重新观察后会从当前 Case 继续验证。'
   }
   const artifactCopy: Record<string, string> = {
     browser_artifact_staging_invalid: '验证证据暂存目录不可用，失败发生在浏览器启动前。请检查本地磁盘与目录权限后在当前 Case 重试。',
@@ -186,6 +202,7 @@ const stateCopy = computed(() => {
     attachment: '验证机器人无法读取本次截图证据。Studio 会优先使用结构化页面与网络证据降级判定；仍失败时请检查 macOS 文件访问权限后在当前 Case 重试。',
     configuration: '验证机器人启动配置不兼容。请升级或重新启动已修复的 Studio 后，在当前 Case 直接重试验证；无需补充证据或重建故障闭环。',
     process: '验证机器人进程异常退出或没有返回结构化结果。当前 Case 和浏览器证据均已保留，可以直接重试。',
+    transport: '',
     retry: '验证机器人本次执行异常。可以在当前 Case 内重新运行验证，无需补附件或重建故障闭环。',
     system: '浏览器验证遇到系统错误。请刷新 Case 后按稳定错误码处理，不要用附件补充来掩盖运行时故障。',
     progress: '',
@@ -238,7 +255,7 @@ const stateCopy = computed(() => {
 <style scoped>
 .browser-progress { display: grid; gap: var(--sp-3); padding: var(--sp-4); border: 1px solid #bfdbfe; border-left: 3px solid #2563eb; border-radius: var(--r-lg); background: #f8fbff; }
 .browser-progress[data-browser-state="assistance"], .browser-progress[data-browser-state="login"], .browser-progress[data-browser-state="url"], .browser-progress[data-browser-state="business"] { border-color: #fed7aa; border-left-color: #ea580c; background: #fffaf5; }
-.browser-progress[data-browser-state="runtime"], .browser-progress[data-browser-state="validator"], .browser-progress[data-browser-state="quota"], .browser-progress[data-browser-state="locator"], .browser-progress[data-browser-state="plan"], .browser-progress[data-browser-state="retry"], .browser-progress[data-browser-state="system"] { border-color: #fecaca; border-left-color: #dc2626; background: #fffafa; }
+.browser-progress[data-browser-state="runtime"], .browser-progress[data-browser-state="validator"], .browser-progress[data-browser-state="quota"], .browser-progress[data-browser-state="locator"], .browser-progress[data-browser-state="plan"], .browser-progress[data-browser-state="transport"], .browser-progress[data-browser-state="retry"], .browser-progress[data-browser-state="system"] { border-color: #fecaca; border-left-color: #dc2626; background: #fffafa; }
 .browser-progress header { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: var(--sp-2); }
 .browser-progress header span, .browser-progress header small, .browser-recovery-copy small { color: var(--c-muted); font-size: var(--fs-xs); }
 .browser-progress h3, .browser-progress p { margin: 0; }

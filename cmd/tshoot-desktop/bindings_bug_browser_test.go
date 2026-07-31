@@ -37,6 +37,7 @@ type fakeIncidentBrowserController struct {
 	progress      bughub.BrowserProgress
 	afterLogin    func()
 	status        browserverify.RuntimeStatus
+	manualCapture func(browserverify.BrowserManualCaptureRequest) (bughub.BrowserVerificationResult, error)
 }
 
 func (f *fakeIncidentBrowserController) Prepare(_ context.Context, emit func(bughub.BrowserProgress)) error {
@@ -52,6 +53,13 @@ func (f *fakeIncidentBrowserController) Prepare(_ context.Context, emit func(bug
 }
 
 func (*fakeIncidentBrowserController) Execute(context.Context, bughub.BrowserVerificationRequest) (bughub.BrowserVerificationResult, error) {
+	return bughub.BrowserVerificationResult{}, nil
+}
+
+func (f *fakeIncidentBrowserController) CaptureManual(_ context.Context, request browserverify.BrowserManualCaptureRequest) (bughub.BrowserVerificationResult, error) {
+	if f.manualCapture != nil {
+		return f.manualCapture(request)
+	}
 	return bughub.BrowserVerificationResult{}, nil
 }
 
@@ -254,6 +262,7 @@ func newBrowserRecoveryBindingApp(t *testing.T, phase bughub.Phase, errorCode, l
 	incident := bughub.IncidentCase{
 		ID: "case-browser-recovery", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test",
 		Status: status, CycleNumber: 2, CurrentAttemptID: attemptID, SelectedBotKey: "base|codex",
+		FrontendEntry: bughub.FrontendEntryBinding{ID: "admin", Name: "管理端", URL: "https://app.test/users", ResolutionSource: "user"},
 	}
 	if err := store.CreateCase(context.Background(), incident); err != nil {
 		t.Fatal(err)
@@ -285,6 +294,62 @@ func browserCommandInput(incident bughub.IncidentCase, attempt bughub.PhaseAttem
 	return IncidentBrowserCommandInput{
 		CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version,
 		IdempotencyKey: key, ActorID: "desktop-user",
+	}
+}
+
+func TestCaptureIncidentManualReproductionFreezesEvidenceWithoutAdvancingCase(t *testing.T) {
+	app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_locator_failed", "")
+	controller.manualCapture = func(request browserverify.BrowserManualCaptureRequest) (bughub.BrowserVerificationResult, error) {
+		files := map[string][]byte{
+			"browser/manual-001.png":       []byte("\x89PNG\r\n\x1a\nmanual"),
+			"browser/network.json":         []byte("[]\n"),
+			"browser/console.jsonl":        []byte("{\"type\":\"log\",\"text\":\"safe\"}\n"),
+			"browser/browser-actions.json": []byte(`[{"action":"click","label":"内容管理","url":"https://app.test/users"},{"action":"change","label":"作者昵称","url":"https://app.test/users"}]` + "\n"),
+		}
+		for relative, content := range files {
+			path := filepath.Join(request.StagingDir, filepath.FromSlash(relative))
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				return bughub.BrowserVerificationResult{}, err
+			}
+			if err := os.WriteFile(path, content, 0o600); err != nil {
+				return bughub.BrowserVerificationResult{}, err
+			}
+		}
+		return bughub.BrowserVerificationResult{
+			Status: "completed", FinalURL: "https://app.test/users", Title: "用户管理", FinalScreenshotPath: "browser/manual-001.png",
+			Artifacts: []bughub.BrowserArtifactReference{
+				{Kind: "screenshot", Path: "browser/manual-001.png", Environment: "test"},
+				{Kind: "network", Path: "browser/network.json", Environment: "test"},
+				{Kind: "console", Path: "browser/console.jsonl", Environment: "test"},
+				{Kind: "browser_actions", Path: "browser/browser-actions.json", Environment: "test"},
+			},
+		}, nil
+	}
+	result, err := app.CaptureIncidentManualReproduction(browserCommandInput(incident, attempt, "manual-capture"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ActionCount != 2 || len(result.ScreenshotArtifactIDs) != 1 || len(result.ArtifactIDs) != 4 || !strings.Contains(result.Summary, "内容管理") || !strings.Contains(result.Summary, "Bug 是否已经复现") {
+		t.Fatalf("result = %+v", result)
+	}
+	current, err := store.GetCase(context.Background(), incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status != bughub.CaseWaitingEvidence || current.Version != incident.Version || current.CurrentAttemptID != attempt.ID || runner.count() != 0 {
+		t.Fatalf("case changed during capture: %+v runs=%d", current, runner.count())
+	}
+	artifacts, err := store.ListEvidenceArtifacts(context.Background(), incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := make([]string, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		kinds = append(kinds, artifact.Kind)
+	}
+	slices.Sort(kinds)
+	if !reflect.DeepEqual(kinds, []string{"browser_actions", "console", "network", "user_screenshot"}) {
+		t.Fatalf("artifact kinds = %v", kinds)
 	}
 }
 

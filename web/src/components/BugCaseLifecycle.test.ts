@@ -1,8 +1,22 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
-import type { CaseStatus, IncidentCase, IncidentCaseDetail, TransitionEvent } from '../lib/bridge/bugWorkflow'
+import { getIncidentArtifactPreview, type CaseStatus, type IncidentCase, type IncidentCaseDetail, type TransitionEvent } from '../lib/bridge/bugWorkflow'
 import BugCaseLifecycle, { primaryActionFor } from './BugCaseLifecycle.vue'
+
+vi.mock('../lib/bridge/bugWorkflow', async importOriginal => ({
+  ...(await importOriginal<typeof import('../lib/bridge/bugWorkflow')>()),
+  getIncidentArtifactPreview: vi.fn(),
+}))
+
+beforeEach(() => {
+  vi.mocked(getIncidentArtifactPreview).mockReset().mockResolvedValue({
+    artifact_id: 'scene-current',
+    mime_type: 'image/png',
+    base64_data: 'iVBORw0KGgo=',
+    size: 8,
+  })
+})
 
 function incident(status: CaseStatus, id = 'case-1'): IncidentCase {
   return { id, bug_id: `bug-${id}`, source: 'zentao', system_id: 'base', environment: 'test', status, cycle_number: 1, current_attempt_id: '', selected_bot_key: 'base|codex', version: 2, created_at: '2026-07-11T10:00:00Z', updated_at: '2026-07-11T11:00:00Z' }
@@ -212,6 +226,71 @@ describe('BugCaseLifecycle', () => {
     }]])
   })
 
+  it('shows the latest screenshot from the current validation attempt when the Agent asks for help', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-assistance'
+    snapshot.attempts = [{
+      id: 'validation-assistance', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'reproduce' }, parent_attempt_id: '', started_at: '',
+      error_code: 'browser_locator_failed', error_message: '', usage: {},
+      output_json: {
+        error_code: 'browser_locator_failed',
+        validation_questions: [{
+          id: 'confirm_page_state',
+          question: '当前页面是否已经到达应继续验证的业务状态？',
+          answer_hint: '请说明下一步应验证什么。',
+        }],
+      },
+    }]
+    snapshot.artifacts = [
+      { id: 'scene-old', case_id: 'case-1', attempt_id: 'validation-assistance', kind: 'screenshot', sha256: 'old', size: 8, captured_at: '2026-07-31T10:40:01Z', environment: 'test', version: '', request_id: '', trace_id: '' },
+      { id: 'scene-current', case_id: 'case-1', attempt_id: 'validation-assistance', kind: 'screenshot', sha256: 'current', size: 8, captured_at: '2026-07-31T10:40:08Z', environment: 'test', version: '', request_id: '', trace_id: '' },
+      { id: 'scene-other-attempt', case_id: 'case-1', attempt_id: 'validation-older', kind: 'screenshot', sha256: 'other', size: 8, captured_at: '2026-07-31T10:41:00Z', environment: 'test', version: '', request_id: '', trace_id: '' },
+    ]
+
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    await flushPromises()
+    vi.mocked(getIncidentArtifactPreview).mockClear()
+    await wrapper.get('.primary-action').trigger('click')
+    await flushPromises()
+
+    expect(getIncidentArtifactPreview).toHaveBeenCalledTimes(1)
+    expect(getIncidentArtifactPreview).toHaveBeenCalledWith('case-1', 'scene-current')
+    expect(wrapper.get('.assistance-scene').text()).toContain('Agent 遇到问题时的页面现场')
+    expect(wrapper.get<HTMLImageElement>('.assistance-scene img').attributes('src')).toBe('data:image/png;base64,iVBORw0KGgo=')
+    expect(wrapper.get('.approval-dialog').classes()).toContain('has-assistance-scene')
+    expect(wrapper.get('.approval-dialog').html()).not.toContain('scene-current')
+    expect(wrapper.get('.approval-dialog').html()).not.toContain('sha256')
+  })
+
+  it('keeps the assistance dialog usable when its scene screenshot cannot be previewed', async () => {
+    vi.mocked(getIncidentArtifactPreview).mockRejectedValue(new Error('/private/artifacts/scene.png is unreadable'))
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-assistance'
+    snapshot.attempts = [{
+      id: 'validation-assistance', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, parent_attempt_id: '', started_at: '',
+      error_code: 'browser_locator_failed', error_message: '', usage: {},
+      output_json: { error_code: 'browser_locator_failed' },
+    }]
+    snapshot.artifacts = [
+      { id: 'scene-current', case_id: 'case-1', attempt_id: 'validation-assistance', kind: 'screenshot', sha256: 'current', size: 8, captured_at: '2026-07-31T10:40:08Z', environment: 'test', version: '', request_id: '', trace_id: '' },
+    ]
+
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    await wrapper.get('.primary-action').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('.assistance-scene').text()).toContain('现场截图暂时无法预览，不影响回答 Agent')
+    expect(wrapper.html()).not.toContain('/private/artifacts')
+    await wrapper.get('#case-supplement').setValue('已经进入目标列表，请继续搜索并对比头像。')
+    await wrapper.get('[data-confirm]').trigger('click')
+    expect(wrapper.emitted('primary')).toEqual([[{
+      kind: 'supply_evidence',
+      input: '已经进入目标列表，请继续搜索并对比头像。',
+    }]])
+  })
+
   it('retries an invalid locator repair plan inside the current Case', () => {
     const snapshot = detail('waiting_evidence')
     snapshot.case.current_attempt_id = 'repair-plan'
@@ -236,6 +315,25 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.emitted('primary')).toEqual([[{ kind: 'retry_validation' }]])
     expect(wrapper.find('#case-supplement').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('private provider failure')
+  })
+
+  it('offers reconnect copy for an exhausted validator transport retry', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-transport-failed'
+    snapshot.attempts = [{
+      id: 'validation-transport-failed', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'reproduce' },
+      output_json: { error_code: 'browser_validator_transport_failed', failure_stage: 'planning', transport_retry_count: 1 },
+      parent_attempt_id: '', started_at: '', error_code: 'browser_validator_transport_failed', error_message: 'private endpoint failure', usage: {},
+    }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'retry_validation', label: '重新连接并继续验证' })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(wrapper.get('[data-browser-state="transport"]').text()).toContain('模型服务连接')
+    expect(wrapper.get('.primary-action').text()).toBe('重新连接并继续验证')
+    await wrapper.get('.primary-action').trigger('click')
+    expect(wrapper.emitted('primary')).toEqual([[{ kind: 'retry_validation' }]])
+    expect(wrapper.text()).not.toContain('private endpoint failure')
   })
 
   it('offers a direct retry for an unclassified validation system failure', async () => {
@@ -393,6 +491,47 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.get('[role="dialog"]').text()).toContain('当前页面是否已经到达')
     expect(wrapper.get('[role="dialog"]').text()).toContain('无需提供按钮名称')
     expect(wrapper.find('#case-supplement').exists()).toBe(true)
+  })
+
+  it('re-observes without asking the same question after user clarification was applied', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-clarified-locator'
+    snapshot.attempts = [{
+      id: 'validation-clarified-locator', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: { user_input: '进入内容管理后搜索目标内容' },
+      output_json: {
+        error_code: 'browser_locator_failed',
+        user_clarification_applied: true,
+      },
+      parent_attempt_id: '', started_at: '', error_code: 'browser_locator_failed', error_message: '', usage: {},
+    }]
+
+    expect(primaryActionFor(snapshot)).toEqual({ kind: 'retry_validation', label: '重新观察并继续验证' })
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(wrapper.get('.primary-action').text()).toBe('重新观察并继续验证')
+    await wrapper.get('.primary-action').trigger('click')
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.emitted('primary')).toEqual([[{ kind: 'retry_validation' }]])
+  })
+
+  it('offers a user-driven reproduction fallback and prefills the evidence continuation', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-manual'
+    snapshot.attempts = [{
+      id: 'validation-manual', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_locator_failed', user_clarification_applied: true },
+      parent_attempt_id: '', started_at: '', error_code: 'browser_locator_failed', error_message: '', usage: {},
+    }]
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    await wrapper.get('[data-browser-action="manual-reproduce"]').trigger('click')
+    expect(wrapper.emitted('browser')).toEqual([['manual-reproduce']])
+
+    await (wrapper.vm as unknown as { openManualReproductionEvidence: (summary: string) => Promise<void> })
+      .openManualReproductionEvidence('已记录 2 个操作和 1 张截图；请补充实际现象。')
+    expect(wrapper.get('#case-supplement').element).toHaveProperty('value', '已记录 2 个操作和 1 张截图；请补充实际现象。')
+    await wrapper.get('[data-confirm]').trigger('click')
+    const primaryEvents = wrapper.emitted('primary') ?? []
+    expect(primaryEvents[primaryEvents.length - 1]).toEqual([{ kind: 'supply_evidence', input: '已记录 2 个操作和 1 张截图；请补充实际现象。' }])
   })
 
   it('shows the Agent question and waits for a user answer before replanning', async () => {

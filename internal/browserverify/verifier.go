@@ -114,6 +114,23 @@ type BrowserLoginRequest struct {
 	Emit    func(bughub.BrowserProgress)
 }
 
+// BrowserManualCaptureRequest opens a visible, policy-constrained browser so
+// the user can reproduce a problem while Studio captures redacted evidence.
+// It intentionally carries no model-authored actions or assertions.
+type BrowserManualCaptureRequest struct {
+	CaseID      string
+	CycleNumber int
+	AttemptID   string
+	SystemID    string
+	Environment string
+	Version     string
+	StartURL    string
+	Policy      bughub.BrowserSecurityPolicy
+	StagingDir  string
+	Timeout     time.Duration
+	Emit        func(bughub.BrowserProgress)
+}
+
 type browserDirectoryIdentity struct {
 	path string
 	info os.FileInfo
@@ -370,6 +387,102 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 // not accidentally pretend to provide live DOM evidence.
 func (v *HostVerifier) Observe(ctx context.Context, request bughub.BrowserVerificationRequest) (bughub.BrowserVerificationResult, error) {
 	return v.Execute(ctx, request)
+}
+
+// CaptureManual records a user-driven reproduction in the same isolated
+// browser runtime and evidence pipeline as Agent-driven verification. It does
+// not decide whether the Bug reproduced; the caller must feed the frozen
+// evidence and the user's explicit observation back into validation.
+func (v *HostVerifier) CaptureManual(ctx context.Context, request BrowserManualCaptureRequest) (bughub.BrowserVerificationResult, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if strings.TrimSpace(request.CaseID) == "" || strings.TrimSpace(request.AttemptID) == "" || request.CycleNumber < 1 ||
+		strings.TrimSpace(request.SystemID) == "" || strings.TrimSpace(request.Environment) == "" ||
+		strings.TrimSpace(request.StagingDir) == "" || !filepath.IsAbs(request.StagingDir) {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_manual_request_invalid", cause: errors.New("manual capture identity and staging are required")}
+	}
+	if request.Policy.IsProd {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_manual_prod_blocked", cause: errors.New("manual reproduction recording is disabled in production")}
+	}
+	startURL, applicationOrigin, err := canonicalBrowserLoginApplicationURL(strings.TrimSpace(request.StartURL))
+	if err != nil {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_manual_request_invalid", cause: errors.New("manual capture start URL is invalid")}
+	}
+	if err := requireConfiguredBrowserOrigin(startURL, request.Policy.StartOrigins); err != nil {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_manual_request_invalid", cause: err}
+	}
+	if err := requireConfiguredBrowserOrigin(startURL, request.Policy.ApplicationOrigins); err != nil {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_manual_request_invalid", cause: err}
+	}
+	if err := AllowedURL(ctx, v.resolver, request.Policy, startURL); err != nil {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_manual_request_invalid", cause: err}
+	}
+	if v.runtime == nil {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_runtime_missing", cause: errors.New("browser runtime manager is required")}
+	}
+	runtimePaths, err := v.runtime.RequireReady()
+	if err != nil {
+		return bughub.BrowserVerificationResult{}, err
+	}
+	timeout := request.Timeout
+	if timeout <= 0 {
+		timeout = 15 * time.Minute
+	}
+	if timeout > 30*time.Minute {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_manual_request_invalid", cause: errors.New("manual capture timeout exceeds its limit")}
+	}
+	recordCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	browserDir, err := ensureBrowserStagingDirectory(request.StagingDir)
+	if err != nil {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_staging_invalid", cause: err}
+	}
+	browserIdentity, err := pinBrowserDirectory(browserDir)
+	if err != nil {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_staging_invalid", cause: err}
+	}
+	key := SessionKey{SystemID: request.SystemID, Environment: request.Environment, Origin: applicationOrigin}
+	var sessionState []byte
+	hasSession := false
+	if v.sessions != nil {
+		sessionState, hasSession, err = v.sessions.Load(key)
+		if err != nil {
+			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_session_unavailable", cause: errors.New("load encrypted browser session")}
+		}
+	}
+	workerOutput, runErr := v.runWorkerWithSession(recordCtx, runtimePaths, workerRequest{
+		Mode:   "record",
+		Plan:   bughub.BrowserPlan{Version: 2, DeviceProfile: "desktop", StartURL: startURL, Actions: []bughub.BrowserAction{}, Assertions: []bughub.BrowserAssertion{}},
+		Policy: request.Policy, StagingDir: browserDir, Headless: false,
+	}, request.Emit, key, sessionState, hasSession)
+	if runErr != nil {
+		if recordCtx.Err() != nil {
+			return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_manual_interrupted", cause: errors.New("manual reproduction recording was interrupted")}
+		}
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_manual_failed", cause: errors.New("manual reproduction browser failed")}
+	}
+	if err := browserIdentity.Verify(); err != nil {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_artifact_identity_changed", cause: err}
+	}
+	if err := validateWorkerResultBounds(workerOutput); err != nil {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_protocol_invalid", cause: err}
+	}
+	workerOutput = sanitizeWorkerResult(workerOutput)
+	if err := validateWorkerResultURLs(recordCtx, v.resolver, request.Policy, workerOutput); err != nil {
+		return bughub.BrowserVerificationResult{}, &verifierError{code: "browser_worker_protocol_invalid", cause: err}
+	}
+	result := browserVerificationResult(bughub.BrowserVerificationRequest{
+		CaseID: request.CaseID, CycleNumber: request.CycleNumber, AttemptID: request.AttemptID,
+		SystemID: request.SystemID, Environment: request.Environment, Version: request.Version,
+	}, workerOutput)
+	validation, err := validateManifestArtifacts(request.StagingDir, browserIdentity, result.Artifacts, result.Status, result.FinalScreenshotPath)
+	if err != nil {
+		return bughub.BrowserVerificationResult{}, browserArtifactManifestError(err)
+	}
+	if result.FinalScreenshotPath == "" {
+		result.FinalScreenshotPath = validation.FinalScreenshot
+	}
+	return bindVerifiedBrowserArtifacts(result, validation), nil
 }
 
 func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (returnedErr error) {
@@ -849,6 +962,10 @@ func validateWorkerPlanShape(plan bughub.BrowserPlan) error {
 		}
 		if action.Action == "upload_file" && (action.Locator == nil || strings.TrimSpace(action.FileRef) == "") {
 			return errors.New("browser upload action is invalid")
+		}
+		if action.Action == "press" && action.Locator == nil &&
+			(plan.Version != bughub.BrowserPlanVersion || !strings.EqualFold(strings.TrimSpace(action.Key), "escape")) {
+			return errors.New("browser global press action is invalid")
 		}
 		if action.Action != "upload_file" && action.FileRef != "" {
 			return errors.New("browser controlled file reference is invalid")

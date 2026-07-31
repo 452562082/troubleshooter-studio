@@ -121,11 +121,96 @@ func validBrowserRequest(t *testing.T) bughub.BrowserVerificationRequest {
 	}
 }
 
+func TestCaptureManualUsesVisiblePolicyConstrainedWorkerAndVerifiesEvidence(t *testing.T) {
+	worker := &fakeWorker{Result: workerResult{
+		Status: "completed", FinalURL: "https://app.test/users", Title: "Users",
+		FinalScreenshotPath: "browser/manual-001.png",
+		Artifacts: []workerArtifact{
+			{Kind: "screenshot", Path: "browser/manual-001.png"},
+			{Kind: "network", Path: "browser/network.json"},
+			{Kind: "console", Path: "browser/console.jsonl"},
+			{Kind: "browser_actions", Path: "browser/browser-actions.json"},
+		},
+	}}
+	verifier := newTestHostVerifier(t, worker)
+	result, err := verifier.CaptureManual(context.Background(), BrowserManualCaptureRequest{
+		CaseID: "case-1", CycleNumber: 1, AttemptID: "attempt-1", SystemID: "shop", Environment: "test",
+		Version: "v1", StartURL: "https://app.test/users", StagingDir: t.TempDir(),
+		Policy: bughub.BrowserSecurityPolicy{
+			AllowedOrigins: []string{"https://app.test"}, ApplicationOrigins: []string{"https://app.test"}, StartOrigins: []string{"https://app.test"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "completed" || result.FinalScreenshotPath != "browser/manual-001.png" || len(result.Artifacts) != 4 {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(worker.Requests) != 1 || worker.Requests[0].Mode != "record" || worker.Requests[0].Headless || len(worker.Requests[0].Plan.Actions) != 0 || len(worker.Requests[0].Plan.Assertions) != 0 {
+		t.Fatalf("worker request = %+v", worker.Requests)
+	}
+	for _, artifact := range result.Artifacts {
+		if artifact.SHA256 == "" || artifact.Size <= 0 || artifact.Environment != "test" || artifact.Version != "v1" {
+			t.Fatalf("artifact = %+v", artifact)
+		}
+	}
+}
+
+func TestCaptureManualRejectsProductionWithoutStartingWorker(t *testing.T) {
+	worker := &fakeWorker{}
+	verifier := newTestHostVerifier(t, worker)
+	_, err := verifier.CaptureManual(context.Background(), BrowserManualCaptureRequest{
+		CaseID: "case-1", CycleNumber: 1, AttemptID: "attempt-1", SystemID: "shop", Environment: "prod",
+		StartURL: "https://app.test/users", StagingDir: t.TempDir(),
+		Policy: bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}, ApplicationOrigins: []string{"https://app.test"}, StartOrigins: []string{"https://app.test"}, IsProd: true},
+	})
+	if err == nil || !strings.Contains(err.Error(), "browser_manual_prod_blocked") || worker.Calls != 0 {
+		t.Fatalf("err=%v calls=%d", err, worker.Calls)
+	}
+}
+
 func TestValidateWorkerPlanShapeAcceptsNegativeTextAssertion(t *testing.T) {
 	request := validBrowserRequest(t)
 	request.Plan.Assertions = []bughub.BrowserAssertion{{Kind: "not_visible_text", Value: "2022"}}
 	if err := validateWorkerPlanShape(request.Plan); err != nil {
 		t.Fatalf("negative assertion rejected: %v", err)
+	}
+}
+
+func TestValidateWorkerPlanShapeAllowsOnlyV2GlobalEscape(t *testing.T) {
+	valid := bughub.BrowserPlan{
+		Version:  bughub.BrowserPlanVersion,
+		StartURL: "https://app.example.com",
+		Actions: []bughub.BrowserAction{{
+			ID: "dismiss-dialog", Action: "press", Key: "Escape",
+		}},
+		Assertions: []bughub.BrowserAssertion{{Kind: "visible_text", Value: "用户管理"}},
+	}
+	if err := validateWorkerPlanShape(valid); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, invalid := range []bughub.BrowserPlan{
+		{
+			Version:  bughub.BrowserPlanLegacyVersion,
+			StartURL: "https://app.example.com",
+			Actions:  []bughub.BrowserAction{{ID: "dismiss-dialog", Action: "press", Key: "Escape"}},
+			Assertions: []bughub.BrowserAssertion{{
+				Kind: "visible_text", Value: "用户管理",
+			}},
+		},
+		{
+			Version:  bughub.BrowserPlanVersion,
+			StartURL: "https://app.example.com",
+			Actions:  []bughub.BrowserAction{{ID: "submit", Action: "press", Key: "Enter"}},
+			Assertions: []bughub.BrowserAssertion{{
+				Kind: "visible_text", Value: "用户管理",
+			}},
+		},
+	} {
+		if err := validateWorkerPlanShape(invalid); err == nil {
+			t.Fatalf("unsafe global press was accepted: %+v", invalid)
+		}
 	}
 }
 

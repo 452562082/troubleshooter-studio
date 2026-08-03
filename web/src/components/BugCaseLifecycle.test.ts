@@ -547,7 +547,6 @@ describe('BugCaseLifecycle', () => {
     const confirm = wrapper.get<HTMLButtonElement>('[data-confirm]')
     expect(confirm.element.disabled).toBe(true)
     await wrapper.get('input[value="reproduced"]').setValue()
-    await wrapper.get('#manual-reproduction-observation').setValue('选择作者 chengzi 后仍展示默认头像。')
     expect(confirm.element.disabled).toBe(false)
     await wrapper.get('[data-confirm]').trigger('click')
     const primaryEvents = wrapper.emitted('primary') ?? []
@@ -555,10 +554,9 @@ describe('BugCaseLifecycle', () => {
       kind: 'supply_evidence',
       input: [
         '手动复现结论：已复现',
-        '用户现场观察：选择作者 chengzi 后仍展示默认头像。',
         'Studio 自动采集的现场摘要：',
         '已记录 2 个操作和 1 张截图；请补充实际现象。',
-        '请将用户结论与冻结的截图、操作轨迹、Network、Console 一起作为验证证据，重新生成 scenario_contract 后继续当前 Case。',
+        '请读取当前 Case 中冻结的 manual_reproduction_recipe、截图、Network 和 Console；严格按可回放动作重新执行，无需再次向用户询问已记录的操作和值，并重新生成 scenario_contract 后继续当前 Case。',
       ].join('\n'),
     }])
   })

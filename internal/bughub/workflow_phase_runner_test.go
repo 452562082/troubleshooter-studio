@@ -2847,6 +2847,54 @@ func TestAgentPhaseRunnerCarriesUploadedScreenshotsIntoValidationRetry(t *testin
 	}
 }
 
+func TestAgentPhaseRunnerLoadsManualReproductionRecipeFromBlockedAncestor(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-manual-recipe", CaseWaitingEvidence)
+	now := time.Now().UTC()
+	blocked := PhaseAttempt{
+		ID: "attempt-manual-recipe-blocked", CaseID: incident.ID, CycleNumber: incident.CycleNumber,
+		Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusFailed,
+		AgentTarget: "codex", BotKey: "bot", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
+		StartedAt: now.Add(-time.Minute), FinishedAt: &now,
+	}
+	if err := store.CreateAttempt(context.Background(), blocked); err != nil {
+		t.Fatal(err)
+	}
+	exact := true
+	recipe := BrowserManualReproductionRecipe{
+		Version: ManualReproductionRecipeVersion, StartURL: "https://app.example.com/users",
+		Actions: []BrowserManualReproductionAction{{
+			ID: "manual-001", Action: "fill", Label: "搜索作者", Value: "chengzi",
+			Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索作者", Exact: &exact},
+		}},
+	}
+	content, err := json.Marshal(recipe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := phaseArtifactsRoot(t)
+	if _, err := RegisterArtifactBytes(context.Background(), store, ArtifactInput{
+		ArtifactsRoot: root, CaseID: incident.ID, AttemptID: blocked.ID,
+		Kind: ManualReproductionArtifactKind, Environment: "test", RedactionStatus: RedactionStatusNotRequired,
+	}, content); err != nil {
+		t.Fatal(err)
+	}
+	retry := PhaseAttempt{
+		ID: "attempt-manual-recipe-retry", CaseID: incident.ID, CycleNumber: incident.CycleNumber,
+		Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusRunning,
+		AgentTarget: "codex", BotKey: "bot", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
+		ParentAttemptID: blocked.ID, StartedAt: now,
+	}
+	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, root, nil)
+	loaded, err := runner.browserManualReproductionRecipe(context.Background(), retry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded == nil || len(loaded.Actions) != 1 || loaded.Actions[0].Value != "chengzi" {
+		t.Fatalf("loaded recipe = %+v", loaded)
+	}
+}
+
 func TestAgentPhaseRunnerFixCheckpointIsConsumedBeforeStagingCleanup(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-fix-checkpoint-normal", CaseFixing)

@@ -166,7 +166,6 @@ const dialogEvidence = ref('')
 type ManualReproductionOutcome = '' | 'reproduced' | 'not_reproduced' | 'uncertain'
 const manualReproductionSummary = ref('')
 const manualReproductionOutcome = ref<ManualReproductionOutcome>('')
-const manualReproductionObservation = ref('')
 type PendingEvidenceImage = IncidentEvidenceImageInput & { size: number; preview: string }
 const dialogImages = ref<PendingEvidenceImage[]>([])
 const dialogImageError = ref('')
@@ -451,7 +450,6 @@ async function openAction(event: MouseEvent) {
   dialogEvidence.value = ''
   manualReproductionSummary.value = ''
   manualReproductionOutcome.value = ''
-  manualReproductionObservation.value = ''
   dialogImages.value = []
   dialogImageError.value = ''
   dialogFiles.value = []
@@ -478,7 +476,6 @@ async function openManualReproductionEvidence(summary: string) {
   dialogEvidence.value = ''
   manualReproductionSummary.value = summary.trim()
   manualReproductionOutcome.value = ''
-  manualReproductionObservation.value = ''
   dialogImages.value = []
   dialogImageError.value = ''
   dialogFiles.value = []
@@ -605,7 +602,6 @@ function closeDialog() {
   assistanceSceneState.value = 'idle'
   manualReproductionSummary.value = ''
   manualReproductionOutcome.value = ''
-  manualReproductionObservation.value = ''
   dialogBranchOptionsLoading.value = false
   dialogOpen.value = false
   nextTick(() => actionTrigger.value?.focus())
@@ -651,7 +647,6 @@ function confirmAction() {
   assistanceSceneState.value = 'idle'
   manualReproductionSummary.value = ''
   manualReproductionOutcome.value = ''
-  manualReproductionObservation.value = ''
   dialogBranchOptionsLoading.value = false
   dialogOpen.value = false
   nextTick(() => actionTrigger.value?.focus())
@@ -659,7 +654,7 @@ function confirmAction() {
 
 const evidenceSupplementMissing = computed(() => {
   if (!dialogAction.value || !['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(dialogAction.value.kind)) return false
-  if (isManualReproductionDialog.value) return !manualReproductionOutcome.value || !manualReproductionObservation.value.trim()
+  if (isManualReproductionDialog.value) return !manualReproductionOutcome.value
   if (dialogAction.value.kind === 'supply_evidence') return !dialogInput.value.trim() && dialogImages.value.length === 0 && dialogFiles.value.length === 0
   return !dialogInput.value.trim()
 })
@@ -674,10 +669,9 @@ function manualReproductionInput(): string {
   if (!outcome) return ''
   return [
     `手动复现结论：${labels[outcome]}`,
-    `用户现场观察：${manualReproductionObservation.value.trim()}`,
     'Studio 自动采集的现场摘要：',
     manualReproductionSummary.value,
-    '请将用户结论与冻结的截图、操作轨迹、Network、Console 一起作为验证证据，重新生成 scenario_contract 后继续当前 Case。',
+    '请读取当前 Case 中冻结的 manual_reproduction_recipe、截图、Network 和 Console；严格按可回放动作重新执行，无需再次向用户询问已记录的操作和值，并重新生成 scenario_contract 后继续当前 Case。',
   ].join('\n')
 }
 
@@ -1036,7 +1030,7 @@ function dialogTitle(): string {
           <header>
             <div>
               <h3 id="assistance-scene-title">{{ isManualReproductionDialog ? '本次手动复现现场' : 'Agent 遇到问题时的页面现场' }}</h3>
-              <p>{{ isManualReproductionDialog ? '这是你刚刚在验证浏览器中操作时保存的页面。请确认复现结论并描述实际现象。' : '这是当前验证 Attempt 最后保存的页面，请结合现场判断 Agent 接下来应该做什么。' }}</p>
+              <p>{{ isManualReproductionDialog ? '这是你刚刚在验证浏览器中操作时保存的页面。操作步骤和非敏感输入值已自动记录，只需确认复现结论。' : '这是当前验证 Attempt 最后保存的页面，请结合现场判断 Agent 接下来应该做什么。' }}</p>
             </div>
           </header>
           <div v-if="assistanceSceneState === 'loading'" class="assistance-scene-status" role="status">正在加载现场截图…</div>
@@ -1061,8 +1055,6 @@ function dialogTitle(): string {
               <span><strong>无法判断</strong><small>受账号、数据或环境条件影响，暂时无法确认</small></span>
             </label>
           </fieldset>
-          <label for="manual-reproduction-observation">实际现象或判断原因</label>
-          <textarea id="manual-reproduction-observation" v-model="manualReproductionObservation" rows="4" maxlength="4000" placeholder="例如：选择作者 chengzi 后，头像仍展示成默认头像，与用户信息页不一致。"></textarea>
           <details class="manual-capture-summary">
             <summary>查看自动采集摘要</summary>
             <pre>{{ manualReproductionSummary }}</pre>

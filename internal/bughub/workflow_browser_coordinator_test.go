@@ -289,6 +289,53 @@ func TestBrowserPlannerPromptIncludesBoundedLiveInitialObservation(t *testing.T)
 	}
 }
 
+func TestBrowserPlannerPromptRequiresRecordedManualRecipeReplay(t *testing.T) {
+	exact := true
+	request := BrowserCoordinatorRequest{
+		ManualReproductionRecipe: &BrowserManualReproductionRecipe{
+			Version: ManualReproductionRecipeVersion, StartURL: "https://app.example.com/users",
+			Actions: []BrowserManualReproductionAction{{
+				ID: "manual-001", Action: "fill", Label: "搜索作者", Value: "chengzi",
+				Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索作者", Exact: &exact},
+			}},
+		},
+	}
+	prompt := browserPlannerPrompt(request, nil)
+	for _, expected := range []string{"manual_reproduction_recipe", "manual-001", "chengzi", "Replay every action", "Do not ask the user to repeat"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("planner prompt lost manual recipe %q:\n%s", expected, prompt)
+		}
+	}
+}
+
+func TestBrowserPlanMustReplayRecordedManualActionsInOrder(t *testing.T) {
+	exact := true
+	recipe := &BrowserManualReproductionRecipe{
+		Version: ManualReproductionRecipeVersion, StartURL: "https://app.example.com/users",
+		Actions: []BrowserManualReproductionAction{
+			{ID: "manual-001", Action: "fill", Label: "搜索作者", Value: "chengzi", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索作者", Exact: &exact}},
+			{ID: "manual-002", Action: "press", Key: "Enter", Label: "提交搜索", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索作者", Exact: &exact}},
+		},
+	}
+	plan := BrowserPlan{Actions: []BrowserAction{
+		{ID: "fill-author", Action: "fill", Value: "chengzi", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索作者", Exact: &exact}},
+		{ID: "capture", Action: "screenshot"},
+		{ID: "submit", Action: "press", Key: "Enter", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索作者", Exact: &exact}},
+	}}
+	if err := validateBrowserPlanManualReproductionRecipe(plan, recipe); err != nil {
+		t.Fatal(err)
+	}
+	plan.Actions[0].Value = "another-user"
+	if err := validateBrowserPlanManualReproductionRecipe(plan, recipe); err == nil || !strings.Contains(err.Error(), "manual-001") {
+		t.Fatalf("changed manual value err=%v", err)
+	}
+	plan.Actions[0].Value = "chengzi"
+	plan.Actions[2].Key = "Escape"
+	if err := validateBrowserPlanManualReproductionRecipe(plan, recipe); err == nil || !strings.Contains(err.Error(), "manual-002") {
+		t.Fatalf("changed manual key err=%v", err)
+	}
+}
+
 func TestBrowserCoordinatorObservesEverySelectedFrontendBeforePlanning(t *testing.T) {
 	request := browserCoordinatorRequest(t)
 	request.Bug.FrontendURL = "https://consumer.example.com/"

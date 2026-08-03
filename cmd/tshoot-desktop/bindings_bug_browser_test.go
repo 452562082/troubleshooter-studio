@@ -304,7 +304,7 @@ func TestCaptureIncidentManualReproductionFreezesEvidenceWithoutAdvancingCase(t 
 			"browser/manual-001.png":       []byte("\x89PNG\r\n\x1a\nmanual"),
 			"browser/network.json":         []byte("[]\n"),
 			"browser/console.jsonl":        []byte("{\"type\":\"log\",\"text\":\"safe\"}\n"),
-			"browser/browser-actions.json": []byte(`[{"action":"click","label":"内容管理","url":"https://app.test/users"},{"action":"change","label":"作者昵称","url":"https://app.test/users"}]` + "\n"),
+			"browser/browser-actions.json": []byte(`[{"id":"manual-001","action":"click","locator":{"kind":"text","value":"内容管理","exact":true},"label":"内容管理","url":"https://app.test/users"},{"id":"manual-002","action":"fill","locator":{"kind":"placeholder","value":"搜索作者","exact":true},"label":"作者昵称","value":"chengzi","url":"https://app.test/users"}]` + "\n"),
 		}
 		for relative, content := range files {
 			path := filepath.Join(request.StagingDir, filepath.FromSlash(relative))
@@ -348,8 +348,24 @@ func TestCaptureIncidentManualReproductionFreezesEvidenceWithoutAdvancingCase(t 
 		kinds = append(kinds, artifact.Kind)
 	}
 	slices.Sort(kinds)
-	if !reflect.DeepEqual(kinds, []string{"browser_actions", "console", "network", "user_screenshot"}) {
+	if !reflect.DeepEqual(kinds, []string{"console", bughub.ManualReproductionArtifactKind, "network", "user_screenshot"}) {
 		t.Fatalf("artifact kinds = %v", kinds)
+	}
+	for _, artifact := range artifacts {
+		if artifact.Kind != bughub.ManualReproductionArtifactKind {
+			continue
+		}
+		stored, err := bughub.ReadEvidenceArtifactFromRoot(context.Background(), store, filepath.Join(app.workflowRoot, "artifacts"), incident.ID, artifact.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recipe, err := bughub.ParseBrowserManualReproductionRecipe(stored.Content)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(recipe.Actions) != 2 || recipe.Actions[1].Value != "chengzi" || recipe.Actions[1].Locator == nil || recipe.Actions[1].Locator.Kind != "placeholder" {
+			t.Fatalf("recipe = %+v", recipe)
+		}
 	}
 }
 

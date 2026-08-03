@@ -3374,18 +3374,59 @@ async function writeEvidenceFiles(request, networkCollector, consoleCollector, a
   return artifacts;
 }
 
-function safeManualInteraction(payload, pageURL, index) {
+function safeManualInputValue(rawValue, sensitive) {
+  if (sensitive) return { value: '', value_redacted: true };
+  const original = String(rawValue ?? '');
+  const redacted = redactConsoleText(original);
+  if (redacted !== original) return { value: '', value_redacted: true };
+  return { value: boundedUTF8(original, 1024), value_redacted: false };
+}
+
+function safeManualLocator(rawLocator) {
+  if (!rawLocator || typeof rawLocator !== 'object' || Array.isArray(rawLocator)) return null;
+  const kind = String(rawLocator.kind ?? '').trim();
+  if (!ALLOWED_LOCATORS.has(kind)) return null;
+  const originalValue = String(rawLocator.value ?? '').trim();
+  const value = boundedUTF8(redactConsoleText(originalValue), 512);
+  if (!value || value !== originalValue) return null;
+  const locator = { kind, value };
+  if (kind === 'role' && rawLocator.name !== undefined) {
+    const originalName = String(rawLocator.name ?? '').trim();
+    const name = boundedUTF8(redactConsoleText(originalName), 512);
+    if (!name || name !== originalName) return null;
+    locator.name = name;
+  }
+  if (rawLocator.exact === true && kind !== 'test_id' && kind !== 'css' && !(kind === 'role' && locator.name === undefined)) locator.exact = true;
+  return locator;
+}
+
+export function safeManualInteraction(payload, pageURL, index) {
   const raw = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {};
-  const allowedEvents = new Set(['click', 'change', 'submit']);
+  const allowedEvents = new Set(['click', 'change', 'keydown']);
   const event = allowedEvents.has(raw.event) ? raw.event : 'click';
+  const tag = String(raw.tag ?? '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+  const inputType = String(raw.input_type ?? '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+  const replayAction = event === 'keydown'
+    ? 'press'
+    : event === 'change'
+    ? (tag === 'select' ? 'select' : (inputType === 'checkbox' || inputType === 'radio' ? 'click' : 'fill'))
+    : 'click';
+  const locator = safeManualLocator(raw.locator);
+  const sensitive = Boolean(raw.sensitive) || inputType === 'password' || inputType === 'hidden';
+  const capturedValue = (replayAction === 'fill' || replayAction === 'select')
+    ? safeManualInputValue(raw.value, sensitive)
+    : { value: '', value_redacted: false };
   return {
     id: `manual-${String(index).padStart(3, '0')}`,
-    action: event,
-    locator_kind: 'manual_observation',
+    action: replayAction,
+    locator,
     role: boundedUTF8(redactConsoleText(String(raw.role ?? '').trim()), 64),
-    tag: boundedUTF8(String(raw.tag ?? '').toLowerCase().replace(/[^a-z0-9-]/g, ''), 32),
+    tag: boundedUTF8(tag, 32),
     label: boundedUTF8(redactConsoleText(String(raw.label ?? '').trim()), 256),
-    input_type: boundedUTF8(String(raw.input_type ?? '').toLowerCase().replace(/[^a-z0-9-]/g, ''), 32),
+    input_type: boundedUTF8(inputType, 32),
+    value: capturedValue.value,
+    value_redacted: capturedValue.value_redacted,
+    ...(replayAction === 'press' ? { key: canonicalPressKey(raw.key) } : {}),
     url: sanitizeURL(pageURL),
     started_at: new Date().toISOString(),
     duration_ms: 0,
@@ -3490,24 +3531,89 @@ async function recordWorker(request) {
       scheduleScreenshot(page);
     });
     await context.addInitScript(() => {
-      const describe = (target) => {
+      const bounded = (value, limit = 256) => String(value || '').trim().slice(0, limit);
+      const exactLocator = (kind, value, name = '') => {
+        const locator = { kind, value: bounded(value) };
+        if (name) locator.name = bounded(name);
+        if (kind !== 'test_id' && kind !== 'css' && !(kind === 'role' && !name)) locator.exact = true;
+        return locator;
+      };
+      const implicitRole = (element, tag, inputType) => {
+        const explicit = bounded(element.getAttribute('role'), 64);
+        if (explicit) return explicit;
+        if (tag === 'button') return 'button';
+        if (tag === 'a' && element.hasAttribute('href')) return 'link';
+        if (tag === 'select') return 'combobox';
+        if (tag === 'textarea') return 'textbox';
+        if (tag === 'input') {
+          if (inputType === 'checkbox') return 'checkbox';
+          if (inputType === 'radio') return 'radio';
+          if (inputType === 'button' || inputType === 'submit' || inputType === 'reset') return 'button';
+          return 'textbox';
+        }
+        return '';
+      };
+      const elementLocator = (element, tag, inputType, label) => {
+        const testID = element.getAttribute('data-testid') || element.getAttribute('data-test-id');
+        if (testID) return exactLocator('test_id', testID);
+        const associatedLabel = element.labels && element.labels.length > 0 ? bounded(element.labels[0].innerText || element.labels[0].textContent) : '';
+        if (associatedLabel) return exactLocator('label', associatedLabel);
+        const ariaLabel = bounded(element.getAttribute('aria-label'));
+        if (ariaLabel) return exactLocator('label', ariaLabel);
+        const placeholder = bounded(element.getAttribute('placeholder'));
+        if (placeholder) return exactLocator('placeholder', placeholder);
+        const role = implicitRole(element, tag, inputType);
+        if (role && label) return exactLocator('role', role, label);
+        const id = bounded(element.getAttribute('id'));
+        if (id && /^[A-Za-z][A-Za-z0-9_:-]{0,127}$/.test(id)) return exactLocator('css', `#${id}`);
+        if (label) return exactLocator('text', label);
+        return null;
+      };
+      const describe = (target, eventName) => {
         const element = target instanceof Element ? target.closest('button,a,input,textarea,select,[role],[contenteditable="true"],form') : null;
         if (!element) return null;
         const tag = element.tagName.toLowerCase();
         const inputType = tag === 'input' ? String(element.getAttribute('type') || 'text').toLowerCase() : '';
+        if (inputType === 'checkbox' || inputType === 'radio') {
+          // The click event already represents the replayable user action.
+          // Ignore the following change event to avoid a duplicate toggle.
+          if (eventName === 'change') return null;
+        }
         const rawLabel = inputType === 'password'
           ? '密码输入框'
-          : element.getAttribute('aria-label') || element.getAttribute('placeholder') || element.getAttribute('name') || element.textContent || '';
-        return { tag, role: element.getAttribute('role') || '', label: String(rawLabel).trim().slice(0, 256), input_type: inputType };
+          : element.getAttribute('aria-label') || element.getAttribute('placeholder') || element.textContent || '';
+        const label = bounded(rawLabel);
+        const sensitiveName = [element.getAttribute('name'), element.getAttribute('id'), element.getAttribute('autocomplete'), rawLabel]
+          .some((value) => /password|passwd|token|secret|authorization|cookie|session|otp|captcha|验证码|密码/i.test(String(value || '')));
+        const value = tag === 'select' || tag === 'textarea' || tag === 'input'
+          ? element.value
+          : (element.isContentEditable ? element.textContent : '');
+        return {
+          tag,
+          role: implicitRole(element, tag, inputType),
+          label,
+          input_type: inputType,
+          locator: elementLocator(element, tag, inputType, label),
+          value,
+          sensitive: inputType === 'password' || inputType === 'hidden' || sensitiveName,
+        };
       };
-      for (const eventName of ['click', 'change', 'submit']) {
+      for (const eventName of ['click', 'change']) {
         document.addEventListener(eventName, (event) => {
-          const description = describe(event.target);
+          const description = describe(event.target, eventName);
           if (description && typeof window.__tshootRecordInteraction === 'function') {
             void window.__tshootRecordInteraction({ event: eventName, ...description });
           }
         }, true);
       }
+      const replayableKeys = new Set(['Enter', 'Escape', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown']);
+      document.addEventListener('keydown', (event) => {
+        if (event.isComposing || event.repeat || event.ctrlKey || event.metaKey || event.altKey || !replayableKeys.has(event.key)) return;
+        const description = describe(event.target, 'keydown');
+        if (description && typeof window.__tshootRecordInteraction === 'function') {
+          void window.__tshootRecordInteraction({ event: 'keydown', key: event.key, ...description });
+        }
+      }, true);
     });
     const page = supervised.page;
     await assertAllowedURL(request.plan.start_url, request.policy);

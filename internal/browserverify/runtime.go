@@ -23,7 +23,7 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 )
 
-const browserRuntimeVersion = "1.61.1-r44"
+const browserRuntimeVersion = "1.61.1-r45"
 const browserRuntimeProtocolProbeVersion = 3
 
 // BrowserRuntimeVersion is the immutable Playwright runtime version bundled by

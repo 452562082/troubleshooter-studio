@@ -66,11 +66,7 @@ type incidentBrowserController interface {
 	Status() browserverify.RuntimeStatus
 }
 
-type incidentManualAction struct {
-	Action string `json:"action"`
-	Label  string `json:"label"`
-	URL    string `json:"url"`
-}
+type incidentManualAction = bughub.BrowserManualReproductionAction
 
 func (a *App) GetIncidentBrowserRuntimeStatus() browserverify.RuntimeStatus {
 	controller := a.incidentBrowserController()
@@ -578,7 +574,23 @@ func (a *App) CaptureIncidentManualReproduction(input IncidentBrowserCommandInpu
 		if kind == "screenshot" {
 			kind = "user_screenshot"
 		} else if reference.Kind == "browser_actions" {
-			_ = json.Unmarshal(content, &actions)
+			if err := json.Unmarshal(content, &actions); err != nil {
+				return IncidentManualReproductionResult{}, errors.New("manual reproduction actions are invalid")
+			}
+			recipe := bughub.BrowserManualReproductionRecipe{
+				Version:  bughub.ManualReproductionRecipeVersion,
+				StartURL: entries[0].URL,
+				FinalURL: result.FinalURL,
+				Actions:  append([]bughub.BrowserManualReproductionAction(nil), actions...),
+			}
+			content, err = json.Marshal(recipe)
+			if err != nil {
+				return IncidentManualReproductionResult{}, errors.New("manual reproduction recipe is unavailable")
+			}
+			if _, err := bughub.ParseBrowserManualReproductionRecipe(content); err != nil {
+				return IncidentManualReproductionResult{}, fmt.Errorf("manual reproduction recipe is invalid: %w", err)
+			}
+			kind = bughub.ManualReproductionArtifactKind
 		}
 		artifact, err := bughub.RegisterArtifactBytes(ctx, store, bughub.ArtifactInput{
 			ArtifactsRoot: filepath.Join(a.workflowRoot, "artifacts"), CaseID: incident.ID, AttemptID: attempt.ID,

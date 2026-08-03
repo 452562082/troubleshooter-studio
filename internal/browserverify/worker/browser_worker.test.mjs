@@ -44,9 +44,50 @@ import {
   resolvePinnedTarget,
   resolveUploadFileLocator,
   saveLoginStorageState,
+  safeManualInteraction,
   startPinnedProxy,
   validateWorkerRequest,
 } from './browser_worker.mjs';
+
+test('manual interaction records replayable locators and non-sensitive values', () => {
+  const action = safeManualInteraction({
+    event: 'change', tag: 'input', input_type: 'text', label: '作者昵称', value: 'chengzi',
+    locator: { kind: 'placeholder', value: '搜索作者', exact: true },
+  }, 'https://app.test/users?token=hidden', 1);
+  assert.match(action.started_at, /^\d{4}-\d{2}-\d{2}T/);
+  delete action.started_at;
+  assert.deepEqual(action, {
+    id: 'manual-001', action: 'fill',
+    locator: { kind: 'placeholder', value: '搜索作者', exact: true },
+    role: '', tag: 'input', label: '作者昵称', input_type: 'text',
+    value: 'chengzi', value_redacted: false, url: 'https://app.test/users?token=%5BREDACTED%5D',
+    duration_ms: 0, result: 'observed',
+  });
+});
+
+test('manual interaction redacts credential values while retaining the safe step', () => {
+  const action = safeManualInteraction({
+    event: 'change', tag: 'input', input_type: 'password', label: '密码输入框', value: 'top-secret', sensitive: true,
+    locator: { kind: 'label', value: '密码', exact: true },
+  }, 'https://app.test/login', 2);
+  assert.equal(action.action, 'fill');
+  assert.equal(action.value, '');
+  assert.equal(action.value_redacted, true);
+  assert.deepEqual(action.locator, { kind: 'label', value: '密码', exact: true });
+  assert.equal(JSON.stringify(action).includes('top-secret'), false);
+});
+
+test('manual interaction records replayable keyboard submission without typed characters', () => {
+  const action = safeManualInteraction({
+    event: 'keydown', key: 'Enter', tag: 'input', input_type: 'search', label: '作者昵称',
+    locator: { kind: 'placeholder', value: '搜索作者', exact: true },
+  }, 'https://app.test/users', 3);
+  assert.equal(action.action, 'press');
+  assert.equal(action.key, 'Enter');
+  assert.equal(action.value, '');
+  assert.equal(action.value_redacted, false);
+  assert.deepEqual(action.locator, { kind: 'placeholder', value: '搜索作者', exact: true });
+});
 
 test('login capture finishes only when the user closes every validation browser window', () => {
   assert.equal(loginCaptureShouldFinish(true, 1), false);

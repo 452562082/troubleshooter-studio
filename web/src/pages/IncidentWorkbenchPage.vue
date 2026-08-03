@@ -44,6 +44,7 @@ import {
   type IncidentCase,
   type IncidentEvidenceFileInput,
   type IncidentEvidenceImageInput,
+  type IncidentManualReproductionResult,
   type FrontendEntryResolution,
 } from '../lib/bridge'
 import { dismiss as dismissToast, toast, toastError } from '../lib/toast'
@@ -75,6 +76,7 @@ const starting = ref(false)
 const workflowNotice = ref('')
 const browserLoginConfirmationKey = ref('')
 const browserLoginToastID = ref<number | null>(null)
+const manualReproductionPending = ref(false)
 const lifecycleComponent = ref<{ openManualReproductionEvidence: (summary: string) => Promise<void> } | null>(null)
 const browserRuntimeStatus = ref<IncidentBrowserRuntimeStatus>({
   state: 'installing',
@@ -1016,7 +1018,13 @@ async function handleIncidentBrowser(action: IncidentBrowserAction) {
   workflowNotice.value = ''
   try {
     if (action === 'manual-reproduce') {
-      const captured = await incidentWorkflow.runOnce(key, () => captureIncidentManualReproduction(input))
+      manualReproductionPending.value = true
+      let captured: IncidentManualReproductionResult
+      try {
+        captured = await incidentWorkflow.runOnce(key, () => captureIncidentManualReproduction(input))
+      } finally {
+        manualReproductionPending.value = false
+      }
       if (!isSameBlockedBrowserAttempt(context)) return
       await refreshCaseSnapshotIfCurrent(context.caseID, () => isSameBrowserCase(context))
       if (!isSameBlockedBrowserAttempt(context)) return
@@ -1340,7 +1348,8 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         ref="lifecycleComponent"
         :detail="displayedDetail"
         :bug-title="tickets.selectedBug.value?.title || ''"
-        :pending="incidentWorkflow.pending.value || starting"
+        :pending="(incidentWorkflow.pending.value && !manualReproductionPending) || starting"
+        :manual-reproduction-pending="manualReproductionPending"
         :error="incidentWorkflow.error.value"
         :phase-events="incidentWorkflow.phaseEvents.value[displayedDetail.case.current_attempt_id] || []"
         :browser-login-ready="browserLoginReady"

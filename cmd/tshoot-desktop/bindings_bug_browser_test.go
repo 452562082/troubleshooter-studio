@@ -329,7 +329,7 @@ func TestCaptureIncidentManualReproductionFreezesEvidenceWithoutAdvancingCase(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ActionCount != 2 || len(result.ScreenshotArtifactIDs) != 1 || len(result.ArtifactIDs) != 4 || !strings.Contains(result.Summary, "内容管理") || !strings.Contains(result.Summary, "Bug 是否已经复现") {
+	if result.ActionCount != 2 || len(result.ScreenshotArtifactIDs) != 1 || len(result.ArtifactIDs) != 4 || !strings.Contains(result.Summary, "内容管理") || !strings.Contains(result.Summary, "复现结论由用户单独确认") {
 		t.Fatalf("result = %+v", result)
 	}
 	current, err := store.GetCase(context.Background(), incident.ID)

@@ -617,7 +617,7 @@ func safeIncidentManualArtifactPath(staging, reference string) (string, error) {
 
 func incidentManualReproductionSummary(actions []incidentManualAction, result IncidentManualReproductionResult) string {
 	var builder strings.Builder
-	builder.WriteString("我已在 Studio 验证浏览器中手动复现，系统已冻结本次页面截图、操作轨迹、Network 和 Console。请基于这些现场证据重新生成 scenario_contract 并继续验证。\n")
+	builder.WriteString("用户已在 Studio 验证浏览器中完成一次手动验证，系统已冻结本次页面截图、操作轨迹、Network 和 Console。复现结论由用户在采集完成后确认。\n")
 	if result.Title != "" {
 		fmt.Fprintf(&builder, "最终页面：%s\n", result.Title)
 	}
@@ -641,7 +641,7 @@ func incidentManualReproductionSummary(actions []incidentManualAction, result In
 			fmt.Fprintf(&builder, "另有 %d 个操作已保存在结构化证据中。\n", len(actions)-limit)
 		}
 	}
-	fmt.Fprintf(&builder, "截图证据：%d 张；全部证据 ID：%s\n请补充：实际现象是什么，以及你认为 Bug 是否已经复现。", len(result.ScreenshotArtifactIDs), strings.Join(result.ArtifactIDs, ", "))
+	fmt.Fprintf(&builder, "截图证据：%d 张；全部证据 ID：%s\n以上为系统自动采集信息，复现结论由用户单独确认。", len(result.ScreenshotArtifactIDs), strings.Join(result.ArtifactIDs, ", "))
 	return builder.String()
 }
 

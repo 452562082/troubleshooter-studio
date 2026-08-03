@@ -514,7 +514,7 @@ describe('BugCaseLifecycle', () => {
     expect(wrapper.emitted('primary')).toEqual([[{ kind: 'retry_validation' }]])
   })
 
-  it('offers a user-driven reproduction fallback and prefills the evidence continuation', async () => {
+  it('collects an explicit manual reproduction outcome with the captured scene', async () => {
     const snapshot = detail('waiting_evidence')
     snapshot.case.current_attempt_id = 'validation-manual'
     snapshot.attempts = [{
@@ -522,16 +522,45 @@ describe('BugCaseLifecycle', () => {
       agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_locator_failed', user_clarification_applied: true },
       parent_attempt_id: '', started_at: '', error_code: 'browser_locator_failed', error_message: '', usage: {},
     }]
+    snapshot.artifacts = [{
+      id: 'manual-scene', case_id: 'case-1', attempt_id: 'validation-manual', kind: 'user_screenshot',
+      sha256: 'manual', size: 8, captured_at: '2026-07-31T18:10:00Z', environment: 'test', version: '', request_id: '', trace_id: '',
+    }]
     const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
     await wrapper.get('[data-browser-action="manual-reproduce"]').trigger('click')
     expect(wrapper.emitted('browser')).toEqual([['manual-reproduce']])
 
+    await wrapper.setProps({ manualReproductionPending: true })
+    expect(wrapper.get('[data-browser-action="manual-reproduce"]').text()).toBe('正在记录复现…')
+    expect(wrapper.get('.primary-action').text()).toBe('重新观察并继续验证')
+    expect(wrapper.get<HTMLButtonElement>('.primary-action').element.disabled).toBe(true)
+    await wrapper.setProps({ manualReproductionPending: false })
+
     await (wrapper.vm as unknown as { openManualReproductionEvidence: (summary: string) => Promise<void> })
       .openManualReproductionEvidence('已记录 2 个操作和 1 张截图；请补充实际现象。')
-    expect(wrapper.get('#case-supplement').element).toHaveProperty('value', '已记录 2 个操作和 1 张截图；请补充实际现象。')
+    await flushPromises()
+    expect(getIncidentArtifactPreview).toHaveBeenCalledWith('case-1', 'manual-scene')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('确认手动复现结果')
+    expect(wrapper.get('.assistance-scene').text()).toContain('本次手动复现现场')
+    expect(wrapper.get<HTMLImageElement>('.assistance-scene img').attributes('src')).toBe('data:image/png;base64,iVBORw0KGgo=')
+    expect(wrapper.find('#case-supplement').exists()).toBe(false)
+    const confirm = wrapper.get<HTMLButtonElement>('[data-confirm]')
+    expect(confirm.element.disabled).toBe(true)
+    await wrapper.get('input[value="reproduced"]').setValue()
+    await wrapper.get('#manual-reproduction-observation').setValue('选择作者 chengzi 后仍展示默认头像。')
+    expect(confirm.element.disabled).toBe(false)
     await wrapper.get('[data-confirm]').trigger('click')
     const primaryEvents = wrapper.emitted('primary') ?? []
-    expect(primaryEvents[primaryEvents.length - 1]).toEqual([{ kind: 'supply_evidence', input: '已记录 2 个操作和 1 张截图；请补充实际现象。' }])
+    expect(primaryEvents[primaryEvents.length - 1]).toEqual([{
+      kind: 'supply_evidence',
+      input: [
+        '手动复现结论：已复现',
+        '用户现场观察：选择作者 chengzi 后仍展示默认头像。',
+        'Studio 自动采集的现场摘要：',
+        '已记录 2 个操作和 1 张截图；请补充实际现象。',
+        '请将用户结论与冻结的截图、操作轨迹、Network、Console 一起作为验证证据，重新生成 scenario_contract 后继续当前 Case。',
+      ].join('\n'),
+    }])
   })
 
   it('shows the Agent question and waits for a user answer before replanning', async () => {

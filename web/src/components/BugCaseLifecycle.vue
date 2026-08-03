@@ -147,6 +147,7 @@ const props = defineProps<{
   detail: IncidentCaseDetail | null
   bugTitle?: string
   pending?: boolean
+  manualReproductionPending?: boolean
   error?: string
   phaseEvents?: IncidentPhaseEvent[]
   browserLoginReady?: boolean
@@ -162,6 +163,10 @@ const dialogOpen = ref(false)
 const dialogAction = ref<CasePrimaryAction>()
 const dialogInput = ref('')
 const dialogEvidence = ref('')
+type ManualReproductionOutcome = '' | 'reproduced' | 'not_reproduced' | 'uncertain'
+const manualReproductionSummary = ref('')
+const manualReproductionOutcome = ref<ManualReproductionOutcome>('')
+const manualReproductionObservation = ref('')
 type PendingEvidenceImage = IncidentEvidenceImageInput & { size: number; preview: string }
 const dialogImages = ref<PendingEvidenceImage[]>([])
 const dialogImageError = ref('')
@@ -182,6 +187,7 @@ const assistanceSceneURL = ref('')
 const assistanceSceneState = ref<'idle' | 'loading' | 'ready' | 'missing' | 'failed'>('idle')
 let assistanceSceneLoadGeneration = 0
 const currentCase = computed(() => props.detail?.case)
+const interactionPending = computed(() => Boolean(props.pending || props.manualReproductionPending))
 const TIMELINE_PREVIEW_COUNT = 3
 const timelineExpanded = ref(false)
 const timelineEvents = computed(() => [...(props.detail?.events ?? [])].reverse())
@@ -213,16 +219,19 @@ const canCaptureManualReproduction = computed(() => {
 const evidenceGaps = computed(() => dialogAction.value?.kind === 'supply_evidence'
   ? structuredEvidenceGaps(currentAttempt.value?.output_json)
   : [])
+const isManualReproductionDialog = computed(() =>
+  dialogAction.value?.kind === 'supply_evidence' && Boolean(manualReproductionSummary.value),
+)
 const assistanceNeedsScene = computed(() =>
   dialogAction.value?.kind === 'supply_evidence' &&
-  verificationNeedsUserEvidence(currentAttempt.value || undefined),
+  (isManualReproductionDialog.value || verificationNeedsUserEvidence(currentAttempt.value || undefined)),
 )
 const assistanceSceneArtifact = computed<IncidentArtifact | null>(() => {
   const attemptID = currentAttempt.value?.id
   if (!attemptID) return null
   return (props.detail?.artifacts || [])
     .map((artifact, index) => ({ artifact, index, capturedAt: Date.parse(artifact.captured_at) }))
-    .filter(item => item.artifact.kind === 'screenshot' && item.artifact.attempt_id === attemptID)
+    .filter(item => ['screenshot', 'user_screenshot'].includes(item.artifact.kind) && item.artifact.attempt_id === attemptID)
     .sort((left, right) => {
       const leftTime = Number.isNaN(left.capturedAt) ? 0 : left.capturedAt
       const rightTime = Number.isNaN(right.capturedAt) ? 0 : right.capturedAt
@@ -412,7 +421,7 @@ function fmtTime(value?: string): string {
 }
 
 async function openAction(event: MouseEvent) {
-  if (!action.value || props.pending) return
+  if (!action.value || interactionPending.value) return
   if (!action.value.approval && !['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(action.value.kind)) {
     emit('primary', { kind: action.value.kind })
     return
@@ -440,6 +449,9 @@ async function openAction(event: MouseEvent) {
   }
   dialogInput.value = ''
   dialogEvidence.value = ''
+  manualReproductionSummary.value = ''
+  manualReproductionOutcome.value = ''
+  manualReproductionObservation.value = ''
   dialogImages.value = []
   dialogImageError.value = ''
   dialogFiles.value = []
@@ -462,8 +474,11 @@ async function openManualReproductionEvidence(summary: string) {
   dialogCaseVersion.value = undefined
   dialogRootCauseAttemptID.value = ''
   dialogSourceBaselines.value = []
-  dialogInput.value = summary.trim()
+  dialogInput.value = ''
   dialogEvidence.value = ''
+  manualReproductionSummary.value = summary.trim()
+  manualReproductionOutcome.value = ''
+  manualReproductionObservation.value = ''
   dialogImages.value = []
   dialogImageError.value = ''
   dialogFiles.value = []
@@ -588,6 +603,9 @@ function closeDialog() {
   assistanceSceneLoadGeneration++
   assistanceSceneURL.value = ''
   assistanceSceneState.value = 'idle'
+  manualReproductionSummary.value = ''
+  manualReproductionOutcome.value = ''
+  manualReproductionObservation.value = ''
   dialogBranchOptionsLoading.value = false
   dialogOpen.value = false
   nextTick(() => actionTrigger.value?.focus())
@@ -615,7 +633,11 @@ function confirmAction() {
     payload.input = dialogInput.value.trim()
     payload.evidence = dialogEvidence.value.trim()
   }
-  if (['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(dialogAction.value.kind)) payload.input = dialogInput.value.trim()
+  if (['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(dialogAction.value.kind)) {
+    payload.input = isManualReproductionDialog.value
+      ? manualReproductionInput()
+      : dialogInput.value.trim()
+  }
   if (dialogAction.value.kind === 'supply_evidence' && dialogImages.value.length > 0) {
     payload.images = dialogImages.value.map(({ name, mime_type, base64_data }) => ({ name, mime_type, base64_data }))
   }
@@ -627,6 +649,9 @@ function confirmAction() {
   assistanceSceneLoadGeneration++
   assistanceSceneURL.value = ''
   assistanceSceneState.value = 'idle'
+  manualReproductionSummary.value = ''
+  manualReproductionOutcome.value = ''
+  manualReproductionObservation.value = ''
   dialogBranchOptionsLoading.value = false
   dialogOpen.value = false
   nextTick(() => actionTrigger.value?.focus())
@@ -634,9 +659,27 @@ function confirmAction() {
 
 const evidenceSupplementMissing = computed(() => {
   if (!dialogAction.value || !['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(dialogAction.value.kind)) return false
+  if (isManualReproductionDialog.value) return !manualReproductionOutcome.value || !manualReproductionObservation.value.trim()
   if (dialogAction.value.kind === 'supply_evidence') return !dialogInput.value.trim() && dialogImages.value.length === 0 && dialogFiles.value.length === 0
   return !dialogInput.value.trim()
 })
+
+function manualReproductionInput(): string {
+  const labels: Record<Exclude<ManualReproductionOutcome, ''>, string> = {
+    reproduced: '已复现',
+    not_reproduced: '未复现',
+    uncertain: '无法判断',
+  }
+  const outcome = manualReproductionOutcome.value
+  if (!outcome) return ''
+  return [
+    `手动复现结论：${labels[outcome]}`,
+    `用户现场观察：${manualReproductionObservation.value.trim()}`,
+    'Studio 自动采集的现场摘要：',
+    manualReproductionSummary.value,
+    '请将用户结论与冻结的截图、操作轨迹、Network、Console 一起作为验证证据，重新生成 scenario_contract 后继续当前 Case。',
+  ].join('\n')
+}
 
 function readEvidenceImage(file: File): Promise<PendingEvidenceImage> {
   return new Promise((resolve, reject) => {
@@ -765,6 +808,7 @@ function trapDialogFocus(event: KeyboardEvent) {
 }
 
 function dialogTitle(): string {
+  if (isManualReproductionDialog.value) return '确认手动复现结果'
   if (dialogAction.value?.kind === 'approve_fix') return '确认允许修复'
   if (dialogAction.value?.kind === 'reconsider_remediation') return '提出其他修复方案'
   if (dialogAction.value?.kind === 'dispute_root_cause') return '根因不认可，重新排障'
@@ -791,7 +835,7 @@ function dialogTitle(): string {
           </div>
           <div class="case-heading-actions">
             <span class="status-pill" :data-status="detail.case.status">{{ statusLabel(detail.case.status) }}</span>
-            <button class="icon-button" type="button" aria-label="刷新故障闭环" :disabled="pending" @click="emit('refresh')">
+            <button class="icon-button" type="button" aria-label="刷新故障闭环" :disabled="interactionPending" @click="emit('refresh')">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 5v6h-6" /></svg>
             </button>
           </div>
@@ -830,22 +874,22 @@ function dialogTitle(): string {
             <p v-else>第 {{ detail.case.cycle_number }} 轮 · {{ detail.case.environment || '环境未知' }}</p>
           </div>
           <div class="current-action-controls">
-            <button v-if="canCaptureManualReproduction" class="btn dispute-action" type="button" data-browser-action="manual-reproduce" :disabled="pending" @click="emit('browser', 'manual-reproduce')">
-              我来手动复现
+            <button v-if="canCaptureManualReproduction" class="btn dispute-action" type="button" data-browser-action="manual-reproduce" :disabled="interactionPending" @click="emit('browser', 'manual-reproduce')">
+              {{ manualReproductionPending ? '正在记录复现…' : '我来手动复现' }}
             </button>
-            <button v-if="detail.case.status === 'reproduced'" class="btn dispute-action" type="button" :disabled="pending" @click="openValidationRevision">
+            <button v-if="detail.case.status === 'reproduced'" class="btn dispute-action" type="button" :disabled="interactionPending" @click="openValidationRevision">
               验证结果有问题
             </button>
-            <button v-if="['waiting_fix_approval', 'waiting_remediation'].includes(detail.case.status)" class="btn dispute-action" type="button" :disabled="pending" @click="openRootCauseDispute">
+            <button v-if="['waiting_fix_approval', 'waiting_remediation'].includes(detail.case.status)" class="btn dispute-action" type="button" :disabled="interactionPending" @click="openRootCauseDispute">
               根因不认可
             </button>
-            <button v-if="detail.case.status === 'waiting_fix_approval'" class="btn reconsider-action" type="button" :disabled="pending" @click="openRemediationReassessment">
+            <button v-if="detail.case.status === 'waiting_fix_approval'" class="btn reconsider-action" type="button" :disabled="interactionPending" @click="openRemediationReassessment">
               提出其他修复方案
             </button>
-            <button v-if="detail.case.status === 'waiting_merge_approval'" class="btn reconsider-action rework-action" type="button" :disabled="pending" @click="openFixRework">
+            <button v-if="detail.case.status === 'waiting_merge_approval'" class="btn reconsider-action rework-action" type="button" :disabled="interactionPending" @click="openFixRework">
               重新修复
             </button>
-            <button v-if="action" class="btn primary primary-action" type="button" :disabled="pending" @click="openAction">
+            <button v-if="action" class="btn primary primary-action" type="button" :disabled="interactionPending" @click="openAction">
               {{ pending ? '处理中…' : action.label }}
             </button>
             <span v-else class="terminal-copy">{{ detail.case.status === 'fixed_verified' ? '闭环完成' : detail.case.status === 'reset_archived' ? '已归档，由新 Case 接替' : validationEvidenceRefreshExhausted ? '等待系统修复后重试' : '当前阶段自动推进' }}</span>
@@ -862,7 +906,7 @@ function dialogTitle(): string {
           :events="phaseEvents || []"
           :system-i-d="detail.case.system_id"
           :environment="detail.case.environment"
-          :pending="pending"
+          :pending="interactionPending"
           :login-ready="browserLoginReady"
           @action="emit('browser', $event)"
         />
@@ -991,8 +1035,8 @@ function dialogTitle(): string {
         <section v-if="assistanceNeedsScene" class="assistance-scene" aria-labelledby="assistance-scene-title">
           <header>
             <div>
-              <h3 id="assistance-scene-title">Agent 遇到问题时的页面现场</h3>
-              <p>这是当前验证 Attempt 最后保存的页面，请结合现场判断 Agent 接下来应该做什么。</p>
+              <h3 id="assistance-scene-title">{{ isManualReproductionDialog ? '本次手动复现现场' : 'Agent 遇到问题时的页面现场' }}</h3>
+              <p>{{ isManualReproductionDialog ? '这是你刚刚在验证浏览器中操作时保存的页面。请确认复现结论并描述实际现象。' : '这是当前验证 Attempt 最后保存的页面，请结合现场判断 Agent 接下来应该做什么。' }}</p>
             </div>
           </header>
           <div v-if="assistanceSceneState === 'loading'" class="assistance-scene-status" role="status">正在加载现场截图…</div>
@@ -1000,16 +1044,40 @@ function dialogTitle(): string {
           <p v-else-if="assistanceSceneState === 'failed'" class="assistance-scene-status" role="status">现场截图暂时无法预览，不影响回答 Agent。</p>
           <p v-else-if="assistanceSceneState === 'missing'" class="assistance-scene-status" role="status">本次求助没有可用的页面现场截图，请根据 Agent 的问题补充说明。</p>
         </section>
-        <section v-if="dialogAction.kind === 'supply_evidence' && evidenceGaps.length" class="evidence-gap-summary" aria-labelledby="evidence-gap-title">
+        <section v-if="isManualReproductionDialog" class="manual-reproduction-result" aria-labelledby="manual-reproduction-result-title">
+          <h3 id="manual-reproduction-result-title">这次手动操作的结果是什么？</h3>
+          <fieldset class="manual-outcome-options">
+            <legend>选择一个复现结论</legend>
+            <label>
+              <input v-model="manualReproductionOutcome" type="radio" name="manual-reproduction-outcome" value="reproduced">
+              <span><strong>已复现</strong><small>页面出现了 Bug 工单描述的问题</small></span>
+            </label>
+            <label>
+              <input v-model="manualReproductionOutcome" type="radio" name="manual-reproduction-outcome" value="not_reproduced">
+              <span><strong>未复现</strong><small>完成相同步骤后没有出现问题</small></span>
+            </label>
+            <label>
+              <input v-model="manualReproductionOutcome" type="radio" name="manual-reproduction-outcome" value="uncertain">
+              <span><strong>无法判断</strong><small>受账号、数据或环境条件影响，暂时无法确认</small></span>
+            </label>
+          </fieldset>
+          <label for="manual-reproduction-observation">实际现象或判断原因</label>
+          <textarea id="manual-reproduction-observation" v-model="manualReproductionObservation" rows="4" maxlength="4000" placeholder="例如：选择作者 chengzi 后，头像仍展示成默认头像，与用户信息页不一致。"></textarea>
+          <details class="manual-capture-summary">
+            <summary>查看自动采集摘要</summary>
+            <pre>{{ manualReproductionSummary }}</pre>
+          </details>
+        </section>
+        <section v-if="dialogAction.kind === 'supply_evidence' && !isManualReproductionDialog && evidenceGaps.length" class="evidence-gap-summary" aria-labelledby="evidence-gap-title">
           <h3 id="evidence-gap-title">Agent 还缺少以下信息</h3>
           <ul>
             <li v-for="gap in evidenceGaps" :key="gap">{{ gap }}</li>
           </ul>
           <p>请只补充与这些缺失项相关的信息或截图；提交后会在当前阶段继续，不会重建 Case。</p>
         </section>
-        <label v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(dialogAction.kind)" for="case-supplement">补充信息</label>
-        <textarea v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(dialogAction.kind)" id="case-supplement" v-model="dialogInput" rows="5" :placeholder="dialogAction.kind === 'supply_evidence' ? (evidenceGaps.length ? '根据上面的缺失项补充账号权限、操作条件、业务预期或外部资料' : '描述图片中的页面状态、操作位置或业务预期（可选）') : '输入新证据、处理决定或测试信息'"></textarea>
-        <section v-if="dialogAction.kind === 'supply_evidence' || dialogAction.kind === 'dispute_root_cause'" class="evidence-image-upload">
+        <label v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(dialogAction.kind) && !isManualReproductionDialog" for="case-supplement">补充信息</label>
+        <textarea v-if="['supply_evidence', 'continue_fix', 'supply_merge_decision'].includes(dialogAction.kind) && !isManualReproductionDialog" id="case-supplement" v-model="dialogInput" rows="5" :placeholder="dialogAction.kind === 'supply_evidence' ? (evidenceGaps.length ? '根据上面的缺失项补充账号权限、操作条件、业务预期或外部资料' : '描述图片中的页面状态、操作位置或业务预期（可选）') : '输入新证据、处理决定或测试信息'"></textarea>
+        <section v-if="(dialogAction.kind === 'supply_evidence' && !isManualReproductionDialog) || dialogAction.kind === 'dispute_root_cause'" class="evidence-image-upload">
           <div class="evidence-image-heading">
             <div>
               <strong>补充截图</strong>
@@ -1027,7 +1095,7 @@ function dialogTitle(): string {
             </li>
           </ul>
         </section>
-        <section v-if="dialogAction.kind === 'supply_evidence'" class="evidence-image-upload">
+        <section v-if="dialogAction.kind === 'supply_evidence' && !isManualReproductionDialog" class="evidence-image-upload">
           <div class="evidence-image-heading">
             <div>
               <strong>补充复现测试文件</strong>
@@ -1046,7 +1114,7 @@ function dialogTitle(): string {
         </section>
         <footer>
           <button class="btn" type="button" :disabled="pending" @click="closeDialog">取消</button>
-          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (dialogAction.kind === 'approve_fix' && (dialogBranchOptionsLoading || Boolean(dialogBranchOptionsError) || !dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (['reconsider_remediation', 'dispute_root_cause', 'redo_fix', 'revise_validation'].includes(dialogAction.kind) && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim())) || (dialogAction.kind === 'complete_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim() || !dialogEvidence.trim())) || evidenceSupplementMissing" @click="confirmAction">{{ dialogAction.kind === 'reconsider_remediation' ? '提交并重新评估' : dialogAction.kind === 'dispute_root_cause' ? '提交并重新排障' : dialogAction.kind === 'redo_fix' ? '提交重修要求' : dialogAction.kind === 'revise_validation' ? '提交并重新验证' : dialogAction.kind === 'complete_remediation' ? '确认并开始回归' : dialogAction.kind === 'supply_evidence' ? '回答并继续验证' : '确认' }}</button>
+          <button ref="confirmButton" class="btn primary" data-confirm type="button" :disabled="pending || (dialogAction.kind === 'approve_fix' && (dialogBranchOptionsLoading || Boolean(dialogBranchOptionsError) || !dialogRootCauseAttemptID || dialogCaseVersion === undefined || !sourceBaselinesValid)) || (['reconsider_remediation', 'dispute_root_cause', 'redo_fix', 'revise_validation'].includes(dialogAction.kind) && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim())) || (dialogAction.kind === 'complete_remediation' && (!dialogRootCauseAttemptID || dialogCaseVersion === undefined || !dialogInput.trim() || !dialogEvidence.trim())) || evidenceSupplementMissing" @click="confirmAction">{{ dialogAction.kind === 'reconsider_remediation' ? '提交并重新评估' : dialogAction.kind === 'dispute_root_cause' ? '提交并重新排障' : dialogAction.kind === 'redo_fix' ? '提交重修要求' : dialogAction.kind === 'revise_validation' ? '提交并重新验证' : dialogAction.kind === 'complete_remediation' ? '确认并开始回归' : isManualReproductionDialog ? '提交复现结果并继续' : dialogAction.kind === 'supply_evidence' ? '回答并继续验证' : '确认' }}</button>
         </footer>
       </section>
     </div>
@@ -1148,6 +1216,19 @@ h2, h3, p { margin: 0; }
 .assistance-scene header p { margin-top: 2px; color: var(--c-muted); font-size: var(--fs-xs); line-height: 1.5; }
 .assistance-scene img { width: 100%; max-height: 380px; border: 1px solid var(--c-line); border-radius: var(--r-sm); background: var(--c-surf); object-fit: contain; }
 .assistance-scene-status { min-height: 96px; display: grid; place-items: center; margin: 0; padding: var(--sp-3); border: 1px dashed var(--c-line-2); border-radius: var(--r-sm); background: var(--c-surf); color: var(--c-muted) !important; text-align: center; font-size: var(--fs-sm) !important; }
+.manual-reproduction-result { display: grid; gap: var(--sp-3); }
+.manual-reproduction-result h3 { color: var(--c-ink); font-size: var(--fs-base); }
+.manual-outcome-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--sp-2); margin: 0; padding: 0; border: 0; }
+.manual-outcome-options legend { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.manual-outcome-options label { min-width: 0; display: flex; align-items: flex-start; gap: var(--sp-2); padding: var(--sp-3); border: 1px solid var(--c-line-2); border-radius: var(--r-md); background: var(--c-surf-2); cursor: pointer; }
+.manual-outcome-options label:has(input:checked) { border-color: var(--c-accent); background: #eff6ff; box-shadow: 0 0 0 1px var(--c-accent); }
+.manual-outcome-options input { flex: 0 0 auto; width: 20px; min-height: 20px; margin: 2px 0 0; accent-color: var(--c-accent); }
+.manual-outcome-options span { min-width: 0; display: grid; gap: 3px; }
+.manual-outcome-options strong { color: var(--c-ink); font-size: var(--fs-sm); }
+.manual-outcome-options small { color: var(--c-muted); font-size: var(--fs-xs); font-weight: 400; line-height: 1.45; }
+.manual-capture-summary { padding: var(--sp-2) var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-sm); background: var(--c-surf-2); }
+.manual-capture-summary summary { color: var(--c-text); font-size: var(--fs-sm); font-weight: 600; cursor: pointer; }
+.manual-capture-summary pre { max-height: 180px; margin: var(--sp-2) 0 0; overflow: auto; color: var(--c-muted); font: inherit; font-size: var(--fs-xs); line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .evidence-gap-summary { display: grid; gap: var(--sp-2); padding: var(--sp-3); border: 1px solid #fdba74; border-radius: var(--r-md); background: #fff7ed; }
 .evidence-gap-summary h3 { color: #9a3412; font-size: var(--fs-base); }
 .evidence-gap-summary ul { display: grid; gap: 6px; margin: 0; padding-left: 22px; color: var(--c-text); font-size: var(--fs-sm); line-height: 1.55; }
@@ -1185,6 +1266,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
   .approval-dialog footer .btn { width: 100%; }
   .evidence-image-heading { align-items: stretch; flex-direction: column; }
   .evidence-image-list { grid-template-columns: minmax(0, 1fr); }
+  .manual-outcome-options { grid-template-columns: minmax(0, 1fr); }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }

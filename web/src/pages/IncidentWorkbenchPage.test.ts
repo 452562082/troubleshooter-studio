@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import {
   approveIncidentFix,
   approveIncidentMerge,
+  captureIncidentManualReproduction,
   clearIncidentBrowserSession,
   completeIncidentRemediation,
   confirmIncidentBrowserLogin,
@@ -55,6 +56,7 @@ vi.mock('../lib/bridge', async importOriginal => ({
   ...(await importOriginal<typeof import('../lib/bridge')>()),
   approveIncidentFix: vi.fn(),
   approveIncidentMerge: vi.fn(),
+  captureIncidentManualReproduction: vi.fn(),
   cancelIncidentAttempt: vi.fn(),
   clearIncidentBrowserSession: vi.fn(),
   completeIncidentRemediation: vi.fn(),
@@ -202,6 +204,7 @@ afterEach(() => {
   vi.mocked(matchBugBots).mockReset().mockResolvedValue([botMatch])
   vi.mocked(saveBugSelectedBot).mockReset().mockResolvedValue(bugA as any)
   vi.mocked(startIncidentCase).mockReset()
+  vi.mocked(captureIncidentManualReproduction).mockReset()
   vi.mocked(confirmIncidentValidation).mockReset()
   vi.mocked(confirmIncidentBrowserLogin).mockReset()
   vi.mocked(uploadIncidentEvidenceFiles).mockReset()
@@ -1834,6 +1837,49 @@ describe('IncidentWorkbenchPage', () => {
     expect(getIncidentCase).toHaveBeenLastCalledWith(item.id)
     expect(wrapper.get('.status-pill').text()).toBe('验证中')
     expect(wrapper.find('[data-artifact-id="recovery-evidence"]').exists()).toBe(true)
+  })
+
+  it('keeps manual recording distinct from automatic validation and opens an explicit outcome dialog', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const item = incident('case-manual-reproduction', 'waiting_evidence', '2026-07-31T18:00:00Z', { version: 9, current_attempt_id: 'attempt-manual' })
+    const blocked = detail(item, {
+      attempts: [{
+        id: 'attempt-manual', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
+        agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_locator_failed', user_clarification_applied: true },
+        parent_attempt_id: '', started_at: '', error_code: 'browser_locator_failed', error_message: '', usage: {},
+      }],
+    })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    vi.mocked(getIncidentCase).mockResolvedValue(blocked)
+    const pending = deferred<Awaited<ReturnType<typeof captureIncidentManualReproduction>>>()
+    vi.mocked(captureIncidentManualReproduction).mockReturnValue(pending.promise)
+    const wrapper = await mountedPage()
+
+    await wrapper.get('[data-browser-action="manual-reproduce"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-browser-action="manual-reproduce"]').text()).toBe('正在记录复现…')
+    expect(wrapper.get('.primary-action').text()).toBe('重新观察并继续验证')
+    expect(captureIncidentManualReproduction).toHaveBeenCalledWith(expect.objectContaining({
+      case_id: item.id,
+      attempt_id: 'attempt-manual',
+      expected_version: 9,
+      actor_id: 'desktop-user',
+      idempotency_key: expect.stringMatching(/^manual-reproduce:case-manual-reproduction:attempt-manual:v9:\d+$/),
+    }))
+
+    pending.resolve({
+      artifact_ids: ['manual-scene'], screenshot_artifact_ids: ['manual-scene'], action_count: 3,
+      final_url: 'https://app.test/content', title: '内容管理', summary: '已记录 3 个操作和 1 张截图。',
+    })
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.get('[role="dialog"]').text()).toContain('确认手动复现结果')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('已复现')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('未复现')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('无法判断')
   })
 
   it('repairs the browser runtime with the exact key and refreshes only the current Case', async () => {

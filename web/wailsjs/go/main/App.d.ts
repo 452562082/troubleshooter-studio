@@ -39,6 +39,8 @@ export function CancelIncidentAttempt(arg1:main.CancelIncidentAttemptInput):Prom
 
 export function CancelInstall():Promise<boolean>;
 
+export function CaptureIncidentManualReproduction(arg1:main.IncidentBrowserCommandInput):Promise<main.IncidentManualReproductionResult>;
+
 export function ChatDeleteKey(arg1:string):Promise<void>;
 
 export function ChatDeleteProviderKey(arg1:string):Promise<void>;
@@ -54,8 +56,6 @@ export function ChatSaveProviderKey(arg1:string,arg2:string):Promise<void>;
 export function ClearBugPlatformLogin(arg1:main.BugLoginInput):Promise<main.BugLoginResult>;
 
 export function ClearIncidentBrowserSession(arg1:main.IncidentBrowserCommandInput):Promise<void>;
-
-export function CaptureIncidentManualReproduction(arg1:main.IncidentBrowserCommandInput):Promise<main.IncidentManualReproductionResult>;
 
 export function CompleteIncidentRemediation(arg1:main.CompleteIncidentRemediationInput):Promise<bughub.IncidentCase>;
 

@@ -2960,6 +2960,7 @@ export namespace main {
 	export class IncidentBrowserCommandInput {
 	    case_id: string;
 	    attempt_id: string;
+	    frontend_entry_id?: string;
 	    expected_version: number;
 	    idempotency_key: string;
 	    actor_id: string;
@@ -2972,33 +2973,11 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.case_id = source["case_id"];
 	        this.attempt_id = source["attempt_id"];
+	        this.frontend_entry_id = source["frontend_entry_id"];
 	        this.expected_version = source["expected_version"];
 	        this.idempotency_key = source["idempotency_key"];
 	        this.actor_id = source["actor_id"];
 	    }
-	}
-
-	export class IncidentManualReproductionResult {
-		artifact_ids: Array<string>;
-		screenshot_artifact_ids: Array<string>;
-		action_count: number;
-		final_url: string;
-		title: string;
-		summary: string;
-
-		static createFrom(source: any = {}) {
-			return new IncidentManualReproductionResult(source);
-		}
-
-		constructor(source: any = {}) {
-			if ('string' === typeof source) source = JSON.parse(source);
-			this.artifact_ids = source["artifact_ids"];
-			this.screenshot_artifact_ids = source["screenshot_artifact_ids"];
-			this.action_count = source["action_count"];
-			this.final_url = source["final_url"];
-			this.title = source["title"];
-			this.summary = source["summary"];
-		}
 	}
 	export class IncidentBugTicketResolution {
 	    state: string;
@@ -3013,6 +2992,49 @@ export namespace main {
 	        this.state = source["state"];
 	        this.source_status = source["source_status"];
 	    }
+	}
+	export class IncidentManualReproductionSegment {
+	    frontend_entry_id: string;
+	    frontend_entry_name: string;
+	    start_url: string;
+	    final_url: string;
+	    title: string;
+	    action_count: number;
+	    // Go type: time
+	    captured_at: any;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentManualReproductionSegment(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.frontend_entry_id = source["frontend_entry_id"];
+	        this.frontend_entry_name = source["frontend_entry_name"];
+	        this.start_url = source["start_url"];
+	        this.final_url = source["final_url"];
+	        this.title = source["title"];
+	        this.action_count = source["action_count"];
+	        this.captured_at = this.convertValues(source["captured_at"], null);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class IncidentDeploymentVerification {
 	    provider: string;
@@ -3188,6 +3210,7 @@ export namespace main {
 	    events: IncidentTransitionEvent[];
 	    deployment_verification: IncidentDeploymentVerification;
 	    bug_ticket_resolution: IncidentBugTicketResolution;
+	    manual_reproduction_segments: IncidentManualReproductionSegment[];
 
 	    static createFrom(source: any = {}) {
 	        return new IncidentCaseDetail(source);
@@ -3205,6 +3228,7 @@ export namespace main {
 	        this.events = this.convertValues(source["events"], IncidentTransitionEvent);
 	        this.deployment_verification = this.convertValues(source["deployment_verification"], IncidentDeploymentVerification);
 	        this.bug_ticket_resolution = this.convertValues(source["bug_ticket_resolution"], IncidentBugTicketResolution);
+	        this.manual_reproduction_segments = this.convertValues(source["manual_reproduction_segments"], IncidentManualReproductionSegment);
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -3295,6 +3319,39 @@ export namespace main {
 	        this.base64_data = source["base64_data"];
 	    }
 	}
+	export class IncidentManualReproductionResult {
+	    artifact_ids: string[];
+	    screenshot_artifact_ids: string[];
+	    frontend_entry_id: string;
+	    frontend_entry_name: string;
+	    captured_frontend_entry_ids: string[];
+	    remaining_frontend_entry_ids: string[];
+	    all_required_entries_captured: boolean;
+	    action_count: number;
+	    final_url: string;
+	    title: string;
+	    summary: string;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentManualReproductionResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.artifact_ids = source["artifact_ids"];
+	        this.screenshot_artifact_ids = source["screenshot_artifact_ids"];
+	        this.frontend_entry_id = source["frontend_entry_id"];
+	        this.frontend_entry_name = source["frontend_entry_name"];
+	        this.captured_frontend_entry_ids = source["captured_frontend_entry_ids"];
+	        this.remaining_frontend_entry_ids = source["remaining_frontend_entry_ids"];
+	        this.all_required_entries_captured = source["all_required_entries_captured"];
+	        this.action_count = source["action_count"];
+	        this.final_url = source["final_url"];
+	        this.title = source["title"];
+	        this.summary = source["summary"];
+	    }
+	}
+
 
 
 	export class InfraCredBatchInput {

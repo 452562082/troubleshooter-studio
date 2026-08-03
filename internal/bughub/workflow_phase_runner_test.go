@@ -2847,7 +2847,7 @@ func TestAgentPhaseRunnerCarriesUploadedScreenshotsIntoValidationRetry(t *testin
 	}
 }
 
-func TestAgentPhaseRunnerLoadsManualReproductionRecipeFromBlockedAncestor(t *testing.T) {
+func TestAgentPhaseRunnerLoadsOrderedManualReproductionBundleFromBlockedAncestor(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-manual-recipe", CaseWaitingEvidence)
 	now := time.Now().UTC()
@@ -2861,37 +2861,45 @@ func TestAgentPhaseRunnerLoadsManualReproductionRecipeFromBlockedAncestor(t *tes
 		t.Fatal(err)
 	}
 	exact := true
-	recipe := BrowserManualReproductionRecipe{
-		Version: ManualReproductionRecipeVersion, StartURL: "https://app.example.com/users",
-		Actions: []BrowserManualReproductionAction{{
-			ID: "manual-001", Action: "fill", Label: "搜索作者", Value: "chengzi",
-			Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索作者", Exact: &exact},
-		}},
-	}
-	content, err := json.Marshal(recipe)
-	if err != nil {
-		t.Fatal(err)
-	}
 	root := phaseArtifactsRoot(t)
-	if _, err := RegisterArtifactBytes(context.Background(), store, ArtifactInput{
-		ArtifactsRoot: root, CaseID: incident.ID, AttemptID: blocked.ID,
-		Kind: ManualReproductionArtifactKind, Environment: "test", RedactionStatus: RedactionStatusNotRequired,
-	}, content); err != nil {
-		t.Fatal(err)
+	for index, recipe := range []BrowserManualReproductionRecipe{
+		{
+			Version: ManualReproductionRecipeVersion, FrontendEntryID: "consumer", FrontendEntryName: "C端", StartURL: "https://web.example.com/",
+			Actions: []BrowserManualReproductionAction{{ID: "consumer-001", Action: "fill", Label: "搜索内容", Value: "demo", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索", Exact: &exact}}},
+		},
+		{
+			Version: ManualReproductionRecipeVersion, FrontendEntryID: "admin", FrontendEntryName: "管理端", StartURL: "https://admin.example.com/users",
+			Actions: []BrowserManualReproductionAction{{ID: "admin-001", Action: "click", Label: "下架", Locator: &BrowserLocator{Kind: "role", Value: "button", Name: "下架", Exact: &exact}}},
+		},
+	} {
+		content, err := json.Marshal(recipe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := RegisterArtifactBytes(context.Background(), store, ArtifactInput{
+			ArtifactsRoot: root, CaseID: incident.ID, AttemptID: blocked.ID,
+			Kind: ManualReproductionArtifactKind, CapturedAt: now.Add(time.Duration(index) * time.Second), Environment: "test", RedactionStatus: RedactionStatusNotRequired,
+		}, content); err != nil {
+			t.Fatal(err)
+		}
 	}
 	retry := PhaseAttempt{
 		ID: "attempt-manual-recipe-retry", CaseID: incident.ID, CycleNumber: incident.CycleNumber,
 		Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusRunning,
-		AgentTarget: "codex", BotKey: "bot", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
+		AgentTarget: "codex", BotKey: "bot",
+		InputJSON: mustJSON(map[string]any{
+			"frontend_entries": []FrontendEntryBinding{{ID: "admin"}, {ID: "consumer"}},
+		}),
+		OutputJSON:      []byte(`{}`),
 		ParentAttemptID: blocked.ID, StartedAt: now,
 	}
 	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, root, nil)
-	loaded, err := runner.browserManualReproductionRecipe(context.Background(), retry)
+	loaded, err := runner.browserManualReproductionBundle(context.Background(), retry)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded == nil || len(loaded.Actions) != 1 || loaded.Actions[0].Value != "chengzi" {
-		t.Fatalf("loaded recipe = %+v", loaded)
+	if loaded == nil || len(loaded.Segments) != 2 || loaded.Segments[0].FrontendEntryID != "admin" || loaded.Segments[1].FrontendEntryID != "consumer" {
+		t.Fatalf("loaded bundle = %+v", loaded)
 	}
 }
 

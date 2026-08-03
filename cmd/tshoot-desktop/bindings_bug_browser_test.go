@@ -236,6 +236,10 @@ func TestSaveIncidentArtifactWritesOnlyVerifiedRegisteredBytes(t *testing.T) {
 }
 
 func newBrowserRecoveryBindingApp(t *testing.T, phase bughub.Phase, errorCode, loginOrigin string) (*App, *bughub.CaseStore, *workflowBindingRunner, *fakeIncidentBrowserController, bughub.IncidentCase, bughub.PhaseAttempt) {
+	return newBrowserRecoveryBindingAppWithEntries(t, phase, errorCode, loginOrigin, []bughub.FrontendEntryBinding{{ID: "admin", Name: "管理端", URL: "https://app.test/users", ConfigURL: "https://app.test/", ResolutionSource: "user"}})
+}
+
+func newBrowserRecoveryBindingAppWithEntries(t *testing.T, phase bughub.Phase, errorCode, loginOrigin string, entries []bughub.FrontendEntryBinding) (*App, *bughub.CaseStore, *workflowBindingRunner, *fakeIncidentBrowserController, bughub.IncidentCase, bughub.PhaseAttempt) {
 	t.Helper()
 	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "browser-recovery.db"))
 	controller := &fakeIncidentBrowserController{}
@@ -244,10 +248,18 @@ func newBrowserRecoveryBindingApp(t *testing.T, phase bughub.Phase, errorCode, l
 		return bughub.Bug{ID: id, Source: "zentao", Title: "checkout fails", Env: "test", SystemID: "base", FrontendURL: "https://app.test/users"}, nil
 	}
 	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
+		configuredEntries := make([]config.FrontendEntry, 0, len(entries))
+		for _, entry := range entries {
+			entryURL := entry.ConfigURL
+			if entryURL == "" {
+				entryURL = entry.URL
+			}
+			configuredEntries = append(configuredEntries, config.FrontendEntry{ID: entry.ID, Name: entry.Name, URL: entryURL})
+		}
 		return &config.SystemConfig{
 			System: config.System{ID: "base"},
 			Environments: []config.Environment{{
-				ID: "test", WebDomain: "HTTPS://App.Test:443", APIDomain: "http://127.0.0.1:3000",
+				ID: "test", WebDomain: "HTTPS://App.Test:443", APIDomain: "http://127.0.0.1:3000", FrontendEntries: configuredEntries,
 				BrowserAllowedOrigins: []string{"https://STATIC.Test:443"},
 				BrowserAuthOrigins:    []string{"https://LOGIN.Test:443"}, IsProd: false,
 			}},
@@ -262,7 +274,11 @@ func newBrowserRecoveryBindingApp(t *testing.T, phase bughub.Phase, errorCode, l
 	incident := bughub.IncidentCase{
 		ID: "case-browser-recovery", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test",
 		Status: status, CycleNumber: 2, CurrentAttemptID: attemptID, SelectedBotKey: "base|codex",
-		FrontendEntry: bughub.FrontendEntryBinding{ID: "admin", Name: "管理端", URL: "https://app.test/users", ResolutionSource: "user"},
+		FrontendEntry: entries[0],
+	}
+	if len(entries) > 1 {
+		bindings := bughub.FrontendEntryBindings(entries)
+		incident.FrontendEntries = &bindings
 	}
 	if err := store.CreateCase(context.Background(), incident); err != nil {
 		t.Fatal(err)
@@ -366,6 +382,92 @@ func TestCaptureIncidentManualReproductionFreezesEvidenceWithoutAdvancingCase(t 
 		if len(recipe.Actions) != 2 || recipe.Actions[1].Value != "chengzi" || recipe.Actions[1].Locator == nil || recipe.Actions[1].Locator.Kind != "placeholder" {
 			t.Fatalf("recipe = %+v", recipe)
 		}
+	}
+}
+
+func TestCaptureIncidentManualReproductionCollectsEverySelectedFrontendEntry(t *testing.T) {
+	entries := []bughub.FrontendEntryBinding{
+		{ID: "admin", Name: "管理端", URL: "https://app.test/users", ConfigURL: "https://app.test/", ResolutionSource: "user"},
+		{ID: "consumer", Name: "C端", URL: "https://web.test/", ConfigURL: "https://web.test/", ResolutionSource: "user"},
+	}
+	app, store, _, controller, incident, attempt := newBrowserRecoveryBindingAppWithEntries(t, bughub.PhaseValidation, "browser_locator_failed", "", entries)
+	var starts []string
+	controller.manualCapture = func(request browserverify.BrowserManualCaptureRequest) (bughub.BrowserVerificationResult, error) {
+		starts = append(starts, request.StartURL)
+		files := map[string][]byte{
+			"browser/manual.png":           []byte("\x89PNG\r\n\x1a\nmanual"),
+			"browser/browser-actions.json": []byte(fmt.Sprintf(`[{"id":"action-%d","action":"click","locator":{"kind":"text","value":"继续","exact":true},"label":"继续"}]`, len(starts))),
+		}
+		for relative, content := range files {
+			path := filepath.Join(request.StagingDir, filepath.FromSlash(relative))
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				return bughub.BrowserVerificationResult{}, err
+			}
+			if err := os.WriteFile(path, content, 0o600); err != nil {
+				return bughub.BrowserVerificationResult{}, err
+			}
+		}
+		return bughub.BrowserVerificationResult{Status: "completed", FinalURL: request.StartURL, Title: "已打开", Artifacts: []bughub.BrowserArtifactReference{
+			{Kind: "screenshot", Path: "browser/manual.png", Environment: "test"},
+			{Kind: "browser_actions", Path: "browser/browser-actions.json", Environment: "test"},
+		}}, nil
+	}
+	adminInput := browserCommandInput(incident, attempt, "manual-admin")
+	adminInput.FrontendEntryID = "admin"
+	admin, err := app.CaptureIncidentManualReproduction(adminInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admin.FrontendEntryID != "admin" || admin.AllRequiredEntriesCaptured || !reflect.DeepEqual(admin.RemainingFrontendEntryIDs, []string{"consumer"}) {
+		t.Fatalf("admin result = %+v", admin)
+	}
+	consumerInput := browserCommandInput(incident, attempt, "manual-consumer")
+	consumerInput.FrontendEntryID = "consumer"
+	consumer, err := app.CaptureIncidentManualReproduction(consumerInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consumer.FrontendEntryID != "consumer" || !consumer.AllRequiredEntriesCaptured || len(consumer.RemainingFrontendEntryIDs) != 0 || !reflect.DeepEqual(consumer.CapturedFrontendEntryIDs, []string{"admin", "consumer"}) {
+		t.Fatalf("consumer result = %+v", consumer)
+	}
+	if !reflect.DeepEqual(starts, []string{"https://app.test/users", "https://web.test/"}) {
+		t.Fatalf("capture starts = %v", starts)
+	}
+	artifacts, err := store.ListEvidenceArtifacts(context.Background(), incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recipeEntries []string
+	for _, artifact := range artifacts {
+		if artifact.Kind != bughub.ManualReproductionArtifactKind {
+			continue
+		}
+		stored, readErr := bughub.ReadEvidenceArtifactFromRoot(context.Background(), store, filepath.Join(app.workflowRoot, "artifacts"), incident.ID, artifact.ID)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		recipe, parseErr := bughub.ParseBrowserManualReproductionRecipe(stored.Content)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		recipeEntries = append(recipeEntries, recipe.FrontendEntryID)
+	}
+	slices.Sort(recipeEntries)
+	if !reflect.DeepEqual(recipeEntries, []string{"admin", "consumer"}) {
+		t.Fatalf("recipe entries = %v", recipeEntries)
+	}
+	detail, err := app.GetIncidentCase(incident.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.ManualReproductionSegments) != 2 || detail.ManualReproductionSegments[0].FrontendEntryID != "admin" || detail.ManualReproductionSegments[1].FrontendEntryID != "consumer" {
+		t.Fatalf("manual segments = %+v", detail.ManualReproductionSegments)
+	}
+
+	invalidInput := browserCommandInput(incident, attempt, "manual-invalid")
+	invalidInput.FrontendEntryID = "unknown"
+	if _, err := app.CaptureIncidentManualReproduction(invalidInput); err == nil || !strings.Contains(err.Error(), "selected frontend entry") {
+		t.Fatalf("invalid entry err = %v", err)
 	}
 }
 

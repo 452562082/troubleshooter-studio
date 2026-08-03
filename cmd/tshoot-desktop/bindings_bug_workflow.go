@@ -34,16 +34,27 @@ type incidentWorkflowRuntime struct {
 }
 
 type IncidentCaseDetail struct {
-	Case                   bughub.IncidentCase            `json:"case"`
-	Attempts               []IncidentPhaseAttempt         `json:"attempts"`
-	PhaseEvents            []bughub.InvestigationEvent    `json:"phase_events"`
-	Artifacts              []IncidentArtifact             `json:"artifacts"`
-	Approvals              []IncidentApproval             `json:"approvals"`
-	CodeChanges            []IncidentCodeChange           `json:"code_changes"`
-	DeploymentObservations []bughub.DeploymentObservation `json:"deployment_observations"`
-	Events                 []IncidentTransitionEvent      `json:"events"`
-	DeploymentVerification IncidentDeploymentVerification `json:"deployment_verification"`
-	BugTicketResolution    IncidentBugTicketResolution    `json:"bug_ticket_resolution"`
+	Case                       bughub.IncidentCase                 `json:"case"`
+	Attempts                   []IncidentPhaseAttempt              `json:"attempts"`
+	PhaseEvents                []bughub.InvestigationEvent         `json:"phase_events"`
+	Artifacts                  []IncidentArtifact                  `json:"artifacts"`
+	Approvals                  []IncidentApproval                  `json:"approvals"`
+	CodeChanges                []IncidentCodeChange                `json:"code_changes"`
+	DeploymentObservations     []bughub.DeploymentObservation      `json:"deployment_observations"`
+	Events                     []IncidentTransitionEvent           `json:"events"`
+	DeploymentVerification     IncidentDeploymentVerification      `json:"deployment_verification"`
+	BugTicketResolution        IncidentBugTicketResolution         `json:"bug_ticket_resolution"`
+	ManualReproductionSegments []IncidentManualReproductionSegment `json:"manual_reproduction_segments"`
+}
+
+type IncidentManualReproductionSegment struct {
+	FrontendEntryID   string    `json:"frontend_entry_id"`
+	FrontendEntryName string    `json:"frontend_entry_name"`
+	StartURL          string    `json:"start_url"`
+	FinalURL          string    `json:"final_url"`
+	Title             string    `json:"title"`
+	ActionCount       int       `json:"action_count"`
+	CapturedAt        time.Time `json:"captured_at"`
 }
 
 type IncidentBugTicketResolution struct {
@@ -934,6 +945,9 @@ func (a *App) GetIncidentCase(caseID string) (IncidentCaseDetail, error) {
 		return IncidentCaseDetail{}, err
 	}
 	if detail.Artifacts, err = incidentArtifacts(ctx, store, filepath.Join(a.workflowRoot, "artifacts"), caseID, artifacts); err != nil {
+		return IncidentCaseDetail{}, err
+	}
+	if detail.ManualReproductionSegments, err = incidentManualReproductionSegments(ctx, store, filepath.Join(a.workflowRoot, "artifacts"), incident, incident.CurrentAttemptID); err != nil {
 		return IncidentCaseDetail{}, err
 	}
 	approvals, err := store.ListApprovals(ctx, caseID)

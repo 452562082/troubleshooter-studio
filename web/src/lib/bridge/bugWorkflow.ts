@@ -110,6 +110,17 @@ export interface IncidentCaseDetail {
   events: TransitionEvent[]
   deployment_verification?: { provider: 'manual' | 'http' | 'k8s' | 'unavailable'; available: boolean; hint: string }
   bug_ticket_resolution?: { state: 'not_ready' | 'pending' | 'resolved' | 'unknown'; source_status?: string }
+  manual_reproduction_segments?: IncidentManualReproductionSegment[]
+}
+
+export interface IncidentManualReproductionSegment {
+  frontend_entry_id: string
+  frontend_entry_name: string
+  start_url: string
+  final_url: string
+  title: string
+  action_count: number
+  captured_at: string
 }
 
 export interface IncidentPhaseEvent {
@@ -157,9 +168,21 @@ export type IncidentCaseEventPayload = {
 }
 
 export interface WorkflowCommandInput { case_id: string; expected_version: number; idempotency_key: string; actor_id: string }
-export interface IncidentBrowserCommandInput extends WorkflowCommandInput { attempt_id: string }
+export interface IncidentBrowserCommandInput extends WorkflowCommandInput { attempt_id: string; frontend_entry_id?: string }
 export interface IncidentArtifactPreview { artifact_id: string; mime_type: 'image/png'; base64_data: string; size: number }
-export interface IncidentManualReproductionResult { artifact_ids: string[]; screenshot_artifact_ids: string[]; action_count: number; final_url: string; title: string; summary: string }
+export interface IncidentManualReproductionResult {
+  artifact_ids: string[]
+  screenshot_artifact_ids: string[]
+  frontend_entry_id: string
+  frontend_entry_name: string
+  captured_frontend_entry_ids: string[]
+  remaining_frontend_entry_ids: string[]
+  all_required_entries_captured: boolean
+  action_count: number
+  final_url: string
+  title: string
+  summary: string
+}
 export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: string; bot_key?: string; bot_environment?: string; frontend_entry_id?: string; frontend_entry_ids?: string[]; primary_frontend_entry_id?: string; input_json?: Record<string, unknown> }
 export interface ResetIncidentCaseInput extends WorkflowCommandInput { new_case_id: string; bot_key: string; bot_environment?: string; frontend_entry_id?: string; frontend_entry_ids?: string[]; primary_frontend_entry_id?: string; input_json?: Record<string, unknown> }
 export interface WorkflowWarning { code: string; message: string }
@@ -381,6 +404,11 @@ export async function captureIncidentManualReproduction(input: IncidentBrowserCo
   return {
     artifact_ids: artifactIDs,
     screenshot_artifact_ids: screenshotIDs,
+    frontend_entry_id: typeof raw.frontend_entry_id === 'string' ? raw.frontend_entry_id : '',
+    frontend_entry_name: typeof raw.frontend_entry_name === 'string' ? raw.frontend_entry_name : '',
+    captured_frontend_entry_ids: Array.isArray(raw.captured_frontend_entry_ids) ? raw.captured_frontend_entry_ids.map(String) : [],
+    remaining_frontend_entry_ids: Array.isArray(raw.remaining_frontend_entry_ids) ? raw.remaining_frontend_entry_ids.map(String) : [],
+    all_required_entries_captured: raw.all_required_entries_captured === true,
     action_count: typeof raw.action_count === 'number' ? raw.action_count : 0,
     final_url: typeof raw.final_url === 'string' ? raw.final_url : '',
     title: typeof raw.title === 'string' ? raw.title : '',
@@ -500,6 +528,20 @@ function normalizeDetail(raw: unknown): IncidentCaseDetail {
         : 'unknown',
       source_status: String(record(source.bug_ticket_resolution).source_status ?? ''),
     },
+    manual_reproduction_segments: Array.isArray(source.manual_reproduction_segments)
+      ? source.manual_reproduction_segments.map(item => {
+        const segment = record(item)
+        return {
+          frontend_entry_id: String(segment.frontend_entry_id ?? ''),
+          frontend_entry_name: String(segment.frontend_entry_name ?? ''),
+          start_url: String(segment.start_url ?? ''),
+          final_url: String(segment.final_url ?? ''),
+          title: String(segment.title ?? ''),
+          action_count: typeof segment.action_count === 'number' ? segment.action_count : 0,
+          captured_at: String(segment.captured_at ?? ''),
+        }
+      })
+      : [],
   }
 }
 

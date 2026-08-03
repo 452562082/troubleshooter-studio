@@ -138,7 +138,7 @@ export function primaryActionFor(subject: IncidentCase | ActionDetail): CasePrim
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { getIncidentArtifactPreview, type CaseStatus, type IncidentArtifact, type IncidentCaseDetail, type IncidentPhaseEvent } from '../lib/bridge/bugWorkflow'
+import { getIncidentArtifactPreview, type CaseStatus, type FrontendEntryBinding, type IncidentArtifact, type IncidentCaseDetail, type IncidentPhaseEvent } from '../lib/bridge/bugWorkflow'
 import BugAgentProgress from './BugAgentProgress.vue'
 import BugCaseArtifacts from './BugCaseArtifacts.vue'
 import BugBrowserProgress from './BugBrowserProgress.vue'
@@ -148,6 +148,7 @@ const props = defineProps<{
   bugTitle?: string
   pending?: boolean
   manualReproductionPending?: boolean
+  manualReproductionPendingEntryID?: string
   error?: string
   phaseEvents?: IncidentPhaseEvent[]
   browserLoginReady?: boolean
@@ -156,7 +157,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   refresh: []
   primary: [payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; images?: IncidentEvidenceImageInput[]; files?: IncidentEvidenceFileInput[]; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }]
-  browser: [action: 'login' | 'confirm-login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url' | 'manual-reproduce']
+  browser: [action: 'login' | 'confirm-login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url' | 'manual-reproduce', frontendEntryID?: string]
 }>()
 
 const dialogOpen = ref(false)
@@ -215,6 +216,27 @@ const canCaptureManualReproduction = computed(() => {
     'browser_manual_prod_blocked', 'browser_artifact_sensitive',
   ].includes(code)
 })
+const manualReproductionEntries = computed<FrontendEntryBinding[]>(() => {
+  const entries = props.detail?.case.frontend_entries
+  if (entries?.length) return entries
+  return props.detail?.case.frontend_entry ? [props.detail.case.frontend_entry] : []
+})
+const capturedManualReproductionEntryIDs = computed(() => new Set(
+  (props.detail?.manual_reproduction_segments || []).map(segment => segment.frontend_entry_id).filter(Boolean),
+))
+const allManualReproductionEntriesCaptured = computed(() =>
+  manualReproductionEntries.value.length > 0 && manualReproductionEntries.value.every(entry => capturedManualReproductionEntryIDs.value.has(entry.id)),
+)
+function manualReproductionButtonLabel(entry: FrontendEntryBinding): string {
+  if (props.manualReproductionPending && props.manualReproductionPendingEntryID === entry.id) return `正在记录${entry.name}…`
+  if (manualReproductionEntries.value.length === 1) return props.manualReproductionPending ? '正在记录复现…' : '我来手动复现'
+  return capturedManualReproductionEntryIDs.value.has(entry.id) ? `重新复现${entry.name}（已采集）` : `复现${entry.name}`
+}
+async function openCollectedManualReproductionEvidence() {
+  const segments = props.detail?.manual_reproduction_segments || []
+  const lines = segments.map(segment => `${segment.frontend_entry_name || segment.frontend_entry_id}：已记录 ${segment.action_count} 个操作${segment.title ? `，最终页面“${segment.title}”` : ''}`)
+  await openManualReproductionEvidence(`已完成 ${segments.length} 个端的手动复现采集：\n${lines.join('\n')}`)
+}
 const evidenceGaps = computed(() => dialogAction.value?.kind === 'supply_evidence'
   ? structuredEvidenceGaps(currentAttempt.value?.output_json)
   : [])
@@ -671,7 +693,7 @@ function manualReproductionInput(): string {
     `手动复现结论：${labels[outcome]}`,
     'Studio 自动采集的现场摘要：',
     manualReproductionSummary.value,
-    '请读取当前 Case 中冻结的 manual_reproduction_recipe、截图、Network 和 Console；严格按可回放动作重新执行，无需再次向用户询问已记录的操作和值，并重新生成 scenario_contract 后继续当前 Case。',
+    '请读取当前 Case 中冻结的 manual_reproduction_bundle、各端截图、Network 和 Console；按端、按顺序严格重放所有可回放动作，无需再次向用户询问已记录的操作和值，并重新生成 scenario_contract 后继续当前 Case。',
   ].join('\n')
 }
 
@@ -868,9 +890,14 @@ function dialogTitle(): string {
             <p v-else>第 {{ detail.case.cycle_number }} 轮 · {{ detail.case.environment || '环境未知' }}</p>
           </div>
           <div class="current-action-controls">
-            <button v-if="canCaptureManualReproduction" class="btn dispute-action" type="button" data-browser-action="manual-reproduce" :disabled="interactionPending" @click="emit('browser', 'manual-reproduce')">
-              {{ manualReproductionPending ? '正在记录复现…' : '我来手动复现' }}
-            </button>
+            <template v-if="canCaptureManualReproduction">
+              <button v-for="entry in manualReproductionEntries" :key="entry.id" class="btn dispute-action" type="button" data-browser-action="manual-reproduce" :data-frontend-entry-id="entry.id" :disabled="interactionPending" @click="emit('browser', 'manual-reproduce', entry.id)">
+                {{ manualReproductionButtonLabel(entry) }}
+              </button>
+              <button v-if="allManualReproductionEntriesCaptured" class="btn primary" type="button" data-manual-reproduction-submit @click="openCollectedManualReproductionEvidence">
+                提交复现结果
+              </button>
+            </template>
             <button v-if="detail.case.status === 'reproduced'" class="btn dispute-action" type="button" :disabled="interactionPending" @click="openValidationRevision">
               验证结果有问题
             </button>

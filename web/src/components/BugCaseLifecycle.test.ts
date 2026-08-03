@@ -516,6 +516,7 @@ describe('BugCaseLifecycle', () => {
 
   it('collects an explicit manual reproduction outcome with the captured scene', async () => {
     const snapshot = detail('waiting_evidence')
+		snapshot.case.frontend_entry = { id: 'admin', name: '管理端', url: 'https://app.test/', resolution_source: 'user' }
     snapshot.case.current_attempt_id = 'validation-manual'
     snapshot.attempts = [{
       id: 'validation-manual', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
@@ -528,7 +529,7 @@ describe('BugCaseLifecycle', () => {
     }]
     const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
     await wrapper.get('[data-browser-action="manual-reproduce"]').trigger('click')
-    expect(wrapper.emitted('browser')).toEqual([['manual-reproduce']])
+    expect(wrapper.emitted('browser')).toEqual([['manual-reproduce', 'admin']])
 
     await wrapper.setProps({ manualReproductionPending: true })
     expect(wrapper.get('[data-browser-action="manual-reproduce"]').text()).toBe('正在记录复现…')
@@ -556,9 +557,50 @@ describe('BugCaseLifecycle', () => {
         '手动复现结论：已复现',
         'Studio 自动采集的现场摘要：',
         '已记录 2 个操作和 1 张截图；请补充实际现象。',
-        '请读取当前 Case 中冻结的 manual_reproduction_recipe、截图、Network 和 Console；严格按可回放动作重新执行，无需再次向用户询问已记录的操作和值，并重新生成 scenario_contract 后继续当前 Case。',
+				'请读取当前 Case 中冻结的 manual_reproduction_bundle、各端截图、Network 和 Console；按端、按顺序严格重放所有可回放动作，无需再次向用户询问已记录的操作和值，并重新生成 scenario_contract 后继续当前 Case。',
       ].join('\n'),
     }])
+  })
+
+  it('collects manual reproduction per selected frontend before allowing one combined result', async () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-multi-manual'
+    snapshot.case.frontend_entry = { id: 'admin', name: '管理端', url: 'https://admin.test/', resolution_source: 'user' }
+    snapshot.case.frontend_entries = [
+      snapshot.case.frontend_entry,
+      { id: 'consumer', name: 'C端', url: 'https://web.test/', resolution_source: 'user' },
+    ]
+    snapshot.attempts = [{
+      id: 'validation-multi-manual', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_locator_failed' },
+      parent_attempt_id: '', started_at: '', error_code: 'browser_locator_failed', error_message: '', usage: {},
+    }]
+    snapshot.manual_reproduction_segments = [{
+      frontend_entry_id: 'admin', frontend_entry_name: '管理端', start_url: 'https://admin.test/', final_url: 'https://admin.test/content',
+      title: '内容管理', action_count: 4, captured_at: '2026-08-03T10:00:00Z',
+    }]
+    const wrapper = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    const buttons = wrapper.findAll('[data-browser-action="manual-reproduce"]')
+    expect(buttons).toHaveLength(2)
+    expect(buttons[0].text()).toContain('重新复现管理端（已采集）')
+    expect(buttons[1].text()).toBe('复现C端')
+    expect(wrapper.find('[data-manual-reproduction-submit]').exists()).toBe(false)
+    await buttons[1].trigger('click')
+    expect(wrapper.emitted('browser')).toEqual([['manual-reproduce', 'consumer']])
+
+    await wrapper.setProps({
+      detail: {
+        ...snapshot,
+        manual_reproduction_segments: [
+          ...(snapshot.manual_reproduction_segments || []),
+          { frontend_entry_id: 'consumer', frontend_entry_name: 'C端', start_url: 'https://web.test/', final_url: 'https://web.test/search', title: '搜索', action_count: 3, captured_at: '2026-08-03T10:05:00Z' },
+        ],
+      },
+    })
+    expect(wrapper.get('[data-manual-reproduction-submit]').text()).toBe('提交复现结果')
+    await wrapper.get('[data-manual-reproduction-submit]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[role="dialog"]').text()).toContain('已完成 2 个端的手动复现采集')
   })
 
   it('shows the Agent question and waits for a user answer before replanning', async () => {

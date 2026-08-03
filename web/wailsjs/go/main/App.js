@@ -50,6 +50,10 @@ export function CancelInstall() {
   return window['go']['main']['App']['CancelInstall']();
 }
 
+export function CaptureIncidentManualReproduction(arg1) {
+  return window['go']['main']['App']['CaptureIncidentManualReproduction'](arg1);
+}
+
 export function ChatDeleteKey(arg1) {
   return window['go']['main']['App']['ChatDeleteKey'](arg1);
 }
@@ -80,10 +84,6 @@ export function ClearBugPlatformLogin(arg1) {
 
 export function ClearIncidentBrowserSession(arg1) {
   return window['go']['main']['App']['ClearIncidentBrowserSession'](arg1);
-}
-
-export function CaptureIncidentManualReproduction(arg1) {
-  return window['go']['main']['App']['CaptureIncidentManualReproduction'](arg1);
 }
 
 export function CompleteIncidentRemediation(arg1) {

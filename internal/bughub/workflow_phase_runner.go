@@ -654,12 +654,12 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 				coordinatorResult := browserCoordinatorFailure(BrowserCoordinatorResult{}, "browser_execution_interrupted")
 				coordinated = &coordinatorResult
 			} else {
-				manualRecipe, recipeErr := r.browserManualReproductionRecipe(ctx, attempt)
+				manualBundle, recipeErr := r.browserManualReproductionBundle(ctx, attempt)
 				if recipeErr != nil {
 					coordinatorResult := browserCoordinatorFailure(BrowserCoordinatorResult{}, "browser_execution_interrupted")
 					coordinated = &coordinatorResult
 				} else {
-					coordinatorResult, executeErr := (BrowserCoordinator{Executor: r.executor, Verifier: browserVerifier, Recipes: r.store}).Execute(ctx, BrowserCoordinatorRequest{Attempt: attempt, Bug: browserBug, Bot: bot, BasePrompt: prompt, UserClarifications: clarifications, ManualReproductionRecipe: manualRecipe, Policy: route.Policy, StagingDir: staging.Path(), Emit: emit, FreezeArtifacts: freezeBrowserArtifacts})
+					coordinatorResult, executeErr := (BrowserCoordinator{Executor: r.executor, Verifier: browserVerifier, Recipes: r.store}).Execute(ctx, BrowserCoordinatorRequest{Attempt: attempt, Bug: browserBug, Bot: bot, BasePrompt: prompt, UserClarifications: clarifications, ManualReproductionBundle: manualBundle, Policy: route.Policy, StagingDir: staging.Path(), Emit: emit, FreezeArtifacts: freezeBrowserArtifacts})
 					coordinated = &coordinatorResult
 					runErr = executeErr
 					result = PhaseExecutionResult{FinalYAML: coordinatorResult.FinalYAML, Usage: coordinatorResult.Usage}

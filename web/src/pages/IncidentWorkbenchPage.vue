@@ -77,6 +77,7 @@ const workflowNotice = ref('')
 const browserLoginConfirmationKey = ref('')
 const browserLoginToastID = ref<number | null>(null)
 const manualReproductionPending = ref(false)
+const manualReproductionPendingEntryID = ref('')
 const lifecycleComponent = ref<{ openManualReproductionEvidence: (summary: string) => Promise<void> } | null>(null)
 const browserRuntimeStatus = ref<IncidentBrowserRuntimeStatus>({
   state: 'installing',
@@ -986,7 +987,7 @@ function clearBrowserLoginConfirmation() {
   }
 }
 
-async function handleIncidentBrowser(action: IncidentBrowserAction) {
+async function handleIncidentBrowser(action: IncidentBrowserAction, frontendEntryID?: string) {
   if (action === 'redeploy-validator') {
     await router.push('/bots')
     return
@@ -1004,7 +1005,7 @@ async function handleIncidentBrowser(action: IncidentBrowserAction) {
   // attempt. Deduplicate concurrent clicks, but do not reuse an earlier
   // recording as if it were a fresh reproduction.
   const key = action === 'manual-reproduce'
-    ? `${browserKey(action, detail)}:${Date.now()}`
+    ? `${browserKey(action, detail)}:${frontendEntryID || 'default'}:${Date.now()}`
     : browserKey(action, detail)
   const recoveryKey = action === 'confirm-login' ? browserKey('login', detail) : key
   const input = {
@@ -1013,24 +1014,32 @@ async function handleIncidentBrowser(action: IncidentBrowserAction) {
     expected_version: incident.version,
     idempotency_key: recoveryKey,
     actor_id: 'desktop-user',
+    ...(action === 'manual-reproduce' && frontendEntryID ? { frontend_entry_id: frontendEntryID } : {}),
   }
   incidentWorkflow.error.value = ''
   workflowNotice.value = ''
   try {
     if (action === 'manual-reproduce') {
       manualReproductionPending.value = true
+      manualReproductionPendingEntryID.value = frontendEntryID || ''
       let captured: IncidentManualReproductionResult
       try {
         captured = await incidentWorkflow.runOnce(key, () => captureIncidentManualReproduction(input))
       } finally {
         manualReproductionPending.value = false
+        manualReproductionPendingEntryID.value = ''
       }
       if (!isSameBlockedBrowserAttempt(context)) return
       await refreshCaseSnapshotIfCurrent(context.caseID, () => isSameBrowserCase(context))
       if (!isSameBlockedBrowserAttempt(context)) return
-      await nextTick()
-      await lifecycleComponent.value?.openManualReproductionEvidence(captured.summary)
-      toast.success(`已采集手动复现现场（${captured.screenshot_artifact_ids.length} 张截图、${captured.action_count} 个操作）`)
+      if (captured.all_required_entries_captured) {
+        await nextTick()
+        await lifecycleComponent.value?.openManualReproductionEvidence(captured.summary)
+        toast.success(`所有端均已采集，可确认复现结果（本次 ${captured.screenshot_artifact_ids.length} 张截图、${captured.action_count} 个操作）`)
+      } else {
+        const remaining = captured.remaining_frontend_entry_ids.join('、')
+        toast.success(`已采集${captured.frontend_entry_name || captured.frontend_entry_id}；请继续复现剩余端${remaining ? `（${remaining}）` : ''}`)
+      }
       return
     }
     if (action === 'clear-session') {
@@ -1350,6 +1359,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         :bug-title="tickets.selectedBug.value?.title || ''"
         :pending="(incidentWorkflow.pending.value && !manualReproductionPending) || starting"
         :manual-reproduction-pending="manualReproductionPending"
+        :manual-reproduction-pending-entry-id="manualReproductionPendingEntryID"
         :error="incidentWorkflow.error.value"
         :phase-events="incidentWorkflow.phaseEvents.value[displayedDetail.case.current_attempt_id] || []"
         :browser-login-ready="browserLoginReady"

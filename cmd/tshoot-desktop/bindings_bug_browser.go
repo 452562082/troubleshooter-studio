@@ -42,18 +42,24 @@ type IncidentArtifactPreview struct {
 type IncidentBrowserCommandInput struct {
 	CaseID          string `json:"case_id"`
 	AttemptID       string `json:"attempt_id"`
+	FrontendEntryID string `json:"frontend_entry_id,omitempty"`
 	ExpectedVersion int64  `json:"expected_version"`
 	IdempotencyKey  string `json:"idempotency_key"`
 	ActorID         string `json:"actor_id"`
 }
 
 type IncidentManualReproductionResult struct {
-	ArtifactIDs           []string `json:"artifact_ids"`
-	ScreenshotArtifactIDs []string `json:"screenshot_artifact_ids"`
-	ActionCount           int      `json:"action_count"`
-	FinalURL              string   `json:"final_url"`
-	Title                 string   `json:"title"`
-	Summary               string   `json:"summary"`
+	ArtifactIDs                []string `json:"artifact_ids"`
+	ScreenshotArtifactIDs      []string `json:"screenshot_artifact_ids"`
+	FrontendEntryID            string   `json:"frontend_entry_id"`
+	FrontendEntryName          string   `json:"frontend_entry_name"`
+	CapturedFrontendEntryIDs   []string `json:"captured_frontend_entry_ids"`
+	RemainingFrontendEntryIDs  []string `json:"remaining_frontend_entry_ids"`
+	AllRequiredEntriesCaptured bool     `json:"all_required_entries_captured"`
+	ActionCount                int      `json:"action_count"`
+	FinalURL                   string   `json:"final_url"`
+	Title                      string   `json:"title"`
+	Summary                    string   `json:"summary"`
 }
 
 type incidentBrowserController interface {
@@ -526,8 +532,12 @@ func (a *App) CaptureIncidentManualReproduction(input IncidentBrowserCommandInpu
 		return IncidentManualReproductionResult{}, errors.New("manual reproduction requires the current failed validation attempt")
 	}
 	entries := incident.EffectiveFrontendEntries()
-	if len(entries) == 0 || strings.TrimSpace(entries[0].URL) == "" {
+	if len(entries) == 0 {
 		return IncidentManualReproductionResult{}, errors.New("manual reproduction has no configured frontend entry")
+	}
+	selected, err := incidentManualReproductionFrontendEntry(entries, input.FrontendEntryID)
+	if err != nil {
+		return IncidentManualReproductionResult{}, err
 	}
 	controller := a.incidentBrowserController()
 	if controller == nil {
@@ -541,6 +551,11 @@ func (a *App) CaptureIncidentManualReproduction(input IncidentBrowserCommandInpu
 	if err != nil {
 		return IncidentManualReproductionResult{}, err
 	}
+	_, selectedOrigin, err := canonicalIncidentBrowserApplicationURL(selected.URL)
+	if err != nil {
+		return IncidentManualReproductionResult{}, errors.New("selected frontend entry URL is invalid")
+	}
+	policy.StartOrigins = []string{selectedOrigin}
 	stagingParent := filepath.Join(a.workflowRoot, "manual-browser")
 	if err := os.MkdirAll(stagingParent, 0o700); err != nil {
 		return IncidentManualReproductionResult{}, errors.New("manual reproduction staging is unavailable")
@@ -552,14 +567,14 @@ func (a *App) CaptureIncidentManualReproduction(input IncidentBrowserCommandInpu
 	defer os.RemoveAll(staging)
 	result, err := controller.CaptureManual(ctx, browserverify.BrowserManualCaptureRequest{
 		CaseID: incident.ID, CycleNumber: incident.CycleNumber, AttemptID: attempt.ID,
-		SystemID: incident.SystemID, Environment: incident.Environment, StartURL: entries[0].URL,
+		SystemID: incident.SystemID, Environment: incident.Environment, StartURL: selected.URL,
 		Policy: policy, StagingDir: staging, Timeout: 20 * time.Minute,
 		Emit: func(progress bughub.BrowserProgress) { a.emitIncidentBrowserProgress(caseID, progress) },
 	})
 	if err != nil {
 		return IncidentManualReproductionResult{}, errors.New("manual reproduction capture failed")
 	}
-	output := IncidentManualReproductionResult{FinalURL: result.FinalURL, Title: result.Title}
+	output := IncidentManualReproductionResult{FrontendEntryID: selected.ID, FrontendEntryName: selected.Name, FinalURL: result.FinalURL, Title: result.Title}
 	var actions []incidentManualAction
 	for _, reference := range result.Artifacts {
 		path, err := safeIncidentManualArtifactPath(staging, reference.Path)
@@ -578,10 +593,13 @@ func (a *App) CaptureIncidentManualReproduction(input IncidentBrowserCommandInpu
 				return IncidentManualReproductionResult{}, errors.New("manual reproduction actions are invalid")
 			}
 			recipe := bughub.BrowserManualReproductionRecipe{
-				Version:  bughub.ManualReproductionRecipeVersion,
-				StartURL: entries[0].URL,
-				FinalURL: result.FinalURL,
-				Actions:  append([]bughub.BrowserManualReproductionAction(nil), actions...),
+				Version:           bughub.ManualReproductionRecipeVersion,
+				FrontendEntryID:   selected.ID,
+				FrontendEntryName: selected.Name,
+				StartURL:          selected.URL,
+				FinalURL:          result.FinalURL,
+				Title:             result.Title,
+				Actions:           append([]bughub.BrowserManualReproductionAction(nil), actions...),
 			}
 			content, err = json.Marshal(recipe)
 			if err != nil {
@@ -608,7 +626,108 @@ func (a *App) CaptureIncidentManualReproduction(input IncidentBrowserCommandInpu
 	}
 	output.ActionCount = len(actions)
 	output.Summary = incidentManualReproductionSummary(actions, output)
+	captured, remaining, err := incidentManualReproductionCaptureState(ctx, store, filepath.Join(a.workflowRoot, "artifacts"), incident, attempt.ID)
+	if err != nil {
+		return IncidentManualReproductionResult{}, err
+	}
+	output.CapturedFrontendEntryIDs = captured
+	output.RemainingFrontendEntryIDs = remaining
+	output.AllRequiredEntriesCaptured = len(remaining) == 0
+	if len(entries) > 1 {
+		output.Summary += fmt.Sprintf("多端采集进度：已完成 %d/%d（%s）。\n", len(captured), len(entries), strings.Join(captured, "、"))
+	}
 	return output, nil
+}
+
+func incidentManualReproductionFrontendEntry(entries []bughub.FrontendEntryBinding, requestedID string) (bughub.FrontendEntryBinding, error) {
+	requestedID = strings.TrimSpace(requestedID)
+	if requestedID == "" {
+		if len(entries) == 1 {
+			return entries[0], nil
+		}
+		return bughub.FrontendEntryBinding{}, errors.New("frontend_entry_id is required when manual reproduction covers multiple frontend entries")
+	}
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.ID) == requestedID && strings.TrimSpace(entry.URL) != "" {
+			return entry, nil
+		}
+	}
+	return bughub.FrontendEntryBinding{}, errors.New("selected frontend entry does not belong to the current Case")
+}
+
+func incidentManualReproductionCaptureState(ctx context.Context, store *bughub.CaseStore, artifactsRoot string, incident bughub.IncidentCase, attemptID string) ([]string, []string, error) {
+	segments, err := incidentManualReproductionSegments(ctx, store, artifactsRoot, incident, attemptID)
+	if err != nil {
+		return nil, nil, err
+	}
+	capturedSet := make(map[string]struct{}, len(segments))
+	for _, segment := range segments {
+		capturedSet[segment.FrontendEntryID] = struct{}{}
+	}
+	entries := incident.EffectiveFrontendEntries()
+	captured := make([]string, 0, len(entries))
+	remaining := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if _, ok := capturedSet[entry.ID]; ok {
+			captured = append(captured, entry.ID)
+		} else {
+			remaining = append(remaining, entry.ID)
+		}
+	}
+	return captured, remaining, nil
+}
+
+func incidentManualReproductionSegments(ctx context.Context, store *bughub.CaseStore, artifactsRoot string, incident bughub.IncidentCase, attemptID string) ([]IncidentManualReproductionSegment, error) {
+	artifacts, err := store.ListEvidenceArtifacts(ctx, incident.ID)
+	if err != nil {
+		return nil, err
+	}
+	entries := incident.EffectiveFrontendEntries()
+	entryByID := make(map[string]bughub.FrontendEntryBinding, len(entries))
+	for _, entry := range entries {
+		entryByID[entry.ID] = entry
+	}
+	latest := make(map[string]IncidentManualReproductionSegment)
+	for _, artifact := range artifacts {
+		if artifact.AttemptID != attemptID || artifact.Kind != bughub.ManualReproductionArtifactKind || artifact.RedactionStatus == bughub.RedactionStatusPending {
+			continue
+		}
+		stored, readErr := bughub.ReadEvidenceArtifactFromRoot(ctx, store, artifactsRoot, incident.ID, artifact.ID)
+		if readErr != nil {
+			return nil, readErr
+		}
+		recipe, parseErr := bughub.ParseBrowserManualReproductionRecipe(stored.Content)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		entryID := strings.TrimSpace(recipe.FrontendEntryID)
+		entryName := strings.TrimSpace(recipe.FrontendEntryName)
+		if recipe.Version == bughub.LegacyManualReproductionRecipeVersion && len(entries) == 1 {
+			entryID = entries[0].ID
+			entryName = entries[0].Name
+		}
+		configured, belongs := entryByID[entryID]
+		if !belongs {
+			continue
+		}
+		if entryName == "" {
+			entryName = configured.Name
+		}
+		segment := IncidentManualReproductionSegment{
+			FrontendEntryID: entryID, FrontendEntryName: entryName, StartURL: recipe.StartURL,
+			FinalURL: recipe.FinalURL, Title: recipe.Title, ActionCount: len(recipe.Actions), CapturedAt: artifact.CapturedAt,
+		}
+		if prior, ok := latest[entryID]; !ok || segment.CapturedAt.After(prior.CapturedAt) {
+			latest[entryID] = segment
+		}
+	}
+	segments := make([]IncidentManualReproductionSegment, 0, len(latest))
+	for _, entry := range entries {
+		if segment, ok := latest[entry.ID]; ok {
+			segments = append(segments, segment)
+		}
+	}
+	return segments, nil
 }
 
 func safeIncidentManualArtifactPath(staging, reference string) (string, error) {

@@ -289,50 +289,59 @@ func TestBrowserPlannerPromptIncludesBoundedLiveInitialObservation(t *testing.T)
 	}
 }
 
-func TestBrowserPlannerPromptRequiresRecordedManualRecipeReplay(t *testing.T) {
+func TestBrowserPlannerPromptRequiresRecordedManualBundleReplay(t *testing.T) {
 	exact := true
 	request := BrowserCoordinatorRequest{
-		ManualReproductionRecipe: &BrowserManualReproductionRecipe{
-			Version: ManualReproductionRecipeVersion, StartURL: "https://app.example.com/users",
-			Actions: []BrowserManualReproductionAction{{
-				ID: "manual-001", Action: "fill", Label: "搜索作者", Value: "chengzi",
-				Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索作者", Exact: &exact},
+		ManualReproductionBundle: &BrowserManualReproductionBundle{
+			Version: ManualReproductionBundleVersion,
+			Segments: []BrowserManualReproductionRecipe{{
+				Version: ManualReproductionRecipeVersion, FrontendEntryID: "admin", FrontendEntryName: "管理端", StartURL: "https://admin.example.com/users",
+				Actions: []BrowserManualReproductionAction{{
+					ID: "manual-001", Action: "fill", Label: "搜索作者", Value: "chengzi",
+					Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索作者", Exact: &exact},
+				}},
 			}},
 		},
 	}
 	prompt := browserPlannerPrompt(request, nil)
-	for _, expected := range []string{"manual_reproduction_recipe", "manual-001", "chengzi", "Replay every action", "Do not ask the user to repeat"} {
+	for _, expected := range []string{"manual_reproduction_bundle", "admin", "管理端", "manual-001", "chengzi", "Replay every segment", "Do not ask the user to repeat"} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("planner prompt lost manual recipe %q:\n%s", expected, prompt)
 		}
 	}
 }
 
-func TestBrowserPlanMustReplayRecordedManualActionsInOrder(t *testing.T) {
+func TestBrowserPlanMustReplayRecordedManualSegmentsByFrontendInOrder(t *testing.T) {
 	exact := true
-	recipe := &BrowserManualReproductionRecipe{
-		Version: ManualReproductionRecipeVersion, StartURL: "https://app.example.com/users",
-		Actions: []BrowserManualReproductionAction{
-			{ID: "manual-001", Action: "fill", Label: "搜索作者", Value: "chengzi", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索作者", Exact: &exact}},
-			{ID: "manual-002", Action: "press", Key: "Enter", Label: "提交搜索", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索作者", Exact: &exact}},
+	bundle := &BrowserManualReproductionBundle{
+		Version: ManualReproductionBundleVersion,
+		Segments: []BrowserManualReproductionRecipe{
+			{Version: ManualReproductionRecipeVersion, FrontendEntryID: "admin", FrontendEntryName: "管理端", StartURL: "https://admin.example.com/users", Actions: []BrowserManualReproductionAction{
+				{ID: "admin-001", Action: "click", Label: "下架", Locator: &BrowserLocator{Kind: "role", Value: "button", Name: "下架", Exact: &exact}},
+			}},
+			{Version: ManualReproductionRecipeVersion, FrontendEntryID: "consumer", FrontendEntryName: "C端", StartURL: "https://web.example.com/", Actions: []BrowserManualReproductionAction{
+				{ID: "consumer-001", Action: "fill", Label: "搜索内容", Value: "demo", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索", Exact: &exact}},
+				{ID: "consumer-002", Action: "press", Key: "Enter", Label: "提交搜索", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索", Exact: &exact}},
+			}},
 		},
 	}
-	plan := BrowserPlan{Actions: []BrowserAction{
-		{ID: "fill-author", Action: "fill", Value: "chengzi", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索作者", Exact: &exact}},
-		{ID: "capture", Action: "screenshot"},
-		{ID: "submit", Action: "press", Key: "Enter", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索作者", Exact: &exact}},
+	plan := BrowserPlan{StartURL: "https://admin.example.com/users", Actions: []BrowserAction{
+		{ID: "unpublish", Action: "click", Locator: &BrowserLocator{Kind: "role", Value: "button", Name: "下架", Exact: &exact}},
+		{ID: "open-consumer", Action: "goto", URL: "https://web.example.com/"},
+		{ID: "fill-content", Action: "fill", Value: "demo", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索", Exact: &exact}},
+		{ID: "submit", Action: "press", Key: "Enter", Locator: &BrowserLocator{Kind: "placeholder", Value: "搜索", Exact: &exact}},
 	}}
-	if err := validateBrowserPlanManualReproductionRecipe(plan, recipe); err != nil {
+	if err := validateBrowserPlanManualReproductionBundle(plan, bundle); err != nil {
 		t.Fatal(err)
 	}
-	plan.Actions[0].Value = "another-user"
-	if err := validateBrowserPlanManualReproductionRecipe(plan, recipe); err == nil || !strings.Contains(err.Error(), "manual-001") {
-		t.Fatalf("changed manual value err=%v", err)
+	plan.Actions[1] = BrowserAction{ID: "capture", Action: "screenshot"}
+	if err := validateBrowserPlanManualReproductionBundle(plan, bundle); err == nil || !strings.Contains(err.Error(), "consumer") {
+		t.Fatalf("missing consumer activation err=%v", err)
 	}
-	plan.Actions[0].Value = "chengzi"
-	plan.Actions[2].Key = "Escape"
-	if err := validateBrowserPlanManualReproductionRecipe(plan, recipe); err == nil || !strings.Contains(err.Error(), "manual-002") {
-		t.Fatalf("changed manual key err=%v", err)
+	plan.Actions[1] = BrowserAction{ID: "open-consumer", Action: "goto", URL: "https://web.example.com/"}
+	plan.Actions[3].Key = "Escape"
+	if err := validateBrowserPlanManualReproductionBundle(plan, bundle); err == nil || !strings.Contains(err.Error(), "consumer-002") {
+		t.Fatalf("changed consumer key err=%v", err)
 	}
 }
 

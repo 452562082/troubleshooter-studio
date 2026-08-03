@@ -1842,7 +1842,10 @@ describe('IncidentWorkbenchPage', () => {
   it('keeps manual recording distinct from automatic validation and opens an explicit outcome dialog', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-manual-reproduction', 'waiting_evidence', '2026-07-31T18:00:00Z', { version: 9, current_attempt_id: 'attempt-manual' })
+    const item = incident('case-manual-reproduction', 'waiting_evidence', '2026-07-31T18:00:00Z', {
+      version: 9, current_attempt_id: 'attempt-manual',
+      frontend_entry: { id: 'admin', name: '管理端', url: 'https://app.test/', resolution_source: 'user' },
+    })
     const blocked = detail(item, {
       attempts: [{
         id: 'attempt-manual', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
@@ -1866,11 +1869,14 @@ describe('IncidentWorkbenchPage', () => {
       attempt_id: 'attempt-manual',
       expected_version: 9,
       actor_id: 'desktop-user',
-      idempotency_key: expect.stringMatching(/^manual-reproduce:case-manual-reproduction:attempt-manual:v9:\d+$/),
+      frontend_entry_id: 'admin',
+      idempotency_key: expect.stringMatching(/^manual-reproduce:case-manual-reproduction:attempt-manual:v9:admin:\d+$/),
     }))
 
     pending.resolve({
       artifact_ids: ['manual-scene'], screenshot_artifact_ids: ['manual-scene'], action_count: 3,
+      frontend_entry_id: 'admin', frontend_entry_name: '管理端', captured_frontend_entry_ids: ['admin'],
+      remaining_frontend_entry_ids: [], all_required_entries_captured: true,
       final_url: 'https://app.test/content', title: '内容管理', summary: '已记录 3 个操作和 1 张截图。',
     })
     await flushPromises()
@@ -1880,6 +1886,71 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.get('[role="dialog"]').text()).toContain('已复现')
     expect(wrapper.get('[role="dialog"]').text()).toContain('未复现')
     expect(wrapper.get('[role="dialog"]').text()).toContain('无法判断')
+  })
+
+  it('collects every selected frontend before opening the combined manual outcome', async () => {
+    route.query = { bug_id: 'bug-a' }
+    vi.mocked(listBugs).mockResolvedValue([bugA])
+    const admin = { id: 'admin', name: '管理端', url: 'https://admin.test/', resolution_source: 'user' as const }
+    const consumer = { id: 'consumer', name: 'C端', url: 'https://web.test/', resolution_source: 'user' as const }
+    const item = incident('case-multi-manual-reproduction', 'waiting_evidence', '2026-08-03T10:00:00Z', {
+      version: 9,
+      current_attempt_id: 'attempt-multi-manual',
+      frontend_entry: admin,
+      frontend_entries: [admin, consumer],
+    })
+    const attempt = {
+      id: 'attempt-multi-manual', case_id: item.id, cycle_number: 1, phase: 'validation' as const, mode: 'reproduce' as const, status: 'failed' as const,
+      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_locator_failed' },
+      parent_attempt_id: '', started_at: '', error_code: 'browser_locator_failed', error_message: '', usage: {},
+    }
+    const adminSegment = {
+      frontend_entry_id: 'admin', frontend_entry_name: '管理端', start_url: admin.url, final_url: `${admin.url}content`,
+      title: '内容管理', action_count: 4, captured_at: '2026-08-03T10:01:00Z',
+    }
+    const consumerSegment = {
+      frontend_entry_id: 'consumer', frontend_entry_name: 'C端', start_url: consumer.url, final_url: `${consumer.url}search`,
+      title: '内容搜索', action_count: 3, captured_at: '2026-08-03T10:02:00Z',
+    }
+    let current = detail(item, { attempts: [attempt], manual_reproduction_segments: [] })
+    vi.mocked(listIncidentCases).mockResolvedValue([item])
+    vi.mocked(getIncidentCase).mockImplementation(async () => current)
+    vi.mocked(captureIncidentManualReproduction).mockImplementation(async input => {
+      if (input.frontend_entry_id === 'admin') {
+        current = detail(item, { attempts: [attempt], manual_reproduction_segments: [adminSegment] })
+        return {
+          artifact_ids: ['admin-recipe'], screenshot_artifact_ids: ['admin-scene'], action_count: 4,
+          frontend_entry_id: 'admin', frontend_entry_name: '管理端', captured_frontend_entry_ids: ['admin'],
+          remaining_frontend_entry_ids: ['consumer'], all_required_entries_captured: false,
+          final_url: adminSegment.final_url, title: adminSegment.title, summary: '管理端已采集。',
+        }
+      }
+      current = detail(item, { attempts: [attempt], manual_reproduction_segments: [adminSegment, consumerSegment] })
+      return {
+        artifact_ids: ['consumer-recipe'], screenshot_artifact_ids: ['consumer-scene'], action_count: 3,
+        frontend_entry_id: 'consumer', frontend_entry_name: 'C端', captured_frontend_entry_ids: ['admin', 'consumer'],
+        remaining_frontend_entry_ids: [], all_required_entries_captured: true,
+        final_url: consumerSegment.final_url, title: consumerSegment.title, summary: '管理端和 C 端均已采集。',
+      }
+    })
+    const wrapper = await mountedPage()
+
+    await wrapper.get('[data-frontend-entry-id="admin"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
+    expect(wrapper.get('[data-frontend-entry-id="admin"]').text()).toContain('已采集')
+    expect(wrapper.get('[data-frontend-entry-id="consumer"]').text()).toBe('复现C端')
+
+    await wrapper.get('[data-frontend-entry-id="consumer"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    expect(captureIncidentManualReproduction).toHaveBeenNthCalledWith(1, expect.objectContaining({ frontend_entry_id: 'admin' }))
+    expect(captureIncidentManualReproduction).toHaveBeenNthCalledWith(2, expect.objectContaining({ frontend_entry_id: 'consumer' }))
+    expect(wrapper.get('[role="dialog"]').text()).toContain('确认手动复现结果')
+    expect(wrapper.get('[role="dialog"]').text()).toContain('管理端和 C 端均已采集')
   })
 
   it('repairs the browser runtime with the exact key and refreshes only the current Case', async () => {

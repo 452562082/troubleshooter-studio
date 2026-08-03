@@ -13,8 +13,10 @@ import (
 )
 
 const (
-	ManualReproductionRecipeVersion = 1
-	ManualReproductionArtifactKind  = "manual_reproduction_recipe"
+	LegacyManualReproductionRecipeVersion = 1
+	ManualReproductionRecipeVersion       = 2
+	ManualReproductionBundleVersion       = 1
+	ManualReproductionArtifactKind        = "manual_reproduction_recipe"
 )
 
 // BrowserManualReproductionRecipe is a host-recorded, credential-safe replay
@@ -22,10 +24,22 @@ const (
 // screenshots and assertions, but every replayable action must remain present
 // in order in the generated plan.
 type BrowserManualReproductionRecipe struct {
+	Version           int                               `json:"version"`
+	FrontendEntryID   string                            `json:"frontend_entry_id,omitempty"`
+	FrontendEntryName string                            `json:"frontend_entry_name,omitempty"`
+	StartURL          string                            `json:"start_url"`
+	FinalURL          string                            `json:"final_url,omitempty"`
+	Title             string                            `json:"title,omitempty"`
+	Actions           []BrowserManualReproductionAction `json:"actions"`
+}
+
+// BrowserManualReproductionBundle groups independently recorded application
+// segments. Segments follow the Case's frozen frontend-entry order when that
+// order is available, with capture time as a legacy fallback, so locators from
+// different DOMs never get merged.
+type BrowserManualReproductionBundle struct {
 	Version  int                               `json:"version"`
-	StartURL string                            `json:"start_url"`
-	FinalURL string                            `json:"final_url,omitempty"`
-	Actions  []BrowserManualReproductionAction `json:"actions"`
+	Segments []BrowserManualReproductionRecipe `json:"segments"`
 }
 
 type BrowserManualReproductionAction struct {
@@ -65,13 +79,24 @@ func ParseBrowserManualReproductionRecipe(content []byte) (BrowserManualReproduc
 }
 
 func (recipe BrowserManualReproductionRecipe) Validate() error {
-	if recipe.Version != ManualReproductionRecipeVersion {
-		return fmt.Errorf("manual reproduction recipe version must be %d", ManualReproductionRecipeVersion)
+	if recipe.Version != LegacyManualReproductionRecipeVersion && recipe.Version != ManualReproductionRecipeVersion {
+		return fmt.Errorf("manual reproduction recipe version must be %d or %d", LegacyManualReproductionRecipeVersion, ManualReproductionRecipeVersion)
+	}
+	if recipe.Version >= ManualReproductionRecipeVersion {
+		if err := validateBrowserPlanString("manual_reproduction_recipe.frontend_entry_id", recipe.FrontendEntryID, true); err != nil {
+			return err
+		}
+		if err := validateBrowserPlanString("manual_reproduction_recipe.frontend_entry_name", recipe.FrontendEntryName, true); err != nil {
+			return err
+		}
 	}
 	if err := validateBrowserPlanString("manual_reproduction_recipe.start_url", recipe.StartURL, true); err != nil {
 		return err
 	}
 	if err := validateBrowserPlanString("manual_reproduction_recipe.final_url", recipe.FinalURL, false); err != nil {
+		return err
+	}
+	if err := validateBrowserPlanString("manual_reproduction_recipe.title", recipe.Title, false); err != nil {
 		return err
 	}
 	if len(recipe.Actions) > 40 {
@@ -119,6 +144,35 @@ func (recipe BrowserManualReproductionRecipe) Validate() error {
 	return nil
 }
 
+func (bundle BrowserManualReproductionBundle) Validate() error {
+	if bundle.Version != ManualReproductionBundleVersion {
+		return fmt.Errorf("manual reproduction bundle version must be %d", ManualReproductionBundleVersion)
+	}
+	if len(bundle.Segments) == 0 || len(bundle.Segments) > 16 {
+		return errors.New("manual reproduction bundle must contain 1 to 16 segments")
+	}
+	seen := make(map[string]struct{}, len(bundle.Segments))
+	legacyCount := 0
+	for index, segment := range bundle.Segments {
+		if err := segment.Validate(); err != nil {
+			return fmt.Errorf("manual reproduction bundle segment %d: %w", index, err)
+		}
+		key := strings.TrimSpace(segment.FrontendEntryID)
+		if segment.Version == LegacyManualReproductionRecipeVersion {
+			legacyCount++
+			key = "__legacy__"
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("manual reproduction bundle frontend entry %q is duplicated", key)
+		}
+		seen[key] = struct{}{}
+	}
+	if legacyCount > 1 || (legacyCount == 1 && len(bundle.Segments) > 1) {
+		return errors.New("legacy manual reproduction recipe cannot be combined with other segments")
+	}
+	return nil
+}
+
 func validateManualReproductionLocator(field string, locator *BrowserLocator) error {
 	if locator == nil {
 		return fmt.Errorf("%s is required", field)
@@ -155,42 +209,73 @@ func validateBrowserPlanManualReproductionRecipe(plan BrowserPlan, recipe *Brows
 	if recipe == nil {
 		return nil
 	}
-	expected := recipe.ReplayableActions()
-	if len(expected) == 0 {
+	bundle := &BrowserManualReproductionBundle{Version: ManualReproductionBundleVersion, Segments: []BrowserManualReproductionRecipe{*recipe}}
+	return validateBrowserPlanManualReproductionBundle(plan, bundle)
+}
+
+func validateBrowserPlanManualReproductionBundle(plan BrowserPlan, bundle *BrowserManualReproductionBundle) error {
+	if bundle == nil {
 		return nil
 	}
-	actual := make([]BrowserAction, 0, len(plan.Actions))
-	for _, action := range plan.Actions {
-		switch action.Action {
-		case "click", "fill", "press", "select":
-			actual = append(actual, action)
-		}
+	if err := bundle.Validate(); err != nil {
+		return err
 	}
-	next := 0
-	for _, candidate := range actual {
-		if next >= len(expected) {
-			break
+	cursor := 0
+	for segmentIndex, segment := range bundle.Segments {
+		entry := strings.TrimSpace(segment.FrontendEntryID)
+		if entry == "" {
+			entry = "legacy"
 		}
-		want := expected[next]
-		if candidate.Action != want.Action || !reflect.DeepEqual(candidate.Locator, want.Locator) {
-			continue
+		if name := strings.TrimSpace(segment.FrontendEntryName); name != "" {
+			entry += " (" + name + ")"
 		}
-		if (want.Action == "fill" || want.Action == "select") && candidate.Value != want.Value {
-			continue
+		activated := segmentIndex == 0 && sameManualReproductionURL(plan.StartURL, segment.StartURL)
+		if !activated {
+			for cursor < len(plan.Actions) {
+				candidate := plan.Actions[cursor]
+				cursor++
+				if candidate.Action == "goto" && sameManualReproductionURL(candidate.URL, segment.StartURL) {
+					activated = true
+					break
+				}
+			}
 		}
-		if want.Action == "press" && !strings.EqualFold(strings.TrimSpace(candidate.Key), strings.TrimSpace(want.Key)) {
-			continue
+		if !activated {
+			return fmt.Errorf("browser plan must activate manual reproduction frontend entry %s at %q", entry, segment.StartURL)
 		}
-		next++
-	}
-	if next != len(expected) {
-		missing := expected[next]
-		return fmt.Errorf("browser plan must replay recorded manual action %q (%s) in order", missing.ID, strings.TrimSpace(missing.Label))
+		for _, expected := range segment.ReplayableActions() {
+			matched := false
+			for cursor < len(plan.Actions) {
+				candidate := plan.Actions[cursor]
+				cursor++
+				if manualReproductionActionMatches(candidate, expected) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return fmt.Errorf("browser plan must replay recorded manual action %q (%s) for frontend entry %s in order", expected.ID, strings.TrimSpace(expected.Label), entry)
+			}
+		}
 	}
 	return nil
 }
 
-func (r *AgentPhaseRunner) browserManualReproductionRecipe(ctx context.Context, attempt PhaseAttempt) (*BrowserManualReproductionRecipe, error) {
+func sameManualReproductionURL(left, right string) bool {
+	return strings.TrimRight(strings.TrimSpace(left), "/") == strings.TrimRight(strings.TrimSpace(right), "/")
+}
+
+func manualReproductionActionMatches(candidate BrowserAction, expected BrowserManualReproductionAction) bool {
+	if candidate.Action != expected.Action || !reflect.DeepEqual(candidate.Locator, expected.Locator) {
+		return false
+	}
+	if (expected.Action == "fill" || expected.Action == "select") && candidate.Value != expected.Value {
+		return false
+	}
+	return expected.Action != "press" || strings.EqualFold(strings.TrimSpace(candidate.Key), strings.TrimSpace(expected.Key))
+}
+
+func (r *AgentPhaseRunner) browserManualReproductionBundle(ctx context.Context, attempt PhaseAttempt) (*BrowserManualReproductionBundle, error) {
 	if r == nil || r.store == nil || strings.TrimSpace(attempt.ParentAttemptID) == "" {
 		return nil, nil
 	}
@@ -228,17 +313,64 @@ func (r *AgentPhaseRunner) browserManualReproductionRecipe(ctx context.Context, 
 	}
 	sort.SliceStable(candidates, func(left, right int) bool {
 		if candidates[left].CapturedAt.Equal(candidates[right].CapturedAt) {
-			return candidates[left].ID > candidates[right].ID
+			return candidates[left].ID < candidates[right].ID
 		}
-		return candidates[left].CapturedAt.After(candidates[right].CapturedAt)
+		return candidates[left].CapturedAt.Before(candidates[right].CapturedAt)
 	})
-	stored, err := ReadEvidenceArtifactFromRoot(ctx, r.store, r.artifactsRoot, attempt.CaseID, candidates[0].ID)
-	if err != nil {
+	type capturedRecipe struct {
+		recipe   BrowserManualReproductionRecipe
+		captured EvidenceArtifact
+	}
+	latest := make(map[string]capturedRecipe)
+	hasVersionedSegment := false
+	for _, candidate := range candidates {
+		stored, readErr := ReadEvidenceArtifactFromRoot(ctx, r.store, r.artifactsRoot, attempt.CaseID, candidate.ID)
+		if readErr != nil {
+			return nil, readErr
+		}
+		recipe, parseErr := ParseBrowserManualReproductionRecipe(stored.Content)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		key := strings.TrimSpace(recipe.FrontendEntryID)
+		if recipe.Version == LegacyManualReproductionRecipeVersion {
+			key = "__legacy__"
+		} else {
+			hasVersionedSegment = true
+		}
+		latest[key] = capturedRecipe{recipe: recipe, captured: candidate}
+	}
+	if hasVersionedSegment {
+		delete(latest, "__legacy__")
+	}
+	selected := make([]capturedRecipe, 0, len(latest))
+	for _, item := range latest {
+		selected = append(selected, item)
+	}
+	entryOrder := make(map[string]int)
+	for index, entry := range browserAttemptFrontendEntryBindings(attempt) {
+		entryOrder[entry.ID] = index
+	}
+	sort.SliceStable(selected, func(left, right int) bool {
+		leftOrder, leftConfigured := entryOrder[selected[left].recipe.FrontendEntryID]
+		rightOrder, rightConfigured := entryOrder[selected[right].recipe.FrontendEntryID]
+		if leftConfigured && rightConfigured && leftOrder != rightOrder {
+			return leftOrder < rightOrder
+		}
+		if leftConfigured != rightConfigured {
+			return leftConfigured
+		}
+		if selected[left].captured.CapturedAt.Equal(selected[right].captured.CapturedAt) {
+			return selected[left].captured.ID < selected[right].captured.ID
+		}
+		return selected[left].captured.CapturedAt.Before(selected[right].captured.CapturedAt)
+	})
+	bundle := &BrowserManualReproductionBundle{Version: ManualReproductionBundleVersion, Segments: make([]BrowserManualReproductionRecipe, 0, len(selected))}
+	for _, item := range selected {
+		bundle.Segments = append(bundle.Segments, item.recipe)
+	}
+	if err := bundle.Validate(); err != nil {
 		return nil, err
 	}
-	recipe, err := ParseBrowserManualReproductionRecipe(stored.Content)
-	if err != nil {
-		return nil, err
-	}
-	return &recipe, nil
+	return bundle, nil
 }

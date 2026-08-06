@@ -93,10 +93,11 @@ func (r *recordingCommandRunner) Run(ctx context.Context, executable string, arg
 			workerResult = *r.ProbeWorkerResult
 		}
 		return json.NewEncoder(stdout).Encode(map[string]any{
-			"status":           "ready",
-			"sha256":           probeSHA,
-			"protocol_version": browserRuntimeProtocolProbeVersion,
-			"worker_result":    workerResult,
+			"status":                      "ready",
+			"sha256":                      probeSHA,
+			"protocol_version":            browserRuntimeProtocolProbeVersion,
+			"step_session_error_envelope": true,
+			"worker_result":               workerResult,
 		})
 	}
 	return nil
@@ -116,7 +117,34 @@ func runtimeProbeWorkerResultFixture() workerResult {
 			{Role: "row", Name: "测试都市生活剧查看", LocatorKind: "role", Visible: true},
 			{Role: "link", Name: "查看", LocatorKind: "text", Visible: true},
 		},
+		Scene: &bughub.BrowserScene{
+			Version:       bughub.BrowserSceneVersion,
+			CapturedAt:    "2026-08-04T12:00:00Z",
+			URL:           "http://127.0.0.1:12345/",
+			Title:         "tshoot browser runtime probe",
+			DeviceProfile: "desktop",
+			Viewport:      bughub.BrowserSceneViewport{Width: 1280, Height: 720},
+			ActiveSurface: &bughub.BrowserSceneSurface{Ref: "s-active", Type: "dialog", Name: "作者用户选择", Modal: true},
+			Frames:        []bughub.BrowserSceneFrame{{Ref: "f-main", URL: "http://127.0.0.1:12345/", SameOrigin: true}},
+			Elements: []bughub.BrowserSceneElement{{
+				Ref: "e-1", FrameRef: "f-main", SurfaceRef: "s-active", Role: "searchbox", Name: "请输入搜索关键字", Tag: "input",
+				LocatorHints: bughub.BrowserSceneLocatorHints{Placeholder: "请输入搜索关键字"},
+				States:       bughub.BrowserSceneElementStates{Visible: true, InViewport: true, Enabled: true, Editable: true},
+				Box:          bughub.BrowserSceneBox{X: 20, Y: 20, Width: 240, Height: 32},
+			}},
+			TextBlocks: []bughub.BrowserSceneTextBlock{{Ref: "t-1", SurfaceRef: "s-active", Text: "作者用户选择", Box: bughub.BrowserSceneBox{X: 20, Y: 10, Width: 200, Height: 24}}},
+			Capabilities: bughub.BrowserSceneCapabilities{
+				DOM: "available", Accessibility: "partial", Screenshot: "available", VisionGrounding: "disabled", FrameObservation: "main_only",
+			},
+		},
 		Artifacts: []workerArtifact{},
+	}
+}
+
+func TestEmbeddedWorkerProbeProtocolMatchesHost(t *testing.T) {
+	want := fmt.Sprintf("protocol_version: %d", browserRuntimeProtocolProbeVersion)
+	if !bytes.Contains(embeddedBrowserWorker, []byte(want)) {
+		t.Fatalf("embedded worker probe protocol does not match host: want %q", want)
 	}
 }
 

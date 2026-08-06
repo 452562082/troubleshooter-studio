@@ -837,7 +837,8 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 		assertTableColumns(t, store.db, "incident_cases", "reset_from_case_id", "superseded_by_case_id")
 		assertTableColumns(t, store.db, "reset_cancellation_operations", "reset_key", "case_id", "attempt_id", "request_fingerprint", "status", "claim_token", "outcome_code", "created_at", "updated_at")
 		assertTableColumns(t, store.db, "browser_recovery_operations", "idempotency_key", "operation", "case_id", "attempt_id", "expected_error_code", "cycle_number", "expected_version", "actor_id", "request_fingerprint", "status", "claim_token", "outcome_code", "result_case_json", "created_at", "updated_at")
-		assertTableColumns(t, store.db, "validation_recipes", "case_id", "scenario_sha256", "plan_sha256", "plan_json", "source_attempt_id", "created_at", "updated_at")
+		assertTableColumns(t, store.db, "validation_recipes", "case_id", "scenario_sha256", "plan_sha256", "plan_json", "autonomous_recipe_sha256", "autonomous_recipe_json", "source_attempt_id", "created_at", "updated_at")
+		assertTableColumns(t, store.db, "browser_decision_steps", "attempt_id", "step_no", "scene_sha256", "decision_sha256", "action_fingerprint", "status", "effect_code", "before_scene_ref", "after_scene_ref", "created_at", "updated_at")
 		var cancellationDDL string
 		if err := store.db.QueryRow(`SELECT lower(sql) FROM sqlite_master WHERE type='table' AND name='reset_cancellation_operations'`).Scan(&cancellationDDL); err != nil {
 			t.Fatal(err)
@@ -859,6 +860,10 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 		if err := store.db.QueryRow(`SELECT tbl_name FROM sqlite_master WHERE type='index' AND name='idx_validation_recipes_scenario'`).Scan(&validationRecipeIndexTable); err != nil || validationRecipeIndexTable != "validation_recipes" {
 			t.Fatalf("validation recipe index table=%q err=%v", validationRecipeIndexTable, err)
 		}
+		var browserDecisionStepIndexTable string
+		if err := store.db.QueryRow(`SELECT tbl_name FROM sqlite_master WHERE type='index' AND name='idx_browser_decision_steps_status_updated'`).Scan(&browserDecisionStepIndexTable); err != nil || browserDecisionStepIndexTable != "browser_decision_steps" {
+			t.Fatalf("browser decision step index table=%q err=%v", browserDecisionStepIndexTable, err)
+		}
 		var browserRecoveryDDL string
 		if err := store.db.QueryRow(`SELECT lower(sql) FROM sqlite_master WHERE type='table' AND name='browser_recovery_operations'`).Scan(&browserRecoveryDDL); err != nil {
 			t.Fatal(err)
@@ -867,6 +872,130 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 			if !strings.Contains(browserRecoveryDDL, required) {
 				t.Fatalf("browser recovery schema missing %q: %s", required, browserRecoveryDDL)
 			}
+		}
+	})
+
+	t.Run("v11 preserves attempts while adding browser decision steps", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "private", "workflows.db")
+		store, err := OpenCaseStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		createTestCase(t, store, "case-v11-browser-steps")
+		attempt := PhaseAttempt{
+			ID: "attempt-v11-browser-steps", CaseID: "case-v11-browser-steps", CycleNumber: 1,
+			Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusRunning,
+			AgentTarget: "codex", BotKey: "validator", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`), StartedAt: time.Now().UTC(),
+		}
+		if err := store.CreateAttempt(context.Background(), attempt); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		db := openRawWorkflowDB(t, path)
+		if _, err := db.Exec(`DROP TABLE browser_decision_steps`); err != nil {
+			t.Fatal(err)
+		}
+		tx, err := db.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fingerprint, err := workflowSchemaFingerprint(context.Background(), tx)
+		if err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		detailJSON, err := json.Marshal(workflowSchemaMigrationDetail{Version: 11, Fingerprint: fingerprint})
+		if err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`UPDATE schema_migrations SET detail_json = ? WHERE key = ?`, string(detailJSON), workflowStoreSchemaV1Key); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`PRAGMA user_version=11`); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		migrated, err := OpenCaseStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer migrated.Close()
+		if _, err := migrated.GetAttempt(context.Background(), attempt.ID); err != nil {
+			t.Fatal(err)
+		}
+		assertTableColumns(t, migrated.db, "browser_decision_steps", "attempt_id", "step_no", "status", "effect_code")
+	})
+
+	t.Run("v12 resumes migration and adds autonomous recipe columns", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "private", "workflows.db")
+		store, err := OpenCaseStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		db := openRawWorkflowDB(t, path)
+		tx, err := db.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, statement := range []string{
+			`ALTER TABLE validation_recipes DROP COLUMN autonomous_recipe_sha256`,
+			`ALTER TABLE validation_recipes DROP COLUMN autonomous_recipe_json`,
+		} {
+			if _, err := tx.Exec(statement); err != nil {
+				_ = tx.Rollback()
+				t.Fatal(err)
+			}
+		}
+		fingerprint, err := workflowSchemaFingerprint(context.Background(), tx)
+		if err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: 12, Fingerprint: fingerprint})
+		if err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`UPDATE schema_migrations SET detail_json=? WHERE key=?`, string(detail), workflowStoreSchemaV1Key); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(`PRAGMA user_version=12`); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+
+		migrated, err := OpenCaseStore(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer migrated.Close()
+		assertTableColumns(t, migrated.db, "validation_recipes", "autonomous_recipe_sha256", "autonomous_recipe_json")
+		var version int
+		if err := migrated.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != workflowStoreSchemaVersion {
+			t.Fatalf("version=%d err=%v", version, err)
 		}
 	})
 
@@ -886,6 +1015,9 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 		}
 
 		db := openRawWorkflowDB(t, path)
+		if _, err := db.Exec(`DROP TABLE browser_decision_steps`); err != nil {
+			t.Fatal(err)
+		}
 		if _, err := db.Exec(`ALTER TABLE incident_cases DROP COLUMN frontend_entry_json`); err != nil {
 			t.Fatal(err)
 		}

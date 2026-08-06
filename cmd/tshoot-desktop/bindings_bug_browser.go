@@ -531,6 +531,9 @@ func (a *App) CaptureIncidentManualReproduction(input IncidentBrowserCommandInpu
 		(incident.Status != bughub.CaseWaitingEvidence && incident.Status != bughub.CaseNotReproduced) {
 		return IncidentManualReproductionResult{}, errors.New("manual reproduction requires the current failed validation attempt")
 	}
+	if err := incidentManualReproductionGateProof(attempt); err != nil {
+		return IncidentManualReproductionResult{}, err
+	}
 	entries := incident.EffectiveFrontendEntries()
 	if len(entries) == 0 {
 		return IncidentManualReproductionResult{}, errors.New("manual reproduction has no configured frontend entry")
@@ -550,6 +553,9 @@ func (a *App) CaptureIncidentManualReproduction(input IncidentBrowserCommandInpu
 	policy, err := (caseBrowserPolicyResolver{app: a}).ResolveBrowserPolicy(ctx, incident, bug)
 	if err != nil {
 		return IncidentManualReproductionResult{}, err
+	}
+	if policy.IsProd {
+		return IncidentManualReproductionResult{}, errors.New("manual reproduction is unavailable in production")
 	}
 	_, selectedOrigin, err := canonicalIncidentBrowserApplicationURL(selected.URL)
 	if err != nil {
@@ -637,6 +643,23 @@ func (a *App) CaptureIncidentManualReproduction(input IncidentBrowserCommandInpu
 		output.Summary += fmt.Sprintf("多端采集进度：已完成 %d/%d（%s）。\n", len(captured), len(entries), strings.Join(captured, "、"))
 	}
 	return output, nil
+}
+
+func incidentManualReproductionGateProof(attempt bughub.PhaseAttempt) error {
+	if strings.TrimSpace(attempt.ErrorCode) != "browser_capability_gap" {
+		return errors.New("manual reproduction requires an autonomous capability gap")
+	}
+	var envelope struct {
+		ErrorCode              string                                     `json:"error_code"`
+		ManualReproductionGate *bughub.BrowserManualReproductionGateProof `json:"manual_reproduction_gate"`
+	}
+	if err := json.Unmarshal(attempt.OutputJSON, &envelope); err != nil || strings.TrimSpace(envelope.ErrorCode) != "browser_capability_gap" || envelope.ManualReproductionGate == nil {
+		return errors.New("manual reproduction requires a Host capability-gap proof")
+	}
+	if err := bughub.ValidateBrowserManualReproductionGateProof(*envelope.ManualReproductionGate, attempt.ID); err != nil {
+		return errors.New("manual reproduction Host capability-gap proof is invalid")
+	}
+	return nil
 }
 
 func incidentManualReproductionFrontendEntry(entries []bughub.FrontendEntryBinding, requestedID string) (bughub.FrontendEntryBinding, error) {

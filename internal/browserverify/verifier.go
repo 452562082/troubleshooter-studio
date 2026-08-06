@@ -54,6 +54,7 @@ var verifierCredentialPattern = regexp.MustCompile(`(?i)(?:["']?(?:authorization
 var verifierEvidenceCredentialPattern = regexp.MustCompile(`(?i)(?:["']?(?:authorization|proxy-authorization|set-cookie|cookie)["']?\s*:)|\bbearer\s+[A-Za-z0-9._~+/=-]{3,}|(?:^|[?&;,\s{])["']?(?:password|passwd|access[_-]?token|token|api[_-]?key|client[_-]?secret|secret|session|authorization|auth|cookie)["']?\s*[:=]\s*["']?[^\s&,;}"']+`)
 var verifierSensitiveQueryKey = regexp.MustCompile(`(?i)token|password|secret|code|session|auth|cookie|key`)
 var verifierRedactionMarker = regexp.MustCompile(`(?i)(?:\[REDACTED\]|%5B(?:REDACTED|redacted)%5D)`)
+var browserSceneRefPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 
 type WorkerRunner interface {
 	Run(context.Context, RuntimePaths, workerRequest, func(bughub.BrowserProgress)) (workerResult, error)
@@ -67,6 +68,28 @@ type workerRequest struct {
 	UploadFiles      map[string]string            `json:"upload_files,omitempty"`
 	StorageStatePath string                       `json:"storage_state_path,omitempty"`
 	Headless         bool                         `json:"headless"`
+}
+
+// executableBrowserWorkerPlan removes Host-only reasoning metadata before the
+// strict Worker protocol boundary. The scenario contract remains available to
+// Host binding/readiness/metrics, while the Worker receives only executable
+// browser instructions and assertions.
+func executableBrowserWorkerPlan(plan bughub.BrowserPlan) bughub.BrowserPlan {
+	plan.ScenarioContract = nil
+	return plan
+}
+
+// executableBrowserWorkerPolicy preserves the validated policy while forcing
+// every origin collection to encode as a JSON array. Direct HostVerifier
+// callers may use nil for an empty optional set; the Worker intentionally
+// rejects JSON null so transport normalization belongs at this boundary.
+func executableBrowserWorkerPolicy(policy bughub.BrowserSecurityPolicy) bughub.BrowserSecurityPolicy {
+	policy.AllowedOrigins = append([]string{}, policy.AllowedOrigins...)
+	policy.ApplicationOrigins = append([]string{}, policy.ApplicationOrigins...)
+	policy.StartOrigins = append([]string{}, policy.StartOrigins...)
+	policy.PrivateOrigins = append([]string{}, policy.PrivateOrigins...)
+	policy.AuthOrigins = append([]string{}, policy.AuthOrigins...)
+	return policy
 }
 
 type workerArtifact struct {
@@ -86,6 +109,7 @@ type workerResult struct {
 	LoginOrigin          string                            `json:"login_origin,omitempty"`
 	FinalScreenshotPath  string                            `json:"final_screenshot_path,omitempty"`
 	AccessibilitySummary []bughub.BrowserAccessibilityNode `json:"accessibility_summary,omitempty"`
+	Scene                *bughub.BrowserScene              `json:"scene,omitempty"`
 	Artifacts            []workerArtifact                  `json:"artifacts"`
 	sessionState         []byte
 }
@@ -331,8 +355,8 @@ func (v *HostVerifier) Execute(ctx context.Context, request bughub.BrowserVerifi
 	}
 	workerOutput, runErr := v.runWorkerWithSession(ctx, runtimePaths, workerRequest{
 		Mode:        "execute",
-		Plan:        request.Plan,
-		Policy:      request.Policy,
+		Plan:        executableBrowserWorkerPlan(request.Plan),
+		Policy:      executableBrowserWorkerPolicy(request.Policy),
 		StagingDir:  browserDir,
 		UploadFiles: uploadPaths,
 		Headless:    true,
@@ -453,7 +477,7 @@ func (v *HostVerifier) CaptureManual(ctx context.Context, request BrowserManualC
 	workerOutput, runErr := v.runWorkerWithSession(recordCtx, runtimePaths, workerRequest{
 		Mode:   "record",
 		Plan:   bughub.BrowserPlan{Version: 2, DeviceProfile: "desktop", StartURL: startURL, Actions: []bughub.BrowserAction{}, Assertions: []bughub.BrowserAssertion{}},
-		Policy: request.Policy, StagingDir: browserDir, Headless: false,
+		Policy: executableBrowserWorkerPolicy(request.Policy), StagingDir: browserDir, Headless: false,
 	}, request.Emit, key, sessionState, hasSession)
 	if runErr != nil {
 		if recordCtx.Err() != nil {
@@ -584,7 +608,7 @@ func (v *HostVerifier) Login(ctx context.Context, request BrowserLoginRequest) (
 			Actions:    []bughub.BrowserAction{},
 			Assertions: []bughub.BrowserAssertion{},
 		},
-		Policy:           request.Policy,
+		Policy:           executableBrowserWorkerPolicy(request.Policy),
 		StorageStatePath: path,
 		Headless:         false,
 	}, request.Emit)
@@ -784,7 +808,7 @@ func validateLoginWorkerResult(result workerResult) error {
 	}
 	if result.Status != "completed" || result.ErrorCode != "" || result.ErrorMessage != "" ||
 		result.FailedActionID != "" || result.FinalURL != "" || result.Title != "" || result.LoginOrigin != "" ||
-		result.FinalScreenshotPath != "" || len(result.AccessibilitySummary) != 0 || len(result.Artifacts) != 0 {
+		result.FinalScreenshotPath != "" || len(result.AccessibilitySummary) != 0 || result.Scene != nil || len(result.Artifacts) != 0 {
 		return errors.New("browser login worker returned forbidden result fields")
 	}
 	return nil
@@ -946,7 +970,7 @@ func validateWorkerPlanShape(plan bughub.BrowserPlan) error {
 	if plan.Version == bughub.BrowserPlanLegacyVersion && (plan.DeviceProfile != "" || len(plan.ResponseAssertions) != 0) {
 		return errors.New("browser response extensions require plan version 2")
 	}
-	actions := map[string]struct{}{"goto": {}, "click": {}, "fill": {}, "press": {}, "select": {}, "upload_file": {}, "wait_for": {}, "screenshot": {}}
+	actions := map[string]struct{}{"goto": {}, "click": {}, "fill": {}, "press": {}, "select": {}, "upload_file": {}, "wait_for": {}, "dismiss_surface": {}, "screenshot": {}}
 	locators := map[string]struct{}{"role": {}, "label": {}, "text": {}, "placeholder": {}, "test_id": {}, "css": {}}
 	seen := make(map[string]string, len(plan.Actions))
 	for _, action := range plan.Actions {
@@ -967,8 +991,21 @@ func validateWorkerPlanShape(plan bughub.BrowserPlan) error {
 			(plan.Version != bughub.BrowserPlanVersion || !strings.EqualFold(strings.TrimSpace(action.Key), "escape")) {
 			return errors.New("browser global press action is invalid")
 		}
+		if action.Action == "dismiss_surface" && (plan.Version != bughub.BrowserPlanVersion || action.Locator != nil || action.URL != "" || action.Value != "" || action.Key != "" || action.FileRef != "" || action.State != "" || action.TimeoutMS != 0 || action.ScreenshotAfter) {
+			return errors.New("browser dismiss surface action is invalid")
+		}
 		if action.Action != "upload_file" && action.FileRef != "" {
 			return errors.New("browser controlled file reference is invalid")
+		}
+		if action.Action == "wait_for" {
+			if action.State != "" && action.State != "visible" && action.State != "hidden" {
+				return errors.New("browser wait state is invalid")
+			}
+			if action.TimeoutMS < 0 || action.TimeoutMS > 60_000 || action.TimeoutMS > 0 && plan.Version != bughub.BrowserPlanVersion || action.State != "" && plan.Version != bughub.BrowserPlanVersion {
+				return errors.New("browser wait timeout or version is invalid")
+			}
+		} else if action.State != "" || action.TimeoutMS != 0 {
+			return errors.New("browser wait fields are bound to a non-wait action")
 		}
 		if action.Locator != nil {
 			if err := validateWorkerLocatorShape(action.Locator, locators, plan.Version == bughub.BrowserPlanVersion); err != nil {
@@ -992,7 +1029,7 @@ func validateWorkerPlanShape(plan bughub.BrowserPlan) error {
 		}
 		responseIDs[assertion.ID] = struct{}{}
 		actionKind, exists := seen[assertion.ActionID]
-		if !exists || actionKind == "screenshot" || actionKind == "wait_for" {
+		if !exists || actionKind == "screenshot" || actionKind == "wait_for" || actionKind == "dismiss_surface" {
 			return errors.New("browser response assertion action is invalid")
 		}
 		switch assertion.Kind {
@@ -1249,7 +1286,41 @@ func sanitizeWorkerResult(result workerResult) workerResult {
 		result.Artifacts[index].RequestID = safeVerifierIdentifier(result.Artifacts[index].RequestID, 128)
 		result.Artifacts[index].TraceID = safeVerifierIdentifier(result.Artifacts[index].TraceID, 128)
 	}
+	if result.Scene != nil {
+		result.Scene = sanitizeWorkerScene(result.Scene)
+	}
 	return result
+}
+
+func sanitizeWorkerScene(scene *bughub.BrowserScene) *bughub.BrowserScene {
+	if scene == nil {
+		return nil
+	}
+	copy := *scene
+	copy.Title = redactVerifierText(copy.Title, 1024)
+	if copy.ActiveSurface != nil {
+		surface := *copy.ActiveSurface
+		surface.Name = redactVerifierText(surface.Name, 1024)
+		copy.ActiveSurface = &surface
+	}
+	copy.Frames = append([]bughub.BrowserSceneFrame(nil), copy.Frames...)
+	copy.Elements = append([]bughub.BrowserSceneElement(nil), copy.Elements...)
+	for index := range copy.Elements {
+		element := &copy.Elements[index]
+		element.Role = redactVerifierText(element.Role, 128)
+		element.Name = redactVerifierText(element.Name, 1024)
+		element.Tag = redactVerifierText(element.Tag, 32)
+		element.LocatorHints.TestID = redactVerifierText(element.LocatorHints.TestID, 256)
+		element.LocatorHints.Label = redactVerifierText(element.LocatorHints.Label, 1024)
+		element.LocatorHints.Placeholder = redactVerifierText(element.LocatorHints.Placeholder, 1024)
+		element.Relations.RowName = redactVerifierText(element.Relations.RowName, 1024)
+		element.Relations.GroupName = redactVerifierText(element.Relations.GroupName, 1024)
+	}
+	copy.TextBlocks = append([]bughub.BrowserSceneTextBlock(nil), copy.TextBlocks...)
+	for index := range copy.TextBlocks {
+		copy.TextBlocks[index].Text = redactVerifierText(copy.TextBlocks[index].Text, 1024)
+	}
+	return &copy
 }
 
 func validateWorkerResultBounds(result workerResult) error {
@@ -1282,7 +1353,118 @@ func validateWorkerResultBounds(result workerResult) error {
 			return errors.New("browser worker artifact field is too long")
 		}
 	}
+	if err := validateWorkerSceneBounds(result.Scene); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateWorkerSceneBounds(scene *bughub.BrowserScene) error {
+	if scene == nil {
+		return nil
+	}
+	if scene.Version != bughub.BrowserSceneVersion || scene.SceneID != "" || scene.SceneSHA256 != "" || scene.AttemptID != "" {
+		return errors.New("browser worker scene identity is invalid")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, scene.CapturedAt); err != nil {
+		return errors.New("browser worker scene capture time is invalid")
+	}
+	if len(scene.URL) > 4096 || len(scene.Title) > 1024 || (scene.DeviceProfile != "desktop" && scene.DeviceProfile != "mobile") {
+		return errors.New("browser worker scene metadata is invalid")
+	}
+	if scene.Viewport.Width < 1 || scene.Viewport.Width > 10000 || scene.Viewport.Height < 1 || scene.Viewport.Height > 10000 {
+		return errors.New("browser worker scene viewport is invalid")
+	}
+	if len(scene.Frames) < 1 || len(scene.Frames) > 16 || len(scene.Elements) > 128 || len(scene.TextBlocks) > 64 {
+		return errors.New("browser worker scene collection bounds are invalid")
+	}
+	if !validBrowserSceneCapability(scene.Capabilities.DOM, "available") ||
+		!validBrowserSceneCapability(scene.Capabilities.Accessibility, "available", "partial") ||
+		!validBrowserSceneCapability(scene.Capabilities.Screenshot, "available", "unavailable") ||
+		!validBrowserSceneCapability(scene.Capabilities.VisionGrounding, "disabled", "available") ||
+		!validBrowserSceneCapability(scene.Capabilities.FrameObservation, "main_only", "same_origin") {
+		return errors.New("browser worker scene capabilities are invalid")
+	}
+	frameRefs := make(map[string]struct{}, len(scene.Frames))
+	for index, frame := range scene.Frames {
+		if !validBrowserSceneRef(frame.Ref) || len(frame.URL) > 4096 {
+			return errors.New("browser worker scene frame is invalid")
+		}
+		if index == 0 && (!frame.SameOrigin || frame.URL != scene.URL) {
+			return errors.New("browser worker scene main frame is invalid")
+		}
+		if frame.URL != "" && !frame.SameOrigin {
+			return errors.New("browser worker scene cross-origin frame URL is forbidden")
+		}
+		if _, duplicate := frameRefs[frame.Ref]; duplicate {
+			return errors.New("browser worker scene frame ref is duplicated")
+		}
+		frameRefs[frame.Ref] = struct{}{}
+	}
+	activeSurfaceRef := ""
+	if scene.ActiveSurface != nil {
+		activeSurfaceRef = scene.ActiveSurface.Ref
+		if !validBrowserSceneRef(activeSurfaceRef) || !validBrowserSceneSurfaceType(scene.ActiveSurface.Type) || len(scene.ActiveSurface.Name) > 1024 {
+			return errors.New("browser worker active surface is invalid")
+		}
+	}
+	elementRefs := make(map[string]struct{}, len(scene.Elements))
+	for _, element := range scene.Elements {
+		if !validBrowserSceneRef(element.Ref) || !validBrowserSceneRef(element.FrameRef) || len(element.Role) > 128 || len(element.Name) > 1024 || len(element.Tag) > 32 ||
+			len(element.LocatorHints.TestID) > 256 || len(element.LocatorHints.Label) > 1024 || len(element.LocatorHints.Placeholder) > 1024 || len(element.LocatorHints.SameOriginHref) > 4096 ||
+			len(element.Relations.RowName) > 1024 || len(element.Relations.GroupName) > 1024 || !validBrowserSceneBox(element.Box) {
+			return errors.New("browser worker scene element is invalid")
+		}
+		if _, ok := frameRefs[element.FrameRef]; !ok {
+			return errors.New("browser worker scene element frame is unknown")
+		}
+		if element.SurfaceRef != "" && element.SurfaceRef != activeSurfaceRef {
+			return errors.New("browser worker scene element surface is unknown")
+		}
+		if _, duplicate := elementRefs[element.Ref]; duplicate {
+			return errors.New("browser worker scene element ref is duplicated")
+		}
+		elementRefs[element.Ref] = struct{}{}
+	}
+	textRefs := make(map[string]struct{}, len(scene.TextBlocks))
+	for _, block := range scene.TextBlocks {
+		if !validBrowserSceneRef(block.Ref) || len(block.Text) < 1 || len(block.Text) > 1024 || !validBrowserSceneBox(block.Box) ||
+			(block.SurfaceRef != "" && block.SurfaceRef != activeSurfaceRef) {
+			return errors.New("browser worker scene text block is invalid")
+		}
+		if _, duplicate := textRefs[block.Ref]; duplicate {
+			return errors.New("browser worker scene text ref is duplicated")
+		}
+		textRefs[block.Ref] = struct{}{}
+	}
+	return nil
+}
+
+func validBrowserSceneCapability(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func validBrowserSceneRef(value string) bool {
+	return browserSceneRefPattern.MatchString(value)
+}
+
+func validBrowserSceneSurfaceType(value string) bool {
+	switch value {
+	case "dialog", "alertdialog", "drawer", "popover", "region":
+		return true
+	default:
+		return false
+	}
+}
+
+func validBrowserSceneBox(box bughub.BrowserSceneBox) bool {
+	return box.X >= -10000 && box.X <= 20000 && box.Y >= -10000 && box.Y <= 20000 &&
+		box.Width >= 1 && box.Width <= 10000 && box.Height >= 1 && box.Height <= 10000
 }
 
 func validateWorkerResultURLs(ctx context.Context, resolver IPResolver, policy bughub.BrowserSecurityPolicy, result workerResult) error {
@@ -1301,6 +1483,43 @@ func validateWorkerResultURLs(ctx context.Context, resolver IPResolver, policy b
 			return fmt.Errorf("worker login origin: %w", err)
 		}
 	}
+	if result.Scene != nil {
+		if result.Scene.URL == "" || (result.FinalURL != "" && result.Scene.URL != result.FinalURL) {
+			return errors.New("worker scene URL does not match final URL")
+		}
+		if err := AllowedURL(ctx, resolver, policy, result.Scene.URL); err != nil {
+			return fmt.Errorf("worker scene URL: %w", err)
+		}
+		_, sceneOrigin, _, err := parseBrowserURL(result.Scene.URL)
+		if err != nil {
+			return errors.New("worker scene URL is invalid")
+		}
+		for _, frame := range result.Scene.Frames {
+			if frame.URL == "" {
+				continue
+			}
+			if err := AllowedURL(ctx, resolver, policy, frame.URL); err != nil {
+				return fmt.Errorf("worker scene frame URL: %w", err)
+			}
+			_, frameOrigin, _, err := parseBrowserURL(frame.URL)
+			if err != nil || !frame.SameOrigin || frameOrigin != sceneOrigin {
+				return errors.New("worker scene frame origin is invalid")
+			}
+		}
+		for _, element := range result.Scene.Elements {
+			href := element.LocatorHints.SameOriginHref
+			if href == "" {
+				continue
+			}
+			if err := AllowedURL(ctx, resolver, policy, href); err != nil {
+				return fmt.Errorf("worker scene element href: %w", err)
+			}
+			_, hrefOrigin, _, err := parseBrowserURL(href)
+			if err != nil || hrefOrigin != sceneOrigin {
+				return errors.New("worker scene element href is not same-origin")
+			}
+		}
+	}
 	return nil
 }
 
@@ -1310,6 +1529,7 @@ func browserVerificationResult(request bughub.BrowserVerificationRequest, worker
 		FailedActionID: worker.FailedActionID, FinalURL: sanitizeVerifierURL(worker.FinalURL),
 		Title: worker.Title, LoginOrigin: sanitizeVerifierURL(worker.LoginOrigin),
 		FinalScreenshotPath: worker.FinalScreenshotPath, AccessibilitySummary: worker.AccessibilitySummary,
+		Scene:     bindBrowserScene(request.AttemptID, worker.Scene),
 		Artifacts: make([]bughub.BrowserArtifactReference, 0, len(worker.Artifacts)),
 	}
 	if result.Status == "login_required" && result.ErrorCode == "" {
@@ -1322,6 +1542,60 @@ func browserVerificationResult(request bughub.BrowserVerificationRequest, worker
 		})
 	}
 	return result
+}
+
+func bindBrowserScene(attemptID string, scene *bughub.BrowserScene) *bughub.BrowserScene {
+	if scene == nil {
+		return nil
+	}
+	copy := *scene
+	copy.URL = sanitizeVerifierURL(copy.URL)
+	copy.Frames = append([]bughub.BrowserSceneFrame(nil), copy.Frames...)
+	frameRefs := make(map[string]string, len(copy.Frames))
+	for index := range copy.Frames {
+		originalRef := copy.Frames[index].Ref
+		if index == 0 {
+			copy.Frames[index].Ref = "f-main"
+		} else {
+			copy.Frames[index].Ref = fmt.Sprintf("f-%d", index+1)
+		}
+		frameRefs[originalRef] = copy.Frames[index].Ref
+		copy.Frames[index].URL = sanitizeVerifierURL(copy.Frames[index].URL)
+	}
+	surfaceRef := ""
+	if copy.ActiveSurface != nil {
+		surface := *copy.ActiveSurface
+		surfaceRef = surface.Ref
+		surface.Ref = "s-1"
+		copy.ActiveSurface = &surface
+	}
+	copy.Elements = append([]bughub.BrowserSceneElement(nil), copy.Elements...)
+	for index := range copy.Elements {
+		copy.Elements[index].Ref = fmt.Sprintf("e-%d", index+1)
+		copy.Elements[index].FrameRef = frameRefs[copy.Elements[index].FrameRef]
+		if surfaceRef != "" && copy.Elements[index].SurfaceRef == surfaceRef {
+			copy.Elements[index].SurfaceRef = "s-1"
+		}
+		copy.Elements[index].LocatorHints.SameOriginHref = sanitizeVerifierURL(copy.Elements[index].LocatorHints.SameOriginHref)
+	}
+	copy.TextBlocks = append([]bughub.BrowserSceneTextBlock(nil), copy.TextBlocks...)
+	for index := range copy.TextBlocks {
+		copy.TextBlocks[index].Ref = fmt.Sprintf("t-%d", index+1)
+		if surfaceRef != "" && copy.TextBlocks[index].SurfaceRef == surfaceRef {
+			copy.TextBlocks[index].SurfaceRef = "s-1"
+		}
+	}
+	copy.AttemptID = attemptID
+	copy.SceneID = ""
+	copy.SceneSHA256 = ""
+	encoded, err := json.Marshal(copy)
+	if err != nil {
+		return nil
+	}
+	digest := sha256.Sum256(encoded)
+	copy.SceneSHA256 = hex.EncodeToString(digest[:])
+	copy.SceneID = "scene-" + copy.SceneSHA256[:16]
+	return &copy
 }
 
 func validateManifestArtifacts(stagingRoot string, identity browserDirectoryIdentity, artifacts []bughub.BrowserArtifactReference, status, declaredFinal string) (manifestArtifactValidation, error) {
@@ -1446,7 +1720,7 @@ func artifactDigestsEqual(first, second map[string]string) bool {
 
 func validBrowserArtifactKind(kind string) bool {
 	switch kind {
-	case "screenshot", "network", "console", "browser_actions", "request_facts", "response_facts", "response_assertions":
+	case "screenshot", "network", "console", "browser_actions", "browser_step_effects", "request_facts", "response_facts", "response_assertions":
 		return true
 	default:
 		return false

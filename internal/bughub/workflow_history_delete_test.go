@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -56,14 +57,14 @@ func TestDeleteTerminalCaseHistoryForBugPurgesRecordsAndArtifacts(t *testing.T) 
 		t.Fatalf("artifact directory still exists: %v", err)
 	}
 	for _, table := range []string{
-		"browser_recovery_operations", "reset_cancellation_operations", "validation_recipes",
+		"browser_recovery_operations", "reset_cancellation_operations", "validation_recipes", "browser_decision_steps",
 		"fix_checkpoints", "evidence_artifacts", "code_changes", "approvals",
 		"deployment_observations", "transition_events", "phase_attempts", "incident_cases",
 	} {
 		var count int
 		query := "SELECT COUNT(*) FROM " + table + " WHERE "
 		switch table {
-		case "fix_checkpoints":
+		case "fix_checkpoints", "browser_decision_steps":
 			query += "attempt_id=?"
 		case "validation_recipes", "browser_recovery_operations", "reset_cancellation_operations",
 			"evidence_artifacts", "code_changes", "approvals", "deployment_observations",
@@ -73,7 +74,7 @@ func TestDeleteTerminalCaseHistoryForBugPurgesRecordsAndArtifacts(t *testing.T) 
 			query += "id=?"
 		}
 		arg := deletedCase.ID
-		if table == "fix_checkpoints" {
+		if table == "fix_checkpoints" || table == "browser_decision_steps" {
 			arg = attempt.ID
 		}
 		if err := store.db.QueryRow(query, arg).Scan(&count); err != nil || count != 0 {
@@ -147,6 +148,8 @@ func seedTerminalHistoryRelatedRows(t *testing.T, store *CaseStore, incident Inc
 			[]any{"browser-delete", "repair", incident.ID, attempt.ID, "browser_locator_failed", 1, 1, "alice", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", BrowserRecoveryEffectFailed, "claim", "failed", `{}`, at, at}},
 		{`INSERT INTO validation_recipes (case_id,scenario_sha256,plan_sha256,plan_json,source_attempt_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?)`,
 			[]any{incident.ID, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", `{}`, attempt.ID, at, at}},
+		{`INSERT INTO browser_decision_steps (attempt_id,step_no,scene_sha256,decision_sha256,action_fingerprint,status,effect_code,before_scene_ref,after_scene_ref,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+			[]any{attempt.ID, 1, strings.Repeat("e", 64), strings.Repeat("f", 64), strings.Repeat("a", 64), BrowserDecisionStepConfirmed, BrowserStepEffectConfirmedCode, "browser-scenes/before.json", "browser-scenes/after.json", at, at}},
 	}
 	for _, statement := range statements {
 		if _, err := store.db.Exec(statement.query, statement.args...); err != nil {

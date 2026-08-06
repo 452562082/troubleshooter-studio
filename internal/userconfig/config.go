@@ -70,6 +70,18 @@ type Config struct {
 	// 没意义已砍。老 config.json 里如果有 custom_install_roots 字段,Unmarshal 时会
 	// 被忽略,写回时就自动消失,无需 migrate。
 	DeployedBots map[string]DeployedBotEntry `json:"deployed_bots,omitempty"`
+
+	// BrowserDecisionRollout is an operator-only Studio experiment switch.
+	// It is intentionally not exposed by a write binding in the desktop UI:
+	// operators edit config.json explicitly and restart Studio. Nil preserves
+	// the safe disabled/0% default.
+	BrowserDecisionRollout *BrowserDecisionRolloutConfig `json:"browser_decision_rollout,omitempty"`
+}
+
+type BrowserDecisionRolloutConfig struct {
+	Version    int  `json:"version"`
+	Enabled    bool `json:"enabled"`
+	Percentage int  `json:"percentage"`
 }
 
 // DeployedBotEntry 单条"曾部署"记录。字段最小化:够 BotsPage ghost 卡片渲染 +

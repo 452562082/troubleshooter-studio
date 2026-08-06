@@ -17,18 +17,80 @@ import (
 // their own crash journal, while this record is reused by later attempts and
 // regression cycles after one execution proved the plan runnable.
 type ValidationRecipe struct {
-	CaseID          string
-	ScenarioSHA256  string
-	PlanSHA256      string
-	Plan            BrowserPlan
-	SourceAttemptID string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	CaseID                 string
+	ScenarioSHA256         string
+	PlanSHA256             string
+	Plan                   BrowserPlan
+	AutonomousRecipeSHA256 string
+	AutonomousRecipe       *AutonomousValidationRecipe
+	SourceAttemptID        string
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
 }
 
 type ValidationRecipeStore interface {
 	GetValidationRecipe(context.Context, string) (ValidationRecipe, bool, error)
 	StoreValidationRecipe(context.Context, ValidationRecipe) (ValidationRecipe, error)
+}
+
+func autonomousValidationRecipeForPlan(ctx context.Context, store ValidationRecipeStore, caseID string, plan BrowserPlan) (*AutonomousValidationRecipe, error) {
+	if store == nil || strings.TrimSpace(caseID) == "" {
+		return nil, nil
+	}
+	stored, found, err := store.GetValidationRecipe(ctx, caseID)
+	if err != nil || !found || stored.AutonomousRecipe == nil || plan.ScenarioContract == nil {
+		return nil, err
+	}
+	planSHA256, err := durableBrowserPlanSHA256(plan)
+	if err != nil {
+		return nil, err
+	}
+	if stored.ScenarioSHA256 != plan.ScenarioContract.ContextSHA256 || stored.PlanSHA256 != planSHA256 {
+		return nil, nil
+	}
+	copy := *stored.AutonomousRecipe
+	copy.Steps = append([]AutonomousRecipeStep(nil), stored.AutonomousRecipe.Steps...)
+	return &copy, nil
+}
+
+func validationRecipeFromBrowserExecution(
+	ctx context.Context,
+	store ValidationRecipeStore,
+	caseID, sourceAttemptID, scenarioSHA256 string,
+	plan BrowserPlan,
+	result BrowserVerificationResult,
+) (ValidationRecipe, error) {
+	planSHA256, err := durableBrowserPlanSHA256(plan)
+	if err != nil {
+		return ValidationRecipe{}, err
+	}
+	recipe := ValidationRecipe{
+		CaseID: caseID, ScenarioSHA256: scenarioSHA256, PlanSHA256: planSHA256,
+		Plan: plan, SourceAttemptID: sourceAttemptID,
+	}
+	if result.autonomousScenarioSHA256 == scenarioSHA256 && len(result.autonomousTrace) != 0 {
+		if autonomous, compileErr := CompileAutonomousValidationRecipe(plan, scenarioSHA256, result.autonomousTrace); compileErr == nil {
+			digest, digestErr := autonomousValidationRecipeSHA256(autonomous, plan)
+			if digestErr != nil {
+				return ValidationRecipe{}, digestErr
+			}
+			recipe.AutonomousRecipeSHA256 = digest
+			recipe.AutonomousRecipe = &autonomous
+		}
+	}
+	if recipe.AutonomousRecipe == nil && store != nil {
+		stored, found, loadErr := store.GetValidationRecipe(ctx, caseID)
+		if loadErr != nil {
+			return ValidationRecipe{}, loadErr
+		}
+		if found && stored.ScenarioSHA256 == scenarioSHA256 && stored.PlanSHA256 == planSHA256 && stored.AutonomousRecipe != nil {
+			recipe.AutonomousRecipeSHA256 = stored.AutonomousRecipeSHA256
+			copy := *stored.AutonomousRecipe
+			copy.Steps = append([]AutonomousRecipeStep(nil), stored.AutonomousRecipe.Steps...)
+			recipe.AutonomousRecipe = &copy
+		}
+	}
+	return recipe, nil
 }
 
 func validLowerSHA256(value string) bool {
@@ -52,6 +114,19 @@ func (recipe ValidationRecipe) validate() error {
 	actual, err := durableBrowserPlanSHA256(recipe.Plan)
 	if err != nil || actual != recipe.PlanSHA256 {
 		return errors.New("validation recipe plan digest does not match")
+	}
+	if recipe.AutonomousRecipe == nil {
+		if strings.TrimSpace(recipe.AutonomousRecipeSHA256) != "" {
+			return errors.New("validation recipe autonomous digest has no recipe")
+		}
+		return nil
+	}
+	if recipe.AutonomousRecipe.ScenarioContractSHA256 != recipe.ScenarioSHA256 || recipe.AutonomousRecipe.PlanSHA256 != recipe.PlanSHA256 {
+		return errors.New("validation recipe autonomous binding does not match")
+	}
+	autonomousSHA256, err := autonomousValidationRecipeSHA256(*recipe.AutonomousRecipe, recipe.Plan)
+	if err != nil || autonomousSHA256 != recipe.AutonomousRecipeSHA256 {
+		return errors.New("validation recipe autonomous digest does not match")
 	}
 	return nil
 }
@@ -112,6 +187,14 @@ func (s *CaseStore) StoreValidationRecipe(ctx context.Context, recipe Validation
 	if len(encoded) > int(maxBrowserCoordinatorPlanJournalSize) || containsSensitiveData(encoded) {
 		return ValidationRecipe{}, errors.New("validation recipe plan content is unsafe")
 	}
+	autonomousJSON := ""
+	if recipe.AutonomousRecipe != nil {
+		autonomousEncoded, encodeErr := json.Marshal(recipe.AutonomousRecipe)
+		if encodeErr != nil || len(autonomousEncoded) > maxAutonomousValidationRecipeSize || containsSensitiveData(autonomousEncoded) {
+			return ValidationRecipe{}, errors.New("validation recipe autonomous content is unsafe")
+		}
+		autonomousJSON = string(autonomousEncoded)
+	}
 	var sourceCaseID string
 	var sourcePhase Phase
 	if err := s.db.QueryRowContext(ctx, `SELECT case_id, phase FROM phase_attempts WHERE id=?`, recipe.SourceAttemptID).Scan(&sourceCaseID, &sourcePhase); err != nil {
@@ -135,15 +218,17 @@ func (s *CaseStore) StoreValidationRecipe(ctx context.Context, recipe Validation
 		return ValidationRecipe{}, errors.New("validation recipe updated_at precedes created_at")
 	}
 	result, err := s.db.ExecContext(ctx, `INSERT INTO validation_recipes (
-		case_id, scenario_sha256, plan_sha256, plan_json, source_attempt_id, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?)
+		case_id, scenario_sha256, plan_sha256, plan_json, autonomous_recipe_sha256, autonomous_recipe_json, source_attempt_id, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(case_id) DO UPDATE SET
 		scenario_sha256=excluded.scenario_sha256,
 		plan_sha256=excluded.plan_sha256,
 		plan_json=excluded.plan_json,
+		autonomous_recipe_sha256=excluded.autonomous_recipe_sha256,
+		autonomous_recipe_json=excluded.autonomous_recipe_json,
 		source_attempt_id=excluded.source_attempt_id,
 		updated_at=excluded.updated_at`,
-		recipe.CaseID, recipe.ScenarioSHA256, recipe.PlanSHA256, string(encoded),
+		recipe.CaseID, recipe.ScenarioSHA256, recipe.PlanSHA256, string(encoded), recipe.AutonomousRecipeSHA256, autonomousJSON,
 		recipe.SourceAttemptID, formatStoreTime(recipe.CreatedAt), formatStoreTime(recipe.UpdatedAt))
 	if err != nil {
 		return ValidationRecipe{}, fmt.Errorf("store validation recipe: %w", err)
@@ -163,10 +248,10 @@ func (s *CaseStore) GetValidationRecipe(ctx context.Context, caseID string) (Val
 		return ValidationRecipe{}, false, errors.New("validation recipe case is required")
 	}
 	var recipe ValidationRecipe
-	var planJSON, createdAt, updatedAt string
+	var planJSON, autonomousJSON, createdAt, updatedAt string
 	err := s.db.QueryRowContext(ctx, `SELECT case_id, scenario_sha256, plan_sha256, plan_json,
-		source_attempt_id, created_at, updated_at FROM validation_recipes WHERE case_id=?`, caseID).Scan(
-		&recipe.CaseID, &recipe.ScenarioSHA256, &recipe.PlanSHA256, &planJSON,
+		autonomous_recipe_sha256, autonomous_recipe_json, source_attempt_id, created_at, updated_at FROM validation_recipes WHERE case_id=?`, caseID).Scan(
+		&recipe.CaseID, &recipe.ScenarioSHA256, &recipe.PlanSHA256, &planJSON, &recipe.AutonomousRecipeSHA256, &autonomousJSON,
 		&recipe.SourceAttemptID, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ValidationRecipe{}, false, nil
@@ -178,6 +263,13 @@ func (s *CaseStore) GetValidationRecipe(ctx context.Context, caseID string) (Val
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&recipe.Plan); err != nil {
 		return ValidationRecipe{}, false, errors.New("stored validation recipe plan is invalid")
+	}
+	if autonomousJSON != "" {
+		autonomous, decodeErr := ParseAutonomousValidationRecipe([]byte(autonomousJSON), recipe.Plan)
+		if decodeErr != nil {
+			return ValidationRecipe{}, false, errors.New("stored autonomous validation recipe is invalid")
+		}
+		recipe.AutonomousRecipe = &autonomous
 	}
 	if recipe.CreatedAt, err = parseStoreTime(createdAt); err != nil {
 		return ValidationRecipe{}, false, err

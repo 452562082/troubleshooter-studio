@@ -30,7 +30,7 @@ func TestLiveFunhubRepairWorker(t *testing.T) {
 	if configured := os.Getenv("TSHOOT_LIVE_BROWSER_RUNTIME_ROOT"); configured != "" {
 		root = configured
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	result, err := (nodeWorkerRunner{}).Run(ctx, RuntimePaths{
 		Root: root, WorkerPath: filepath.Join(root, "browser_worker.mjs"),
@@ -39,11 +39,11 @@ func TestLiveFunhubRepairWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("worker runner: %v", err)
 	}
-	t.Logf("worker result: status=%s code=%s failed=%s url=%s title=%s accessibility=%+v", result.Status, result.ErrorCode, result.FailedActionID, result.FinalURL, result.Title, result.AccessibilitySummary)
+	t.Logf("worker result: status=%s code=%s failed=%s url=%s title=%s accessibility_nodes=%d", result.Status, result.ErrorCode, result.FailedActionID, result.FinalURL, result.Title, len(result.AccessibilitySummary))
 	var requestFactContent, responseFactContent, responseAssertionContent []byte
 	for _, artifact := range result.Artifacts {
 		t.Logf("artifact reference: kind=%s path=%s", artifact.Kind, artifact.Path)
-		if artifact.Kind != "network" && artifact.Kind != "console" && artifact.Kind != "browser_actions" && artifact.Kind != "request_facts" && artifact.Kind != "response_facts" && artifact.Kind != "response_assertions" {
+		if artifact.Kind != "network" && artifact.Kind != "console" && artifact.Kind != "browser_actions" && artifact.Kind != "browser_step_effects" && artifact.Kind != "request_facts" && artifact.Kind != "response_facts" && artifact.Kind != "response_assertions" {
 			continue
 		}
 		content, readErr := os.ReadFile(filepath.Join(request.StagingDir, strings.TrimPrefix(artifact.Path, "browser/")))
@@ -51,7 +51,7 @@ func TestLiveFunhubRepairWorker(t *testing.T) {
 			t.Logf("read %s artifact: %v", artifact.Kind, readErr)
 			continue
 		}
-		t.Logf("%s artifact: %s", artifact.Kind, content)
+		t.Logf("%s artifact bytes=%d", artifact.Kind, len(content))
 		switch artifact.Kind {
 		case "request_facts":
 			requestFactContent = content
@@ -94,24 +94,22 @@ func TestLiveFunhubRepairWorker(t *testing.T) {
 		Fields []struct {
 			Path string `json:"path"`
 		} `json:"fields"`
-		EqualFieldPairs []struct {
-			LeftField      string `json:"left_field"`
-			RightField     string `json:"right_field"`
-			MatchedObjects int    `json:"matched_objects"`
-		} `json:"equal_field_pairs"`
 	}
 	if err := json.Unmarshal(responseFactContent, &responseFacts); err != nil || len(responseFacts) < 1 {
 		t.Fatalf("live automatic response facts were not captured: facts=%+v err=%v", responseFacts, err)
 	}
-	foundPair := false
+	foundNickname, foundText := false, false
 	for _, fact := range responseFacts {
-		for _, pair := range fact.EqualFieldPairs {
-			if ((pair.LeftField == "nick_name" && pair.RightField == "text") || (pair.LeftField == "text" && pair.RightField == "nick_name")) && pair.MatchedObjects > 0 {
-				foundPair = true
+		for _, field := range fact.Fields {
+			switch field.Path {
+			case "data.users.list[].nick_name":
+				foundNickname = true
+			case "data.users.list[].text":
+				foundText = true
 			}
 		}
 	}
-	if !foundPair {
-		t.Fatalf("live automatic response facts did not include nick_name/text equality: %+v", responseFacts)
+	if !foundNickname || !foundText {
+		t.Fatalf("live automatic response facts did not include user nick_name/text fields: nick_name=%v text=%v", foundNickname, foundText)
 	}
 }

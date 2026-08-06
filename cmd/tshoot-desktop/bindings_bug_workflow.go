@@ -317,6 +317,11 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 	// Initialization errors are observable but not sticky: a later command can
 	// retry after a transient filesystem or migration issue is corrected.
 	a.workflowInitErr = nil
+	browserDecisionPolicy, browserDecisionConfigured, err := loadBrowserDecisionRolloutPolicy()
+	if err != nil {
+		a.workflowInitErr = err
+		return err
+	}
 	root := strings.TrimSpace(a.workflowRoot)
 	if root == "" {
 		root = bughub.DefaultRoot()
@@ -412,6 +417,11 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 		return runtimeErr
 	}
 	if runtime.runner != nil {
+		if err := runtime.runner.SetBrowserDecisionRolloutPolicy(browserDecisionPolicy); err != nil {
+			a.workflowInitErr = err
+			_ = store.Close()
+			return err
+		}
 		runtime.runner.SetBrowserVerifier(a.workflowBrowser, caseBrowserPolicyResolver{app: a})
 		runtime.runner.SetFrontendRuntimeResolver(caseFrontendRuntimeResolver{app: a})
 		runtime.runner.SetCodeIntelligenceResolver(caseCodeIntelligenceResolver{app: a})
@@ -420,6 +430,8 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 	a.workflowStore = store
 	a.workflowOrchestrator = runtime.orchestrator
 	a.workflowRunner = runtime.runner
+	a.workflowBrowserDecisionPolicy = browserDecisionPolicy
+	a.workflowBrowserDecisionConfigured = browserDecisionConfigured
 	if runtime.investigator != nil {
 		a.bugInvestigationMu.Lock()
 		a.bugInvestigator = runtime.investigator

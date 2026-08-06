@@ -240,6 +240,10 @@ func newBrowserRecoveryBindingApp(t *testing.T, phase bughub.Phase, errorCode, l
 }
 
 func newBrowserRecoveryBindingAppWithEntries(t *testing.T, phase bughub.Phase, errorCode, loginOrigin string, entries []bughub.FrontendEntryBinding) (*App, *bughub.CaseStore, *workflowBindingRunner, *fakeIncidentBrowserController, bughub.IncidentCase, bughub.PhaseAttempt) {
+	return newBrowserRecoveryBindingAppConfigured(t, phase, errorCode, loginOrigin, entries, true)
+}
+
+func newBrowserRecoveryBindingAppConfigured(t *testing.T, phase bughub.Phase, errorCode, loginOrigin string, entries []bughub.FrontendEntryBinding, issueManualGateProof bool) (*App, *bughub.CaseStore, *workflowBindingRunner, *fakeIncidentBrowserController, bughub.IncidentCase, bughub.PhaseAttempt) {
 	t.Helper()
 	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "browser-recovery.db"))
 	controller := &fakeIncidentBrowserController{}
@@ -284,9 +288,18 @@ func newBrowserRecoveryBindingAppWithEntries(t *testing.T, phase bughub.Phase, e
 		t.Fatal(err)
 	}
 	finished := time.Now().UTC()
-	output, err := json.Marshal(map[string]any{
+	outputEnvelope := map[string]any{
 		"error_code": errorCode, "application_url": "https://app.test/oauth/start?state=opaque", "application_origin": "https://app.test", "login_origin": loginOrigin,
-	})
+	}
+	if errorCode == "browser_capability_gap" && issueManualGateProof {
+		outputEnvelope["manual_reproduction_gate"] = bughub.BrowserManualReproductionGateProof{
+			Version: bughub.BrowserManualReproductionGateProofVersion, Code: bughub.BrowserManualReproductionAvailableCode,
+			AttemptID: attemptID, SceneID: "scene-proof", ScenarioContractSHA256: strings.Repeat("a", 64),
+			FrontendEntryID: "admin", DecisionSHA256: strings.Repeat("b", 64),
+			ExhaustedChannels: []string{"safe_exploration", "semantic_grounding", "structured_grounding"},
+		}
+	}
+	output, err := json.Marshal(outputEnvelope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +327,7 @@ func browserCommandInput(incident bughub.IncidentCase, attempt bughub.PhaseAttem
 }
 
 func TestCaptureIncidentManualReproductionFreezesEvidenceWithoutAdvancingCase(t *testing.T) {
-	app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_locator_failed", "")
+	app, store, runner, controller, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_capability_gap", "")
 	controller.manualCapture = func(request browserverify.BrowserManualCaptureRequest) (bughub.BrowserVerificationResult, error) {
 		files := map[string][]byte{
 			"browser/manual-001.png":       []byte("\x89PNG\r\n\x1a\nmanual"),
@@ -390,7 +403,7 @@ func TestCaptureIncidentManualReproductionCollectsEverySelectedFrontendEntry(t *
 		{ID: "admin", Name: "管理端", URL: "https://app.test/users", ConfigURL: "https://app.test/", ResolutionSource: "user"},
 		{ID: "consumer", Name: "C端", URL: "https://web.test/", ConfigURL: "https://web.test/", ResolutionSource: "user"},
 	}
-	app, store, _, controller, incident, attempt := newBrowserRecoveryBindingAppWithEntries(t, bughub.PhaseValidation, "browser_locator_failed", "", entries)
+	app, store, _, controller, incident, attempt := newBrowserRecoveryBindingAppWithEntries(t, bughub.PhaseValidation, "browser_capability_gap", "", entries)
 	var starts []string
 	controller.manualCapture = func(request browserverify.BrowserManualCaptureRequest) (bughub.BrowserVerificationResult, error) {
 		starts = append(starts, request.StartURL)
@@ -468,6 +481,32 @@ func TestCaptureIncidentManualReproductionCollectsEverySelectedFrontendEntry(t *
 	invalidInput.FrontendEntryID = "unknown"
 	if _, err := app.CaptureIncidentManualReproduction(invalidInput); err == nil || !strings.Contains(err.Error(), "selected frontend entry") {
 		t.Fatalf("invalid entry err = %v", err)
+	}
+}
+
+func TestCaptureIncidentManualReproductionRejectsLocatorFailureAndMissingHostProof(t *testing.T) {
+	app, _, _, _, incident, attempt := newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_locator_failed", "")
+	if _, err := app.CaptureIncidentManualReproduction(browserCommandInput(incident, attempt, "manual-locator")); err == nil || !strings.Contains(err.Error(), "capability gap") {
+		t.Fatalf("locator failure err = %v", err)
+	}
+
+	app, _, _, _, incident, attempt = newBrowserRecoveryBindingAppConfigured(t, bughub.PhaseValidation, "browser_capability_gap", "", []bughub.FrontendEntryBinding{{ID: "admin", Name: "管理端", URL: "https://app.test/users", ConfigURL: "https://app.test/", ResolutionSource: "user"}}, false)
+	if _, err := app.CaptureIncidentManualReproduction(browserCommandInput(incident, attempt, "manual-missing-proof")); err == nil || !strings.Contains(err.Error(), "Host capability-gap proof") {
+		t.Fatalf("missing proof err = %v", err)
+	}
+
+	app, _, _, _, incident, attempt = newBrowserRecoveryBindingApp(t, bughub.PhaseValidation, "browser_capability_gap", "")
+	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
+		return &config.SystemConfig{
+			System: config.System{ID: "base"},
+			Environments: []config.Environment{{
+				ID: "test", WebDomain: "https://app.test", IsProd: true,
+				FrontendEntries: []config.FrontendEntry{{ID: "admin", Name: "管理端", URL: "https://app.test/"}},
+			}},
+		}, nil
+	}
+	if _, err := app.CaptureIncidentManualReproduction(browserCommandInput(incident, attempt, "manual-production")); err == nil || !strings.Contains(err.Error(), "unavailable in production") {
+		t.Fatalf("production err = %v", err)
 	}
 }
 

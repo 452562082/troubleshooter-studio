@@ -1969,7 +1969,7 @@ func TestAgentPhaseRunnerDeferredCleanupRetriesAfterFirstFailure(t *testing.T) {
 	if err := store.ClaimRunnableAttempt(context.Background(), AttemptRunClaim{Attempt: attempt, ClaimToken: claimToken}); err != nil {
 		t.Fatal(err)
 	}
-	runner.run(context.Background(), attempt, incident, Bug{ID: incident.BugID}, installedPhaseRunnerBot(t, "bot", "codex"), "prompt", staging, nil, incident.Version, claimToken, func(context.Context, CompleteAttemptCommand) error { return nil }, nil, nil, nil)
+	runner.run(context.Background(), attempt, incident, Bug{ID: incident.BugID}, installedPhaseRunnerBot(t, "bot", "codex"), "prompt", staging, nil, incident.Version, claimToken, func(context.Context, CompleteAttemptCommand) error { return nil }, nil, nil, DefaultBrowserDecisionRolloutPolicy(), nil)
 	if staging.calls != 2 {
 		t.Fatalf("cleanup calls = %d, want initial failure plus deferred retry", staging.calls)
 	}
@@ -1997,7 +1997,7 @@ func TestAgentPhaseRunnerPreservesStagingWhenCompletionIntentSaveFails(t *testin
 	runner.run(context.Background(), attempt, incident, Bug{ID: incident.BugID}, installedPhaseRunnerBot(t, "bot", "codex"), "prompt", staging, nil, incident.Version, claimToken, func(context.Context, CompleteAttemptCommand) error {
 		completionCalled = true
 		return nil
-	}, nil, nil, nil)
+	}, nil, nil, DefaultBrowserDecisionRolloutPolicy(), nil)
 	cleanups, closes := staging.lifecycle()
 	if completionCalled || cleanups != 0 || closes != 1 {
 		t.Fatalf("completion=%v staging cleanup=%d close=%d", completionCalled, cleanups, closes)

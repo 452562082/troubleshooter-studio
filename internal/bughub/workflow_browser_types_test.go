@@ -67,6 +67,51 @@ func TestParseBrowserPlanAcceptsExactActionMatrix(t *testing.T) {
 	}
 }
 
+func TestParseBrowserPlanWaitForHiddenStateAndTimeout(t *testing.T) {
+	const raw = `version: 2
+device_profile: desktop
+scenario_contract:
+  version: 1
+  goal: wait for asynchronous content to settle
+  basis: bug
+  causal_action_ids: [capture-final]
+  evidence:
+    - kind: ui_assertions
+start_url: https://app.example.com
+actions:
+  - id: wait-loading
+    action: wait_for
+    locator: {kind: text, value: 加载中...}
+    state: hidden
+    timeout_ms: 20000
+  - id: capture-final
+    action: screenshot
+assertions:
+  - kind: visible_text
+    value: 用户头像
+`
+	plan, err := ParseBrowserPlan([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plan.Actions[0]; got.State != "hidden" || got.TimeoutMS != 20_000 {
+		t.Fatalf("wait action=%+v", got)
+	}
+
+	for name, replacement := range map[string]string{
+		"invalid state":    "state: detached\n    timeout_ms: 20000",
+		"excess timeout":   "state: hidden\n    timeout_ms: 60001",
+		"non-integer time": "state: hidden\n    timeout_ms: \"20000\"",
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := strings.Replace(raw, "state: hidden\n    timeout_ms: 20000", replacement, 1)
+			if _, err := ParseBrowserPlan([]byte(candidate)); err == nil {
+				t.Fatal("expected invalid wait fields")
+			}
+		})
+	}
+}
+
 func TestParseBrowserPlanV2AcceptsGlobalEscapeWithoutLocator(t *testing.T) {
 	plan, err := ParseBrowserPlan([]byte(`version: 2
 device_profile: desktop
@@ -723,6 +768,38 @@ func TestParseBrowserPlanDefersURLSemanticsToHostPolicy(t *testing.T) {
 	raw = []byte(strings.Replace(string(raw), "https://test.example.com/users", "relative/start", 1))
 	if _, err := ParseBrowserPlan(raw); err != nil {
 		t.Fatalf("syntax parser must leave URL policy to the host: %v", err)
+	}
+}
+
+func TestParseBrowserPlanAcceptsHostOwnedDismissSurfaceOnlyInV2(t *testing.T) {
+	raw := []byte(`version: 2
+start_url: https://app.test/content
+actions:
+  - id: close-author-selector
+    action: dismiss_surface
+assertions:
+  - kind: visible_text
+    value: 用户信息管理
+`)
+	plan, err := ParseBrowserPlan(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Actions) != 1 || plan.Actions[0].Action != "dismiss_surface" || plan.Actions[0].Locator != nil || plan.Actions[0].Key != "" {
+		t.Fatalf("plan=%+v", plan)
+	}
+
+	for name, invalid := range map[string]string{
+		"legacy":           strings.Replace(string(raw), "version: 2", "version: 1", 1),
+		"locator":          strings.Replace(string(raw), "    action: dismiss_surface", "    action: dismiss_surface\n    locator: {kind: text, value: 关闭, exact: true}", 1),
+		"key":              strings.Replace(string(raw), "    action: dismiss_surface", "    action: dismiss_surface\n    key: Escape", 1),
+		"screenshot_after": strings.Replace(string(raw), "    action: dismiss_surface", "    action: dismiss_surface\n    screenshot_after: false", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseBrowserPlan([]byte(invalid)); err == nil {
+				t.Fatal("invalid dismiss_surface action was accepted")
+			}
+		})
 	}
 }
 

@@ -81,6 +81,8 @@ func workerFixtureBytes(kind string) []byte {
 		return []byte("{\"type\":\"log\",\"text\":\"safe\"}\n")
 	case "browser_actions":
 		return []byte("[]\n")
+	case "browser_step_effects":
+		return []byte("[]\n")
 	case "response_assertions":
 		return []byte("[]\n")
 	case "response_facts":
@@ -177,6 +179,31 @@ func TestValidateWorkerPlanShapeAcceptsNegativeTextAssertion(t *testing.T) {
 	}
 }
 
+func TestValidateWorkerPlanShapeAcceptsOnlyV2BoundedWaitState(t *testing.T) {
+	request := validBrowserRequest(t)
+	request.Plan.Version = bughub.BrowserPlanVersion
+	request.Plan.Actions = []bughub.BrowserAction{{
+		ID: "wait-loading", Action: "wait_for", Locator: &bughub.BrowserLocator{Kind: "text", Value: "加载中..."},
+		State: "hidden", TimeoutMS: 20_000,
+	}}
+	if err := validateWorkerPlanShape(request.Plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*bughub.BrowserPlan){
+		func(plan *bughub.BrowserPlan) { plan.Version = bughub.BrowserPlanLegacyVersion },
+		func(plan *bughub.BrowserPlan) { plan.Actions[0].State = "detached" },
+		func(plan *bughub.BrowserPlan) { plan.Actions[0].TimeoutMS = 60_001 },
+		func(plan *bughub.BrowserPlan) { plan.Actions[0].Action = "click" },
+	} {
+		invalid := request.Plan
+		invalid.Actions = append([]bughub.BrowserAction(nil), request.Plan.Actions...)
+		mutate(&invalid)
+		if err := validateWorkerPlanShape(invalid); err == nil {
+			t.Fatalf("invalid wait fields accepted: %+v", invalid.Actions[0])
+		}
+	}
+}
+
 func TestValidateWorkerPlanShapeAllowsOnlyV2GlobalEscape(t *testing.T) {
 	valid := bughub.BrowserPlan{
 		Version:  bughub.BrowserPlanVersion,
@@ -210,6 +237,37 @@ func TestValidateWorkerPlanShapeAllowsOnlyV2GlobalEscape(t *testing.T) {
 	} {
 		if err := validateWorkerPlanShape(invalid); err == nil {
 			t.Fatalf("unsafe global press was accepted: %+v", invalid)
+		}
+	}
+}
+
+func TestValidateWorkerPlanShapeAcceptsHostOwnedDismissSurfaceOnlyInV2(t *testing.T) {
+	valid := bughub.BrowserPlan{
+		Version:  bughub.BrowserPlanVersion,
+		StartURL: "https://app.example.com",
+		Actions:  []bughub.BrowserAction{{ID: "dismiss-dialog", Action: "dismiss_surface"}},
+		Assertions: []bughub.BrowserAssertion{{
+			Kind: "visible_text", Value: "用户管理",
+		}},
+	}
+	if err := validateWorkerPlanShape(valid); err != nil {
+		t.Fatal(err)
+	}
+
+	exact := true
+	for _, mutate := range []func(*bughub.BrowserPlan){
+		func(plan *bughub.BrowserPlan) { plan.Version = bughub.BrowserPlanLegacyVersion },
+		func(plan *bughub.BrowserPlan) { plan.Actions[0].Key = "Escape" },
+		func(plan *bughub.BrowserPlan) {
+			plan.Actions[0].Locator = &bughub.BrowserLocator{Kind: "text", Value: "关闭", Exact: &exact}
+		},
+		func(plan *bughub.BrowserPlan) { plan.Actions[0].ScreenshotAfter = true },
+	} {
+		invalid := valid
+		invalid.Actions = append([]bughub.BrowserAction(nil), valid.Actions...)
+		mutate(&invalid)
+		if err := validateWorkerPlanShape(invalid); err == nil {
+			t.Fatalf("invalid dismiss_surface action was accepted: %+v", invalid.Actions[0])
 		}
 	}
 }
@@ -307,6 +365,140 @@ func completedWorkerResult() workerResult {
 			{Kind: "screenshot", Path: "browser/final.png"},
 			{Kind: "network", Path: "browser/network.json", RequestID: "req-1", TraceID: "trace-1"},
 		},
+	}
+}
+
+func TestExecutableBrowserWorkerPlanRemovesOnlyHostScenarioContract(t *testing.T) {
+	contract := &bughub.BrowserScenarioContract{Version: 1, Goal: "验证搜索", Basis: "bug"}
+	plan := bughub.BrowserPlan{
+		Version: bughub.BrowserPlanVersion, StartURL: "https://app.test/search",
+		ScenarioContract: contract,
+		Actions:          []bughub.BrowserAction{{ID: "search", Action: "click", Locator: &bughub.BrowserLocator{Kind: "text", Value: "搜索"}}},
+		Assertions:       []bughub.BrowserAssertion{{Kind: "visible_text", Value: "结果"}},
+	}
+	workerPlan := executableBrowserWorkerPlan(plan)
+	if workerPlan.ScenarioContract != nil {
+		t.Fatal("Host-only scenario contract crossed the Worker protocol boundary")
+	}
+	if plan.ScenarioContract != contract || !reflect.DeepEqual(workerPlan.Actions, plan.Actions) || !reflect.DeepEqual(workerPlan.Assertions, plan.Assertions) {
+		t.Fatalf("plan changed unexpectedly: host=%+v worker=%+v", plan, workerPlan)
+	}
+}
+
+func TestExecutableBrowserWorkerPolicyEncodesEmptyOriginsAsArrays(t *testing.T) {
+	policy := bughub.BrowserSecurityPolicy{AllowedOrigins: []string{"https://app.test"}}
+	workerPolicy := executableBrowserWorkerPolicy(policy)
+	encoded, err := json.Marshal(workerPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "null") || string(encoded) != `{"allowed_origins":["https://app.test"],"application_origins":[],"start_origins":[],"private_origins":[],"auth_origins":[],"is_prod":false}` {
+		t.Fatalf("worker policy JSON = %s", encoded)
+	}
+	if policy.ApplicationOrigins != nil || policy.AuthOrigins != nil {
+		t.Fatalf("source policy was mutated: %+v", policy)
+	}
+}
+
+func workerSceneFixture() *bughub.BrowserScene {
+	return &bughub.BrowserScene{
+		Version:       bughub.BrowserSceneVersion,
+		CapturedAt:    "2026-08-04T12:00:00Z",
+		URL:           "https://app.test/users",
+		Title:         "Users",
+		DeviceProfile: "desktop",
+		Viewport:      bughub.BrowserSceneViewport{Width: 1280, Height: 720},
+		Frames:        []bughub.BrowserSceneFrame{{Ref: "f-main", URL: "https://app.test/users", SameOrigin: true}},
+		Elements: []bughub.BrowserSceneElement{{
+			Ref: "e-1", FrameRef: "f-main", Role: "link", Name: "View", Tag: "a",
+			LocatorHints: bughub.BrowserSceneLocatorHints{SameOriginHref: "https://app.test/users/42"},
+			States:       bughub.BrowserSceneElementStates{Visible: true, InViewport: true, Enabled: true},
+			Box:          bughub.BrowserSceneBox{X: 20, Y: 40, Width: 80, Height: 24},
+		}},
+		TextBlocks: []bughub.BrowserSceneTextBlock{{Ref: "t-1", Text: "Users", Box: bughub.BrowserSceneBox{X: 20, Y: 10, Width: 120, Height: 24}}},
+		Capabilities: bughub.BrowserSceneCapabilities{
+			DOM: "available", Accessibility: "partial", Screenshot: "available", VisionGrounding: "disabled", FrameObservation: "main_only",
+		},
+	}
+}
+
+func TestHostVerifierBindsAndSanitizesBrowserScene(t *testing.T) {
+	workerResult := completedWorkerResult()
+	workerResult.FinalURL = "https://app.test/users?token=secret"
+	workerResult.Scene = workerSceneFixture()
+	workerResult.Scene.URL = workerResult.FinalURL
+	workerResult.Scene.Frames[0].URL = workerResult.FinalURL
+	workerResult.Scene.Frames[0].Ref = "worker-main-frame"
+	workerResult.Scene.Elements[0].Ref = "worker-element"
+	workerResult.Scene.Elements[0].FrameRef = "worker-main-frame"
+	workerResult.Scene.TextBlocks[0].Ref = "worker-text"
+	workerResult.Scene.Elements[0].Name = "password=top-secret"
+	workerResult.Scene.Elements[0].LocatorHints.SameOriginHref = "https://app.test/users/42?access_token=secret"
+	workerResult.Scene.TextBlocks[0].Text = "authorization: Bearer top-secret"
+	worker := &fakeWorker{Result: workerResult}
+	verifier := newTestHostVerifier(t, worker)
+	request := validBrowserRequest(t)
+
+	result, err := verifier.Execute(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Scene == nil {
+		t.Fatal("browser scene was not returned")
+	}
+	if result.Scene.AttemptID != request.AttemptID || len(result.Scene.SceneSHA256) != sha256.Size*2 ||
+		result.Scene.SceneID != "scene-"+result.Scene.SceneSHA256[:16] {
+		t.Fatalf("scene identity = %+v", result.Scene)
+	}
+	if result.Scene.Frames[0].Ref != "f-main" || result.Scene.Elements[0].Ref != "e-1" ||
+		result.Scene.Elements[0].FrameRef != "f-main" || result.Scene.Elements[0].SurfaceRef != "" ||
+		result.Scene.TextBlocks[0].Ref != "t-1" || result.Scene.TextBlocks[0].SurfaceRef != "" {
+		t.Fatalf("scene refs were not rebound by the host: %+v", result.Scene)
+	}
+	if result.Scene.URL != "https://app.test/users?token=%5BREDACTED%5D" ||
+		result.Scene.Elements[0].LocatorHints.SameOriginHref != "https://app.test/users/42?access_token=%5BREDACTED%5D" {
+		t.Fatalf("scene URLs were not sanitized: %+v", result.Scene)
+	}
+	if result.Scene.Elements[0].Name != "[REDACTED]" || result.Scene.TextBlocks[0].Text != "[REDACTED]" {
+		t.Fatalf("scene text was not redacted: %+v", result.Scene)
+	}
+	hashInput := *result.Scene
+	hashInput.SceneID = ""
+	hashInput.SceneSHA256 = ""
+	encoded, err := json.Marshal(hashInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(encoded)
+	if result.Scene.SceneSHA256 != fmt.Sprintf("%x", digest) {
+		t.Fatalf("scene SHA256 is not bound to the sanitized host result")
+	}
+}
+
+func TestHostVerifierRejectsUnsafeBrowserScene(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*bughub.BrowserScene)
+	}{
+		{name: "forged identity", mutate: func(scene *bughub.BrowserScene) { scene.SceneID = "scene-forged" }},
+		{name: "duplicate element ref", mutate: func(scene *bughub.BrowserScene) { scene.Elements = append(scene.Elements, scene.Elements[0]) }},
+		{name: "unknown frame", mutate: func(scene *bughub.BrowserScene) { scene.Elements[0].FrameRef = "f-unknown" }},
+		{name: "cross-origin href", mutate: func(scene *bughub.BrowserScene) {
+			scene.Elements[0].LocatorHints.SameOriginHref = "https://evil.test/users"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := completedWorkerResult()
+			result.Scene = workerSceneFixture()
+			test.mutate(result.Scene)
+			worker := &fakeWorker{Result: result}
+			verifier := newTestHostVerifier(t, worker)
+			_, err := verifier.Execute(context.Background(), validBrowserRequest(t))
+			if err == nil || !strings.Contains(err.Error(), "browser_worker_protocol_invalid") {
+				t.Fatalf("err=%v, want browser_worker_protocol_invalid", err)
+			}
+		})
 	}
 }
 

@@ -243,11 +243,11 @@ func TestAllowedURLReparsesAndResolvesEveryCall(t *testing.T) {
 }
 
 func TestValidatePlanRejectsProdInteractions(t *testing.T) {
-	for _, action := range []string{"click", "fill", "press", "select"} {
+	for _, action := range []string{"click", "fill", "press", "select", "dismiss_surface"} {
 		t.Run(action, func(t *testing.T) {
 			policy := bughub.BrowserSecurityPolicy{IsProd: true, AllowedOrigins: []string{"https://app.example.com"}, ApplicationOrigins: []string{"https://app.example.com"}, StartOrigins: []string{"https://app.example.com"}}
 			plan := bughub.BrowserPlan{
-				Version:  1,
+				Version:  2,
 				StartURL: "https://app.example.com",
 				Actions:  []bughub.BrowserAction{{ID: "restricted", Action: action}},
 			}

@@ -176,6 +176,61 @@ func OpenCaseStore(path string) (*CaseStore, error) {
 	return store, nil
 }
 
+// OpenCaseStoreReadOnly opens an existing current-schema workflow database
+// without creating files, changing permissions, migrating schema or switching
+// journal mode. It is intended for offline reporting and benchmark export.
+func OpenCaseStoreReadOnly(path string) (*CaseStore, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, errors.New("read-only case store path is required")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect read-only case store: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("read-only case store must be a regular file")
+	}
+	values := url.Values{}
+	values.Set("mode", "ro")
+	values.Add("_pragma", "query_only(1)")
+	values.Add("_pragma", "foreign_keys(1)")
+	values.Add("_pragma", "busy_timeout(5000)")
+	dsn := (&url.URL{Scheme: "file", Path: filepath.ToSlash(path), RawQuery: values.Encode()}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open read-only case store: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	if err := verifyReadOnlyWorkflowSchema(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &CaseStore{db: db}, nil
+}
+
+func verifyReadOnlyWorkflowSchema(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return fmt.Errorf("begin read-only workflow schema verification: %w", err)
+	}
+	defer tx.Rollback()
+	var version int
+	if err := tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("read workflow schema version: %w", err)
+	}
+	// Benchmark export only reads tables whose shape is unchanged from v11
+	// through the current schema. Accept those historical versions after their
+	// exact marker/fingerprint is verified, but never run migrations here.
+	if version < 11 || version > workflowStoreSchemaVersion {
+		return fmt.Errorf("%w: user_version=%d", ErrUnsupportedWorkflowSchema, version)
+	}
+	if err := verifyWorkflowSchemaMarker(ctx, tx, version); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *CaseStore) initialize(ctx context.Context) error {
 	for _, pragma := range []string{
 		"PRAGMA foreign_keys=ON",
@@ -264,6 +319,14 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		}
 	case 10:
 		if err := verifyWorkflowSchemaMarker(ctx, tx, 10); err != nil {
+			return err
+		}
+	case 11:
+		if err := verifyWorkflowSchemaMarker(ctx, tx, 11); err != nil {
+			return err
+		}
+	case 12:
+		if err := verifyWorkflowSchemaMarker(ctx, tx, 12); err != nil {
 			return err
 		}
 	case workflowStoreSchemaVersion:
@@ -474,6 +537,62 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=11`); err != nil {
 			return fmt.Errorf("set workflow schema version 11: %w", err)
 		}
+		version = 11
+	}
+	if version == 11 {
+		if _, err := tx.ExecContext(ctx, workflowStoreSchemaV12Upgrade); err != nil {
+			return fmt.Errorf("apply workflow schema v12: %w", err)
+		}
+		fingerprint, err := workflowSchemaFingerprint(ctx, tx)
+		if err != nil {
+			return err
+		}
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		if err != nil {
+			return fmt.Errorf("encode workflow schema v12 detail: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE schema_migrations SET applied_at = ?, detail_json = ? WHERE key = ?`, formatStoreTime(time.Now().UTC()), string(detail), workflowStoreSchemaV1Key); err != nil {
+			return fmt.Errorf("record workflow schema v12: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=12`); err != nil {
+			return fmt.Errorf("set workflow schema version 12: %w", err)
+		}
+		version = 12
+	}
+	if version == 12 {
+		tables, err := workflowTableColumns(ctx, tx)
+		if err != nil {
+			return err
+		}
+		columns := tables["validation_recipes"]
+		for _, addition := range []struct {
+			name string
+			sql  string
+		}{
+			{name: "autonomous_recipe_sha256", sql: `ALTER TABLE validation_recipes ADD COLUMN autonomous_recipe_sha256 TEXT NOT NULL DEFAULT ''`},
+			{name: "autonomous_recipe_json", sql: `ALTER TABLE validation_recipes ADD COLUMN autonomous_recipe_json TEXT NOT NULL DEFAULT ''`},
+		} {
+			if stringInSlice(addition.name, columns) {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, addition.sql); err != nil {
+				return fmt.Errorf("apply workflow schema v13 column %s: %w", addition.name, err)
+			}
+		}
+		fingerprint, err := workflowSchemaFingerprint(ctx, tx)
+		if err != nil {
+			return err
+		}
+		detail, err := json.Marshal(workflowSchemaMigrationDetail{Version: workflowStoreSchemaVersion, Fingerprint: fingerprint})
+		if err != nil {
+			return fmt.Errorf("encode workflow schema v13 detail: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE schema_migrations SET applied_at = ?, detail_json = ? WHERE key = ?`, formatStoreTime(time.Now().UTC()), string(detail), workflowStoreSchemaV1Key); err != nil {
+			return fmt.Errorf("record workflow schema v13: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `PRAGMA user_version=13`); err != nil {
+			return fmt.Errorf("set workflow schema version 13: %w", err)
+		}
 	}
 	tables, err := workflowTableColumns(ctx, tx)
 	if err != nil {
@@ -488,7 +607,8 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 	v1Columns["phase_attempts"] = append(v1Columns["phase_attempts"], "run_claim_token")
 	v1Columns["reset_cancellation_operations"] = []string{"reset_key", "case_id", "attempt_id", "request_fingerprint", "status", "claim_token", "outcome_code", "created_at", "updated_at"}
 	v1Columns["browser_recovery_operations"] = []string{"idempotency_key", "operation", "case_id", "attempt_id", "expected_error_code", "cycle_number", "expected_version", "actor_id", "request_fingerprint", "status", "claim_token", "outcome_code", "result_case_json", "created_at", "updated_at"}
-	v1Columns["validation_recipes"] = []string{"case_id", "scenario_sha256", "plan_sha256", "plan_json", "source_attempt_id", "created_at", "updated_at"}
+	v1Columns["validation_recipes"] = []string{"case_id", "scenario_sha256", "plan_sha256", "plan_json", "source_attempt_id", "created_at", "updated_at", "autonomous_recipe_sha256", "autonomous_recipe_json"}
+	v1Columns["browser_decision_steps"] = []string{"attempt_id", "step_no", "scene_sha256", "decision_sha256", "action_fingerprint", "status", "effect_code", "before_scene_ref", "after_scene_ref", "created_at", "updated_at"}
 	if err := verifyWorkflowColumns(tables, v1Columns); err != nil {
 		return err
 	}
@@ -1122,8 +1242,8 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 		return result, fmt.Errorf("insert reset replacement Case: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO validation_recipes (
-		case_id,scenario_sha256,plan_sha256,plan_json,source_attempt_id,created_at,updated_at
-	) SELECT ?,scenario_sha256,plan_sha256,plan_json,source_attempt_id,?,?
+		case_id,scenario_sha256,plan_sha256,plan_json,autonomous_recipe_sha256,autonomous_recipe_json,source_attempt_id,created_at,updated_at
+	) SELECT ?,scenario_sha256,plan_sha256,plan_json,autonomous_recipe_sha256,autonomous_recipe_json,source_attempt_id,?,?
 	  FROM validation_recipes WHERE case_id=?`, replacement.ID, formatStoreTime(now), formatStoreTime(now), incident.ID); err != nil {
 		return result, fmt.Errorf("inherit reset Case validation recipe: %w", err)
 	}

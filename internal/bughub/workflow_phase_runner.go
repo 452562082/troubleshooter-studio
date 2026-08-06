@@ -161,6 +161,7 @@ type AgentPhaseRunner struct {
 	eventSink                   InvestigationEventSink
 	browserVerifier             BrowserVerifier
 	browserPolicyResolver       BrowserPolicyResolver
+	browserDecisionPolicy       BrowserDecisionRolloutPolicy
 	frontendRuntimeResolver     FrontendRuntimeResolver
 	repositoryAccessResolver    RepositoryAccessResolver
 	codeIntelligenceResolver    CodeIntelligenceResolver
@@ -184,7 +185,7 @@ func (r *AgentPhaseRunner) SetEventSink(sink InvestigationEventSink) {
 }
 
 func NewAgentPhaseRunner(store *CaseStore, executor PhaseAgentExecutor, legacy *InvestigationStore, artifactsRoot string, complete PhaseCompletionFunc) *AgentPhaseRunner {
-	return &AgentPhaseRunner{store: store, executor: executor, legacy: legacy, artifactsRoot: artifactsRoot, complete: complete, completionReconcileAttempts: 6, completionReconcileDelay: 2 * time.Second, active: make(map[string]context.CancelFunc), scheduled: make(map[string]struct{})}
+	return &AgentPhaseRunner{store: store, executor: executor, legacy: legacy, artifactsRoot: artifactsRoot, complete: complete, browserDecisionPolicy: DefaultBrowserDecisionRolloutPolicy(), completionReconcileAttempts: 6, completionReconcileDelay: 2 * time.Second, active: make(map[string]context.CancelFunc), scheduled: make(map[string]struct{})}
 }
 
 func (r *AgentPhaseRunner) SetCompletionCallback(complete PhaseCompletionFunc) {
@@ -204,6 +205,22 @@ func (r *AgentPhaseRunner) SetBrowserVerifier(verifier BrowserVerifier, resolver
 	defer r.mu.Unlock()
 	r.browserVerifier = verifier
 	r.browserPolicyResolver = resolver
+}
+
+// SetBrowserDecisionRolloutPolicy is the only production composition switch
+// for the persistent decision loop. New runners start at an explicit 0% and
+// production requests remain forbidden by DecideBrowserDecisionRollout.
+func (r *AgentPhaseRunner) SetBrowserDecisionRolloutPolicy(policy BrowserDecisionRolloutPolicy) error {
+	if r == nil {
+		return errors.New("agent phase runner is unavailable")
+	}
+	if err := ValidateBrowserDecisionRolloutPolicy(policy); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.browserDecisionPolicy = policy
+	return nil
 }
 
 func (r *AgentPhaseRunner) SetFixWorkspaceManager(manager *FixWorkspaceManager) {
@@ -244,6 +261,10 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	complete := r.complete
 	browserVerifier := r.browserVerifier
 	browserPolicyResolver := r.browserPolicyResolver
+	browserDecisionPolicy := r.browserDecisionPolicy
+	if browserDecisionPolicy == (BrowserDecisionRolloutPolicy{}) {
+		browserDecisionPolicy = DefaultBrowserDecisionRolloutPolicy()
+	}
 	frontendRuntimeResolver := r.frontendRuntimeResolver
 	repositoryAccessResolver := r.repositoryAccessResolver
 	codeIntelligenceResolver := r.codeIntelligenceResolver
@@ -394,7 +415,7 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 		prompt += "\n## Durable fix checkpoint (mandatory)\n\nBefore the first repository push, atomically write `" + fixCheckpointManifestName + "` in the Studio staging directory (write a temporary sibling, fsync, then rename) with state=`prepared`; include every planned repository commit/branch/remote/test. After all pushes succeed, atomically replace it with the same manifest and state=`pushed` before reporting completion. JSON fields: kind=`" + fixCheckpointManifestKind + "`, version=1, case_id=`" + attempt.CaseID + "`, attempt_id=`" + attempt.ID + "`, state=`prepared|pushed`, result=<the exact structured FixResult also returned as final YAML>. Never include credentials. Recovery treats the SSH remote branch as truth, so a crash after push but before the state update remains recoverable while a pre-push crash cannot be misreported.\n"
 	}
 	r.startLegacyProjection(attempt, bug, executionBot)
-	go r.run(runCtx, attempt.Clone(), incident.Clone(), bug, executionBot, prompt, staging, fixWorkspace, incident.Version, claimToken, complete, browserVerifier, browserPolicyResolver, codeIntelligenceResolver)
+	go r.run(runCtx, attempt.Clone(), incident.Clone(), bug, executionBot, prompt, staging, fixWorkspace, incident.Version, claimToken, complete, browserVerifier, browserPolicyResolver, browserDecisionPolicy, codeIntelligenceResolver)
 	return nil
 }
 
@@ -526,7 +547,7 @@ func (r *AgentPhaseRunner) Cancel(ctx context.Context, attemptID string) error {
 	return err
 }
 
-func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incident IncidentCase, bug Bug, bot BotRef, prompt string, staging attemptEvidenceStaging, fixWorkspace *FixWorkspaceLease, expectedVersion int64, claimToken string, complete PhaseCompletionFunc, browserVerifier BrowserVerifier, browserPolicyResolver BrowserPolicyResolver, codeIntelligenceResolver CodeIntelligenceResolver) {
+func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incident IncidentCase, bug Bug, bot BotRef, prompt string, staging attemptEvidenceStaging, fixWorkspace *FixWorkspaceLease, expectedVersion int64, claimToken string, complete PhaseCompletionFunc, browserVerifier BrowserVerifier, browserPolicyResolver BrowserPolicyResolver, browserDecisionPolicy BrowserDecisionRolloutPolicy, codeIntelligenceResolver CodeIntelligenceResolver) {
 	started := time.Now()
 	cleaned := false
 	preserveStaging := false
@@ -618,6 +639,7 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 	var result PhaseExecutionResult
 	var runErr = codeIntelligenceErr
 	var coordinated *BrowserCoordinatorResult
+	var browserDecisionUsage AgentUsage
 	freezeBrowserArtifacts := func(ctx context.Context, references []BrowserArtifactReference) ([]browserFrozenArtifact, error) {
 		return r.freezeBrowserArtifacts(ctx, attempt, staging, references)
 	}
@@ -659,7 +681,15 @@ func (r *AgentPhaseRunner) run(ctx context.Context, attempt PhaseAttempt, incide
 					coordinatorResult := browserCoordinatorFailure(BrowserCoordinatorResult{}, "browser_execution_interrupted")
 					coordinated = &coordinatorResult
 				} else {
-					coordinatorResult, executeErr := (BrowserCoordinator{Executor: r.executor, Verifier: browserVerifier, Recipes: r.store}).Execute(ctx, BrowserCoordinatorRequest{Attempt: attempt, Bug: browserBug, Bot: bot, BasePrompt: prompt, UserClarifications: clarifications, ManualReproductionBundle: manualBundle, Policy: route.Policy, StagingDir: staging.Path(), Emit: emit, FreezeArtifacts: freezeBrowserArtifacts})
+					decisionRunner := phaseBrowserDecisionCoordinatorRunner(
+						browserVerifier, r.executor, r.store, attempt, bot, prompt, emit,
+						func(usage AgentUsage) { addAgentUsage(&browserDecisionUsage, usage) },
+					)
+					coordinatorResult, executeErr := (BrowserCoordinator{
+						Executor: r.executor, Verifier: browserVerifier, Recipes: r.store,
+						BrowserDecisionRunner: decisionRunner, BrowserDecisionPolicy: browserDecisionPolicy,
+					}).Execute(ctx, BrowserCoordinatorRequest{Attempt: attempt, Bug: browserBug, Bot: bot, BasePrompt: prompt, UserClarifications: clarifications, ManualReproductionBundle: manualBundle, Policy: route.Policy, StagingDir: staging.Path(), Emit: emit, FreezeArtifacts: freezeBrowserArtifacts})
+					addAgentUsage(&coordinatorResult.Usage, browserDecisionUsage)
 					coordinated = &coordinatorResult
 					runErr = executeErr
 					result = PhaseExecutionResult{FinalYAML: coordinatorResult.FinalYAML, Usage: coordinatorResult.Usage}
@@ -996,6 +1026,30 @@ func (r *AgentPhaseRunner) promptForAttempt(attempt PhaseAttempt, bug Bug, bot B
 		return prompt, nil
 	default:
 		return "", fmt.Errorf("unsupported phase %q", attempt.Phase)
+	}
+}
+
+func phaseBrowserDecisionCoordinatorRunner(
+	verifier BrowserVerifier,
+	executor PhaseAgentExecutor,
+	store BrowserDecisionStepStore,
+	attempt PhaseAttempt,
+	bot BotRef,
+	prompt string,
+	emit func(InvestigationEvent),
+	usageSink func(AgentUsage),
+) BrowserDecisionCoordinatorRunner {
+	opener, ok := verifier.(BrowserDecisionSessionOpener)
+	if !ok || opener == nil {
+		return nil
+	}
+	return HostBrowserDecisionCoordinatorRunner{
+		Opener: opener,
+		Provider: PhaseAgentBrowserDecisionProvider{
+			Executor: executor, AttemptID: attempt.ID, Bot: bot, BasePrompt: prompt, Emit: emit, UsageSink: usageSink,
+		},
+		Transactions: BrowserStepTransactionCoordinator{Store: store},
+		Recovery:     ConservativeBrowserDecisionRecoveryProvider{},
 	}
 }
 

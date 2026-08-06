@@ -90,7 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_events_case_created ON transition_events(case_id,
 `
 
 const (
-	workflowStoreSchemaVersion   = 11
+	workflowStoreSchemaVersion   = 13
 	workflowStoreSchemaV1Key     = "workflow-schema-v1"
 	workflowStoreSchemaV1Upgrade = `
 ALTER TABLE transition_events ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT '';
@@ -217,6 +217,27 @@ CREATE INDEX idx_validation_recipes_scenario ON validation_recipes(scenario_sha2
 	workflowStoreSchemaV11Upgrade = `
 ALTER TABLE incident_cases ADD COLUMN frontend_entry_json TEXT NOT NULL DEFAULT '{}';
 `
+	workflowStoreSchemaV12Upgrade = `
+CREATE TABLE browser_decision_steps (
+  attempt_id TEXT NOT NULL REFERENCES phase_attempts(id) ON DELETE CASCADE,
+  step_no INTEGER NOT NULL CHECK (step_no >= 1),
+  scene_sha256 TEXT NOT NULL CHECK (length(scene_sha256) = 64 AND scene_sha256 NOT GLOB '*[^0-9a-f]*'),
+  decision_sha256 TEXT NOT NULL CHECK (length(decision_sha256) = 64 AND decision_sha256 NOT GLOB '*[^0-9a-f]*'),
+  action_fingerprint TEXT NOT NULL CHECK (length(action_fingerprint) = 64 AND action_fingerprint NOT GLOB '*[^0-9a-f]*'),
+  status TEXT NOT NULL CHECK (status IN ('prepared','executing','confirmed','no_effect','blocked','ambiguous','uncertain')),
+  effect_code TEXT NOT NULL DEFAULT '',
+  before_scene_ref TEXT NOT NULL,
+  after_scene_ref TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(attempt_id, step_no),
+  UNIQUE(attempt_id, action_fingerprint),
+  CHECK ((status IN ('prepared','executing') AND effect_code = '' AND after_scene_ref = '') OR
+         (status IN ('confirmed','no_effect','blocked','ambiguous') AND effect_code <> '' AND after_scene_ref <> '') OR
+         (status = 'uncertain' AND effect_code = 'browser_step_effect_uncertain'))
+);
+CREATE INDEX idx_browser_decision_steps_status_updated ON browser_decision_steps(status, updated_at);
+`
 )
 
 var legacyWorkflowTableColumns = map[string][]string{
@@ -230,15 +251,17 @@ var legacyWorkflowTableColumns = map[string][]string{
 	"schema_migrations":             {"key", "applied_at", "detail_json"},
 	"reset_cancellation_operations": {"reset_key", "case_id", "attempt_id", "request_fingerprint", "status", "claim_token", "outcome_code", "created_at", "updated_at"},
 	"browser_recovery_operations":   {"idempotency_key", "operation", "case_id", "attempt_id", "expected_error_code", "cycle_number", "expected_version", "actor_id", "request_fingerprint", "status", "claim_token", "outcome_code", "result_case_json", "created_at", "updated_at"},
-	"validation_recipes":            {"case_id", "scenario_sha256", "plan_sha256", "plan_json", "source_attempt_id", "created_at", "updated_at"},
+	"validation_recipes":            {"case_id", "scenario_sha256", "plan_sha256", "plan_json", "source_attempt_id", "created_at", "updated_at", "autonomous_recipe_sha256", "autonomous_recipe_json"},
+	"browser_decision_steps":        {"attempt_id", "step_no", "scene_sha256", "decision_sha256", "action_fingerprint", "status", "effect_code", "before_scene_ref", "after_scene_ref", "created_at", "updated_at"},
 }
 
 var requiredWorkflowIndexes = map[string]string{
-	"idx_cases_status_updated":               "incident_cases",
-	"idx_cases_bug_updated":                  "incident_cases",
-	"idx_attempts_case_started":              "phase_attempts",
-	"idx_events_case_created":                "transition_events",
-	"idx_reset_cancellations_status_updated": "reset_cancellation_operations",
-	"idx_browser_recovery_status_updated":    "browser_recovery_operations",
-	"idx_validation_recipes_scenario":        "validation_recipes",
+	"idx_cases_status_updated":                  "incident_cases",
+	"idx_cases_bug_updated":                     "incident_cases",
+	"idx_attempts_case_started":                 "phase_attempts",
+	"idx_events_case_created":                   "transition_events",
+	"idx_reset_cancellations_status_updated":    "reset_cancellation_operations",
+	"idx_browser_recovery_status_updated":       "browser_recovery_operations",
+	"idx_validation_recipes_scenario":           "validation_recipes",
+	"idx_browser_decision_steps_status_updated": "browser_decision_steps",
 }

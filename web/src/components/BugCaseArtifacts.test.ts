@@ -70,6 +70,46 @@ describe('BugCaseArtifacts', () => {
     expect(evidence.get('summary').text()).toContain('1 条')
   })
 
+  it('separates authoritative, active, and failed-attempt evidence without treating failure artifacts as business proof', () => {
+    const succeeded = {
+      ...detail.attempts[0],
+      id: 'validation-succeeded',
+      phase: 'validation' as const,
+      mode: 'reproduce' as const,
+      status: 'succeeded' as const,
+    }
+    const running = {
+      ...succeeded,
+      id: 'validation-running',
+      status: 'running' as const,
+      parent_attempt_id: succeeded.id,
+    }
+    const failed = {
+      ...succeeded,
+      id: 'validation-failed',
+      status: 'failed' as const,
+      error_code: 'browser_locator_failed',
+      parent_attempt_id: running.id,
+    }
+    const artifacts = [
+      { ...detail.artifacts[0], id: 'authoritative-evidence', attempt_id: succeeded.id },
+      { ...detail.artifacts[0], id: 'active-evidence', attempt_id: running.id },
+      { ...detail.artifacts[0], id: 'failed-evidence', attempt_id: failed.id },
+    ]
+    const wrapper = mount(BugCaseArtifacts, {
+      props: { detail: { ...detail, attempts: [succeeded, running, failed], artifacts } },
+    })
+
+    const evidence = wrapper.get('details.evidence-card')
+    expect(evidence.get(':scope > summary').text()).toContain('1 条有效 · 1 条执行中 · 1 条失败历史')
+    expect(evidence.get('[data-evidence-group="authoritative"]').attributes()).toHaveProperty('open')
+    expect(evidence.get('[data-evidence-group="active"]').attributes()).toHaveProperty('open')
+    const failureHistory = evidence.get('[data-evidence-group="failed"]')
+    expect(failureHistory.attributes('open')).toBeUndefined()
+    expect(failureHistory.text()).toContain('不作为业务结论依据')
+    expect(failureHistory.find('[data-artifact-id="failed-evidence"]').exists()).toBe(true)
+  })
+
   it('shows the structured remediation plan next to the root cause', () => {
     const attempts = [{ ...detail.attempts[0], output_json: {
       root_cause: '前端将 text 和 nick_name 同时渲染',

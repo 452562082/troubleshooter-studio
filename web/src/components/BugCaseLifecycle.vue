@@ -211,10 +211,9 @@ const canCaptureManualReproduction = computed(() => {
   if (!attempt || props.detail?.case.status !== 'waiting_evidence' || attempt.status !== 'failed') return false
   if (!['validation', 'regression'].includes(attempt.phase)) return false
   const code = (attempt.error_code || (typeof attempt.output_json?.error_code === 'string' ? attempt.output_json.error_code : '')).trim()
-  return code.startsWith('browser_') && ![
-    'browser_login_required', 'browser_runtime_broken', 'browser_url_required',
-    'browser_manual_prod_blocked', 'browser_artifact_sensitive',
-  ].includes(code)
+  const gate = attempt.output_json?.manual_reproduction_gate as Record<string, unknown> | null | undefined
+  return code === 'browser_capability_gap' && typeof gate === 'object' && gate !== null &&
+    gate.version === 1 && gate.code === 'browser_manual_reproduction_available' && gate.attempt_id === attempt.id
 })
 const manualReproductionEntries = computed<FrontendEntryBinding[]>(() => {
   const entries = props.detail?.case.frontend_entries

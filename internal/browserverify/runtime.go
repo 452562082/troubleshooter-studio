@@ -23,8 +23,8 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 )
 
-const browserRuntimeVersion = "1.61.1-r45"
-const browserRuntimeProtocolProbeVersion = 3
+const browserRuntimeVersion = "1.61.1-r63"
+const browserRuntimeProtocolProbeVersion = 21
 
 // BrowserRuntimeVersion is the immutable Playwright runtime version bundled by
 // desktop release artifacts. Packaging and runtime discovery must agree on it.
@@ -33,7 +33,7 @@ const BrowserRuntimeVersion = browserRuntimeVersion
 const (
 	browserRuntimeDependencyInstallTimeout = 5 * time.Minute
 	browserRuntimeDownloadTimeout          = 90 * time.Minute
-	browserRuntimeProbeTimeout             = time.Minute
+	browserRuntimeProbeTimeout             = 3 * time.Minute
 )
 
 const browserRuntimePackageJSON = "{\n  \"name\": \"tshoot-browser-runtime\",\n  \"private\": true,\n  \"version\": \"1.61.1\",\n  \"dependencies\": { \"playwright\": \"1.61.1\" }\n}\n"
@@ -732,10 +732,11 @@ func (m *RuntimeManager) setBrokenLocked(code, message string, err error) error 
 }
 
 type runtimeProbeResult struct {
-	Status          string       `json:"status"`
-	SHA256          string       `json:"sha256"`
-	ProtocolVersion int          `json:"protocol_version"`
-	WorkerResult    workerResult `json:"worker_result"`
+	Status                   string       `json:"status"`
+	SHA256                   string       `json:"sha256"`
+	ProtocolVersion          int          `json:"protocol_version"`
+	StepSessionErrorEnvelope bool         `json:"step_session_error_envelope"`
+	WorkerResult             workerResult `json:"worker_result"`
 }
 
 func validateRuntimeProbe(encoded []byte, screenshotPath string) (runtimeProbeResult, error) {
@@ -753,6 +754,9 @@ func validateRuntimeProbe(encoded []byte, screenshotPath string) (runtimeProbeRe
 	}
 	if probe.ProtocolVersion != browserRuntimeProtocolProbeVersion {
 		return runtimeProbeResult{}, errors.New("probe protocol version is incompatible")
+	}
+	if !probe.StepSessionErrorEnvelope {
+		return runtimeProbeResult{}, errors.New("probe lacks the step session initialization error envelope proof")
 	}
 	if err := validateRuntimeProbeWorkerResult(probe.WorkerResult); err != nil {
 		return runtimeProbeResult{}, fmt.Errorf("probe worker result is incompatible: %w", err)
@@ -777,6 +781,23 @@ func validateRuntimeProbeWorkerResult(result workerResult) error {
 	}
 	if result.Status != "completed" || result.ErrorCode != "" || result.FinalURL == "" || result.Title != "tshoot browser runtime probe" || len(result.Artifacts) != 0 {
 		return errors.New("probe worker result shape is invalid")
+	}
+	if result.Scene == nil || result.Scene.Version != bughub.BrowserSceneVersion || result.Scene.URL != result.FinalURL ||
+		result.Scene.ActiveSurface == nil || result.Scene.ActiveSurface.Ref != "s-active" || result.Scene.ActiveSurface.Type != "dialog" ||
+		result.Scene.ActiveSurface.Name != "作者用户选择" || !result.Scene.ActiveSurface.Modal {
+		return errors.New("probe worker result lacks a compatible browser scene")
+	}
+	sceneSearchFound := false
+	for _, element := range result.Scene.Elements {
+		if (element.Role == "textbox" || element.Role == "searchbox") && element.Name == "请输入搜索关键字" &&
+			element.SurfaceRef == result.Scene.ActiveSurface.Ref && element.States.Visible && element.States.InViewport &&
+			element.States.Enabled && element.States.Editable && element.LocatorHints.Placeholder == "请输入搜索关键字" {
+			sceneSearchFound = true
+			break
+		}
+	}
+	if !sceneSearchFound {
+		return errors.New("probe worker result browser scene lacks the active search control")
 	}
 	documentFound := false
 	searchFound := false

@@ -1870,3 +1870,379 @@ Bug #1550 的验证流程已经按用户澄清完成专辑搜索、打开记录�
 ### 结果
 
 管理端和 C 端不再争用一个隐式入口或一组无边界 locator。用户可以逐端完成真实流程，Studio 在同一 Case 内保留完整采集状态，验证与后续回归都消费同一份按端分段、顺序固定的证据协议。
+
+---
+
+## 2026-08-04：BrowserScene v1 作为自主浏览器验证的宿主绑定观测协议
+
+### 背景
+
+现有 BrowserPlan 会在规划前和失败后返回有限的 accessibility summary，但它只表达少量控件，缺少 viewport、活动浮层、稳定的场景内元素引用、同源导航提示和结构关系。验证 Agent 因而容易在 SPA hydration、重复按钮、嵌套弹窗和长页面上反复生成无效 locator。直接替换 Playwright 或立刻切成模型控制的长会话会同时扩大运行时、安全和恢复语义的变更面。
+
+### 决策
+
+- 新增版本化 `BrowserScene v1`。Worker 在非登录的执行结果中尽力采集当前 URL、viewport、活动浮层、最多 128 个可交互元素、最多 64 个文本块以及同源 frame 元数据；元素引用只在当前 Scene 内有效，不是持久 locator。
+- 场景采集只使用受控 Playwright Locator API，不执行页面脚本；密码输入框、跨源链接和跨源 frame URL 不进入 Scene。采集失败不得覆盖原始验证结果。
+- Worker 只能提交空的 scene identity。Host 先执行字段大小、引用完整性、URL 白名单和同源校验，再脱敏 URL/文本，绑定 Attempt，并对规范 JSON 计算 SHA256 和短 Scene ID。伪造 identity、未知 frame、重复 ref 和跨源 href 一律视为协议错误。
+- 登录 Worker 不允许返回 Scene，避免登录页观测扩大敏感信息面。Scene 当前仅作为观测证据和后续 shadow decision 的输入，不改变现有 BrowserPlan v2 的动作执行与人工兜底逻辑。
+- 新增 `BrowserDecision v1` 严格解析协议，限定 `act / conclude / assist / capability_gap` 四种分支、当前 Scene 绑定、枚举 rationale、单动作、可证明 effect 和能力穷尽通道。本阶段只建立并测试协议边界，不授权 Decision 执行动作。
+- 现有 BrowserPlan 执行链增加值无关的 `browser_step_effects` 冻结证据：每个动作记录前后 Scene 是否可观测、结构是否变化、活动 surface 转换，以及 fill/select 是否在已解析控件上保持；不记录输入值、选择值或前后 URL。Evaluator 必须把 Playwright API completed 与动作效果分开，`scene_changed` / `url_changed` 单独不能证明提交或业务成功。
+- SQLite schema 升级为 v12，新增 `browser_decision_steps` 动作级事务日志。`prepared → executing → confirmed/no_effect/blocked/ambiguous/uncertain` 由 Store 严格限制并支持完全相同请求的幂等重放；同一 attempt 的状态+动作指纹唯一。恢复时只把遗留 `executing` 原子标记为 `browser_step_effect_uncertain`，不自动重复可能已有外部效果的动作。表内仅保存摘要、稳定结果码和冻结 Scene 引用，不保存原始 Scene、Decision、页面内容或输入值。
+- 新增 Host 侧 Decision 绑定与事务协调器。绑定时重新校验 Scene digest、Attempt、短期 ref、主 frame、viewport、活动 surface、可见/启用/可编辑/遮挡状态，并从 Scene 生成受限语义 locator；动作的输入值、URL、按键和文件引用只能复制自冻结 BrowserPlan。协调器将绑定摘要写为 prepared/executing 后才调用受限的 `BoundBrowserStepExecutor`，再把 effect evaluator 的结果映射为严格终态；若 start 是重放、Executor 中断或 after-scene 无效，只写 uncertain，绝不再次执行动作。本阶段尚未提供生产 Worker 的持久会话实现，也未把 `BrowserDecision` 接入默认执行循环。
+- Node Worker 新增受限 JSONL `step_session`：浏览器与 context 在单个验证回合内保持存活，每条命令都先重新采集 Scene、拒绝 stale Scene/越权动作，只执行一个从冻结 BrowserPlan 复制并重新语义绑定的动作，再返回不含输入值和完整 URL 的 receipt/effect。该协议先保持 shadow，不接入默认验证路径。
+- Go Host 新增长会话进程封装和 shadow Executor：沿用现有跨平台进程树清理，限制 JSONL 单行与总输出，严格拒绝未知字段；每个 ready/step 结果重新经过 URL policy、Scene bounds、artifact 类型、receipt/effect 一致性校验及脱敏，再绑定新的 Host Scene identity。Scene/evidence 冻结回调成功后才允许事务日志引用 after-scene；单步命令不重复携带冻结动作值。
+- 新增 Host 侧有界探索 guard。状态指纹只保存 SHA256，覆盖 origin、规范 path、设备、活动 surface、可见交互语义和 frontend entry；默认共享 24 个状态动作、10 个探索动作、16 个状态及每 Scene 2 次 Decision 纠正预算。同一状态+动作语义只能预留一次，失败、不确定或阻断边不得换 action ID/ref 绕过。当前仅允许由 Scene 证明的同源 href 导航、ARIA tab、被动等待和已确认非业务遮挡 Escape；fill/select/upload/提交以及生产探索一律拒绝。
+- 新增手动复现最后出口 gate。只有非生产、场景/登录/测试资料/授权完整、无安全候选、探索确已穷尽、无系统故障、核心 grounding 通道声明并记录 exhausted，且 AI/视觉通道 exhausted 或 unavailable 时，`browser_capability_gap` 才能让 UI 展示入口；启动仍需独立的用户主动选择。该 gate 目前为 shadow 策略，尚未改动现有 UI。
+- 新增确定性探索候选生成器。Host 只从已绑定 Scene 中唯一、可见、主 frame 且处于活动 surface 的同源 href 和 ARIA tab 生成候选；重复语义整体丢弃，不使用位置消歧。被动 wait 必须由调用方指定当前 element ref。候选以哈希 action ID 和无业务值动作进入临时 binding plan，冻结 BrowserPlan 本身不变；任何伪造值、跨源 URL、重复 ID 或 stale Scene 都不能进入 Decision 绑定。
+- 新增 shadow `BrowserDecisionLoop`，串联 `Observe → strict Decide → binding preflight → journal → ExecuteStep → Effect → Observe`。无效结构、错序场景动作或伪造 candidate type/ref 在写 journal 前消耗同 Scene 纠正额度；事务只有在动作可能执行后失败时才进入 uncertain。探索 effect 会回写失败边；正式场景动作只有 confirmed 才进入下一动作，no_effect/blocked/ambiguous 停在 recovery，terminal journal replay 在没有冻结 Scene loader 时也停止而不重放。该 loop 目前仅通过抽象 provider 调用，未替换现有 BrowserCoordinator 默认路径。
+- runtime probe 在真实 Chromium 的嵌套浮层场景中校验活动 dialog、搜索输入、surface effect 和持久单步会话确实可用。Worker 字节和探针协议变化后，运行时升级为 `1.61.1-r48`，probe protocol 升级为 v6；默认测试仍不得下载浏览器。
+
+### 结果
+
+Studio 获得了可审计、可持久化且受 Host 安全边界约束的页面状态底座，并已让当前 BrowserPlan 判定链消费单步结构效果证据；Node Worker 和 Go Host 已共同具备由 runtime probe、严格协议和证据冻结边界保护的持久单步执行能力，有界探索、确定性候选、shadow Decision loop 和手动复现最后出口也已有可独立测试的 Host 实现。后续仍需接入真实 Validator provider、冻结 Scene loader 与恢复候选策略，并编译 Recipe v3；在达到 benchmark 和灰度门槛前不替换默认路径。该阶段提升观测和判定质量但不承诺验证必然成功，也尚未改变手动复现的触发条件。
+
+---
+
+## 2026-08-04：冻结 Scene 恢复、真实 Decision Provider 与可选 Recipe v3 增强层
+
+### 背景
+
+动作事务在 terminal journal 重放时已经能保证不再次执行动作，但缺少可信 after-scene 时只能停在 recovery；shadow loop 也只有抽象 Decision provider，无法通过现有 Validator transport 运行。首次自主成功路径若仍只保存单 locator 的 BrowserPlan v2，回归时也无法利用当前 Scene 中已经证明有效的多个语义锚点。
+
+### 决策
+
+- 新增 `studio_browser_scene` 冻结信封和 attempt-scoped loader 契约。恢复时由 Host 从不可变引用取回字节，再严格拒绝未知字段、尾随内容、跨 attempt 替换、摘要不符和不可执行 Scene；terminal journal 只有 confirmed/no-effect/blocked 且持有合法 after-scene 引用时才能恢复，动作 Executor 始终不再调用。
+- 新增基于现有 `PhaseAgentExecutor` 的真实 `BrowserDecisionProvider` 适配层。每次只请求一个严格 Decision，复用 Validator transport timeout/retry；页面内容显式标为不可信证据，提示上下文不投射 BrowserPlan 的 fill 值、单 locator、文件引用或宿主路径。模型输出仍必须通过 Scene、Plan、candidate 和 effect 的 Host 绑定才能执行。
+- `BrowserDecisionLoop` 记录 decision、纠正、场景/探索步骤、重放和 effect 结果的纯计数指标；指标不包含 URL、页面文本、动作值、模型输出或 artifact 引用，供后续 benchmark 和灰度比较使用。
+- 新增 `AutonomousValidationRecipe v3` 编译器。输入只能是 confirmed Host-bound trace；输出保留冻结业务动作、场景合同/Plan 摘要、frontend entry、路径/active-surface 前置条件、最多六个 test-id/label/placeholder/role/scoped-role/same-origin-href 锚点和 expected effects，并删除临时 `element_ref` 与 rebound locator。业务值、动作顺序或 Plan 摘要漂移时拒绝编译/读取。
+- SQLite schema 升级为 v13，在现有 `validation_recipes` 上增加可选 v3 摘要和 JSON。BrowserPlan v2 继续作为权威执行源和旧数据兼容层；v3 目前是确定性增强层，不要求旧 recipe 回填，也不改变现有回归入口。
+- 以上能力继续保持 shadow。未达到历史 corpus、真实测试站和安全指标门槛前，不切换 `BrowserCoordinator` 默认执行路径，不自动隐藏现有手动入口。
+
+### 结果
+
+Studio 可以在进程中断后从冻结证据继续已确认步骤而不重复副作用，能够通过现有 Validator 真正产生受限单步决策，并能把成功路径编译、校验和持久化为多锚点 Recipe v3。Host 也能把 Scene 安全导航与明确的 wait/非业务遮挡信号编译成恢复候选；配置 Host-owned recovery provider 后，shadow loop 会在 no-effect/blocked 后有界调度候选，并只接受“Worker 证明动作未派发”或“Host 证明动作前遮挡已移除”两种安全重试证明，恢复期间 Validator 不能直接重复业务动作。保守 evidence adapter 已把 scene stale 和明确的动作前 locator/surface/key 阻断映射为 `not_dispatched`，其余失败及 journal replay 均保持 unknown。loop 在任意终态通过现有 InvestigationEvent 回调恰好发出一次纯计数指标，供后续灰度聚合。默认验证行为仍不变；历史 benchmark runner、Coordinator 灰度接线和 UI 手动入口策略仍需后续完成。
+
+---
+
+## 2026-08-04：自主浏览器验证灰度分桶与 benchmark 门禁先于 Coordinator 切换
+
+### 背景
+
+持久单步 Worker、Decision loop 和纯计数事件已经具备，但直接在 Coordinator 中打开新路径会混淆“代码可运行”和“真实场景达到可接受可靠性”。现有 `WorkflowMetrics` 来源是 durable Case transition；浏览器 loop 指标则经 `InvestigationEvent` 投影到兼容运行记录和事件 sink，二者不是同一持久化口径，不能静默混算。生产环境也不能因为灰度配置错误进入自主状态动作。
+
+### 决策
+
+- 新增版本化、按 Case ID 稳定分桶的 BrowserDecision rollout policy。默认 `enabled=false`、比例 0%；即使配置 100%，生产环境仍硬拒绝，持久单步会话、冻结 Scene、Decision provider 或 recovery evidence 任一 Host 能力缺失也 fail-closed。
+- 分桶只依赖 Case 和内部版本 salt，不依赖 retry/attempt，确保同一 Case 在重试和回归期间不来回切换路径；更换分桶算法必须显式升级版本。
+- `browser_decision_loop_metrics` 保持不含 URL、页面文本、动作值、模型输出和 artifact 引用。新增独立严格聚合器，兼容 `encoding/json` 解码后的数值类型；缺字段、负数、小数或溢出事件整条拒绝，不把部分不可信计数加入报告。该聚合器不冒充 durable `WorkflowMetrics`。
+- 新增 benchmark 样本与验收评估器，固化普通场景 ≥85%、Recipe v3 ≥95%、连续三次结论一致 ≥95%、历史 locator corpus 提升至少 25 个百分点、总手动选择 ≤5%、错误元素动作 <1% 等建议门槛；locator 触发人工、无当前证据成功、生产未授权动作和高风险错误动作必须为 0。普通/Recipe/locator/重复一致性或状态动作 corpus 缺失时一律不通过。
+- Coordinator 新增可选的自主 runner 组合边界，并在每次非 observation 执行前应用同一灰度门禁。只有显式启用、Case 命中、非生产且 runner 报告完整 Host 能力时才进入新路径；零值配置继续调用旧 Verifier。自主 runner 一旦启动，其错误不得回退并用旧 BrowserPlan 重放可能已经发生的状态动作。
+- 本阶段不自动配置自主 runner。历史 corpus 采集与真实执行、HostVerifier 自主 session opener、证据汇总和默认路径切换仍需独立完成。
+
+### 结果
+
+自主闭环在 Coordinator 中已经有确定、可审计、生产不可绕过的可选入口，也不会因空样本或畸形指标得到虚假的高成功率。当前没有配置具体 runner，部署配置和 BrowserPlan 默认执行行为完全不变。
+
+---
+
+## 2026-08-04：持久单步会话以 finish 协议闭合最终证据
+
+### 背景
+
+旧 `step_session` 可以在同一个 Chromium context 中执行并确认多个动作，但 `close` 只释放进程，不执行 BrowserPlan 断言，也不产出最终截图、Network、Console、action trace 和 step effects。仅凭逐步 Scene 就把它接入 Coordinator 会绕过现有 evaluator 和 artifact manifest 的证据合同；若为了拿证据再运行一次旧 BrowserPlan，又会重复已经产生外部效果的动作。
+
+### 决策
+
+- JSONL 会话新增显式 `finish` 命令。它不重放业务动作，只执行冻结 Plan 的断言、采集最终或失败截图、等待已开始的请求证据完成，并写出与普通执行同形的 Network、Console、browser actions、step effects、request/response facts 和 response assertions；随后仍以独立 `close` 释放进程。
+- 会话从打开时即安装与普通执行相同的 request/response/console/CDP 采集钩子，并把每个请求绑定当前 Host-authorized action ID。动作截图名称加入命令 sequence，安全重试不会覆盖先前截图；最终 manifest 声明整个会话的全部截图，登录态出现时删除截图且不返回页面 Scene。
+- Go JSONL 驱动严格区分 `step`、`finished` 和 `closed` envelope；final result 禁止 action receipt/effect，限定 completed/assertion-failed/login-required 三种形状，并再次执行 URL、Scene、字段和敏感信息校验。
+- 新增 attempt-scoped `browser-scenes/scene-NNN-digest.json` 不可变存储。引用不能是任意路径；目录、文件、symlink、大小、attempt、envelope 和 Scene digest 均在加载时重新校验。Scene 文件放在 Worker artifact 目录之外，不能伪装成 evaluator 证据。
+- `HostVerifier.OpenBrowserDecisionSession` 复用现有 runtime、加密登录态、受控上传、DNS/origin policy、固定代理和 artifact manifest 边界，并在会话关闭前持有 verifier 排他锁。每个 ready/step Scene 必须成功冻结后才进入动作事务；finish 后的正常 BrowserVerificationResult 仍交给 Coordinator 既有 artifact freezer。
+- 新增通用 `HostBrowserDecisionCoordinatorRunner`，组合 opener、strict Decision provider、step journal、探索 guard、Scene loader 和 recovery provider。非 conclude 终态也先冻结最终被动证据，再以稳定 status/error code 返回；runner 错误仍不得回退重放旧 BrowserPlan。
+- Worker 字节与 semantic probe 合同变化后，runtime 升级为 `1.61.1-r49`，probe protocol 升级为 v7。真实 probe 必须证明持久动作之后 finish 能返回最终截图、Network、Console 和 browser-actions artifacts；默认测试仍不得下载 Chromium。
+- 本阶段仍不在 `AgentPhaseRunner` 注册或启用该 runner。正式注册前还要把每步 Validator usage 汇总进 Attempt、从冻结场景合同/前端入口构建 readiness，并提供显式的默认 0% 配置入口。
+
+### 结果
+
+自主循环可以在同一浏览器会话内形成与旧 BrowserPlan 执行同等级的最终证据，不需要为 evaluator 再跑一遍业务动作。Host opener 和通用 runner 已具备可测试的组合边界，但生产默认路径仍未改变。
+
+---
+
+## 2026-08-04：AgentPhaseRunner 注册自主浏览器组合但显式保持 0% 默认
+
+### 背景
+
+持久 Host 会话、严格 Decision provider、动作事务和最终证据已经具备独立组合能力，但此前 `AgentPhaseRunner` 没有注册它们。直接注册仍有三个风险：每步 Decision Agent 的 token 可能漏出 Attempt usage，探索 readiness 可能被模型或页面内容影响，以及“注册成功”可能意外改变默认执行事件或路径。
+
+### 决策
+
+- `AgentPhaseRunner` 在 BrowserVerifier 同时实现 `BrowserDecisionSessionOpener` 时，按 attempt 组合 `HostBrowserDecisionCoordinatorRunner`、`PhaseAgentBrowserDecisionProvider`、CaseStore step transaction 和保守 recovery provider。组合能力缺失时灰度门禁继续 fail-closed 到旧 Verifier。
+- 新增经过结构校验的 runner rollout 配置入口；构造器显式保存 version 1、disabled、0%。注册 runner 本身不发送 rollout 事件，只有显式启用或配置错误时才投影门禁事件。生产环境即使配置 100% 仍硬禁止自主循环。
+- Decision provider 的每次调用通过 Host usage sink 累加 input/output token，并在 BrowserCoordinator 返回后合并进同一 Attempt usage；自主 runner 错误仍不触发旧 BrowserPlan 重放。
+- Coordinator 为每次自主执行生成 Host-owned readiness provider：场景合同必须已绑定合法 SHA256，Scene URL 必须属于 attempt 冻结的 frontend entry，Plan 与受控上传必须完整，策略必须是已授权非生产应用。登录 readiness 只在 Host opener 已成功产生可执行初始 Scene 后成立。
+- 探索 guard 在既有 readiness 之外，额外从当前 Scene 判断下一冻结场景动作是否已有安全语义目标；当前目标可用时拒绝绕路探索。CSS 不从 Scene 反推为可信目标，无目标的 passive screenshot 也不会错误阻断必要探索。
+
+### 结果
+
+自主闭环已经进入真实 phase 组合路径，可以在后续显式灰度配置下运行，并且 usage、readiness、入口绑定和直接目标优先级都有 Host 证据边界。默认百分比仍为 0%，现有用户在未开启配置时继续使用旧 BrowserPlan，且不会看到额外 rollout 事件。下一步仍需执行历史/真实测试站 benchmark，提供部署侧灰度配置来源，并把 UI 手动入口切到 capability-gap gate。
+
+---
+
+## 2026-08-04：自主浏览器灰度配置采用用户级显式文件并只读暴露状态
+
+### 背景
+
+`AgentPhaseRunner` 已有严格的 rollout setter，但没有部署配置来源，发布后无法安全地对少量非生产 Case 开启。若直接在 UI 提供开关，普通用户可能在没有 benchmark 与回滚预案时误开实验；若静默接受非法配置，则可能在 workflow runtime 创建一半后才发现版本或比例错误。
+
+### 决策
+
+- 在 `~/.tshoot/config.json` 增加可选的 `browser_decision_rollout`，字段固定为 `version`、`enabled`、`percentage`。该配置属于 Studio 本机运营配置，不进入可分享的 troubleshooter YAML，也不包含 secret。
+- 字段缺失保持 version 1、disabled、0%；显式配置必须通过 bughub 的同一 policy validator。版本不符或比例不在 0–100 时，桌面端在打开 CaseStore 和组装 workflow runtime 前失败。
+- 初始化成功后把策略快照写入 `AgentPhaseRunner`；运行期间编辑文件不会改变当前进程，必须重启 Studio，避免同一进程中不同 attempt 使用不可追溯的动态策略。
+- 桌面端仅暴露 `GetIncidentBrowserDecisionRolloutStatus` 只读接口，返回当前进程实际生效的 version、enabled、percentage 和来源。不存在写 binding，普通 UI 不能启用实验。
+- 配置只决定非生产 Case 是否进入稳定分桶，不能绕过生产硬禁止、Host capability 完整性检查、readiness 或动作安全边界。
+
+### 结果
+
+发布包现在具备明确、可审计且默认关闭的灰度配置来源，非法配置不会留下部分初始化状态，运营方也能读取当前实际生效值。下一步是用历史 corpus 和真实测试站数据决定是否把比例从 0 提升，并把 UI 手动入口接到 capability-gap gate。
+
+---
+
+## 2026-08-04：Benchmark corpus 采用严格离线 JSON 与 CI 退出码
+
+### 背景
+
+现有 benchmark evaluator 只能处理进程内样本，无法直接消费历史 locator 失败 corpus 或真实测试站的脱敏执行结果，也无法让 CI 根据门禁结论阻止提高灰度比例。
+
+### 决策
+
+- 新增 `BrowserDecisionBenchmarkCorpus v1`，限制为最大 8 MiB、100000 条样本的严格 JSON；未知字段、尾随内容、重复/路径型 ID、非法 suite/conclusion、负数或越界动作计数全部拒绝。
+- Corpus 只保存完成状态、结论枚举、当前证据/人工/capability-gap 布尔值和动作计数，不允许 URL、页面内容、locator、动作值、模型输出、artifact 路径或原始 Case/Bug ID。
+- 新增 `tshoot-browser-benchmark` 离线 CLI。它不启动浏览器、不访问网络，只输出包含原始计数、派生比例、阈值和稳定失败码的 JSON 报告。
+- 退出码 0 表示全部门禁通过，1 表示输入/schema 错误，2 表示报告有效但质量或安全门禁未通过。CI 只能在退出码 0 时允许提升 rollout。
+
+### 结果
+
+历史与真实测试站结果现在有统一、可审计的离线执行入口，但仓库仍未伪造实际 corpus 数据；是否提灰度必须由真实脱敏样本报告决定。UI 手动入口切换仍未完成。
+
+---
+
+## 2026-08-04：手动复现必须持有 Host 签发的能力穷尽证明
+
+### 背景
+
+桌面 UI 过去只按 `browser_*` 错误码的排除列表显示手动复现入口，后端也只检查当前失败 validation/regression attempt。普通 locator、navigation 或 verifier 故障因此可能把任务过早转给用户；仅把 UI 改成 `browser_capability_gap` 仍可被直接 binding 调用或错误码误分类绕过。自主 Decision loop 同时会接受模型过早返回的 capability gap，即使 Host 仍有安全候选。
+
+### 决策
+
+- Browser exploration guard 新增只读可用候选过滤：已执行、已失败和超出预算的边不再重复交给 Decision provider；显示候选不消耗预算。
+- Decision provider 返回 capability gap 时，Host 同时检查未耗尽探索候选和下一冻结场景动作。仍有任一安全动作时把该输出计为无效 Decision，进入有界纠正，不签发人工入口。
+- 只有场景合同、登录、测试输入、非生产授权均就绪，核心自动化通道均穷尽、可选通道为 exhausted/unavailable、无安全候选且无系统故障时，Host 才签发版本化 `manual_reproduction_gate`。
+- 证明绑定 attempt、Scene、场景合同、frontend entry 和规范 Decision SHA256，只持久化枚举与摘要，不包含页面内容、URL、locator、动作值或 artifact 路径。
+- 桌面 binding 强制验证当前失败 attempt 的精确 `browser_capability_gap`、Host 证明绑定和当前非生产策略；UI 也只有在同一证明存在时显示入口。用户显式点击仍是独立授权，不由 capability gap 自动启动可见浏览器。
+
+### 结果
+
+locator、navigation、runtime、transport、assertion 和 artifact 故障不再直接触发手动复现；伪造错误码或绕过 UI 调 binding 也不能开启采集。手动复现只保留为自动能力经 Host 证明确已穷尽后的最终出口，默认自主灰度仍为 0%，是否提升比例继续由真实 benchmark 决定。
+
+---
+
+## 2026-08-04：真实历史 benchmark 自动采集只接受 Host 可证明事实
+
+### 背景
+
+离线 corpus 和门禁已有严格 schema，但仍需要人工把历史运行结果整理成样本。人工抄录容易泄露业务身份，也容易把旧版缺失的错误动作计数默认为 0；后者会让没有安全证据的历史数据制造虚假通过。本机 workflow 数据库仍是 v11，采集过程也不能为了读报告而静默迁移用户历史库。
+
+### 决策
+
+- `tshoot-browser-benchmark` 新增 `-collect-root` 与 `-output` 模式，只读联合 durable `workflows.db`、兼容投影 `runs.json` 和 artifact 注册元数据，自动生成 Corpus v1；采集成功与质量门禁通过是两个独立步骤。
+- SQLite 只读入口兼容 v11、v12 和当前 v13，并逐版本验证 schema marker 与 fingerprint；不创建文件、不改权限、不切 journal mode、不执行迁移。生产读写入口补齐 v12 到 v13 的显式恢复迁移分支。
+- 输出身份由带域分隔的 SHA-256 派生；不输出原始 Case/Bug/Attempt ID、URL、页面内容、locator、动作值、模型输出或 artifact 路径。
+- 只有 Attempt-bound 自主指标、合法场景合同摘要、durable 结论、已注册证据元数据和 Host 签发的人工兜底证明可以进入样本。旧指标缺少任一安全计数时整条跳过，不猜测为 0。
+- 未确认的有状态动作保守计为错误元素动作，场景内未确认状态动作同时计为高风险错误，生产环境状态动作计为未授权生产动作。空 corpus 允许生成，但门禁必须因测试集与状态动作覆盖缺失失败。
+
+### 结果
+
+本机真实只读采集扫描 595 个 Attempt，其中 226 个 validation/regression Attempt 全部缺少新版自主指标，得到 0 个样本；门禁按预期失败并保持 rollout 0%。系统现在可以自动积累和评估后续灰度数据，但不会把旧 Playwright 运行或未知安全事实冒充自主验证成功。
+
+---
+
+## 2026-08-04：Recipe v3 只在精确绑定后确定性重放并自动沉淀
+
+### 背景
+
+Recipe v3 已有编译、严格解析和 SQLite 字段，但尚未进入自主 runner；Coordinator 也没有把 Host 单步 trace 自动编译回 Case recipe。若只根据数据库存在 v3 就标记指标，会把未实际选择的普通运行混入 Recipe corpus；若直接复用旧 element ref 或单 locator，又无法解决页面重渲染和定位漂移。
+
+### 决策
+
+- Coordinator 只在 Case、场景合同 SHA256 和 BrowserPlan SHA256 全部匹配时把 v3 交给自主 runner；runner 在打开浏览器前再次执行完整 recipe/plan 校验，只有实际选择了合法 v3 的 Attempt 才记录 `recipe_version=3`。
+- v3 provider 优先按路径、活动浮层、行/分组关系和多种稳定锚点在当前 Scene 中计算唯一最高匹配。不存在唯一候选、进入 recovery 或历史步骤偏离 recipe 时，回退既有 Decision Agent；它不能直接执行动作，最终仍经过 Host 的 Plan/Scene binding、探索准入和事务日志。
+- Recipe 不保存临时 element ref。输入保持、选择保持等 effect 中的目标 ref 编译为固定占位符，重放时替换为当前 Scene ref；引用其他临时元素时拒绝编译。
+- BrowserDecisionLoop 只在进程内保留 Host-bound trace。Coordinator 得到有当前证据的成功结论后尝试编译并持久化 v3；不完整或非 confirmed trace 不制造 recipe。旧 BrowserPlan 精确未变化且本次没有可编译 trace 时保留已有 v3，Plan 漂移时不继承。
+
+### 结果
+
+首次自主成功可以自动沉淀多锚点 Recipe v3，后续匹配运行优先确定性重放，定位漂移才消耗 Decision Agent。Recipe benchmark 的归类来自真实选择的绑定 recipe，不再依赖手工填写版本；正常 rollout 仍为 0%，等待隔离非生产真实样本后再提升。
+
+补充：r49 semantic probe 已覆盖持久会话、单步 effect 和 finish 证据，完整冷启动在本机超过旧的 60 秒上限。probe 超时调整为 2 分钟，不删减或绕过任何校验；超时仍保持清理临时目录并拒绝发布 runtime。
+
+---
+
+## 2026-08-04：持久浏览器会话按冻结下一目标等待并扩大 Scene 首批公平性
+
+### 背景
+
+真实 Funhub DecisionLoop 先后暴露了四个确定性问题：Host-only `scenario_contract` 越过严格 Worker 边界；空 origin slice 编码成 `null`；step-session 初始化异常误用旧版 `{status: ...}` 结果；慢 SPA 的下一控件虽已可见，却因位于移动端 viewport 外或被 3 秒串行 Scene 采集预算饿死而没有 Host ref。继续扩大 locator 重试次数不能解决这些边界错误。
+
+### 决策
+
+- Host→Worker 只发送可执行 BrowserPlan，移除场景合同；五组 origin 在传输边界强制编码为 JSON array。Worker 的初始化失败固定输出严格 JSONL error envelope，Go Host 识别该 envelope，仍不暴露内部异常或放宽未知字段。
+- 每个已完成的状态动作可以只读等待冻结 Plan 的下一 locator，最多 60 秒。只有一个可见匹配时才执行 `scrollIntoViewIfNeeded`，不会 click/fill；匹配歧义、超时或滚动失败仅产生稳定 unavailable 进度并继续 fail closed。
+- BrowserScene 的首批 8 个交互控件并行取证，结果保持 DOM 顺序、128 元素上限、viewport/可见性过滤和 3 秒批次准入预算。慢的第一个节点不能再独占全部采集机会。
+- runtime 升级为 `1.61.1-r58`，semantic probe protocol 升级为 v16。probe 覆盖持久会话导航、冻结下一目标等待、viewport 滚动、Scene、单步 effect、严格初始化错误 envelope 和 finish artifacts；因合同扩大，完整 probe 预算为 3 分钟，超时仍清理并拒绝发布。
+
+### 结果
+
+Node Worker 149 项测试和 browserverify 包测试通过；真实 runtime probe 发布成功。Funhub 的 8 步传统 Worker 链路在 225.63 秒完成，真实 Host DecisionLoop 在 159.60 秒完成导航、fill、提交、用户 tab 切换、最终页面断言、截图及证据 artifacts，全程无需用户手动复现。该 deterministic smoke 证明 Host/runtime 闭环可运行，但不冒充真实 Decision Agent benchmark 样本；rollout 继续保持 0%，直到 corpus 满足既定门禁。
+
+本条 SUPERSEDES 上述 r49/probe v7 的 runtime 现状补充；其 fail-closed 原则继续有效。
+
+---
+
+## 2026-08-05：公网跨域资源默认放行并以语义等待收口验证结果
+
+### 背景
+
+真实管理端搜索已经返回业务 XHR 200，但头像来自未预登记的独立公网资源域名。Worker 把所有不在 `allowed_origins` 的子资源统一 `blockedbyclient`，最终截图停在“加载中”；验证 Agent 随后又把用户提供的导航方法改写成新的业务目标，并在原场景未完成时给出 `not_reproduced`。继续要求用户补域名白名单或手动复现，会把 Studio 自己可解决的网络策略、等待时序和结论门禁转嫁给用户。
+
+### 决策
+
+- 顶层页面导航继续只能进入 Case 冻结的应用、登录和明确授权 origin。普通 HTTP(S) 子资源与 WebSocket 不再要求公网域名预登记；每次请求仍重新解析 DNS，并拒绝 userinfo、非法协议、云元数据、link-local、non-routable、本机和未明确授权的私网地址。受控代理对每次实际连接继续固定已校验 IP，防止 DNS rebinding。
+- `browser_allowed_origins` 保留用于兼容、应用导航、登录和精确私网授权，但不再充当公网图片、字体、脚本、API 或 WebSocket 的穷举白名单。未登记公网资源不得由 Studio 主动产生 `blockedbyclient`。
+- BrowserPlan v2 的 `wait_for` 增加可选 `state: visible | hidden` 与 `timeout_ms: 1..60000`。异步页面存在现场可观察的加载指示时，Planner 必须在证据截图或断言前用 `state: hidden` 等待其消失；Worker 对多个匹配项要求全部不可见，不能因第一个隐藏就提前通过。
+- 用户补充菜单、字段、搜索词、点击或导航顺序时，默认只修正执行路线，保留原 Bug 的业务目标、Expected、Actual 和观察对象；只有用户明确更正业务期望或实际症状时才修订 `scenario_contract.goal`。
+- 一个 BrowserCoordinator 执行最多进行一次 locator repair，不再因失败动作变化而开启第二、第三轮修复。结论为 reproduced/not_reproduced/fixed/still-reproduces 时，Host 还要求本次执行已完成全部 `scenario_contract.causal_action_ids`；唯一例外是失败动作本身就是因果观察点，因为“目标按预期不存在”可以由该失败现场直接证明。
+- Worker、BrowserPlan 和 semantic probe 合同变化，browser runtime 升级为 `1.61.1-r59`，probe protocol 升级为 v17。真实 probe 必须穿过 Worker 请求校验并实际完成 hidden wait，旧 r58 不原地覆盖。
+- 验证场景指纹从 `validation-recipe-v2-scenario-contract` 升级为 `validation-recipe-v3-scenario-contract`。普通验证会自动放弃旧语义配方并重新规划；正式回归仍严格复用显式冻结的场景绑定，避免运行时升级暗改回归目标。
+
+### 结果
+
+公网 CDN/资源域名变化不会再让页面长期停在占位态，截图会在声明的加载条件完成后采集；用户给出的操作方法不会悄悄缩小原验证目标，未走到业务观察点的执行也不能再被包装成验证成功。私网与元数据安全边界、顶层应用边界和生产写操作限制保持不变。
+
+该方案提高自主验证的确定性，但不承诺所有页面必然成功：页面没有可观察加载信号、第三方资源真实不可用、登录/权限/测试资料缺失或 DOM 本身歧义时仍会明确失败或进入受控问答；这些情况不能通过无限重试或伪造成功掩盖。
+
+---
+
+## 2026-08-05：浮层关闭升级为 Host-owned 语义动作
+
+### 背景
+
+验证流程过去把“关闭当前作者选择浮层”规划成无 locator 的全局 `Escape`。页面不响应 Escape 时，Worker 只能返回 `active_surface_dismissal_failed`；Locator Repair Agent 随后从截图猜测“关闭”按钮并把动作改成 `click`，又因 Host 禁止给原本无 locator 的动作新增 locator 而被拒绝。这个冲突不是某个按钮文案或校验条件的问题，而是 BrowserPlan 同时让 Agent 表达业务意图并选择易漂移的关闭机制。
+
+### 决策
+
+- BrowserPlan v2 新增 `dismiss_surface`。它只表达“关闭当前活动 dialog、drawer 或 popover”的语义，除 `id` 和 `action` 外禁止 locator、key、url、value、file_ref、state 与 timeout；v1 不接受该动作。
+- Worker 冻结当前活动浮层身份，先尝试 Escape；浮层仍可见时，最多点击一个符合既有安全关闭白名单的可见控件，并继续拒绝提交、删除、确认等业务按钮。只有冻结的精确浮层消失才算成功，底层父浮层不得被误关。
+- 旧 BrowserPlan v2 的无 locator Escape 作为兼容输入保留，但运行时也进入相同的 Host-owned 有界关闭逻辑。Planner、Decision binding、探索恢复和 Recipe v3 新产物统一使用 `dismiss_surface`，不再生成猜测性的 Escape 或关闭按钮 locator。
+- `dismiss_surface` 失败表示 Worker 已耗尽 Host 允许的关闭策略，Coordinator 不再把它交给 Locator Repair Agent 改写成 click/press；只允许基于现有冻结证据判定结果或明确报告自动执行失败。
+- 该动作继续受非生产策略、活动浮层绑定和单步 Scene 新鲜度约束；不能绑定 request/response assertions，也不能在生产环境执行。
+- browser runtime 升级为 `1.61.1-r60`，semantic probe protocol 升级为 v18。probe 中 Escape 被刻意设置为无效，普通执行与持久 step session 都必须通过安全关闭控件回退，并证明只关闭子浮层。
+
+### 结果
+
+Agent 现在只决定“需要关闭当前浮层”，具体用 Escape、关闭文字或安全图标由 Host/Worker 在实时 DOM 上选择并验证。页面关闭实现变化不会再触发“Agent 新增 locator—Host 拒绝”的协议死结；若所有安全关闭方式都失败，系统也不会通过放宽 locator 合同或猜测业务按钮来掩盖失败。
+
+---
+
+## 2026-08-05：嵌套浮层按前景几何选择，不用控件数量推断层级
+
+### 背景
+
+真实作者选择流程同时保留“内容信息”父弹窗和“作者用户选择”子弹窗。旧活动浮层排序在两个节点都具备 modal 语义时优先选择可见控件更多的节点，父编辑弹窗因此被误认成前景；Escape 实际关闭了子弹窗，但 Worker 检查父弹窗仍可见并错误返回 `active_surface_dismissal_failed`，导致同一 Case 反复进入等待证据。
+
+### 决策
+
+- modal 语义相同时，活动浮层优先选择面积更小、更具体的前景 surface，再使用 DOM 顺序和控件数量消歧。控件数量只描述表单复杂度，不再作为浮层层级的首要信号。
+- 冻结 surface identity、只关闭当前子浮层以及底层父浮层必须保留的安全约束不变。
+- semantic probe 的父弹窗固定包含多于子弹窗的可见控件，证明选择、普通执行和持久 step session 都不会因父表单更复杂而绑定错误浮层。
+- Worker 字节和 probe 合同变化后，browser runtime 升级为 `1.61.1-r61`，semantic probe protocol 升级为 v19；旧 r60 不原地覆盖。
+
+### 结果
+
+嵌套编辑器中的作者、标签或资源选择弹窗可以被准确关闭，父编辑弹窗继续保留。成功关闭子弹窗不会再被伪装成 locator 系统失败，也不需要用户重复回答同一业务流程。
+
+---
+
+## 2026-08-05：浮层关闭判定覆盖异步退场动画
+
+### 背景
+
+r61 已能正确选中“作者用户选择”子弹窗，真实证据也证明关闭后活动浮层已从子弹窗切回“内容信息”父弹窗；但 `dismiss_surface` 只在 Escape 后等待一次 150ms，并且只有找到安全关闭控件时才进行第二次身份检查。页面的关闭按钮会启动约 250–300ms 的异步退场，Worker 因而在动画完成前读取到旧 shell 仍可见，随后错误返回 `active_surface_dismissal_failed`。
+
+### 决策
+
+- Escape 和最多一个安全关闭控件的有界策略保持不变；策略结束后无条件再进行一次带 settle 的冻结 surface identity 检查，不能以“未找到额外关闭控件”为由跳过最终观察。
+- 只有原冻结 surface 确实不可见才算成功，底层父浮层仍不得被误关；不增加无限等待、任意 locator 或业务按钮点击。
+- 单元测试把安全关闭改为 250ms 后生效，真实 semantic probe 同样使用延迟移除的子弹窗。Worker 字节和 probe 合同变化后，browser runtime 升级为 `1.61.1-r62`，semantic probe protocol 升级为 v20；旧 r61 不原地覆盖。
+
+### 结果
+
+真实页面中“关闭动作已触发但退场动画尚未结束”不再被误报为 locator 失败。关闭失败仍会在两次有界观察后 fail closed，不会掩盖真正未关闭的浮层。
+
+---
+
+## 2026-08-05：exact 交互恢复不得降级为组合容器或纯文本点击
+
+### 背景
+
+真实视频详情流程中，“查看”已经打开包含“添加作者”的内容信息页，但 Planner 又生成了点击“内容信息”的冗余动作。原 locator 未唯一命中后，Worker 的 observed recovery 虽收到 `exact: true`，仍允许候选名称包含目标文本；于是包含“内容信息 分集信息 搜索推荐参数设置”的可聚焦组合容器得到分数。点击容器中心把页面切到“分集信息”，后续“添加作者”自然变成 `locator_not_found`。纯文本兜底还可能把没有交互语义的文本节点用于 click，扩大了同类风险。
+
+### 决策
+
+- `exact: true` 的 observed recovery 只接受完整规范化名称或仅移除布局空白后完整相等；不得使用包含、被包含关系恢复 state-changing action。
+- 普通文本节点只可作为 `wait_for` 的被动观察证据。click 必须来自唯一的可见、启用且具备 button/link/tab/menuitem/onclick/tabindex 等交互语义的候选；找不到时 fail closed。
+- Planner 明确禁止在前一步已经打开目标 page/dialog/drawer/tab 后，再通过点击目标标题或标签“重申”当前状态。下一动作应直接定位结果 surface 内第一个必要业务控件。
+- semantic probe 固定加入同时包含两个兄弟标签名称的可聚焦容器，并要求 exact click recovery 拒绝它；browser runtime 升级为 `1.61.1-r63`，probe protocol 升级为 v21，旧 r62 不原地覆盖。
+
+### 结果
+
+自动恢复仍支持组件内部空格、唯一自定义 tab 和键盘可聚焦控件，但不会把精确业务目标改写成兄弟标签或组合容器。冗余计划即使再次出现，也只能明确失败或进入受控修复，不能通过一次“成功点击”悄悄改变页面状态。
+
+---
+
+## 2026-08-06：验证评估优先使用显式观察截图并淘汰相邻瞬时截图
+
+### 背景
+
+真实头像验证已经完成全部 16 个动作。搜索动作的 `screenshot_after` 在图片仍显示“加载中...”时立即留下 `after-08-search-author.png`，紧随其后的显式截图动作则留下头像已经加载完成的 `action-09-capture-author-avatar.png`。Evaluator 的附件选择只接受 `after-*`，没有附加 `action-*`；Agent 因而看到了瞬时加载态，却把未实际读取的显式截图路径写进结论并错误判定 Bug 已复现。
+
+### 决策
+
+- Host 将同一 execution 下的截图分为 `explicit_observation` 与 `automatic_post_action`，在附件额度内始终优先提供显式观察截图；最终截图继续保持第一附件。
+- 若动作 N 的自动 `after-*` 截图后紧接动作 N+1 的显式截图，Host 视后者为对同一结果状态的有意观察，淘汰前者，避免异步占位态与稳定态同时竞争有限附件额度。
+- Evaluator prompt 为每个附加执行截图提供可信的相对引用、证据角色和动作序号。较晚的显式观察在同一页面进程中覆盖较早的自动瞬时截图；只有显式观察仍显示加载或缺陷时，该状态才能作为持续问题证据。
+- 内容摘要中的完整 artifact 清单仍保留，Host 不删除原始证据；本规则只控制哪些 PNG 字节进入模型视觉上下文以及它们的裁决优先级。用户补充证据的预留额度与去重规则保持不变。
+
+### 结果
+
+Evaluator 不会再因附件选择遗漏最终观察点，也不能仅凭搜索后立即出现的加载占位判定终态缺陷。该规则按 Host 生成的动作序号和截图类型工作，不包含业务名称、用户昵称、头像或页面文案特例，适用于列表加载、图片加载、异步详情和其他同类验证场景。
+
+---
+
+## 2026-08-06：失败 Attempt 证据保留审计，但与有效业务证据分开展示
+
+### 背景
+
+Case 详情按 Case 返回全部 `EvidenceArtifact`，工作台过去直接把所有记录展示为同一组“验证证据”。登录失效、locator 修复失败或浏览器运行时失败也会冻结现场证据；这些记录对恢复和审计有价值，但不能支撑业务 `reproduced`、`not_reproduced` 或回归结论。失败重试较多时，总数持续增长且不同可信状态混在一起，用户无法判断哪些证据实际参与了业务结论。
+
+### 决策
+
+- EvidenceArtifact 的持久化、attempt 归属和摘要校验规则不变；失败证据不自动删除，继续保留诊断与审计价值。
+- 工作台按 artifact 所属 attempt 状态分组：`succeeded` 为“有效证据”，`running/queued` 为“当前执行证据”，`failed/cancelled/interrupted` 以及找不到 attempt 的遗留记录为“失败尝试诊断证据”。
+- “有效证据”和“当前执行证据”默认展开；失败历史默认折叠，并明确说明仅用于定位执行失败、不能作为业务结论依据。
+- 证据摘要分别显示有效、执行中和失败历史数量，不再用一个总数暗示所有记录具有相同结论效力。
+- 不在本次变更中引入自动文件删除或 TTL。证据删除仍只通过显式的故障闭环历史删除完成，避免后台策略不可恢复地破坏审计链。
+
+### 结果
+
+失败验证留下的截图、Network 和 Console 仍可用于解释为什么失败，但不会再与成功 attempt 的业务证据混为一组。用户可以默认聚焦当前有效结论，需要排查验证系统问题时再展开失败历史；可信边界与后端实际验收规则保持一致。

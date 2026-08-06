@@ -50,6 +50,19 @@ const notifications = vi.hoisted(() => ({
 }))
 const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
 
+function manualReproductionGate(attemptID: string) {
+  return {
+    version: 1,
+    code: 'browser_manual_reproduction_available',
+    attempt_id: attemptID,
+    scene_id: 'scene-proof',
+    scenario_contract_sha256: 'a'.repeat(64),
+    frontend_entry_id: 'admin',
+    decision_sha256: 'b'.repeat(64),
+    exhausted_channels: ['safe_exploration', 'semantic_grounding', 'structured_grounding'],
+  }
+}
+
 vi.mock('vue-router', () => ({ useRoute: () => route, useRouter: () => router }))
 vi.mock('../../wailsjs/runtime/runtime', () => ({ EventsOn: runtime.EventsOn }))
 vi.mock('../lib/bridge', async importOriginal => ({
@@ -1849,8 +1862,8 @@ describe('IncidentWorkbenchPage', () => {
     const blocked = detail(item, {
       attempts: [{
         id: 'attempt-manual', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
-        agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_locator_failed', user_clarification_applied: true },
-        parent_attempt_id: '', started_at: '', error_code: 'browser_locator_failed', error_message: '', usage: {},
+        agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_capability_gap', manual_reproduction_gate: manualReproductionGate('attempt-manual') },
+        parent_attempt_id: '', started_at: '', error_code: 'browser_capability_gap', error_message: '', usage: {},
       }],
     })
     vi.mocked(listIncidentCases).mockResolvedValue([item])
@@ -1863,7 +1876,7 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
 
     expect(wrapper.get('[data-browser-action="manual-reproduce"]').text()).toBe('正在记录复现…')
-    expect(wrapper.get('.primary-action').text()).toBe('重新观察并继续验证')
+    expect(wrapper.get('.primary-action').text()).toBe('重试当前验证')
     expect(captureIncidentManualReproduction).toHaveBeenCalledWith(expect.objectContaining({
       case_id: item.id,
       attempt_id: 'attempt-manual',
@@ -1901,8 +1914,8 @@ describe('IncidentWorkbenchPage', () => {
     })
     const attempt = {
       id: 'attempt-multi-manual', case_id: item.id, cycle_number: 1, phase: 'validation' as const, mode: 'reproduce' as const, status: 'failed' as const,
-      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_locator_failed' },
-      parent_attempt_id: '', started_at: '', error_code: 'browser_locator_failed', error_message: '', usage: {},
+      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_capability_gap', manual_reproduction_gate: manualReproductionGate('attempt-multi-manual') },
+      parent_attempt_id: '', started_at: '', error_code: 'browser_capability_gap', error_message: '', usage: {},
     }
     const adminSegment = {
       frontend_entry_id: 'admin', frontend_entry_name: '管理端', start_url: admin.url, final_url: `${admin.url}content`,

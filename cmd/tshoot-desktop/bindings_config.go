@@ -4,8 +4,10 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
 
@@ -16,6 +18,66 @@ type UserConfigResult struct {
 	DefaultReposRoot  string `json:"default_repos_root"`  // 用户实际存的值(可能为空)
 	ResolvedReposRoot string `json:"resolved_repos_root"` // 前端展示用:空时回落到内置 fallback(~/.tshoot/repos)
 	HomeDir           string `json:"home_dir"`            // 当前用户 $HOME;前端据此把绝对路径折回成 ~/... 展示,避免把 /Users/xxx 硬编码到 UI copy
+}
+
+type IncidentBrowserDecisionRolloutStatus struct {
+	Version    int    `json:"version"`
+	Enabled    bool   `json:"enabled"`
+	Percentage int    `json:"percentage"`
+	Source     string `json:"source"`
+}
+
+func browserDecisionRolloutPolicyFromUserConfig(cfg *userconfig.Config) (bughub.BrowserDecisionRolloutPolicy, bool, error) {
+	policy := bughub.DefaultBrowserDecisionRolloutPolicy()
+	if cfg == nil || cfg.BrowserDecisionRollout == nil {
+		return policy, false, nil
+	}
+	configured := cfg.BrowserDecisionRollout
+	policy = bughub.BrowserDecisionRolloutPolicy{
+		Version: configured.Version, Enabled: configured.Enabled, Percentage: configured.Percentage,
+	}
+	if err := bughub.ValidateBrowserDecisionRolloutPolicy(policy); err != nil {
+		return bughub.BrowserDecisionRolloutPolicy{}, true, fmt.Errorf("browser_decision_rollout: %w", err)
+	}
+	return policy, true, nil
+}
+
+func loadBrowserDecisionRolloutPolicy() (bughub.BrowserDecisionRolloutPolicy, bool, error) {
+	cfg, err := userconfig.Load()
+	if err != nil {
+		return bughub.BrowserDecisionRolloutPolicy{}, false, err
+	}
+	return browserDecisionRolloutPolicyFromUserConfig(cfg)
+}
+
+// GetIncidentBrowserDecisionRolloutStatus is read-only. Enabling the
+// experiment requires an explicit config.json edit and Studio restart.
+func (a *App) GetIncidentBrowserDecisionRolloutStatus() (IncidentBrowserDecisionRolloutStatus, error) {
+	if a == nil {
+		return IncidentBrowserDecisionRolloutStatus{}, fmt.Errorf("app is unavailable")
+	}
+	a.workflowMu.Lock()
+	policy := a.workflowBrowserDecisionPolicy
+	configured := a.workflowBrowserDecisionConfigured
+	initialized := a.workflowRunner != nil
+	a.workflowMu.Unlock()
+	if !initialized {
+		var err error
+		policy, configured, err = loadBrowserDecisionRolloutPolicy()
+		if err != nil {
+			return IncidentBrowserDecisionRolloutStatus{}, err
+		}
+	}
+	if policy == (bughub.BrowserDecisionRolloutPolicy{}) {
+		policy = bughub.DefaultBrowserDecisionRolloutPolicy()
+	}
+	source := "default"
+	if configured {
+		source = "user_config"
+	}
+	return IncidentBrowserDecisionRolloutStatus{
+		Version: policy.Version, Enabled: policy.Enabled, Percentage: policy.Percentage, Source: source,
+	}, nil
 }
 
 // GetUserConfig 让前端读配置 + 计算好的 fallback。UI 一般两个字段都会用:

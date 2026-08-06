@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 )
@@ -67,6 +68,30 @@ type browserActionEvidence struct {
 	DurationMS  float64 `json:"duration_ms"`
 	Result      string  `json:"result"`
 	ErrorCode   string  `json:"error_code"`
+}
+
+type browserStepSurfaceEvidence struct {
+	Type  string `json:"type"`
+	Name  string `json:"name"`
+	Modal bool   `json:"modal"`
+}
+
+// browserStepEffectEvidence is deliberately value-free. It records whether
+// the Worker could observe a post-action scene and a few structural effects,
+// but never the input/selection value or either URL.
+type browserStepEffectEvidence struct {
+	ActionID           string                      `json:"action_id"`
+	ActionType         string                      `json:"action_type"`
+	EffectStatus       string                      `json:"effect_status"`
+	SceneObserved      bool                        `json:"scene_observed"`
+	SceneChanged       bool                        `json:"scene_changed"`
+	URLChanged         bool                        `json:"url_changed"`
+	SurfaceTransition  string                      `json:"surface_transition"`
+	BeforeSurface      *browserStepSurfaceEvidence `json:"before_surface,omitempty"`
+	AfterSurface       *browserStepSurfaceEvidence `json:"after_surface,omitempty"`
+	InputPersisted     *bool                       `json:"input_persisted,omitempty"`
+	SelectionPersisted *bool                       `json:"selection_persisted,omitempty"`
+	ErrorCode          string                      `json:"error_code,omitempty"`
 }
 
 type browserResponseAssertionEvidence struct {
@@ -147,6 +172,7 @@ type browserEvaluatorEvidence struct {
 	Network            []browserNetworkEvidence           `json:"network,omitempty"`
 	Console            []browserConsoleEvidence           `json:"console,omitempty"`
 	BrowserActions     []browserActionEvidence            `json:"browser_actions,omitempty"`
+	BrowserStepEffects []browserStepEffectEvidence        `json:"browser_step_effects,omitempty"`
 	RequestFacts       []browserRequestFactEvidence       `json:"request_facts,omitempty"`
 	ResponseFacts      []browserResponseFactEvidence      `json:"response_facts,omitempty"`
 	ResponseAssertions []browserResponseAssertionEvidence `json:"response_assertions,omitempty"`
@@ -184,7 +210,7 @@ func validateFrozenBrowserArtifacts(references []BrowserArtifactReference, froze
 			if item.Size > maxEvidenceArtifactBytes || !bytes.HasPrefix(item.Content, browserPNGSignature) {
 				return errors.New("frozen browser screenshot is not a bounded PNG")
 			}
-		case "network", "console", "browser_actions", "request_facts", "response_facts", "response_assertions":
+		case "network", "console", "browser_actions", "browser_step_effects", "request_facts", "response_facts", "response_assertions":
 			if item.Size > maxFrozenBrowserStructuredBytes {
 				return errors.New("frozen browser structured evidence exceeds its byte limit")
 			}
@@ -282,7 +308,7 @@ func truncateLargestBrowserEvaluatorEvidence(evidence *browserEvaluatorEvidence)
 		size int
 		drop func()
 	}
-	candidates := make([]candidate, 0, 6)
+	candidates := make([]candidate, 0, 7)
 	add := func(kind string, value any, length int, drop func()) {
 		if length == 0 {
 			return
@@ -301,6 +327,11 @@ func truncateLargestBrowserEvaluatorEvidence(evidence *browserEvaluatorEvidence)
 	if len(evidence.BrowserActions) > 1 {
 		add("browser_actions", evidence.BrowserActions, len(evidence.BrowserActions), func() {
 			evidence.BrowserActions = dropOldestBrowserEvidence(evidence.BrowserActions)
+		})
+	}
+	if len(evidence.BrowserStepEffects) > 1 {
+		add("browser_step_effects", evidence.BrowserStepEffects, len(evidence.BrowserStepEffects), func() {
+			evidence.BrowserStepEffects = dropOldestBrowserEvidence(evidence.BrowserStepEffects)
 		})
 	}
 	add("request_facts", evidence.RequestFacts, len(evidence.RequestFacts), func() {
@@ -376,6 +407,17 @@ func parseFrozenBrowserStructuredEvidence(frozen []browserFrozenArtifact) (brows
 				}
 			}
 			result.BrowserActions = append(result.BrowserActions, records...)
+		case "browser_step_effects":
+			var records []browserStepEffectEvidence
+			if err := decodeStrictBrowserJSON(item.Content, &records); err != nil || len(records) > 40 {
+				return browserEvaluatorEvidence{}, errors.New("frozen browser step effect evidence is invalid")
+			}
+			for index := range records {
+				if err := sanitizeBrowserStepEffectEvidence(&records[index]); err != nil {
+					return browserEvaluatorEvidence{}, err
+				}
+			}
+			result.BrowserStepEffects = append(result.BrowserStepEffects, records...)
 		case "request_facts":
 			var records []browserRequestFactEvidence
 			if err := decodeStrictBrowserJSON(item.Content, &records); err != nil || len(records) > 40 {
@@ -422,6 +464,10 @@ func parseFrozenBrowserStructuredEvidence(frozen []browserFrozenArtifact) (brows
 	if len(result.BrowserActions) > maxEvaluatorBrowserRecords {
 		result.BrowserActions = result.BrowserActions[:maxEvaluatorBrowserRecords]
 		truncated["browser_actions"] = true
+	}
+	if len(result.BrowserStepEffects) > 40 {
+		result.BrowserStepEffects = result.BrowserStepEffects[:40]
+		truncated["browser_step_effects"] = true
 	}
 	if len(result.ResponseAssertions) > 40 {
 		result.ResponseAssertions = result.ResponseAssertions[:40]
@@ -551,6 +597,78 @@ func sanitizeBrowserActionEvidence(record *browserActionEvidence) error {
 	record.LocatorKind = safeBoundedBrowserText(record.LocatorKind, 32)
 	record.StartedAt = safeBoundedBrowserText(record.StartedAt, 64)
 	record.ErrorCode = safeBoundedBrowserText(record.ErrorCode, 128)
+	return nil
+}
+
+func sanitizeBrowserStepEffectEvidence(record *browserStepEffectEvidence) error {
+	allowedStatuses := map[string]bool{"observed": true, "blocked": true, "unobserved": true}
+	allowedTransitions := map[string]bool{"opened": true, "closed": true, "changed": true, "unchanged": true, "unobserved": true}
+	if strings.TrimSpace(record.ActionID) == "" || !isSupportedBrowserAction(record.ActionType) || !allowedStatuses[record.EffectStatus] || !allowedTransitions[record.SurfaceTransition] {
+		return errors.New("frozen browser step effect evidence is invalid")
+	}
+	if record.EffectStatus == "observed" && (!record.SceneObserved || record.ErrorCode != "") {
+		return errors.New("frozen browser observed step effect evidence is inconsistent")
+	}
+	if record.EffectStatus == "unobserved" && (record.SceneObserved || record.ErrorCode != "") {
+		return errors.New("frozen browser unobserved step effect evidence is inconsistent")
+	}
+	if record.EffectStatus == "blocked" && strings.TrimSpace(record.ErrorCode) == "" {
+		return errors.New("frozen browser blocked step effect evidence lacks an error code")
+	}
+	if !record.SceneObserved {
+		if record.SceneChanged || record.URLChanged || record.SurfaceTransition != "unobserved" || record.BeforeSurface != nil || record.AfterSurface != nil {
+			return errors.New("frozen browser unobserved step effect contains scene facts")
+		}
+	} else if record.SurfaceTransition == "unobserved" {
+		return errors.New("frozen browser observed step effect lacks a surface transition")
+	}
+	if err := validateBrowserStepSurfaceTransition(record); err != nil {
+		return err
+	}
+	if record.InputPersisted != nil && record.ActionType != "fill" {
+		return errors.New("frozen browser input persistence is bound to a non-fill action")
+	}
+	if record.SelectionPersisted != nil && record.ActionType != "select" {
+		return errors.New("frozen browser selection persistence is bound to a non-select action")
+	}
+	if record.InputPersisted != nil && record.SelectionPersisted != nil {
+		return errors.New("frozen browser step effect has incompatible persistence facts")
+	}
+	record.ActionID = safeBoundedBrowserText(record.ActionID, 128)
+	record.ErrorCode = safeBoundedBrowserText(record.ErrorCode, 128)
+	return nil
+}
+
+func validateBrowserStepSurfaceTransition(record *browserStepEffectEvidence) error {
+	if record == nil {
+		return errors.New("frozen browser step effect evidence is invalid")
+	}
+	for _, surface := range []*browserStepSurfaceEvidence{record.BeforeSurface, record.AfterSurface} {
+		if surface == nil {
+			continue
+		}
+		if surface.Type != "dialog" && surface.Type != "alertdialog" && surface.Type != "drawer" && surface.Type != "popover" && surface.Type != "region" {
+			return errors.New("frozen browser step effect surface is invalid")
+		}
+		surface.Name = safeBoundedBrowserText(surface.Name, 512)
+	}
+	equal := reflect.DeepEqual(record.BeforeSurface, record.AfterSurface)
+	valid := false
+	switch record.SurfaceTransition {
+	case "opened":
+		valid = record.BeforeSurface == nil && record.AfterSurface != nil
+	case "closed":
+		valid = record.BeforeSurface != nil && record.AfterSurface == nil
+	case "changed":
+		valid = record.BeforeSurface != nil && record.AfterSurface != nil && !equal
+	case "unchanged":
+		valid = equal
+	case "unobserved":
+		valid = record.BeforeSurface == nil && record.AfterSurface == nil
+	}
+	if !valid {
+		return errors.New("frozen browser step effect surface transition is inconsistent")
+	}
 	return nil
 }
 

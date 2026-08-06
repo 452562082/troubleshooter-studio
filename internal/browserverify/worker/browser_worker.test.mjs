@@ -14,7 +14,10 @@ import { redactConsoleText, sanitizeURL, safeResponseRecord } from './sanitize.m
 import {
   accessibilitySummary,
   assertAllowedURL,
+  assertSafeResourceURL,
   buildLocator,
+  bindBrowserStepSessionCommand,
+  browserStepEffectRecord,
   capturePNG,
   captureSafePNG,
   chromiumLaunchOptions,
@@ -45,9 +48,49 @@ import {
   resolveUploadFileLocator,
   saveLoginStorageState,
   safeManualInteraction,
+  sceneElementFromSnapshot,
   startPinnedProxy,
   validateWorkerRequest,
+  waitForLocatorState,
 } from './browser_worker.mjs';
+
+test('browser step effect record exposes value-free scene and persistence facts', () => {
+  const base = {
+    version: 1, scene_id: '', scene_sha256: '', attempt_id: '', captured_at: '2026-08-04T00:00:00Z',
+    url: 'https://app.test/users?token=before-secret', title: 'Users', device_profile: 'desktop',
+    viewport: { width: 1280, height: 720 }, frames: [{ ref: 'f-main', url: 'https://app.test/users?token=before-secret', same_origin: true }],
+    elements: [], text_blocks: [], capabilities: { dom: 'available', accessibility: 'partial', screenshot: 'available', vision_grounding: 'disabled', frame_observation: 'main_only' },
+  };
+  const before = { ...base, active_surface: { ref: 's-active', type: 'dialog', name: '编辑用户', modal: true } };
+  const after = { ...structuredClone(base), captured_at: '2026-08-04T00:00:01Z', url: 'https://app.test/users?auth=after-secret' };
+  const record = browserStepEffectRecord(
+    { id: 'save-user', action: 'fill' }, before, after, { inputPersisted: true },
+  );
+  assert.deepEqual(record, {
+    action_id: 'save-user', action_type: 'fill', effect_status: 'observed', scene_observed: true,
+    scene_changed: true, url_changed: true, surface_transition: 'closed',
+    before_surface: { type: 'dialog', name: '编辑用户', modal: true }, input_persisted: true,
+  });
+  assert.equal(JSON.stringify(record).includes('secret'), false);
+});
+
+test('browser scene element derives bounded semantic identity without leaking credentials or cross-origin targets', () => {
+  const element = sceneElementFromSnapshot({
+    tag: 'input', type: 'search', role: '', ariaLabel: '', labelledBy: '', label: '',
+    placeholder: '搜索 token=secret', title: '', alt: '', text: '', testID: 'author-search',
+    href: 'https://other.test/private?token=secret', contentEditable: false, programmaticClick: false,
+    disabled: false, editable: true, inViewport: true, obscured: false,
+    box: { x: 12.4, y: 20.6, width: 240.2, height: 31.7 }, rowName: '', groupName: '筛选',
+  }, 0, 's-active', 'https://app.test/users');
+
+  assert.equal(element.ref, 'e-1');
+  assert.equal(element.role, 'searchbox');
+  assert.equal(element.name, '[REDACTED]');
+  assert.equal(element.locator_hints.placeholder, '[REDACTED]');
+  assert.equal('same_origin_href' in element.locator_hints, false);
+  assert.deepEqual(element.bbox, { x: 12, y: 21, width: 240, height: 32 });
+  assert.equal(JSON.stringify(element).includes('secret'), false);
+});
 
 test('manual interaction records replayable locators and non-sensitive values', () => {
   const action = safeManualInteraction({
@@ -782,7 +825,7 @@ test('worker forbids API and identity-provider origins from owning execute or lo
   }
 });
 
-test('browser worker accepts exactly eight actions and six locator kinds', () => {
+test('browser worker accepts exactly nine actions and six locator kinds', () => {
   const uploadDir = mkdtempSync(join(tmpdir(), 'browser-upload-worker-'));
   const lexicalUploadPath = join(uploadDir, 'fixture.xlsx');
   writeFileSync(lexicalUploadPath, Buffer.from('xlsx-fixture'));
@@ -796,10 +839,12 @@ test('browser worker accepts exactly eight actions and six locator kinds', () =>
     { id: 'select', action: 'select', locator: { kind: 'placeholder', value: 'Status' }, value: 'open' },
     { id: 'upload', action: 'upload_file', locator: { kind: 'css', value: 'input[type="file"]' }, file_ref: 'fixture' },
     { id: 'wait', action: 'wait_for', locator: { kind: 'test_id', value: 'results' } },
+    { id: 'dismiss', action: 'dismiss_surface' },
     { id: 'shot', action: 'screenshot' },
     { id: 'css', action: 'wait_for', locator: { kind: 'css', value: '.rendered' } },
   ];
   const request = baseRequest();
+  request.plan.version = 2;
   request.plan.actions = actions;
   request.upload_files = { fixture: uploadPath };
   assert.doesNotThrow(() => validateWorkerRequest(request));
@@ -835,14 +880,121 @@ test('browser worker request protocol accepts only v2 locator-free Escape', () =
   assert.throws(() => validateWorkerRequest(enter), /locator/);
 });
 
+test('browser worker request protocol accepts only field-free v2 dismiss_surface', () => {
+  const request = baseRequest();
+  request.plan.version = 2;
+  request.plan.actions = [{ id: 'close-dialog', action: 'dismiss_surface' }];
+  assert.doesNotThrow(() => validateWorkerRequest(request));
+
+  const legacy = structuredClone(request);
+  legacy.plan.version = 1;
+  assert.throws(() => validateWorkerRequest(legacy), /version 2/);
+
+  for (const extra of [
+    { key: 'Escape' },
+    { locator: { kind: 'text', value: '关闭', exact: true } },
+    { value: '关闭' },
+    { url: 'https://app.test/next' },
+    { screenshot_after: false },
+  ]) {
+    const invalid = structuredClone(request);
+    Object.assign(invalid.plan.actions[0], extra);
+    assert.throws(() => validateWorkerRequest(invalid), /forbidden/);
+  }
+
+  for (const evidenceKind of ['request_captures', 'response_assertions']) {
+    const bound = structuredClone(request);
+    bound.plan[evidenceKind] = evidenceKind === 'request_captures'
+      ? [{ id: 'capture-dismiss', action_id: 'close-dialog', source: 'query', fields: ['page'] }]
+      : [{ id: 'assert-dismiss', action_id: 'close-dialog', kind: 'http_status_rejected' }];
+    assert.throws(() => validateWorkerRequest(bound), /request-capable action/);
+  }
+});
+
+test('wait_for v2 supports a bounded hidden state and rejects the fields elsewhere', () => {
+  const request = baseRequest();
+  request.plan.version = 2;
+  request.plan.actions = [{
+    id: 'wait-loading-finished', action: 'wait_for',
+    locator: { kind: 'text', value: '加载中...', exact: false },
+    state: 'hidden', timeout_ms: 20_000,
+  }];
+  assert.doesNotThrow(() => validateWorkerRequest(request));
+
+  const wrongAction = structuredClone(request);
+  wrongAction.plan.actions[0] = { id: 'shot', action: 'screenshot', state: 'hidden' };
+  assert.throws(() => validateWorkerRequest(wrongAction), /forbidden/);
+
+  const wrongTimeout = structuredClone(request);
+  wrongTimeout.plan.actions[0].timeout_ms = 60_001;
+  assert.throws(() => validateWorkerRequest(wrongTimeout), /between 1 and 60000/);
+
+  const legacy = structuredClone(request);
+  legacy.plan.version = 1;
+  assert.throws(() => validateWorkerRequest(legacy), /require plan version 2/);
+});
+
+test('browser step session binds one current-scene element while preserving frozen action values', () => {
+  const request = baseRequest();
+  request.mode = 'step_session';
+  request.plan.actions = [{
+    id: 'enter-query', action: 'fill',
+    locator: { kind: 'role', value: 'textbox', name: '旧定位', exact: true },
+    value: '汤圆-用户查询',
+  }];
+  assert.doesNotThrow(() => validateWorkerRequest(request));
+  const scene = {
+    active_surface: { ref: 's-active', type: 'dialog', name: '用户搜索', modal: true },
+    elements: [{
+      ref: 'e-1', frame_ref: 'f-main', surface_ref: 's-active', role: 'searchbox', name: '搜索用户', tag: 'input',
+      locator_hints: { placeholder: '请输入用户名' },
+      states: { visible: true, in_viewport: true, enabled: true, editable: true, obscured: false },
+      relations: { row_name: '筛选条件' },
+    }],
+  };
+  const bound = bindBrowserStepSessionCommand(request, scene, {
+    command: 'step', sequence: 1, scene_id: 'scene-a', action_id: 'enter-query', action_type: 'fill', element_ref: 'e-1', passive_checks: ['screenshot'],
+  });
+  assert.equal(bound.action.value, '汤圆-用户查询');
+  assert.deepEqual(bound.action.locator, {
+    kind: 'placeholder', value: '请输入用户名', exact: true,
+    within: { kind: 'role', value: 'row', name: '筛选条件', exact: true },
+  });
+  assert.equal(JSON.stringify(bound).includes('旧定位'), false);
+});
+
+test('browser step session refuses stale, background, or invented action targets', () => {
+  const request = baseRequest();
+  request.mode = 'step_session';
+  request.plan.actions = [{ id: 'save', action: 'click', locator: { kind: 'role', value: 'button', name: '保存', exact: true } }];
+  const scene = {
+    active_surface: { ref: 's-active', type: 'dialog', name: '编辑', modal: true },
+    elements: [{
+      ref: 'e-1', frame_ref: 'f-main', surface_ref: 's-active', role: 'button', name: '保存', tag: 'button',
+      locator_hints: { test_id: 'save-button' },
+      states: { visible: true, in_viewport: true, enabled: true, editable: false, obscured: false }, relations: {},
+    }],
+  };
+  const command = { command: 'step', sequence: 1, scene_id: 'scene-a', action_id: 'save', action_type: 'click', element_ref: 'e-1', passive_checks: [] };
+  assert.doesNotThrow(() => bindBrowserStepSessionCommand(request, scene, command));
+  assert.throws(() => bindBrowserStepSessionCommand(request, scene, { ...command, action_id: 'delete-all' }), /frozen plan/);
+  assert.throws(() => bindBrowserStepSessionCommand(request, scene, { ...command, element_ref: 'e-9' }), /stale/);
+  const background = structuredClone(scene);
+  background.elements[0].surface_ref = '';
+  assert.throws(() => bindBrowserStepSessionCommand(request, background, command), /active surface/);
+  const obscured = structuredClone(scene);
+  obscured.elements[0].states.obscured = true;
+  assert.throws(() => bindBrowserStepSessionCommand(request, obscured, command), /no longer actionable/);
+});
+
 test('browser worker rejects production interaction before browser launch', () => {
-  for (const action of ['click', 'fill', 'press', 'select', 'upload_file']) {
+  for (const action of ['click', 'fill', 'press', 'select', 'upload_file', 'dismiss_surface']) {
     const request = baseRequest();
     request.policy.is_prod = true;
     request.plan.actions = [{
       id: 'write',
       action,
-      locator: { kind: 'text', value: 'Submit' },
+      ...(action === 'dismiss_surface' ? {} : { locator: { kind: 'text', value: 'Submit' } }),
       ...(action === 'fill' || action === 'select' ? { value: 'x' } : {}),
       ...(action === 'press' ? { key: 'Enter' } : {}),
       ...(action === 'upload_file' ? { file_ref: 'fixture' } : {}),
@@ -1031,6 +1183,21 @@ test('assertAllowedURL re-resolves every navigation and request', async () => {
   await assertAllowedURL('https://app.test/users', policy, lookup);
   await assert.rejects(assertAllowedURL('https://app.test/api', policy, lookup), /private/);
   assert.equal(calls, 2);
+});
+
+test('public cross-origin subresources do not require an origin allowlist entry', async () => {
+  const policy = baseRequest().policy;
+  const publicLookup = async () => [{ address: '203.0.113.11', family: 4 }];
+  await assertSafeResourceURL('https://cdn.unlisted.test/avatar.png', policy, publicLookup);
+  await assert.rejects(assertAllowedURL('https://cdn.unlisted.test/page', policy, publicLookup), /origin/);
+  await assert.rejects(
+    assertSafeResourceURL('https://cdn.unlisted.test/avatar.png', policy, async () => [{ address: '10.0.0.8', family: 4 }]),
+    /private/,
+  );
+  await assert.rejects(
+    assertSafeResourceURL('http://169.254.169.254/latest/meta-data', policy, async () => [{ address: '169.254.169.254', family: 4 }]),
+    /link-local|metadata/,
+  );
 });
 
 function proxyAuthorization(proxy) {
@@ -1598,25 +1765,25 @@ test('supervised context installs request, response, console, page, download, di
   assert.equal(connected, true);
   assert.equal(supervised.blocked(), false);
 
-  let subresourceAborted = false;
+  let crossOriginResourceContinued = false;
   await httpRoute({
     request: () => ({
       url: () => 'https://unapproved.test/optional-metric',
       isNavigationRequest: () => false,
     }),
-    continue: async () => { throw new Error('blocked subresource continued'); },
-    abort: async () => { subresourceAborted = true; },
+    continue: async () => { crossOriginResourceContinued = true; },
+    abort: async () => { throw new Error('public cross-origin subresource aborted'); },
   });
-  assert.equal(subresourceAborted, true);
+  assert.equal(crossOriginResourceContinued, true);
   assert.equal(supervised.blocked(), false);
 
-  let webSocketClosed = false;
+  let crossOriginWebSocketConnected = false;
   await webSocketRoute({
     url: () => 'wss://unapproved.test/socket',
-    connectToServer: () => { throw new Error('blocked WebSocket connected'); },
-    close: () => { webSocketClosed = true; },
+    connectToServer: () => { crossOriginWebSocketConnected = true; },
+    close: () => { throw new Error('public cross-origin WebSocket closed'); },
   });
-  assert.equal(webSocketClosed, true);
+  assert.equal(crossOriginWebSocketConnected, true);
   assert.equal(supervised.blocked(), false);
 
   const mainFrame = {};
@@ -2147,6 +2314,113 @@ test('global Escape tracks the dismissed surface identity instead of a live loca
 
   await assert.doesNotReject(worker.pressGlobalEscapeToDismissSurface(page));
   assert.equal(childVisible, false);
+});
+
+test('global Escape prefers the foreground child dialog even when the parent has more controls', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let childVisible = true;
+  const controls = (count) => ({
+    count: async () => count,
+    nth: () => ({
+      isVisible: async () => true,
+      boundingBox: async () => ({ x: 300, y: 180, width: 100, height: 36 }),
+    }),
+  });
+  const childHandle = {
+    isVisible: async () => childVisible,
+    dispose: async () => {},
+  };
+  const parentHandle = {
+    isVisible: async () => true,
+    dispose: async () => {},
+  };
+  const child = {
+    handle: childHandle,
+    getAttribute: async (name) => ({ role: 'dialog', 'aria-modal': 'true', class: 'author-dialog' })[name] ?? null,
+    boundingBox: async () => ({ x: 160, y: 100, width: 760, height: 520 }),
+    locator: () => controls(2),
+  };
+  const parent = {
+    handle: parentHandle,
+    getAttribute: async (name) => ({ role: 'dialog', 'aria-modal': 'true', class: 'video-editor-dialog' })[name] ?? null,
+    boundingBox: async () => ({ x: 80, y: 40, width: 1120, height: 640 }),
+    locator: () => controls(12),
+  };
+  const nodes = () => childVisible ? [parent, child] : [parent];
+  const liveLocator = (index) => ({
+    isVisible: async () => Boolean(nodes()[index]),
+    getAttribute: async (name) => nodes()[index]?.getAttribute(name) ?? null,
+    boundingBox: async () => nodes()[index]?.boundingBox() ?? null,
+    locator: (selector) => nodes()[index]?.locator(selector) ?? controls(0),
+    elementHandle: async () => nodes()[index]?.handle ?? null,
+  });
+  const page = {
+    viewportSize: () => ({ width: 1280, height: 720 }),
+    locator: () => ({ count: async () => nodes().length, nth: (index) => liveLocator(index) }),
+    keyboard: {
+      press: async (key) => {
+        assert.equal(key, 'Escape');
+        childVisible = false;
+      },
+    },
+    waitForTimeout: async () => {},
+  };
+
+  await assert.doesNotReject(worker.pressGlobalEscapeToDismissSurface(page));
+  assert.equal(childVisible, false);
+});
+
+test('dismiss_surface and legacy global Escape wait for a delayed safe-close transition when Escape is ineffective', async () => {
+  const worker = await import('./browser_worker.mjs');
+
+  const run = async (action) => {
+    let elapsedMs = 0;
+    let hiddenAtMs = Number.POSITIVE_INFINITY;
+    let escapePresses = 0;
+    let closeClicks = 0;
+    const visible = () => elapsedMs < hiddenAtMs;
+    const close = {
+      isVisible: async () => visible(),
+      getAttribute: async (name) => ({
+        type: '', role: 'button', 'aria-label': '关闭', title: '', id: 'author-close', class: 'modal-close', 'data-testid': '',
+      })[name] ?? null,
+      textContent: async () => '关闭',
+      isDisabled: async () => false,
+      boundingBox: async () => ({ x: 990, y: 120, width: 44, height: 44 }),
+      click: async (options) => {
+        assert.equal(options?.force, true);
+        closeClicks += 1;
+        hiddenAtMs = elapsedMs + 250;
+      },
+      waitFor: async () => {},
+    };
+    const controls = { count: async () => 1, nth: () => close };
+    const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+    const dialog = {
+      isVisible: async () => visible(),
+      getAttribute: async (name) => ({ role: 'dialog', 'aria-modal': 'true', class: 'author-modal' })[name] ?? null,
+      boundingBox: async () => ({ x: 200, y: 80, width: 840, height: 560 }),
+      textContent: async () => '作者用户选择 关闭',
+      locator: () => controls,
+      elementHandle: async () => null,
+    };
+    const surfaces = { count: async () => 1, nth: () => dialog };
+    const page = {
+      locator: (selector) => selector.includes('[role="dialog"]') ? surfaces : (selector.includes('[class*="close" i]') ? controls : empty),
+      getByText: () => empty,
+      keyboard: { press: async (key) => { assert.equal(key, 'Escape'); escapePresses += 1; } },
+      waitForTimeout: async (milliseconds) => { elapsedMs += milliseconds; },
+      viewportSize: () => ({ width: 1280, height: 720 }),
+    };
+
+    await worker.executeAction(page, action, baseRequest(), 0, async () => ({ loginRequired: false, path: '' }), null);
+    assert.equal(visible(), false);
+    assert.equal(escapePresses, 1);
+    assert.equal(closeClicks, 1);
+  };
+
+  await run({ id: 'dismiss-semantic', action: 'dismiss_surface' });
+  await run({ id: 'dismiss-legacy', action: 'press', key: 'Escape' });
 });
 
 test('executeAction recovers an explicit close action with a bounded forced click inside the active dialog', async () => {
@@ -2883,15 +3157,16 @@ test('observed-document recovery refuses equally plausible state-changing contro
 
 test('observed-document recovery supports one exact visible custom tab and rejects duplicate text', async () => {
   const worker = await import('./browser_worker.mjs');
-  const customTab = { isVisible: async () => true };
+  const customTab = {
+    isVisible: async () => true,
+    getAttribute: async (name) => name === 'role' ? 'tab' : null,
+    textContent: async () => '用户',
+    isDisabled: async () => false,
+  };
   const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const tabs = { count: async () => 1, nth: () => customTab };
   const page = {
-    locator: () => empty,
-    getByText: (text, options) => {
-      assert.equal(text, '用户');
-      assert.deepEqual(options, { exact: true });
-      return { count: async () => 1, nth: () => customTab };
-    },
+    locator: (selector) => selector.startsWith('[role]') ? tabs : empty,
   };
   assert.equal(
     await worker.resolveObservedInteractionLocator(page, { action: 'click', locator: { kind: 'role', value: 'tab', name: '用户' } }),
@@ -2900,11 +3175,40 @@ test('observed-document recovery supports one exact visible custom tab and rejec
 
   await assert.rejects(
     worker.resolveObservedInteractionLocator(
-      { ...page, getByText: () => ({ count: async () => 2, nth: () => customTab }) },
+      { ...page, locator: (selector) => selector.startsWith('[role]') ? { count: async () => 2, nth: () => customTab } : empty },
       { action: 'click', locator: { kind: 'text', value: '用户' } },
     ),
     /multiple visible elements/,
   );
+});
+
+test('exact click recovery refuses a focusable wrapper that only contains the requested sibling label', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let wrapperClicks = 0;
+  const wrapper = {
+    isVisible: async () => true,
+    getAttribute: async (name) => name === 'tabindex' ? '0' : null,
+    textContent: async () => '内容信息 分集信息 搜索推荐参数设置',
+    isDisabled: async () => false,
+    click: async () => { wrapperClicks += 1; },
+  };
+  const plainText = { isVisible: async () => true };
+  const empty = { count: async () => 0, nth: () => assert.fail('empty locator') };
+  const page = {
+    locator: (selector) => selector.startsWith('[tabindex]')
+      ? { count: async () => 1, nth: () => wrapper }
+      : empty,
+    getByText: () => ({ count: async () => 1, nth: () => plainText }),
+  };
+
+  await assert.rejects(
+    worker.resolveObservedInteractionLocator(
+      page,
+      { action: 'click', locator: { kind: 'text', value: '内容信息', exact: true } },
+    ),
+    /did not match a visible element/,
+  );
+  assert.equal(wrapperClicks, 0);
 });
 
 test('observed-document recovery can click a unique keyboard-focusable custom control', async () => {
@@ -3525,17 +3829,67 @@ test('application readiness waits for load and has a bounded network-idle fallba
   assert.equal(fallback, 3_000);
 });
 
+test('hidden wait completes only after every matching loading indicator disappears', async () => {
+  let visible = [false, true];
+  let polls = 0;
+  const locator = {
+    count: async () => visible.length,
+    nth: index => ({ isVisible: async () => visible[index] }),
+  };
+  const page = {
+    waitForTimeout: async () => {
+      polls += 1;
+      visible = [false, false];
+    },
+  };
+  await waitForLocatorState(page, locator, 'hidden', 1_000);
+  assert.equal(polls, 1);
+});
+
 test('SPA interaction settling yields after state-changing actions only', async () => {
   const worker = await import('./browser_worker.mjs');
   const waits = [];
-  const page = { waitForTimeout: async (milliseconds) => waits.push(milliseconds) };
+  const loadStates = [];
+  const page = {
+    waitForTimeout: async (milliseconds) => waits.push(milliseconds),
+    waitForLoadState: async (state) => loadStates.push(state),
+  };
   for (const action of ['click', 'fill', 'press', 'select']) {
     await worker.settleBrowserInteraction(page, { action });
   }
   for (const action of ['goto', 'wait_for', 'screenshot']) {
     await worker.settleBrowserInteraction(page, { action });
   }
-  assert.deepEqual(waits, [150, 150, 150, 150]);
+  assert.deepEqual(loadStates, ['load', 'networkidle']);
+  assert.deepEqual(waits, [150, 150, 150, 150, 3_000]);
+});
+
+test('navigation settling passively waits for the next frozen Plan target', async () => {
+  const worker = await import('./browser_worker.mjs');
+  let waitOptions;
+  let interactions = 0;
+  let scrolls = 0;
+  const locator = {
+    first: () => locator,
+    count: async () => 1,
+    nth: () => locator,
+    isVisible: async () => true,
+    waitFor: async (options) => { waitOptions = options; },
+    scrollIntoViewIfNeeded: async () => { scrolls += 1; },
+    click: async () => { interactions += 1; },
+    fill: async () => { interactions += 1; },
+  };
+  const page = {
+    waitForLoadState: async () => {}, waitForTimeout: async () => {},
+    getByPlaceholder: () => locator,
+  };
+  await worker.settleBrowserInteraction(
+    page, { action: 'goto' }, 150, null, 0,
+    { action: 'fill', locator: { kind: 'placeholder', value: '搜索用户', exact: true } },
+  );
+  assert.deepEqual(waitOptions, { state: 'visible', timeout: 60_000 });
+  assert.equal(interactions, 0);
+  assert.equal(scrolls, 1);
 });
 
 test('execute auth tracking keeps API 401 active past quiet time until the same action and request semantic recovers', async () => {
@@ -4322,16 +4676,16 @@ test('worker source has no arbitrary script, upload path, HAR, trace, body, or r
   assert.equal(source.includes('locator.setInputFiles(request.upload_files[action.file_ref])'), true);
   assert.equal(source.includes('setInputFiles(action.value)'), false);
   assert.equal(source.includes('setInputFiles(action.path)'), false);
-  assert.equal((source.match(/import\('playwright'\)/g) ?? []).length, 4);
+  assert.equal((source.match(/import\('playwright'\)/g) ?? []).length, 5);
   assert.equal(source.includes("from 'playwright'"), false);
   assert.equal(source.includes("context.route('**/*'"), true);
 });
 
-test('execute, login, manual record, and probe can only launch Chromium through the pinned proxy helper', () => {
+test('execute, step session, login, manual record, and probe can only launch Chromium through the pinned proxy helper', () => {
   const workerPath = fileURLToPath(new URL('./browser_worker.mjs', import.meta.url));
   const source = readFileSync(workerPath, 'utf8');
   assert.equal((source.match(/chromium\.launch\(/g) ?? []).length, 1);
-  assert.equal((source.match(/launchPinnedBrowser\(chromium,/g) ?? []).length, 5);
+  assert.equal((source.match(/launchPinnedBrowser\(chromium,/g) ?? []).length, 6);
 });
 
 test('unsupported CLI mode emits exactly one final JSON object and no progress on stdout', () => {
@@ -4344,6 +4698,22 @@ test('unsupported CLI mode emits exactly one final JSON object and no progress o
     status: 'worker_failed',
     error_code: 'browser_worker_failed',
     error_message: 'browser worker failed',
+  });
+  assert.equal(run.stderr, '');
+});
+
+test('step session initialization failure emits its strict JSONL error envelope', () => {
+  const workerPath = fileURLToPath(new URL('./browser_worker.mjs', import.meta.url));
+  const run = spawnSync(process.execPath, [workerPath, '--mode', 'step_session'], {
+    encoding: 'utf8', input: '{}\n',
+  });
+  assert.notEqual(run.status, 0);
+  const lines = run.stdout.trim().split(/\r?\n/);
+  assert.equal(lines.length, 1);
+  assert.deepEqual(JSON.parse(lines[0]), {
+    type: 'error', sequence: 0,
+    error_code: 'browser_worker_failed',
+    error_message: 'browser step session initialization failed',
   });
   assert.equal(run.stderr, '');
 });

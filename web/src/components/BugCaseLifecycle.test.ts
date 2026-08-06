@@ -29,6 +29,19 @@ function detail(status: CaseStatus): IncidentCaseDetail {
   }
 }
 
+function manualReproductionGate(attemptID: string) {
+  return {
+    version: 1,
+    code: 'browser_manual_reproduction_available',
+    attempt_id: attemptID,
+    scene_id: 'scene-proof',
+    scenario_contract_sha256: 'a'.repeat(64),
+    frontend_entry_id: 'admin',
+    decision_sha256: 'b'.repeat(64),
+    exhausted_channels: ['safe_exploration', 'semantic_grounding', 'structured_grounding'],
+  }
+}
+
 function timelineEvents(count: number, caseID = 'case-1'): TransitionEvent[] {
   return Array.from({ length: count }, (_, index) => ({
     id: `${caseID}-event-${index + 1}`,
@@ -520,8 +533,8 @@ describe('BugCaseLifecycle', () => {
     snapshot.case.current_attempt_id = 'validation-manual'
     snapshot.attempts = [{
       id: 'validation-manual', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
-      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_locator_failed', user_clarification_applied: true },
-      parent_attempt_id: '', started_at: '', error_code: 'browser_locator_failed', error_message: '', usage: {},
+      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_capability_gap', manual_reproduction_gate: manualReproductionGate('validation-manual') },
+      parent_attempt_id: '', started_at: '', error_code: 'browser_capability_gap', error_message: '', usage: {},
     }]
     snapshot.artifacts = [{
       id: 'manual-scene', case_id: 'case-1', attempt_id: 'validation-manual', kind: 'user_screenshot',
@@ -533,7 +546,7 @@ describe('BugCaseLifecycle', () => {
 
     await wrapper.setProps({ manualReproductionPending: true })
     expect(wrapper.get('[data-browser-action="manual-reproduce"]').text()).toBe('正在记录复现…')
-    expect(wrapper.get('.primary-action').text()).toBe('重新观察并继续验证')
+    expect(wrapper.get('.primary-action').text()).toBe('重试当前验证')
     expect(wrapper.get<HTMLButtonElement>('.primary-action').element.disabled).toBe(true)
     await wrapper.setProps({ manualReproductionPending: false })
 
@@ -572,8 +585,8 @@ describe('BugCaseLifecycle', () => {
     ]
     snapshot.attempts = [{
       id: 'validation-multi-manual', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
-      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_locator_failed' },
-      parent_attempt_id: '', started_at: '', error_code: 'browser_locator_failed', error_message: '', usage: {},
+      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_capability_gap', manual_reproduction_gate: manualReproductionGate('validation-multi-manual') },
+      parent_attempt_id: '', started_at: '', error_code: 'browser_capability_gap', error_message: '', usage: {},
     }]
     snapshot.manual_reproduction_segments = [{
       frontend_entry_id: 'admin', frontend_entry_name: '管理端', start_url: 'https://admin.test/', final_url: 'https://admin.test/content',
@@ -601,6 +614,23 @@ describe('BugCaseLifecycle', () => {
     await wrapper.get('[data-manual-reproduction-submit]').trigger('click')
     await flushPromises()
     expect(wrapper.get('[role="dialog"]').text()).toContain('已完成 2 个端的手动复现采集')
+  })
+
+  it('does not offer manual reproduction for locator failure or an unproved capability gap', () => {
+    const snapshot = detail('waiting_evidence')
+    snapshot.case.current_attempt_id = 'validation-no-manual'
+    snapshot.attempts = [{
+      id: 'validation-no-manual', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
+      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_locator_failed' },
+      parent_attempt_id: '', started_at: '', error_code: 'browser_locator_failed', error_message: '', usage: {},
+    }]
+    const locator = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(locator.find('[data-browser-action="manual-reproduce"]').exists()).toBe(false)
+
+    snapshot.attempts[0].error_code = 'browser_capability_gap'
+    snapshot.attempts[0].output_json = { error_code: 'browser_capability_gap' }
+    const unprovedGap = mount(BugCaseLifecycle, { props: { detail: snapshot } })
+    expect(unprovedGap.find('[data-browser-action="manual-reproduce"]').exists()).toBe(false)
   })
 
   it('shows the Agent question and waits for a user answer before replanning', async () => {

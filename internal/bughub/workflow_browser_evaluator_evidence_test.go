@@ -274,8 +274,61 @@ func TestBrowserEvaluatorAttachesCurrentSearchActionScreenshotsBeforeHistoricalE
 	if len(attachments) != 3 {
 		t.Fatalf("attachments=%+v", attachments)
 	}
-	if !strings.Contains(prompt, fillRef.Path) || !strings.Contains(prompt, submitRef.Path) || !strings.Contains(prompt, "post-action screenshots attached after the final screenshot") {
+	if !strings.Contains(prompt, fillRef.Path) || !strings.Contains(prompt, submitRef.Path) || !strings.Contains(prompt, "Additional current-execution screenshots are attached after the final screenshot") {
 		t.Fatalf("prompt lacks ordered action screenshot manifest: %s", prompt)
+	}
+}
+
+func TestBrowserEvaluatorPrefersExplicitObservationOverAdjacentTransientSnapshots(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Bot.Target = "codex"
+	finalPixels := append(append([]byte(nil), browserPNGSignature...), []byte("settled-user-list")...)
+	finalRef, finalFrozen := frozenBrowserFixture(t, "screenshot", "browser-executions/repair-1/browser/final.png", finalPixels)
+	afterAuthorRef, afterAuthorFrozen := frozenBrowserFixture(t, "screenshot", "browser-executions/repair-1/browser/after-08-search-author.png", append(append([]byte(nil), browserPNGSignature...), []byte("author-loading")...))
+	authorObservationRef, authorObservationFrozen := frozenBrowserFixture(t, "screenshot", "browser-executions/repair-1/browser/action-09-capture-author-avatar.png", append(append([]byte(nil), browserPNGSignature...), []byte("author-settled")...))
+	afterUserRef, afterUserFrozen := frozenBrowserFixture(t, "screenshot", "browser-executions/repair-1/browser/after-15-search-user.png", append(append([]byte(nil), browserPNGSignature...), []byte("user-loading")...))
+	userObservationRef, userObservationFrozen := frozenBrowserFixture(t, "screenshot", "browser-executions/repair-1/browser/action-16-capture-user-avatar.png", finalPixels)
+	result := BrowserVerificationResult{Status: "completed", FinalScreenshotPath: finalRef.Path}
+
+	prompt, attachments, cleanup, err := browserEvaluatorPrompt(
+		request,
+		result,
+		[]BrowserArtifactReference{afterAuthorRef, authorObservationRef, afterUserRef, userObservationRef, finalRef},
+		[]browserFrozenArtifact{afterAuthorFrozen, authorObservationFrozen, afterUserFrozen, userObservationFrozen, finalFrozen},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := cleanup(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if len(attachments) != 2 || attachments[0].SHA256 != finalRef.SHA256 || attachments[1].SHA256 != authorObservationRef.SHA256 {
+		t.Fatalf("attachments=%+v", attachments)
+	}
+	for _, required := range []string{
+		`"reference_path":"` + authorObservationRef.Path + `"`,
+		`"evidence_role":"explicit_observation"`,
+		`"action_sequence":9`,
+		"later explicit observation",
+		"transient loading or placeholder state",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("evaluator prompt lacks settled-evidence rule %q:\n%s", required, prompt)
+		}
+	}
+	manifestStart := strings.Index(prompt, "Additional current-execution screenshots are attached after the final screenshot")
+	if manifestStart < 0 {
+		t.Fatalf("evaluator prompt lacks screenshot manifest boundaries:\n%s", prompt)
+	}
+	manifestEnd := strings.Index(prompt[manifestStart:], "The host attached the frozen final PNG")
+	if manifestEnd < 0 {
+		t.Fatalf("evaluator prompt lacks screenshot manifest boundaries:\n%s", prompt)
+	}
+	manifestSection := prompt[manifestStart : manifestStart+manifestEnd]
+	if strings.Contains(manifestSection, afterAuthorRef.Path) || strings.Contains(manifestSection, afterUserRef.Path) {
+		t.Fatalf("adjacent transient screenshots were attached beside later explicit observations:\n%s", manifestSection)
 	}
 }
 
@@ -328,8 +381,7 @@ func TestBrowserEvaluatorReservesEvidenceSlotsForLatestUserScreenshots(t *testin
 			t.Fatalf("evaluator prompt lost latest-evidence semantics %q:\n%s", required, prompt)
 		}
 	}
-	if !strings.Contains(prompt, `Additional current-execution post-action screenshots attached after the final screenshot, in this exact order (use them to verify that input persisted and submission changed the page; empty means none):
-["`+fillRef.Path+`"]`) || strings.Contains(prompt, `["`+fillRef.Path+`","`+submitRef.Path+`"]`) {
+	if !strings.Contains(prompt, `[{"action_sequence":2,"evidence_role":"automatic_post_action","reference_path":"`+fillRef.Path+`"}]`) || strings.Contains(prompt, `"reference_path":"`+submitRef.Path+`"`) {
 		t.Fatalf("execution screenshots did not leave two supplemental slots:\n%s", prompt)
 	}
 }
@@ -424,6 +476,63 @@ func TestPrepareBrowserEvaluatorEvidenceIncludesSanitizedResponseAssertions(t *t
 	}
 	if strings.Contains(structured, "chengzi") {
 		t.Fatalf("structured response assertion leaked a field value: %s", structured)
+	}
+}
+
+func TestPrepareBrowserEvaluatorEvidenceIncludesValueFreeStepEffects(t *testing.T) {
+	content := []byte(`[{
+		"action_id":"choose-author","action_type":"click","effect_status":"observed",
+		"scene_observed":true,"scene_changed":true,"url_changed":false,"surface_transition":"changed",
+		"before_surface":{"type":"dialog","name":"作者选择","modal":true},
+		"after_surface":{"type":"dialog","name":"视频编辑","modal":true}
+	},{
+		"action_id":"enter-name","action_type":"fill","effect_status":"observed",
+		"scene_observed":true,"scene_changed":true,"url_changed":false,"surface_transition":"unchanged",
+		"input_persisted":true
+	}]`)
+	_, structured, cleanup, err := prepareBrowserEvaluatorEvidence(BrowserVerificationResult{}, []browserFrozenArtifact{{Kind: "browser_step_effects", Content: content}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cleanup() }()
+	for _, expected := range []string{`"browser_step_effects"`, `"action_id":"choose-author"`, `"surface_transition":"changed"`, `"name":"视频编辑"`, `"input_persisted":true`} {
+		if !strings.Contains(structured, expected) {
+			t.Fatalf("structured step effect evidence lacks %s: %s", expected, structured)
+		}
+	}
+	for _, forbidden := range []string{"before-secret", "after-secret", "raw-input-value"} {
+		if strings.Contains(structured, forbidden) {
+			t.Fatalf("structured step effect evidence leaked %q: %s", forbidden, structured)
+		}
+	}
+}
+
+func TestPrepareBrowserEvaluatorEvidenceRejectsInconsistentStepEffects(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+	}{
+		{
+			name:    "changed transition without two surfaces",
+			content: `[{"action_id":"open","action_type":"click","effect_status":"observed","scene_observed":true,"scene_changed":true,"url_changed":false,"surface_transition":"changed","after_surface":{"type":"dialog","name":"编辑","modal":true}}]`,
+		},
+		{
+			name:    "input persistence on click",
+			content: `[{"action_id":"open","action_type":"click","effect_status":"observed","scene_observed":true,"scene_changed":true,"url_changed":false,"surface_transition":"unchanged","input_persisted":true}]`,
+		},
+		{
+			name:    "unobserved record contains scene facts",
+			content: `[{"action_id":"open","action_type":"click","effect_status":"unobserved","scene_observed":false,"scene_changed":true,"url_changed":false,"surface_transition":"unobserved"}]`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, cleanup, err := prepareBrowserEvaluatorEvidence(BrowserVerificationResult{}, []browserFrozenArtifact{{Kind: "browser_step_effects", Content: []byte(test.content)}})
+			if err == nil {
+				_ = cleanup()
+				t.Fatal("inconsistent browser step effect evidence was accepted")
+			}
+		})
 	}
 }
 

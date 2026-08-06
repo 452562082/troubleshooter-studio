@@ -6,6 +6,7 @@ import { connect as createNetworkConnection, isIP } from 'node:net';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
+import { createInterface as createReadlineInterface } from 'node:readline';
 import {
   chmod,
   mkdir,
@@ -19,7 +20,7 @@ import {
 import { boundedUTF8, redactConsoleText, safeResponseRecord, sanitizeURL } from './sanitize.mjs';
 
 const PROGRESS_PREFIX = 'TSHOOT_BROWSER_PROGRESS ';
-const ALLOWED_ACTIONS = new Set(['goto', 'click', 'fill', 'press', 'select', 'upload_file', 'wait_for', 'screenshot']);
+const ALLOWED_ACTIONS = new Set(['goto', 'click', 'fill', 'press', 'select', 'upload_file', 'wait_for', 'dismiss_surface', 'screenshot']);
 const ALLOWED_LOCATORS = new Set(['role', 'label', 'text', 'placeholder', 'test_id', 'css']);
 const ALLOWED_ASSERTIONS = new Set(['visible_text', 'not_visible_text', 'page_loaded']);
 const ALLOWED_RESPONSE_ASSERTIONS = new Set(['json_fields_not_equal', 'json_fields_equal', 'http_status_rejected']);
@@ -56,6 +57,7 @@ const EXECUTE_AUTH_MAX_API_SEMANTICS = 512;
 const EXECUTE_AUTH_MAX_ACTION_SCOPES = 64;
 const EXECUTE_AUTH_MAX_PENDING_REQUESTS = 2_048;
 const INTERACTION_LOCATOR_TIMEOUT_MS = 15_000;
+const NAVIGATION_TARGET_READINESS_TIMEOUT_MS = 60_000;
 const INTERACTION_LOCATOR_POLL_MS = 100;
 const INTERACTION_FALLBACK_MAX_CANDIDATES = 128;
 const INTERACTION_FALLBACK_MAX_SCANNED_PER_GROUP = 512;
@@ -161,7 +163,7 @@ const AUTOMATIC_RESPONSE_FACT_MAX_PAIRS = 64;
 const AUTOMATIC_RESPONSE_FACT_MAX_ARRAYS = 32;
 const AUTOMATIC_RESPONSE_FACT_MAX_COUNT_RELATIONS = 32;
 const SENSITIVE_BUSINESS_FIELD = /(?:password|passwd|secret|token|authorization|auth|cookie|session|api[_-]?key|private[_-]?key|access[_-]?key|captcha|otp)/i;
-const AUTH_ATTRIBUTED_ACTIONS = new Set(['click', 'fill', 'press', 'select', 'upload_file']);
+const AUTH_ATTRIBUTED_ACTIONS = new Set(['click', 'fill', 'press', 'select', 'upload_file', 'dismiss_surface']);
 const NETWORK_PROTOCOLS = new Set(['http:', 'https:', 'ws:', 'wss:']);
 const BROWSER_LAUNCH_ARGS = Object.freeze([
   '--disable-quic',
@@ -339,7 +341,7 @@ export function validateWorkerRequest(request) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('worker request must be an object');
   ownKeys(request, new Set(['mode', 'plan', 'policy', 'staging_dir', 'upload_files', 'storage_state_path', 'headless']), 'request');
 
-  if (!['execute', 'login', 'record'].includes(request.mode)) throw new Error('worker request mode is not supported');
+  if (!['execute', 'login', 'record', 'step_session'].includes(request.mode)) throw new Error('worker request mode is not supported');
   if (typeof request.headless !== 'boolean') throw new Error('headless must be boolean');
   validatePolicy(request.policy);
 
@@ -417,7 +419,7 @@ export function validateWorkerRequest(request) {
   const ids = new Map();
   for (const action of plan.actions) {
     if (!action || typeof action !== 'object' || Array.isArray(action)) throw new Error('browser action must be an object');
-    ownKeys(action, new Set(['id', 'action', 'locator', 'url', 'value', 'key', 'file_ref', 'screenshot_after']), 'action');
+    ownKeys(action, new Set(['id', 'action', 'locator', 'url', 'value', 'key', 'file_ref', 'state', 'timeout_ms', 'screenshot_after']), 'action');
     requiredString(action.id, 'action id', 256);
     if (ids.has(action.id)) throw new Error('action id is duplicated');
     ids.set(action.id, action.action);
@@ -431,6 +433,12 @@ export function validateWorkerRequest(request) {
       && action.locator === undefined
       && typeof action.key === 'string'
       && action.key.trim().toLowerCase() === 'escape';
+    if (action.action === 'dismiss_surface' && request.plan.version !== 2) {
+      throw new Error('dismiss_surface requires plan version 2');
+    }
+    if (action.action === 'dismiss_surface' && action.screenshot_after !== undefined) {
+      throw new Error('dismiss_surface screenshot_after is forbidden');
+    }
     const locatorActions = new Set(['click', 'fill', 'press', 'select', 'upload_file', 'wait_for']);
     if (locatorActions.has(action.action)) {
       if (!locatorFreeEscape) {
@@ -457,6 +465,17 @@ export function validateWorkerRequest(request) {
       const fileRef = requiredString(action.file_ref, 'upload file_ref', 256);
       if (!Object.hasOwn(uploadFiles, fileRef)) throw new Error('upload file_ref is not host-controlled');
     } else if (action.file_ref !== undefined) throw new Error(`${action.action} file_ref is forbidden`);
+    if (action.action === 'wait_for') {
+      if (action.state !== undefined && !['visible', 'hidden'].includes(action.state)) throw new Error('wait_for state must be visible or hidden');
+      if (action.timeout_ms !== undefined && (!Number.isInteger(action.timeout_ms) || action.timeout_ms < 1 || action.timeout_ms > 60_000)) {
+        throw new Error('wait_for timeout_ms must be between 1 and 60000');
+      }
+      if ((action.state !== undefined || action.timeout_ms !== undefined) && request.plan.version !== 2) {
+        throw new Error('wait_for state and timeout_ms require plan version 2');
+      }
+    } else if (action.state !== undefined || action.timeout_ms !== undefined) {
+      throw new Error(`${action.action} state and timeout_ms are forbidden`);
+    }
   }
   for (const assertion of plan.assertions) {
     if (!assertion || typeof assertion !== 'object' || Array.isArray(assertion)) throw new Error('assertion must be an object');
@@ -474,7 +493,7 @@ export function validateWorkerRequest(request) {
     requestCaptureIDs.add(capture.id);
     requiredString(capture.action_id, 'request capture action_id', 256);
     if (!ids.has(capture.action_id)) throw new Error('request capture action_id does not reference an action');
-    if (ids.get(capture.action_id) === 'screenshot' || ids.get(capture.action_id) === 'wait_for') throw new Error('request capture action_id must reference a request-capable action');
+		if (ids.get(capture.action_id) === 'screenshot' || ids.get(capture.action_id) === 'wait_for' || ids.get(capture.action_id) === 'dismiss_surface') throw new Error('request capture action_id must reference a request-capable action');
 		requestCaptureActionIDs.add(capture.action_id);
     if (capture.url_contains !== undefined) requiredString(capture.url_contains, 'request capture url_contains', 2048);
     if (capture.method !== undefined && !/^[A-Z][A-Z0-9!#$%&'*+.^_`|~-]{0,15}$/.test(capture.method)) throw new Error('request capture method is invalid');
@@ -498,7 +517,7 @@ export function validateWorkerRequest(request) {
     responseAssertionIDs.add(assertion.id);
     requiredString(assertion.action_id, 'response assertion action_id', 256);
     if (!ids.has(assertion.action_id)) throw new Error('response assertion action_id does not reference an action');
-    if (ids.get(assertion.action_id) === 'screenshot' || ids.get(assertion.action_id) === 'wait_for') throw new Error('response assertion action_id must reference a request-capable action');
+		if (ids.get(assertion.action_id) === 'screenshot' || ids.get(assertion.action_id) === 'wait_for' || ids.get(assertion.action_id) === 'dismiss_surface') throw new Error('response assertion action_id must reference a request-capable action');
     if (assertion.url_contains !== undefined) requiredString(assertion.url_contains, 'response assertion url_contains', 2048);
     if (assertion.method !== undefined && !/^[A-Z][A-Z0-9!#$%&'*+.^_`|~-]{0,15}$/.test(assertion.method)) throw new Error('response assertion method is invalid');
     if (!ALLOWED_RESPONSE_ASSERTIONS.has(assertion.kind)) throw new Error('response assertion kind is not supported');
@@ -1021,6 +1040,15 @@ export async function assertAllowedURL(raw, policy, lookup = dnsLookup) {
   return (await resolvePinnedTarget(raw, policy, lookup, new Set(['http:', 'https:']))).parsed;
 }
 
+// Browser applications may legitimately fetch scripts, images, fonts, API
+// responses, and websocket data from public origins that were not known when
+// the application entry was configured. Those subresources remain subject to
+// scheme, credential, DNS-rebinding, metadata, link-local, and private-network
+// checks; only the public-origin allowlist requirement is relaxed.
+export async function assertSafeResourceURL(raw, policy, lookup = dnsLookup, allowedProtocols = new Set(['http:', 'https:'])) {
+  return (await resolvePinnedTarget(raw, policy, lookup, allowedProtocols, { allowUnlistedPublicOrigin: true })).parsed;
+}
+
 function proxyClosingError() {
   const error = new Error('browser proxy is closing');
   error.code = 'ABORT_ERR';
@@ -1057,14 +1085,14 @@ export async function resolvePinnedTarget(
   policy,
   lookup = dnsLookup,
   allowedProtocols = NETWORK_PROTOCOLS,
-  { signal, resolveTimeoutMs = PROXY_RESOLVE_TIMEOUT_MS } = {},
+  { signal, resolveTimeoutMs = PROXY_RESOLVE_TIMEOUT_MS, allowUnlistedPublicOrigin = false } = {},
 ) {
   validatePolicy(policy);
   throwIfProxyClosing(signal);
   const { parsed, host } = parseNetworkURL(raw, allowedProtocols);
   const policyOrigin = policyOriginForNetworkURL(parsed);
   const allowedOrigins = new Set([...policy.allowed_origins, ...policy.auth_origins].map(normalizeOrigin));
-  if (!allowedOrigins.has(policyOrigin)) throw new Error('URL origin is not allowed');
+  if (!allowedOrigins.has(policyOrigin) && !allowUnlistedPublicOrigin) throw new Error('URL origin is not allowed');
   const privateOrigins = new Set(policy.private_origins.map(normalizeOrigin));
   let addresses;
   if (isIP(host)) addresses = [{ address: host, family: isIP(host) }];
@@ -1351,7 +1379,7 @@ export async function startPinnedProxy(policy, {
     policy,
     lookup,
     protocols,
-    { signal: shutdown.signal, resolveTimeoutMs },
+    { signal: shutdown.signal, resolveTimeoutMs, allowUnlistedPublicOrigin: true },
   );
   const dialTarget = (target) => dialPinnedTarget(target, dial, {
     signal: shutdown.signal,
@@ -1568,14 +1596,15 @@ export async function createSupervisedBrowserContext(browser, {
     await context.route('**/*', async (route) => {
       const browserRequest = route.request();
       try {
-        await assertAllowedURL(browserRequest.url(), policy, lookup);
+        if (isTopLevelNavigationRequest(browserRequest)) {
+          await assertAllowedURL(browserRequest.url(), policy, lookup);
+        } else {
+          await assertSafeResourceURL(browserRequest.url(), policy, lookup);
+        }
         await route.continue();
       } catch {
-        // Keep every unapproved request blocked, but only a denied top-level
-        // navigation invalidates the whole validation. Modern applications
-        // commonly issue optional CDN, telemetry, or endpoint-discovery
-        // requests; aborting one must not turn an otherwise usable page into
-        // a browser system failure.
+        // Public cross-origin subresources are accepted above. Only an unsafe
+        // scheme/address or a denied top-level navigation reaches this branch.
         if (isTopLevelNavigationRequest(browserRequest)) blockedNavigation = true;
         await route.abort('blockedbyclient');
       }
@@ -1587,7 +1616,7 @@ export async function createSupervisedBrowserContext(browser, {
         webSocketRoute.close();
         return;
       }
-      await resolvePinnedTarget(webSocketRoute.url(), policy, lookup, new Set(['ws:', 'wss:']));
+      await assertSafeResourceURL(webSocketRoute.url(), policy, lookup, new Set(['ws:', 'wss:']));
       webSocketRoute.connectToServer();
     } catch {
       webSocketRoute.close();
@@ -1702,13 +1731,15 @@ function interactionCandidateScore(action, snapshot) {
     .map(normalizedInteractionText)
     .filter(Boolean);
   if (names.includes(hint)) return score + 60;
-  if (names.some((name) => name.includes(hint) || hint.includes(name))) return score + 25;
   // Component libraries may split short CJK labels across nested spans or
-  // insert layout whitespace. Keep recovery deterministic by accepting the
-  // compact form only through the existing unique-best-candidate gate.
+  // insert layout whitespace. exact:true still means the entire normalized
+  // name must match; it must never recover "内容信息" to a focusable wrapper
+  // whose combined text is "内容信息 分集信息" and click the wrong sibling tab.
   const compactHint = compactInteractionText(hint);
   const compactNames = names.map(compactInteractionText).filter(Boolean);
   if (compactHint && compactNames.includes(compactHint)) return score + 55;
+  if (action.locator?.exact === true) return -1;
+  if (names.some((name) => name.includes(hint) || hint.includes(name))) return score + 25;
   if (compactHint && compactNames.some((name) => name.includes(compactHint) || compactHint.includes(name))) return score + 20;
   return -1;
 }
@@ -1858,9 +1889,13 @@ export async function resolveActiveInteractionScope(page) {
     if (snapshot) ranked.push(snapshot);
   }
   ranked.sort((left, right) => Number(right.modalSemantic) - Number(left.modalSemantic)
-    || right.visibleControls - left.visibleControls
+    // Nested modal editors leave the larger parent dialog visible and often
+    // give it many more controls than the foreground picker. Geometry is the
+    // stable containment signal here; control count describes complexity, not
+    // stacking order. Prefer the more specific surface before DOM order.
     || left.area - right.area
-    || right.index - left.index);
+    || right.index - left.index
+    || right.visibleControls - left.visibleControls);
   return ranked[0]?.candidate ?? page;
 }
 
@@ -2197,7 +2232,10 @@ export async function resolveObservedInteractionLocator(page, action) {
   ranked.sort((left, right) => right.score - left.score);
   if (ranked.length === 0) {
     const textHint = interactionLocatorHint(action?.locator);
-    if (textHint && ['click', 'wait_for'].includes(actionName) && typeof root.getByText === 'function') {
+    // A plain text node is valid passive evidence for wait_for, but it is not
+    // enough authority for a state-changing click. Click recovery must come
+    // from one observed interactive control ranked above.
+    if (textHint && actionName === 'wait_for' && typeof root.getByText === 'function') {
       const textMatches = root.getByText(textHint, { exact: true });
       const visible = [];
       const count = Math.min(await textMatches.count().catch(() => 0), INTERACTION_FALLBACK_MAX_CANDIDATES);
@@ -2797,6 +2835,435 @@ export async function accessibilitySummary(page) {
   return result;
 }
 
+const BROWSER_SCENE_MAX_SCANNED_ELEMENTS = 1024;
+const BROWSER_SCENE_MAX_ELEMENTS = 128;
+const BROWSER_SCENE_MAX_SCANNED_TEXT_BLOCKS = 512;
+const BROWSER_SCENE_MAX_TEXT_BLOCKS = 64;
+const BROWSER_SCENE_COLLECTION_BUDGET_MS = 3_000;
+const BROWSER_SCENE_ELEMENT_BATCH_SIZE = 8;
+const BROWSER_SCENE_ELEMENT_SELECTOR = [
+  'button', 'a', 'input:not([type="hidden"]):not([type="password"])', 'select', 'textarea',
+  '[contenteditable="true"]', '[role="button"]', '[role="link"]', '[role="tab"]',
+  '[role="menuitem"]', '[role="option"]', '[role="checkbox"]', '[role="radio"]',
+  '[role="switch"]', '[role="combobox"]', '[role="textbox"]', '[role="searchbox"]',
+  '[onclick]', '[tabindex]:not([tabindex="-1"])', '[data-testid]',
+].join(',');
+const BROWSER_SCENE_TEXT_SELECTOR = 'h1,h2,h3,h4,h5,h6,p,li,td,th,[role="heading"],[role="status"],[role="alert"]';
+
+function boundedSceneText(value, limit = 1024) {
+  return boundedUTF8(redactConsoleText(String(value || '').normalize('NFKC').replace(/\s+/gu, ' ').trim()), limit);
+}
+
+function sceneImplicitRole(tag, type, explicitRole) {
+  if (explicitRole) return explicitRole;
+  if (tag === 'button') return 'button';
+  if (tag === 'a') return 'link';
+  if (tag === 'select') return 'combobox';
+  if (tag === 'textarea') return 'textbox';
+  if (tag === 'input') {
+    if (type === 'search') return 'searchbox';
+    if (type === 'checkbox') return 'checkbox';
+    if (type === 'radio') return 'radio';
+    if (['', 'text', 'email', 'url', 'tel', 'number'].includes(type)) return 'textbox';
+  }
+  return '';
+}
+
+function sceneElementIsInteractive(snapshot) {
+  if (snapshot.type === 'hidden' || snapshot.type === 'password') return false;
+  if (['button', 'a', 'input', 'select', 'textarea'].includes(snapshot.tag)) return true;
+  if (snapshot.contentEditable || snapshot.programmaticClick) return true;
+  return ['button', 'link', 'tab', 'menuitem', 'option', 'checkbox', 'radio', 'switch', 'combobox', 'textbox', 'searchbox']
+    .includes(snapshot.role);
+}
+
+function sceneBox(raw) {
+  const box = raw || {};
+  return {
+    x: Math.max(-10000, Math.min(20000, Math.round(Number(box.x) || 0))),
+    y: Math.max(-10000, Math.min(20000, Math.round(Number(box.y) || 0))),
+    width: Math.max(1, Math.min(10000, Math.round(Number(box.width) || 1))),
+    height: Math.max(1, Math.min(10000, Math.round(Number(box.height) || 1))),
+  };
+}
+
+export function sceneElementFromSnapshot(snapshot, index, surfaceRef, pageURL) {
+  const role = sceneImplicitRole(snapshot.tag, snapshot.type, snapshot.role);
+  if (!role || !sceneElementIsInteractive({ ...snapshot, role })) return null;
+  const label = boundedSceneText(snapshot.label);
+  const placeholder = boundedSceneText(snapshot.placeholder);
+  const name = boundedSceneText(snapshot.ariaLabel || snapshot.labelledBy || label || placeholder || snapshot.title || snapshot.alt || snapshot.text);
+  let sameOriginHref = '';
+  if (snapshot.href) {
+    try {
+      const current = new URL(pageURL);
+      const target = new URL(snapshot.href, current);
+      if (['http:', 'https:'].includes(target.protocol) && target.origin === current.origin) sameOriginHref = target.href;
+    } catch {
+      sameOriginHref = '';
+    }
+  }
+  return {
+    ref: `e-${index + 1}`,
+    frame_ref: 'f-main',
+    ...(surfaceRef ? { surface_ref: surfaceRef } : {}),
+    role: boundedSceneText(role, 128),
+    name,
+    tag: boundedSceneText(snapshot.tag, 32),
+    locator_hints: {
+      ...(snapshot.testID ? { test_id: boundedSceneText(snapshot.testID, 256) } : {}),
+      ...(label ? { label } : {}),
+      ...(placeholder ? { placeholder } : {}),
+      ...(sameOriginHref ? { same_origin_href: sameOriginHref } : {}),
+    },
+    states: {
+      visible: true,
+      in_viewport: Boolean(snapshot.inViewport),
+      enabled: !snapshot.disabled,
+      editable: Boolean(snapshot.editable),
+      obscured: Boolean(snapshot.obscured),
+    },
+    bbox: sceneBox(snapshot.box),
+    relations: {
+      ...(snapshot.rowName ? { row_name: boundedSceneText(snapshot.rowName) } : {}),
+      ...(snapshot.groupName ? { group_name: boundedSceneText(snapshot.groupName) } : {}),
+    },
+  };
+}
+
+async function sceneLocatorTag(candidate) {
+  for (const tag of ['button', 'a', 'input', 'select', 'textarea']) {
+    if (await candidate.locator(`xpath=self::${tag}`).count().catch(() => 0) === 1) return tag;
+  }
+  return '';
+}
+
+async function sceneLabelledByText(page, value) {
+  const labels = [];
+  for (const rawID of String(value || '').split(/\s+/).filter(Boolean).slice(0, 8)) {
+    const id = rawID.replace(/[^A-Za-z0-9_-]/g, '');
+    if (!id) continue;
+    const text = await page.locator(`[id="${id}"]`).textContent().catch(() => '');
+    if (text) labels.push(text);
+  }
+  return labels.join(' ');
+}
+
+async function sceneElementSnapshot(page, candidate) {
+  const [
+    tag, type, role, ariaLabel, labelledBy, placeholder, title, alt, text, testID, href,
+    contentEditable, onclick, tabindex, ariaDisabled, disabled, editable, box, rowName, groupLabel, groupName,
+  ] = await Promise.all([
+    sceneLocatorTag(candidate),
+    candidate.getAttribute('type').catch(() => ''),
+    candidate.getAttribute('role').catch(() => ''),
+    candidate.getAttribute('aria-label').catch(() => ''),
+    candidate.getAttribute('aria-labelledby').catch(() => ''),
+    candidate.getAttribute('placeholder').catch(() => ''),
+    candidate.getAttribute('title').catch(() => ''),
+    candidate.getAttribute('alt').catch(() => ''),
+    candidate.innerText().catch(() => candidate.textContent().catch(() => '')),
+    candidate.getAttribute('data-testid').catch(() => ''),
+    candidate.getAttribute('href').catch(() => ''),
+    candidate.getAttribute('contenteditable').catch(() => ''),
+    candidate.getAttribute('onclick').catch(() => ''),
+    candidate.getAttribute('tabindex').catch(() => ''),
+    candidate.getAttribute('aria-disabled').catch(() => ''),
+    candidate.isDisabled().catch(() => false),
+    candidate.isEditable().catch(() => false),
+    candidate.boundingBox().catch(() => null),
+    candidate.locator('xpath=ancestor::*[@role="row" or self::tr][1]').innerText().catch(() => ''),
+    candidate.locator('xpath=ancestor::*[@role="group" or @role="region" or self::fieldset][1]').getAttribute('aria-label').catch(() => ''),
+    candidate.locator('xpath=ancestor::*[@role="group" or @role="region" or self::fieldset][1]').innerText().catch(() => ''),
+  ]);
+  const viewport = page.viewportSize?.() || { width: 0, height: 0 };
+  const inViewport = interactionBoxIntersectsViewport(box, viewport);
+  return {
+    tag,
+    type: String(type || '').toLowerCase(),
+    role: String(role || '').toLowerCase(),
+    ariaLabel,
+    labelledBy: await sceneLabelledByText(page, labelledBy),
+    label: '',
+    placeholder,
+    title,
+    alt,
+    text,
+    testID,
+    href,
+    contentEditable: String(contentEditable || '').toLowerCase() === 'true',
+    programmaticClick: Boolean(onclick || (tabindex !== null && tabindex !== '' && tabindex !== '-1')),
+    disabled: disabled || String(ariaDisabled || '').toLowerCase() === 'true',
+    editable,
+    inViewport,
+    // Obstruction is verified by the existing actionability guard immediately
+    // before execution; the scene collector does not run page-authored script.
+    obscured: false,
+    box,
+    rowName,
+    groupName: groupLabel || groupName,
+  };
+}
+
+async function activeSceneSurface(page, root) {
+  if (root === page) return null;
+  const [role, ariaModal, ariaLabel, labelledBy, className, text] = await Promise.all([
+    root.getAttribute('role').catch(() => ''),
+    root.getAttribute('aria-modal').catch(() => ''),
+    root.getAttribute('aria-label').catch(() => ''),
+    root.getAttribute('aria-labelledby').catch(() => ''),
+    root.getAttribute('class').catch(() => ''),
+    root.innerText().catch(() => ''),
+  ]);
+  const labelledText = await sceneLabelledByText(page, labelledBy);
+  const normalizedRole = String(role || '').toLowerCase();
+  const classes = String(className || '').toLowerCase();
+  const type = normalizedRole === 'alertdialog' ? 'alertdialog'
+    : normalizedRole === 'dialog' ? 'dialog'
+      : classes.includes('drawer') ? 'drawer'
+        : classes.includes('popover') || classes.includes('popup') ? 'popover'
+          : 'region';
+  return {
+    ref: 's-active',
+    type,
+    name: boundedSceneText(ariaLabel || labelledText || text),
+    modal: String(ariaModal || '').toLowerCase() === 'true' || type === 'dialog' || type === 'alertdialog',
+  };
+}
+
+async function sceneTextBlockSnapshot(candidate) {
+  const [text, box] = await Promise.all([
+    candidate.innerText().catch(() => candidate.textContent().catch(() => '')),
+    candidate.boundingBox().catch(() => null),
+  ]);
+  return { text, box };
+}
+
+export async function browserScene(page, deviceProfile = 'desktop') {
+  const deadline = Date.now() + BROWSER_SCENE_COLLECTION_BUDGET_MS;
+  const root = await resolveActiveInteractionScope(page);
+  const activeSurface = await activeSceneSurface(page, root);
+  const surfaceRef = activeSurface?.ref || '';
+  const elements = [];
+  const candidates = root.locator(BROWSER_SCENE_ELEMENT_SELECTOR);
+  const candidateCount = Math.min(await candidates.count().catch(() => 0), BROWSER_SCENE_MAX_SCANNED_ELEMENTS);
+  for (let start = 0; start < candidateCount && elements.length < BROWSER_SCENE_MAX_ELEMENTS; start += BROWSER_SCENE_ELEMENT_BATCH_SIZE) {
+    if (Date.now() >= deadline) break;
+    const batch = Array.from(
+      { length: Math.min(BROWSER_SCENE_ELEMENT_BATCH_SIZE, candidateCount - start) },
+      (_, offset) => candidates.nth(start + offset),
+    );
+    const snapshots = await Promise.all(batch.map(async (candidate) => {
+      if (!await candidate.isVisible().catch(() => false)) return null;
+      return sceneElementSnapshot(page, candidate).catch(() => null);
+    }));
+    for (const snapshot of snapshots) {
+      if (!snapshot || !snapshot.inViewport || elements.length >= BROWSER_SCENE_MAX_ELEMENTS) continue;
+      const element = sceneElementFromSnapshot(snapshot, elements.length, surfaceRef, page.url());
+      if (element) elements.push(element);
+    }
+  }
+  const textBlocks = [];
+  const seenText = new Set();
+  const textCandidates = root.locator(BROWSER_SCENE_TEXT_SELECTOR);
+  const textCount = Math.min(await textCandidates.count().catch(() => 0), BROWSER_SCENE_MAX_SCANNED_TEXT_BLOCKS);
+  for (let index = 0; index < textCount && textBlocks.length < BROWSER_SCENE_MAX_TEXT_BLOCKS; index += 1) {
+    if (Date.now() >= deadline) break;
+    const candidate = textCandidates.nth(index);
+    if (!await candidate.isVisible().catch(() => false)) continue;
+    const snapshot = await sceneTextBlockSnapshot(candidate).catch(() => null);
+    const text = boundedSceneText(snapshot?.text);
+    if (!text || seenText.has(text) || !interactionBoxIntersectsViewport(snapshot?.box, page.viewportSize?.())) continue;
+    seenText.add(text);
+    textBlocks.push({
+      ref: `t-${textBlocks.length + 1}`,
+      ...(surfaceRef ? { surface_ref: surfaceRef } : {}),
+      text,
+      bbox: sceneBox(snapshot.box),
+    });
+  }
+  const current = new URL(page.url());
+  const frames = [];
+  const mainFrame = page.mainFrame();
+  const orderedFrames = [mainFrame, ...page.frames().filter((frame) => frame !== mainFrame)].slice(0, 16);
+  for (const [index, frame] of orderedFrames.entries()) {
+    const rawURL = frame.url();
+    let sameOrigin = false;
+    let safeURL = '';
+    try {
+      const parsed = new URL(rawURL);
+      if (['http:', 'https:'].includes(parsed.protocol)) {
+        sameOrigin = parsed.origin === current.origin;
+        safeURL = sameOrigin ? parsed.href : '';
+      }
+    } catch {
+      safeURL = '';
+    }
+    frames.push({ ref: index === 0 ? 'f-main' : `f-${index + 1}`, ...(safeURL ? { url: safeURL } : {}), same_origin: sameOrigin });
+  }
+  if (frames.length === 0) frames.push({ ref: 'f-main', url: page.url(), same_origin: true });
+  const viewport = page.viewportSize?.() || { width: 1280, height: 720 };
+  return {
+    version: 1,
+    scene_id: '',
+    scene_sha256: '',
+    attempt_id: '',
+    captured_at: new Date().toISOString(),
+    url: page.url(),
+    title: boundedSceneText(await page.title().catch(() => '')),
+    device_profile: deviceProfile === 'mobile' ? 'mobile' : 'desktop',
+    viewport: { width: Math.max(1, Math.round(viewport.width)), height: Math.max(1, Math.round(viewport.height)) },
+    ...(activeSurface ? { active_surface: activeSurface } : {}),
+    frames,
+    elements,
+    text_blocks: textBlocks,
+    capabilities: {
+      dom: 'available',
+      accessibility: 'partial',
+      screenshot: 'available',
+      vision_grounding: 'disabled',
+      frame_observation: 'main_only',
+    },
+  };
+}
+
+async function safeBrowserScene(page, deviceProfile) {
+  try {
+    return await browserScene(page, deviceProfile);
+  } catch {
+    return undefined;
+  }
+}
+
+function browserSceneEffectIdentity(scene) {
+  if (!scene) return '';
+  const copy = structuredClone(scene);
+  copy.scene_id = '';
+  copy.scene_sha256 = '';
+  copy.attempt_id = '';
+  copy.captured_at = '';
+  copy.url = sanitizeURL(copy.url);
+  for (const frame of copy.frames || []) frame.url = sanitizeURL(frame.url || '');
+  for (const element of copy.elements || []) {
+    if (element.locator_hints?.same_origin_href) {
+      element.locator_hints.same_origin_href = sanitizeURL(element.locator_hints.same_origin_href);
+    }
+  }
+  return createHash('sha256').update(JSON.stringify(copy)).digest('hex');
+}
+
+function browserSceneEffectSurface(surface) {
+  if (!surface) return null;
+  return {
+    type: boundedSceneText(surface.type, 32),
+    name: boundedSceneText(surface.name, 512),
+    modal: Boolean(surface.modal),
+  };
+}
+
+export function browserStepEffectRecord(action, before, after, receipt = {}, errorCode = '') {
+  const sceneObserved = Boolean(before && after);
+  const beforeSurface = browserSceneEffectSurface(before?.active_surface);
+  const afterSurface = browserSceneEffectSurface(after?.active_surface);
+  let surfaceTransition = 'unobserved';
+  if (sceneObserved) {
+    if (!beforeSurface && afterSurface) surfaceTransition = 'opened';
+    else if (beforeSurface && !afterSurface) surfaceTransition = 'closed';
+    else if (!isDeepStrictEqual(beforeSurface, afterSurface)) surfaceTransition = 'changed';
+    else surfaceTransition = 'unchanged';
+  }
+  const blocked = Boolean(errorCode);
+  return {
+    action_id: boundedSceneText(action?.id, 128),
+    action_type: boundedSceneText(action?.action, 32),
+    effect_status: blocked ? 'blocked' : sceneObserved ? 'observed' : 'unobserved',
+    scene_observed: sceneObserved,
+    scene_changed: sceneObserved && browserSceneEffectIdentity(before) !== browserSceneEffectIdentity(after),
+    url_changed: sceneObserved && before.url !== after.url,
+    surface_transition: surfaceTransition,
+    ...(beforeSurface ? { before_surface: beforeSurface } : {}),
+    ...(afterSurface ? { after_surface: afterSurface } : {}),
+    ...(receipt.inputPersisted !== undefined ? { input_persisted: Boolean(receipt.inputPersisted) } : {}),
+    ...(receipt.selectionPersisted !== undefined ? { selection_persisted: Boolean(receipt.selectionPersisted) } : {}),
+    ...(blocked ? { error_code: boundedSceneText(errorCode, 128) } : {}),
+  };
+}
+
+function browserStepSessionElementLocator(element) {
+  const within = element?.relations?.row_name
+    ? { kind: 'role', value: 'row', name: element.relations.row_name, exact: true }
+    : undefined;
+  const withScope = (locator) => within ? { ...locator, within } : locator;
+  if (element?.locator_hints?.test_id) {
+    return withScope({ kind: 'test_id', value: element.locator_hints.test_id });
+  }
+  if (element?.locator_hints?.label) {
+    return withScope({ kind: 'label', value: element.locator_hints.label, exact: true });
+  }
+  if (element?.locator_hints?.placeholder) {
+    return withScope({ kind: 'placeholder', value: element.locator_hints.placeholder, exact: true });
+  }
+  if (element?.role && element?.name) {
+    return withScope({ kind: 'role', value: element.role, name: element.name, exact: true });
+  }
+  throw new Error('browser step target lacks a stable semantic locator');
+}
+
+function browserStepSessionTarget(scene, action, elementRef) {
+  const matches = (scene?.elements ?? []).filter((element) => element.ref === elementRef);
+  if (matches.length !== 1) throw new BrowserInteractionError('browser_scene_stale', 'browser step element ref is stale');
+  const element = matches[0];
+  if (element.frame_ref !== 'f-main' || !element.states?.visible || !element.states?.in_viewport) {
+    throw new BrowserInteractionError('browser_scene_stale', 'browser step target left the main-frame viewport');
+  }
+  if (scene.active_surface && element.surface_ref !== scene.active_surface.ref) {
+    throw new BrowserInteractionError('browser_scene_stale', 'browser step target left the active surface');
+  }
+  if (!scene.active_surface && element.surface_ref) {
+    throw new BrowserInteractionError('browser_scene_stale', 'browser step target surface is inactive');
+  }
+  if (action.action === 'fill') {
+    if (!element.states.enabled || !element.states.editable || element.states.obscured) throw new BrowserInteractionError('browser_scene_stale', 'browser fill target is no longer editable');
+  } else if (action.action === 'select') {
+    if (!element.states.enabled || element.states.obscured || (element.role !== 'combobox' && element.tag !== 'select')) throw new BrowserInteractionError('browser_scene_stale', 'browser select target is no longer actionable');
+  } else if (action.action === 'upload_file') {
+    if (!element.states.enabled || element.states.obscured || (element.tag !== 'input' && element.role !== 'button')) throw new BrowserInteractionError('browser_scene_stale', 'browser upload target is no longer actionable');
+  } else if (action.action !== 'wait_for' && (!element.states.enabled || element.states.obscured)) {
+    throw new BrowserInteractionError('browser_scene_stale', 'browser step target is no longer actionable');
+  }
+  return element;
+}
+
+export function bindBrowserStepSessionCommand(request, scene, command) {
+  if (!command || typeof command !== 'object' || Array.isArray(command)) throw new Error('browser step command must be an object');
+  ownKeys(command, new Set(['command', 'sequence', 'scene_id', 'action_id', 'action_type', 'element_ref', 'passive_checks']), 'browser step command');
+  if (command.command !== 'step') throw new Error('browser step command kind is invalid');
+  if (!Number.isSafeInteger(command.sequence) || command.sequence < 1 || command.sequence > 40) throw new Error('browser step sequence is invalid');
+  requiredString(command.scene_id, 'browser step scene_id', 128);
+  const actionID = requiredString(command.action_id, 'browser step action_id', 256);
+  const actionType = requiredString(command.action_type, 'browser step action_type', 32);
+  if (!Array.isArray(command.passive_checks) || command.passive_checks.length > 2 || command.passive_checks.some((check) => check !== 'screenshot')) {
+    throw new Error('browser step passive checks are invalid');
+  }
+  const actions = request.plan.actions.filter((candidate) => candidate.id === actionID);
+  if (actions.length !== 1 || actions[0].action !== actionType) throw new Error('browser step action does not match the frozen plan');
+  const action = structuredClone(actions[0]);
+  const locatorAction = new Set(['click', 'fill', 'press', 'select', 'upload_file', 'wait_for']).has(action.action);
+  const locatorFreeEscape = action.action === 'press' && action.locator === undefined && String(action.key || '').trim().toLowerCase() === 'escape';
+	const dismissSurface = action.action === 'dismiss_surface';
+  let target = null;
+  if (locatorAction && !locatorFreeEscape) {
+    const elementRef = requiredString(command.element_ref, 'browser step element_ref', 128);
+    target = browserStepSessionTarget(scene, action, elementRef);
+    action.locator = browserStepSessionElementLocator(target);
+  } else if (command.element_ref !== undefined) {
+    throw new Error('browser step element_ref is forbidden for the frozen action');
+  }
+  if (locatorFreeEscape && !scene.active_surface) throw new BrowserInteractionError('browser_scene_stale', 'browser step Escape requires an active surface');
+	if (dismissSurface && !scene.active_surface) throw new BrowserInteractionError('browser_scene_stale', 'browser step dismiss_surface requires an active surface');
+  return { action, target };
+}
+
 const CANONICAL_PRESS_KEYS = new Map([
   ['enter', 'Enter'],
   ['escape', 'Escape'],
@@ -3008,21 +3475,40 @@ export async function recoverActiveSurfaceDismissal(page, preferredLocator) {
 }
 
 export async function pressGlobalEscapeToDismissSurface(page) {
+	return dismissActiveSurface(page);
+}
+
+// dismiss_surface is a semantic Host-owned operation. The frozen plan grants
+// permission to close exactly the current foreground surface, while the
+// trusted worker chooses a bounded mechanism from the live DOM. This keeps
+// Escape, explicit close buttons and close glyphs out of Agent-authored plans.
+export async function dismissActiveSurface(page) {
   const surface = await resolveActiveInteractionScope(page);
   if (!surface || surface === page) {
-    throw new BrowserInteractionError('active_surface_not_found', 'global Escape requires an active dialog, drawer, or popover');
-  }
-  if (typeof page.keyboard?.press !== 'function') {
-    throw new BrowserInteractionError('active_surface_dismissal_failed', 'active surface does not support global Escape');
+	throw new BrowserInteractionError('active_surface_not_found', 'dismiss_surface requires an active dialog, drawer, or popover');
   }
   const surfaceIdentity = await freezeInteractionSurface(surface);
+  let safeDismissals = 0;
   try {
-    await page.keyboard.press('Escape');
-    if (!await activeSurfaceWasDismissed(page, surfaceIdentity)) {
-      throw new BrowserInteractionError('active_surface_dismissal_failed', 'active surface remained visible after global Escape');
-    }
+	if (typeof page.keyboard?.press === 'function') {
+	  try {
+		await page.keyboard.press('Escape');
+		if (await activeSurfaceWasDismissed(page, surfaceIdentity)) return;
+	  } catch {
+		// Continue to the worker-owned exact safe-close candidate below.
+	  }
+	}
+	safeDismissals = await dismissSafeDOMObstructions(page, { maxDismissals: 1, settleMs: SAFE_DISMISS_SETTLE_MS });
+	// Escape and framework close buttons commonly start an asynchronous leave
+	// transition. The first bounded observation can therefore see the original
+	// shell while it is already closing. Always make one final settled identity
+	// check, even when no safe close candidate was needed or found.
+	if (await activeSurfaceWasDismissed(page, surfaceIdentity)) {
+	  return;
+	}
+	throw new BrowserInteractionError('active_surface_dismissal_failed', `active surface remained visible after bounded dismissal strategies (safe_dismissals=${safeDismissals})`);
   } finally {
-    await releaseInteractionSurface(surface, surfaceIdentity);
+	await releaseInteractionSurface(surface, surfaceIdentity);
   }
 }
 
@@ -3040,6 +3526,34 @@ async function reusableInteractionBinding(binding, action, index) {
   return binding.locator;
 }
 
+export async function waitForLocatorState(page, locator, state = 'visible', timeoutMs = INTERACTION_LOCATOR_TIMEOUT_MS) {
+  if (state === 'visible') {
+    await locator.first().waitFor({ state: 'visible', timeout: timeoutMs });
+    return;
+  }
+  if (state !== 'hidden') throw new Error('wait_for state is unsupported');
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const count = await locator.count();
+    if (count > INTERACTION_FALLBACK_MAX_SCANNED_PER_GROUP) throw new Error('wait_for locator count is unsafe');
+    let visible = false;
+    for (let index = 0; index < count; index += 1) {
+      if (await locator.nth(index).isVisible().catch(() => false)) {
+        visible = true;
+        break;
+      }
+    }
+    if (!visible) return;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      const error = new Error(`wait_for hidden timed out after ${timeoutMs}ms`);
+      error.name = 'TimeoutError';
+      throw error;
+    }
+    await page.waitForTimeout(Math.min(INTERACTION_LOCATOR_POLL_MS, remaining));
+  }
+}
+
 export async function executeAction(page, action, request, index, captureScreenshot, authFailures, onLocatorRecovered = null, locatorOptions = undefined, interactionState = null, onObstructionDismissed = null) {
   const finishAuthScope = authFailures?.beginAction(page, action) ?? (() => {});
   // A locator is a live handle. Preserve only the immediately preceding
@@ -3055,11 +3569,24 @@ export async function executeAction(page, action, request, index, captureScreens
         await assertAllowedURL(action.url, request.policy);
         await page.goto(action.url, { waitUntil: 'domcontentloaded' });
         return { loginRequired: false, path: '' };
-      case 'screenshot':
-        return captureScreenshot(`action-${String(index + 1).padStart(2, '0')}-${safeFilePart(action.id)}.png`);
-      default: {
+	  case 'screenshot':
+		return captureScreenshot(`action-${String(index + 1).padStart(2, '0')}-${safeFilePart(action.id)}.png`);
+	  case 'dismiss_surface':
+		if (request.policy.is_prod) {
+		  throw new BrowserInteractionError('global_press_forbidden', 'dismiss_surface is forbidden in production');
+		}
+		await dismissActiveSurface(page);
+		return { loginRequired: false, path: '' };
+	  default: {
+        let inputPersisted;
+        let selectionPersisted;
         if (action.action === 'wait_for') {
-          await buildLocator(page, action.locator).first().waitFor({ state: 'visible' });
+          await waitForLocatorState(
+            page,
+            buildLocator(page, action.locator),
+            action.state || 'visible',
+            action.timeout_ms || INTERACTION_LOCATOR_TIMEOUT_MS,
+          );
           return { loginRequired: false, path: '' };
         }
         if (action.action === 'press' && !action.locator) {
@@ -3138,8 +3665,13 @@ export async function executeAction(page, action, request, index, captureScreens
                 value: action.value,
               };
             }
+            inputPersisted = true;
           } else if (action.action === 'press') await locator.press(canonicalPressKey(action.key));
-          else if (action.action === 'select') await locator.selectOption(action.value);
+          else if (action.action === 'select') {
+            const selected = await locator.selectOption(action.value);
+            selectionPersisted = Array.isArray(selected) && selected.includes(action.value);
+            if (!selectionPersisted) throw new BrowserInteractionError('selection_value_not_persisted', 'selected value did not persist on the resolved control');
+          }
           else if (action.action === 'upload_file') await locator.setInputFiles(request.upload_files[action.file_ref]);
         };
         try {
@@ -3156,7 +3688,7 @@ export async function executeAction(page, action, request, index, captureScreens
           if (!isDOMObstructionInteractionError(error) || await dismissObstructions() === 0) throw error;
           await applyInteraction();
         }
-        return { loginRequired: false, path: '' };
+        return { loginRequired: false, path: '', inputPersisted, selectionPersisted };
       }
     }
   } finally {
@@ -3172,16 +3704,48 @@ export async function waitForApplicationReady(page, maximumWaitMs = 3_000) {
   ]);
 }
 
-export async function settleBrowserInteraction(page, action, delayMs = 150, interactionState = null, index = -1) {
+async function waitForNextFrozenBrowserTarget(page, nextAction) {
+  if (!nextAction?.locator) return;
+  // This is a read-only readiness wait against the already frozen Plan. It
+  // neither clicks nor fills; ambiguity remains unavailable to Host binding.
+  emitProgress('browser_next_target_wait_started', 'Waiting for the next frozen browser target', nextAction.id);
+  try {
+    const targets = buildLocator(page, nextAction.locator);
+    await targets.first().waitFor({ state: 'visible', timeout: NAVIGATION_TARGET_READINESS_TIMEOUT_MS });
+    const targetCount = await targets.count();
+    if (targetCount < 1 || targetCount > 64) throw new Error('next target count is unsafe');
+    let uniqueVisibleTarget = null;
+    for (let index = 0; index < targetCount; index += 1) {
+      const candidate = targets.nth(index);
+      if (!await candidate.isVisible().catch(() => false)) continue;
+      if (uniqueVisibleTarget) throw new Error('next target is ambiguous');
+      uniqueVisibleTarget = candidate;
+    }
+    if (!uniqueVisibleTarget) throw new Error('next target is unavailable');
+    await uniqueVisibleTarget.scrollIntoViewIfNeeded({ timeout: 5_000 });
+    emitProgress('browser_next_target_ready', 'The next frozen browser target is visible', nextAction.id);
+  } catch {
+    emitProgress('browser_next_target_unavailable', 'The next frozen browser target did not become visible', nextAction.id);
+  }
+}
+
+export async function settleBrowserInteraction(page, action, delayMs = 150, interactionState = null, index = -1, nextAction = null) {
+  if (action?.action === 'goto') {
+    await waitForApplicationReady(page);
+    await waitForNextFrozenBrowserTarget(page, nextAction);
+    return;
+  }
   if (!['click', 'fill', 'press', 'select', 'upload_file'].includes(action?.action)) return;
   await page.waitForTimeout(delayMs);
   const binding = interactionState?.last;
-  if (action.action !== 'fill' || !binding || binding.index !== index || typeof binding.locator?.inputValue !== 'function') return;
-  const observed = await binding.locator.inputValue().catch(() => null);
-  if (observed !== null && observed !== binding.value) {
-    interactionState.last = null;
-    throw new BrowserInteractionError('input_value_not_persisted', 'filled value did not persist after the page settled');
+  if (action.action === 'fill' && binding && binding.index === index && typeof binding.locator?.inputValue === 'function') {
+    const observed = await binding.locator.inputValue().catch(() => null);
+    if (observed !== null && observed !== binding.value) {
+      interactionState.last = null;
+      throw new BrowserInteractionError('input_value_not_persisted', 'filled value did not persist after the page settled');
+    }
   }
+  await waitForNextFrozenBrowserTarget(page, nextAction);
 }
 
 export function browserActionFailureCode(error, destinationBlocked = false) {
@@ -3189,6 +3753,7 @@ export function browserActionFailureCode(error, destinationBlocked = false) {
   if (error?.code === 'locator_ambiguous') return 'locator_ambiguous';
   if (error?.code === 'locator_not_found') return 'locator_not_found';
   if (error?.code === 'input_value_not_persisted') return 'input_value_not_persisted';
+  if (error?.code === 'selection_value_not_persisted') return 'selection_value_not_persisted';
   if (error?.code === 'active_surface_not_found') return 'active_surface_not_found';
   if (error?.code === 'active_surface_dismissal_failed') return 'active_surface_dismissal_failed';
   if (error?.code === 'global_press_forbidden') return 'global_press_forbidden';
@@ -3206,8 +3771,9 @@ function browserActionFailureMessage(code) {
     case 'locator_ambiguous': return 'browser action matched multiple visible controls';
     case 'locator_not_found': return 'browser action did not match a visible control';
     case 'input_value_not_persisted': return 'browser input value did not persist';
+    case 'selection_value_not_persisted': return 'browser selection did not persist';
     case 'browser_destination_blocked': return 'browser destination was blocked';
-    case 'active_surface_not_found': return 'global Escape did not find an active foreground surface';
+    case 'active_surface_not_found': return 'surface dismissal did not find an active foreground surface';
     case 'active_surface_dismissal_failed': return 'active foreground surface could not be dismissed';
     case 'global_press_forbidden': return 'global browser key press was not allowed';
     case 'element_click_intercepted': return 'browser control was covered by another element';
@@ -3331,19 +3897,22 @@ function checkedEvidenceContent(content, label) {
   return content;
 }
 
-async function writeEvidenceFiles(request, networkCollector, consoleCollector, actions, requestFacts, responseFacts, responseAssertions, artifactBudget) {
+async function writeEvidenceFiles(request, networkCollector, consoleCollector, actions, requestFacts, responseFacts, responseAssertions, artifactBudget, stepEffects = []) {
   const network = networkCollector.snapshot();
   const consoleRecords = consoleCollector.snapshot();
   const requestFactRecords = requestFacts.snapshot();
   const responseFactRecords = responseFacts.snapshot();
   const responseAssertionRecords = responseAssertions.snapshot();
-  if (network.length > EVIDENCE_MAX_RECORDS || consoleRecords.length > EVIDENCE_MAX_RECORDS || actions.length > 40 || requestFactRecords.length > 40 || responseFactRecords.length > 40 || responseAssertionRecords.length > 40) {
+  if (network.length > EVIDENCE_MAX_RECORDS || consoleRecords.length > EVIDENCE_MAX_RECORDS || actions.length > 40 || stepEffects.length > 40 || requestFactRecords.length > 40 || responseFactRecords.length > 40 || responseAssertionRecords.length > 40) {
     throw new Error('browser evidence exceeds its record limit');
   }
   const networkJSON = checkedEvidenceContent(`${JSON.stringify(network)}\n`, 'network');
   const consoleJSONL = consoleRecords.map((record) => JSON.stringify(record)).join('\n');
   const consoleContent = checkedEvidenceContent(consoleJSONL ? `${consoleJSONL}\n` : '', 'console');
   const actionJSON = checkedEvidenceContent(`${JSON.stringify(actions)}\n`, 'browser action');
+  const stepEffectJSON = stepEffects.length > 0
+    ? checkedEvidenceContent(`${JSON.stringify(stepEffects)}\n`, 'browser step effect')
+    : '';
   const requestFactJSON = requestFactRecords.length > 0
     ? checkedEvidenceContent(`${JSON.stringify(requestFactRecords)}\n`, 'request fact')
     : '';
@@ -3353,12 +3922,13 @@ async function writeEvidenceFiles(request, networkCollector, consoleCollector, a
   const responseAssertionJSON = responseAssertionRecords.length > 0
     ? checkedEvidenceContent(`${JSON.stringify(responseAssertionRecords)}\n`, 'response assertion')
     : '';
-  for (const content of [networkJSON, consoleContent, actionJSON, requestFactJSON, responseFactJSON, responseAssertionJSON].filter(Boolean)) {
+  for (const content of [networkJSON, consoleContent, actionJSON, stepEffectJSON, requestFactJSON, responseFactJSON, responseAssertionJSON].filter(Boolean)) {
     if (!artifactBudget.reserve(Buffer.byteLength(content, 'utf8'))) throw new Error('browser evidence exceeds the artifact budget');
   }
   await atomicWrite(join(request.staging_dir, 'network.json'), networkJSON);
   await atomicWrite(join(request.staging_dir, 'console.jsonl'), consoleContent);
   await atomicWrite(join(request.staging_dir, 'browser-actions.json'), actionJSON);
+  if (stepEffectJSON) await atomicWrite(join(request.staging_dir, 'browser-step-effects.json'), stepEffectJSON);
   if (requestFactJSON) await atomicWrite(join(request.staging_dir, 'request-facts.json'), requestFactJSON);
   if (responseFactJSON) await atomicWrite(join(request.staging_dir, 'response-facts.json'), responseFactJSON);
   if (responseAssertionJSON) await atomicWrite(join(request.staging_dir, 'response-assertions.json'), responseAssertionJSON);
@@ -3368,6 +3938,7 @@ async function writeEvidenceFiles(request, networkCollector, consoleCollector, a
     { kind: 'console', path: 'browser/console.jsonl' },
     { kind: 'browser_actions', path: 'browser/browser-actions.json' },
   ];
+  if (stepEffectJSON) artifacts.push({ kind: 'browser_step_effects', path: 'browser/browser-step-effects.json' });
   if (requestFactJSON) artifacts.push({ kind: 'request_facts', path: 'browser/request-facts.json' });
   if (responseFactJSON) artifacts.push({ kind: 'response_facts', path: 'browser/response-facts.json' });
   if (responseAssertionJSON) artifacts.push({ kind: 'response_assertions', path: 'browser/response-assertions.json' });
@@ -3667,6 +4238,7 @@ async function executeWorker(request) {
   const consoleRecords = createBoundedRecordCollector();
   const artifactBudget = createArtifactBudget();
   const actions = [];
+  const stepEffects = [];
   const requestFacts = createRequestFactCollector(request.plan.request_captures ?? []);
   const responseFacts = createAutomaticResponseFactCollector();
   const responseAssertions = createResponseAssertionCollector(request.plan.response_assertions ?? []);
@@ -3809,6 +4381,7 @@ async function executeWorker(request) {
         title: redactConsoleText(await page.title().catch(() => '')),
         final_screenshot_path: failure,
         accessibility_summary: await accessibilitySummary(page),
+        scene: finalURL ? await safeBrowserScene(page, request.plan.device_profile || 'desktop') : undefined,
         artifacts,
       };
     }
@@ -3820,6 +4393,7 @@ async function executeWorker(request) {
       activeActionID = action.id;
       if (await requiresLogin()) return finishLogin();
       const started = Date.now();
+      const beforeScene = await safeBrowserScene(page, request.plan.device_profile || 'desktop');
       emitProgress('browser_action_started', `Executing browser action ${index + 1}/${request.plan.actions.length}`, action.id, index + 1, request.plan.actions.length);
       try {
         const captured = await executeAction(
@@ -3846,7 +4420,7 @@ async function executeWorker(request) {
             request.plan.actions.length,
           ),
         );
-        await settleBrowserInteraction(page, action, 150, interactionState, index);
+        await settleBrowserInteraction(page, action, 150, interactionState, index, request.plan.actions[index + 1]);
         if (captured.loginRequired) {
           actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'login_required', error_code: 'browser_login_required' });
           return finishLogin();
@@ -3866,10 +4440,14 @@ async function executeWorker(request) {
           }
           screenshots.push(after.path);
         }
+        const afterScene = await safeBrowserScene(page, request.plan.device_profile || 'desktop');
+        stepEffects.push(browserStepEffectRecord(action, beforeScene, afterScene, captured));
         actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'completed', error_code: '' });
         emitProgress('browser_action_completed', `Completed browser action ${index + 1}/${request.plan.actions.length}`, action.id, index + 1, request.plan.actions.length);
       } catch (error) {
         const actionErrorCode = browserActionFailureCode(error, supervised.blocked());
+        const afterScene = await safeBrowserScene(page, request.plan.device_profile || 'desktop');
+        stepEffects.push(browserStepEffectRecord(action, beforeScene, afterScene, {}, actionErrorCode));
         actions.push({ id: action.id, action: action.action, locator_kind: action.locator?.kind || '', started_at: new Date(started).toISOString(), duration_ms: Date.now() - started, result: 'failed', error_code: actionErrorCode });
         if (await requiresLogin()) return finishLogin();
         const captured = await captureScreenshot('failure.png');
@@ -3877,7 +4455,7 @@ async function executeWorker(request) {
         const failure = captured.path;
         screenshots.push(failure);
         await Promise.allSettled([...pendingResponses, ...pendingRequestFacts]);
-        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseFacts, responseAssertions, artifactBudget))];
+        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseFacts, responseAssertions, artifactBudget, stepEffects))];
         return {
           status: 'locator_failed',
           error_code: actionErrorCode,
@@ -3887,6 +4465,7 @@ async function executeWorker(request) {
           title: redactConsoleText(await page.title().catch(() => '')),
           final_screenshot_path: failure,
           accessibility_summary: await accessibilitySummary(page),
+          scene: await safeBrowserScene(page, request.plan.device_profile || 'desktop'),
           artifacts,
         };
       }
@@ -3902,7 +4481,7 @@ async function executeWorker(request) {
         const failure = captured.path;
         screenshots.push(failure);
         await Promise.allSettled([...pendingResponses, ...pendingRequestFacts]);
-        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseFacts, responseAssertions, artifactBudget))];
+        const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseFacts, responseAssertions, artifactBudget, stepEffects))];
         return {
           status: 'assertion_failed',
           error_code: 'assertion_failed',
@@ -3911,6 +4490,7 @@ async function executeWorker(request) {
           title: redactConsoleText(await page.title().catch(() => '')),
           final_screenshot_path: failure,
           accessibility_summary: await accessibilitySummary(page),
+          scene: await safeBrowserScene(page, request.plan.device_profile || 'desktop'),
           artifacts,
         };
       }
@@ -3922,19 +4502,368 @@ async function executeWorker(request) {
     const finalScreenshot = captured.path;
     screenshots.push(finalScreenshot);
     await Promise.allSettled([...pendingResponses, ...pendingRequestFacts]);
-    const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseFacts, responseAssertions, artifactBudget))];
+    const artifacts = [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...(await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseFacts, responseAssertions, artifactBudget, stepEffects))];
     return {
       status: 'completed',
       final_url: page.url(),
       title: redactConsoleText(await page.title().catch(() => '')),
       final_screenshot_path: finalScreenshot,
       accessibility_summary: await accessibilitySummary(page),
+      scene: await safeBrowserScene(page, request.plan.device_profile || 'desktop'),
       artifacts,
     };
   } finally {
     if (context) await context.close().catch(() => {});
     await launched.close().catch(() => {});
   }
+}
+
+async function openBrowserStepSession(request) {
+  validateWorkerRequest(request);
+  if (request.mode !== 'step_session') throw new Error('browser step session request mode is invalid');
+  await mkdir(request.staging_dir, { recursive: true, mode: 0o700 });
+  const { chromium } = await import('playwright');
+  const launched = await launchPinnedBrowser(chromium, request.policy, request.headless);
+  const browser = launched.browser;
+  let context;
+  let supervised;
+  let closed = false;
+  let finished = false;
+  let finishResult;
+  let lastScene;
+  let interactionState = { last: null };
+  const screenshots = [];
+  const network = createBoundedRecordCollector();
+  const consoleRecords = createBoundedRecordCollector();
+  const artifactBudget = createArtifactBudget();
+  const actions = [];
+  const stepEffects = [];
+  const requestFacts = createRequestFactCollector(request.plan.request_captures ?? []);
+  const responseFacts = createAutomaticResponseFactCollector();
+  const responseAssertions = createResponseAssertionCollector(request.plan.response_assertions ?? []);
+  const pendingResponses = new Set();
+  const pendingRequestFacts = new Set();
+  const requestStarted = new WeakMap();
+  let activeActionID = 'start_url';
+  let cdpNetworkEvidence = null;
+  const authFailures = createExecuteAuthFailureTracker(request.policy);
+  const onResponse = (response) => {
+    authFailures.observeResponse(response);
+    if (pendingResponses.size >= EVIDENCE_MAX_RECORDS) {
+      if (!network.isStopped()) network.truncate();
+      return;
+    }
+    const pending = (async () => {
+      const browserRequest = response.request();
+      const requestContext = requestStarted.get(browserRequest) ?? {};
+      const headers = Object.fromEntries((await responseHeadersPromise(response)).filter(([, value]) => value !== null));
+      if (!cdpNetworkEvidence && !network.isStopped()) {
+        network.add(safeResponseRecord({
+          action_id: requestContext.actionID ?? '',
+          started_at: requestContext.startedAt ? new Date(requestContext.startedAt).toISOString() : '',
+          method: browserRequest.method(), url: response.url(), resource_type: browserRequest.resourceType?.() ?? '',
+          outcome: 'response', status: response.status(),
+          duration_ms: Math.max(0, Date.now() - (requestContext.startedAt ?? Date.now())), headers,
+        }));
+      }
+      const observations = await evaluateResponseAssertionsForResponse(response, requestContext, responseAssertions.assertions, headers);
+      for (const observation of observations) responseAssertions.observe(observation.assertion, observation.metadata, observation.evaluation);
+      if (!responseFacts.isFull()) responseFacts.observe(await evaluateAutomaticResponseFactForResponse(response, requestContext, headers));
+    })().finally(() => pendingResponses.delete(pending));
+    pendingResponses.add(pending);
+  };
+  try {
+    supervised = await createSupervisedBrowserContext(browser, {
+      storageStateInput: request.storage_state_path ? { storageState: request.storage_state_path } : {},
+      policy: request.policy,
+      deviceProfile: request.plan.device_profile || 'desktop',
+      hooks: {
+        onRequest: (browserRequest) => {
+          const requestContext = { startedAt: Date.now(), actionID: activeActionID };
+          requestStarted.set(browserRequest, requestContext);
+          authFailures.observeRequest(browserRequest);
+          if (pendingRequestFacts.size < EVIDENCE_MAX_RECORDS) {
+            const pending = evaluateRequestCapturesForRequest(browserRequest, requestContext, requestFacts.captures)
+              .then((records) => {
+                for (const record of records) requestFacts.observe(record);
+                requestFacts.observe(evaluateAutomaticQueryRequestFact(browserRequest, requestContext));
+              })
+              .finally(() => pendingRequestFacts.delete(pending));
+            pendingRequestFacts.add(pending);
+          }
+        },
+        onRequestFinished: (browserRequest) => authFailures.observeRequestSettled(browserRequest),
+        onRequestFailed: (browserRequest) => {
+          authFailures.observeRequestSettled(browserRequest);
+          if (cdpNetworkEvidence) return;
+          const requestContext = requestStarted.get(browserRequest) ?? {};
+          network.add(safeResponseRecord({
+            action_id: requestContext.actionID ?? '',
+            started_at: requestContext.startedAt ? new Date(requestContext.startedAt).toISOString() : '',
+            method: browserRequest.method?.() ?? '', url: browserRequest.url?.() ?? '',
+            resource_type: browserRequest.resourceType?.() ?? '', outcome: 'failed',
+            failure_reason: browserRequest.failure?.() ?? 'request failed',
+            duration_ms: Math.max(0, Date.now() - (requestContext.startedAt ?? Date.now())), headers: {},
+          }));
+        },
+        onResponse,
+        onConsole: (message) => {
+          if (!consoleRecords.isStopped()) consoleRecords.add({
+            type: String(message.type()).slice(0, 32), text: redactConsoleText(message.text()), timestamp: new Date().toISOString(),
+          });
+        },
+      },
+    });
+    context = supervised.context;
+    const page = supervised.page;
+    cdpNetworkEvidence = await createCDPNetworkEvidenceCollector(page, network, () => activeActionID);
+    const requiresLogin = async () => pagesRequireLogin(context.pages(), request.policy, await authFailures.settle());
+    const captureScreenshot = async (name) => captureSafePNG(
+      page,
+      request,
+      name,
+      () => authFailures.active(),
+      (currentPage, stagingDir, screenshotName) => capturePNG(currentPage, stagingDir, screenshotName, artifactBudget),
+      () => context.pages(),
+    );
+    const loginResult = async () => {
+      for (const screenshot of screenshots.splice(0)) {
+        await rm(join(request.staging_dir, screenshot.replace('browser/', '')), { force: true });
+      }
+      const loginPage = await activeLoginPage(context.pages(), request.policy, authFailures.active());
+      return {
+        status: 'login_required', error_code: 'browser_login_required',
+        final_url: loginPage?.url() || '', title: redactConsoleText(await loginPage?.title().catch(() => '') || ''),
+        login_origin: loginOriginForResult(loginPage, request.plan.start_url), artifacts: [],
+      };
+    };
+
+    await assertAllowedURL(request.plan.start_url, request.policy);
+    await page.goto(request.plan.start_url, { waitUntil: 'domcontentloaded' });
+    if (supervised.blocked()) throw new Error('browser destination was blocked');
+    await assertAllowedURL(page.url(), request.policy);
+    await waitForApplicationReady(page);
+    if (await requiresLogin()) {
+      return {
+        initial: await loginResult(),
+        step: async () => { throw new Error('browser step session requires login'); },
+        close: async () => {
+          if (closed) return;
+          closed = true;
+          if (context) await context.close().catch(() => {});
+          await launched.close().catch(() => {});
+        },
+      };
+    }
+    lastScene = await browserScene(page, request.plan.device_profile || 'desktop');
+    const initial = {
+      status: 'completed', final_url: page.url(), title: redactConsoleText(await page.title().catch(() => '')),
+      accessibility_summary: await accessibilitySummary(page), scene: lastScene, artifacts: [],
+    };
+
+    const step = async (command) => {
+      if (closed) throw new Error('browser step session is closed');
+      if (finished) throw new Error('browser step session is finished');
+      const currentScene = await browserScene(page, request.plan.device_profile || 'desktop');
+      if (browserSceneEffectIdentity(currentScene) !== browserSceneEffectIdentity(lastScene)) {
+        lastScene = currentScene;
+        interactionState = { last: null };
+        return {
+          status: 'scene_stale', error_code: 'browser_scene_stale', final_url: page.url(),
+          title: redactConsoleText(await page.title().catch(() => '')), scene: currentScene, artifacts: [],
+        };
+      }
+      let bound;
+      try {
+        bound = bindBrowserStepSessionCommand(request, currentScene, command);
+      } catch (error) {
+        if (error?.code !== 'browser_scene_stale') throw error;
+        lastScene = currentScene;
+        interactionState = { last: null };
+        return {
+          status: 'scene_stale', error_code: 'browser_scene_stale', final_url: page.url(),
+          title: redactConsoleText(await page.title().catch(() => '')), scene: currentScene, artifacts: [],
+        };
+      }
+      const action = bound.action;
+      const planIndex = request.plan.actions.findIndex((candidate) => candidate.id === action.id);
+      activeActionID = action.id;
+      const started = Date.now();
+      const screenshotStart = screenshots.length;
+      try {
+        const captureStepScreenshot = (name) => captureScreenshot(`step-${String(command.sequence).padStart(2, '0')}-${name}`);
+        const captured = await executeAction(
+          page, action, request, planIndex, captureStepScreenshot, authFailures, null, undefined, interactionState,
+        );
+        await settleBrowserInteraction(page, action, 150, interactionState, planIndex, request.plan.actions[planIndex + 1]);
+        if (captured.loginRequired || await requiresLogin()) return loginResult();
+        if (captured.path) screenshots.push(captured.path);
+        if (supervised.blocked()) throw new Error('browser destination was blocked');
+        if (page.url().startsWith('http:') || page.url().startsWith('https:')) await assertAllowedURL(page.url(), request.policy);
+        if (command.passive_checks.includes('screenshot') || action.screenshot_after) {
+          const capturedAfter = await captureScreenshot(`step-${String(command.sequence).padStart(2, '0')}-${safeFilePart(action.id)}.png`);
+          if (capturedAfter.loginRequired || await requiresLogin()) return loginResult();
+          screenshots.push(capturedAfter.path);
+        }
+        const after = await browserScene(page, request.plan.device_profile || 'desktop');
+        const receipt = {
+          action_id: action.id,
+          action_type: action.action,
+          ...(command.element_ref ? { target_element_ref: command.element_ref } : {}),
+          ...(captured.inputPersisted !== undefined ? { input_persisted: Boolean(captured.inputPersisted) } : {}),
+          ...(captured.selectionPersisted !== undefined ? { selection_persisted: Boolean(captured.selectionPersisted) } : {}),
+        };
+        const effect = browserStepEffectRecord(action, currentScene, after, captured);
+        stepEffects.push(effect);
+        actions.push({
+          id: action.id, action: action.action, locator_kind: action.locator?.kind || '',
+          started_at: new Date(started).toISOString(), duration_ms: Date.now() - started,
+          result: 'completed', error_code: '',
+        });
+        lastScene = after;
+        return {
+          status: 'completed', final_url: page.url(), title: redactConsoleText(await page.title().catch(() => '')),
+          scene: after, receipt, effect,
+          artifacts: screenshots.slice(screenshotStart).map((path) => ({ kind: 'screenshot', path })),
+        };
+      } catch (error) {
+        const errorCode = browserActionFailureCode(error, supervised.blocked());
+        if (await requiresLogin()) return loginResult();
+        const after = await safeBrowserScene(page, request.plan.device_profile || 'desktop');
+        if (after) lastScene = after;
+        stepEffects.push(browserStepEffectRecord(action, currentScene, after, {}, errorCode));
+        actions.push({
+          id: action.id, action: action.action, locator_kind: action.locator?.kind || '',
+          started_at: new Date(started).toISOString(), duration_ms: Date.now() - started,
+          result: 'failed', error_code: errorCode,
+        });
+        interactionState = { last: null };
+        return {
+          status: 'locator_failed', error_code: errorCode, error_message: browserActionFailureMessage(errorCode),
+          failed_action_id: action.id, final_url: page.url(), title: redactConsoleText(await page.title().catch(() => '')),
+          ...(after ? { scene: after, effect: browserStepEffectRecord(action, currentScene, after, {}, errorCode) } : {}),
+          receipt: { action_id: action.id, action_type: action.action, ...(command.element_ref ? { target_element_ref: command.element_ref } : {}), blocked_code: errorCode },
+          artifacts: screenshots.slice(screenshotStart).map((path) => ({ kind: 'screenshot', path })),
+        };
+      }
+    };
+    const finish = async () => {
+      if (closed) throw new Error('browser step session is closed');
+      if (finishResult) return finishResult;
+      finished = true;
+      activeActionID = 'finish';
+      if (await requiresLogin()) {
+        for (const screenshot of screenshots.splice(0)) {
+          await rm(join(request.staging_dir, screenshot.replace(/^browser\//, '')), { force: true });
+        }
+        await Promise.allSettled([...pendingResponses, ...pendingRequestFacts]);
+        const artifacts = await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseFacts, responseAssertions, artifactBudget, stepEffects);
+        const loginPage = await activeLoginPage(context.pages(), request.policy, authFailures.active());
+        finishResult = {
+          status: 'login_required', error_code: 'browser_login_required',
+          final_url: loginPage?.url() || '', title: redactConsoleText(await loginPage?.title().catch(() => '') || ''),
+          login_origin: loginOriginForResult(loginPage, request.plan.start_url), artifacts,
+        };
+        return finishResult;
+      }
+      let status = 'completed';
+      let errorCode = '';
+      for (const assertion of request.plan.assertions) {
+        try {
+          await executeAssertion(page, assertion);
+        } catch {
+          status = 'assertion_failed';
+          errorCode = 'assertion_failed';
+          break;
+        }
+      }
+      const captured = await captureScreenshot(status === 'completed' ? 'final.png' : 'failure.png');
+      if (captured.loginRequired || await requiresLogin()) {
+        if (captured.path) await rm(join(request.staging_dir, captured.path.replace(/^browser\//, '')), { force: true });
+        finished = false;
+        return finish();
+      }
+      screenshots.push(captured.path);
+      await Promise.allSettled([...pendingResponses, ...pendingRequestFacts]);
+      const evidence = await writeEvidenceFiles(request, network, consoleRecords, actions, requestFacts, responseFacts, responseAssertions, artifactBudget, stepEffects);
+      const scene = await safeBrowserScene(page, request.plan.device_profile || 'desktop');
+      if (scene) lastScene = scene;
+      finishResult = {
+        status, ...(errorCode ? { error_code: errorCode, error_message: 'browser assertion failed' } : {}),
+        final_url: page.url(), title: redactConsoleText(await page.title().catch(() => '')),
+        final_screenshot_path: captured.path,
+        accessibility_summary: await accessibilitySummary(page),
+        ...(scene ? { scene } : {}),
+        artifacts: [...screenshots.map((path) => ({ kind: 'screenshot', path })), ...evidence],
+      };
+      return finishResult;
+    };
+    const close = async () => {
+      if (closed) return;
+      closed = true;
+      if (context) await context.close().catch(() => {});
+      await launched.close().catch(() => {});
+    };
+    return { initial, step, finish, close };
+  } catch (error) {
+    if (context) await context.close().catch(() => {});
+    await launched.close().catch(() => {});
+    throw error;
+  }
+}
+
+async function stepSessionWorker() {
+  const lines = createReadlineInterface({ input: process.stdin, crlfDelay: Infinity });
+  let session;
+  let initialized = false;
+  let commands = 0;
+  try {
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      if (Buffer.byteLength(line, 'utf8') > 1 << 20) throw new Error('browser step session line exceeds its limit');
+      const message = JSON.parse(line);
+      if (!initialized) {
+        if (message.mode !== 'step_session') throw new Error('browser step session initialization is invalid');
+        session = await openBrowserStepSession(message);
+        initialized = true;
+        process.stdout.write(`${JSON.stringify({ type: 'ready', sequence: 0, result: session.initial })}\n`);
+        continue;
+      }
+      if (message?.command === 'close') {
+        ownKeys(message, new Set(['command']), 'browser step close command');
+        await session.close();
+        process.stdout.write(`${JSON.stringify({ type: 'closed' })}\n`);
+        return;
+      }
+      if (message?.command === 'finish') {
+        ownKeys(message, new Set(['command']), 'browser step finish command');
+        const result = await session.finish();
+        process.stdout.write(`${JSON.stringify({ type: 'finished', result })}\n`);
+        continue;
+      }
+      commands += 1;
+      if (commands > 40) throw new Error('browser step session command limit exceeded');
+      const result = await session.step(message);
+      process.stdout.write(`${JSON.stringify({ type: 'step', sequence: message.sequence, result })}\n`);
+    }
+    if (!initialized) throw new Error('browser step session initialization is missing');
+  } catch (error) {
+    process.stdout.write(`${JSON.stringify(browserStepSessionFailureEnvelope(initialized))}\n`);
+    process.exitCode = 1;
+  } finally {
+    await session?.close().catch(() => {});
+    lines.close();
+  }
+}
+
+function browserStepSessionFailureEnvelope(initialized) {
+  if (initialized) {
+    return { type: 'fatal', error_code: 'browser_worker_failed', error_message: 'browser step session failed' };
+  }
+  return {
+    type: 'error', sequence: 0,
+    error_code: 'browser_worker_failed', error_message: 'browser step session initialization failed',
+  };
 }
 
 async function loginStorageStateInput(path) {
@@ -4043,7 +4972,7 @@ async function probeWorker(outputPath) {
   const server = createServer((request, response) => {
     const showModal = new URL(request.url || '/', 'http://127.0.0.1').searchParams.has('modal');
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    response.end(`<!doctype html><html><head><title>tshoot browser runtime probe</title></head><body><main><p>${multibyteText}</p><button role="menuitem" data-probe-target="page-menu">内容管理</button><button data-probe-target="background"><span>搜</span> <span>索</span></button><table><tbody><tr role="row"><td>其他剧</td><td><a href="#other">查看</a></td></tr><tr role="row"><td>测试都市生活剧</td><td><a href="#target">查看</a></td></tr></tbody></table></main><aside class="ant-drawer ant-drawer-right" aria-hidden="true" style="position:fixed;inset:0;pointer-events:none"><button style="position:absolute;left:calc(100vw + 100px)">主题设置</button></aside>${showModal ? '<section role="dialog" aria-label="作者用户选择" aria-modal="true" data-probe-target="child-dialog" style="position:fixed;z-index:2;top:120px;left:300px;width:640px;height:320px;background:white"><label for="probe-user-nickname">用户昵称</label><input id="probe-user-nickname" data-probe-target="modal-input" type="search" placeholder="请输入搜索关键字"><button data-probe-target="modal"><span>搜</span> <span>索</span></button><button data-probe-target="modal-close">关闭</button></section><section role="dialog" aria-label="视频编辑" aria-modal="true" data-probe-target="parent-dialog" style="position:fixed;z-index:1;top:60px;left:120px;width:1000px;height:600px;background:white"><button>保存</button></section><script>document.addEventListener("keydown",(event)=>{if(event.key==="Escape")document.querySelector("[data-probe-target=child-dialog]")?.remove()})</script>' : ''}</body></html>`);
+    response.end(`<!doctype html><html><head><title>tshoot browser runtime probe</title></head><body><main><p>${multibyteText}</p><button role="menuitem" data-probe-target="page-menu">内容管理</button><button data-probe-target="background"><span>搜</span> <span>索</span></button><table><tbody><tr role="row"><td>其他剧</td><td><a href="#other">查看</a></td></tr><tr role="row"><td>测试都市生活剧</td><td><a href="#target">查看</a></td></tr></tbody></table></main><div tabindex="0" data-probe-target="combined-tab-wrapper"><span>内容信息</span><span>分集信息</span></div><aside class="ant-drawer ant-drawer-right" aria-hidden="true" style="position:fixed;inset:0;pointer-events:none"><button style="position:absolute;left:calc(100vw + 100px)">主题设置</button></aside>${showModal ? '<section role="dialog" aria-label="作者用户选择" aria-modal="true" data-probe-target="child-dialog" style="position:fixed;z-index:2;top:120px;left:300px;width:640px;height:320px;background:white"><label for="probe-user-nickname">用户昵称</label><input id="probe-user-nickname" data-probe-target="modal-input" type="search" placeholder="请输入搜索关键字"><span data-probe-loading>加载中...</span><button data-probe-target="modal"><span>搜</span> <span>索</span></button><button data-probe-target="modal-close" onclick="const dialog=this.closest(\'[data-probe-target=child-dialog]\');setTimeout(()=>dialog.remove(),250)">关闭</button></section><section role="dialog" aria-label="视频编辑" aria-modal="true" data-probe-target="parent-dialog" style="position:fixed;z-index:1;top:60px;left:120px;width:1000px;height:600px;background:white"><button>保存</button><input placeholder="专辑名称"><input placeholder="导演"><input placeholder="制片人"><input placeholder="编剧"><input placeholder="嘉宾"></section><script>setTimeout(()=>document.querySelector("[data-probe-loading]")?.remove(),50)</script>' : ''}</body></html>`);
   });
   await new Promise((resolveListen, reject) => {
     server.once('error', reject);
@@ -4063,6 +4992,18 @@ async function probeWorker(outputPath) {
     try {
       const page = supervised.page;
       await page.goto(`${origin}/`, { waitUntil: 'domcontentloaded' });
+      let exactWrapperRecoveryRefused = false;
+      try {
+        await resolveObservedInteractionLocator(page, {
+          action: 'click',
+          locator: { kind: 'text', value: '内容信息', exact: true },
+        });
+      } catch (error) {
+        exactWrapperRecoveryRefused = error?.code === 'locator_not_found';
+      }
+      if (!exactWrapperRecoveryRefused) {
+        throw new Error('runtime probe exact click recovery accepted a combined sibling wrapper');
+      }
       const scopedTarget = buildLocator(page, {
         kind: 'role',
         value: 'link',
@@ -4106,12 +5047,16 @@ async function probeWorker(outputPath) {
       // dismissal path: closing the modal intentionally removes the search
       // input and submit control that validateRuntimeProbeWorkerResult checks.
       const semanticProbeSummary = await accessibilitySummary(page);
+      const semanticProbeScene = await browserScene(page, 'desktop');
       const dismissalRequest = {
         mode: 'execute',
         plan: {
           version: 2,
           start_url: `${origin}/?modal=1`,
-          actions: [{ id: 'probe-dismiss-dialog', action: 'press', key: 'Escape' }],
+          actions: [
+            { id: 'probe-wait-loading', action: 'wait_for', locator: { kind: 'text', value: '加载中...', exact: true }, state: 'hidden', timeout_ms: 2_000 },
+            { id: 'probe-dismiss-dialog', action: 'dismiss_surface' },
+          ],
           assertions: [{ kind: 'visible_text', value: '中文页面' }],
         },
         policy,
@@ -4127,13 +5072,26 @@ async function probeWorker(outputPath) {
         headless: false,
       });
       await executeAction(page, dismissalRequest.plan.actions[0], dismissalRequest, 0, async () => {
-        throw new Error('runtime probe global Escape unexpectedly captured a screenshot');
+        throw new Error('runtime probe hidden wait unexpectedly captured a screenshot');
       }, null);
+      try {
+        await executeAction(page, dismissalRequest.plan.actions[1], dismissalRequest, 1, async () => {
+          throw new Error('runtime probe dismiss_surface unexpectedly captured a screenshot');
+        }, null);
+      } catch (error) {
+        throw new Error(`runtime probe ordinary dismiss_surface failed: ${String(error?.message || error)}`);
+      }
       if (await page.getByRole('dialog', { name: '作者用户选择', exact: true }).isVisible().catch(() => false)) {
-        throw new Error('runtime probe global Escape dismissal semantics are invalid');
+        throw new Error('runtime probe dismiss_surface semantics are invalid');
       }
       if (!await page.getByRole('dialog', { name: '视频编辑', exact: true }).isVisible().catch(() => false)) {
-        throw new Error('runtime probe global Escape dismissed the underlying parent surface');
+        throw new Error('runtime probe dismiss_surface dismissed the underlying parent surface');
+      }
+      const dismissedProbeScene = await browserScene(page, 'desktop');
+      const dismissalEffect = browserStepEffectRecord(dismissalRequest.plan.actions[1], semanticProbeScene, dismissedProbeScene);
+      if (!dismissalEffect.scene_observed || !dismissalEffect.scene_changed || dismissalEffect.surface_transition !== 'changed' ||
+          dismissalEffect.before_surface?.name !== '作者用户选择' || dismissalEffect.after_surface?.name !== '视频编辑') {
+        throw new Error('runtime probe browser step effect semantics are invalid');
       }
       await page.screenshot({ path: outputPath, type: 'png' });
       workerResult = {
@@ -4141,11 +5099,88 @@ async function probeWorker(outputPath) {
         final_url: page.url(),
         title: await page.title(),
         accessibility_summary: semanticProbeSummary,
+        scene: semanticProbeScene,
         artifacts: [],
       };
       if (launched.proxy.stats().http < 1) throw new Error('runtime probe bypassed the pinned browser proxy');
     } finally {
       await context.close();
+    }
+
+    const stepSessionRequest = {
+      mode: 'step_session',
+      plan: {
+        version: 2,
+        start_url: `${origin}/`,
+        actions: [
+          { id: 'probe-open-dialog', action: 'goto', url: `${origin}/?modal=1` },
+          { id: 'probe-wait-search', action: 'wait_for', locator: { kind: 'placeholder', value: '请输入搜索关键字', exact: true } },
+          { id: 'probe-dismiss-dialog', action: 'dismiss_surface' },
+        ],
+        assertions: [{ kind: 'visible_text', value: '中文页面' }],
+      },
+      policy,
+      staging_dir: resolve(dirname(outputPath)),
+      headless: true,
+    };
+    const stepSession = await openBrowserStepSession(stepSessionRequest);
+    try {
+      if (stepSession.initial.status !== 'completed' || stepSession.initial.scene?.active_surface) {
+        throw new Error('runtime probe browser step session initial scene is invalid');
+      }
+      const navigated = await stepSession.step({
+        command: 'step',
+        sequence: 1,
+        scene_id: 'runtime-probe-scene',
+        action_id: 'probe-open-dialog',
+        action_type: 'goto',
+        passive_checks: [],
+      });
+      if (navigated.status !== 'completed' || !navigated.effect?.scene_observed ||
+          !navigated.effect?.scene_changed || navigated.scene?.active_surface?.name !== '作者用户选择') {
+        throw new Error('runtime probe browser step session navigation settling is invalid');
+      }
+      const searchElement = navigated.scene.elements.find((element) => element.locator_hints?.placeholder === '请输入搜索关键字');
+      if (!searchElement?.ref) throw new Error('runtime probe browser step session navigation target is missing');
+      const waited = await stepSession.step({
+        command: 'step', sequence: 2, scene_id: 'runtime-probe-scene',
+        action_id: 'probe-wait-search', action_type: 'wait_for', element_ref: searchElement.ref,
+        passive_checks: [],
+      });
+      if (waited.status !== 'completed' || waited.receipt?.target_element_ref !== searchElement.ref) {
+        throw new Error('runtime probe browser step session navigation target wait is invalid');
+      }
+      let stepped;
+      try {
+        stepped = await stepSession.step({
+          command: 'step',
+          sequence: 3,
+          scene_id: 'runtime-probe-scene',
+          action_id: 'probe-dismiss-dialog',
+          action_type: 'dismiss_surface',
+          passive_checks: [],
+        });
+      } catch (error) {
+        throw new Error(`runtime probe step-session dismiss_surface failed: ${String(error?.message || error)}`);
+      }
+      if (stepped.status !== 'completed' || !stepped.effect?.scene_observed ||
+          !stepped.effect?.scene_changed || stepped.effect?.surface_transition !== 'changed' ||
+          stepped.effect?.before_surface?.name !== '作者用户选择' ||
+          stepped.effect?.after_surface?.name !== '视频编辑') {
+        throw new Error('runtime probe browser step session semantics are invalid');
+      }
+    } finally {
+      const finished = await stepSession.finish();
+      if (finished.status !== 'completed' || !finished.final_screenshot_path ||
+          !finished.artifacts.some((artifact) => artifact.kind === 'network') ||
+          !finished.artifacts.some((artifact) => artifact.kind === 'console') ||
+          !finished.artifacts.some((artifact) => artifact.kind === 'browser_actions')) {
+        throw new Error('runtime probe browser step session final evidence is invalid');
+      }
+      for (const artifact of finished.artifacts) {
+        await rm(join(resolve(dirname(outputPath)), artifact.path.replace(/^browser\//, '')), { force: true });
+      }
+      await stepSession.close();
     }
   } finally {
     await launched.close();
@@ -4153,10 +5188,17 @@ async function probeWorker(outputPath) {
   }
   const content = await readFile(outputPath);
   if (content.length <= 8) throw new Error('probe screenshot is empty');
+  const initializationErrorEnvelope = browserStepSessionFailureEnvelope(false);
+  if (initializationErrorEnvelope.type !== 'error' || initializationErrorEnvelope.sequence !== 0 ||
+      initializationErrorEnvelope.error_code !== 'browser_worker_failed' ||
+      initializationErrorEnvelope.error_message !== 'browser step session initialization failed') {
+    throw new Error('runtime probe browser step session initialization error envelope is invalid');
+  }
   return {
     status: 'ready',
     sha256: createHash('sha256').update(content).digest('hex'),
-    protocol_version: 3,
+    protocol_version: 21,
+    step_session_error_envelope: true,
     worker_result: workerResult,
   };
 }
@@ -4192,6 +5234,9 @@ async function main() {
     const request = await readSingleRequest();
     if (request.mode !== mode) throw new Error('worker request mode does not match CLI mode');
     result = await recordWorker(request);
+  } else if (mode === 'step_session') {
+    await stepSessionWorker();
+    return;
   } else {
     throw new Error('worker mode is not supported');
   }
@@ -4201,7 +5246,14 @@ async function main() {
 const invokedPath = process.argv[1] ? realpathSync(resolve(process.argv[1])) : '';
 const modulePath = realpathSync(fileURLToPath(import.meta.url));
 if (modulePath === invokedPath) {
-  main().catch(() => {
+  main().catch((error) => {
+    // Probe runs only against the Worker-owned synthetic localhost page. Its
+    // bounded, redacted failure reason is safe and necessary for packaging
+    // diagnostics; business execute/login modes keep the generic envelope.
+    if (argument('--mode') === 'probe') {
+      const message = boundedUTF8(redactConsoleText(String(error?.message || error || 'unknown probe failure')), 2_048);
+      process.stderr.write(`browser runtime probe failed: ${message}\n`);
+    }
     process.stdout.write(`${JSON.stringify({ status: 'worker_failed', error_code: 'browser_worker_failed', error_message: 'browser worker failed' })}\n`);
     process.exitCode = 1;
   });

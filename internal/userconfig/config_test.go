@@ -57,6 +57,7 @@ func TestSave_RoundTrip(t *testing.T) {
 				LastDeployedAt: 1700000000,
 			},
 		},
+		BrowserDecisionRollout: &BrowserDecisionRolloutConfig{Version: 1, Enabled: true, Percentage: 25},
 	}
 	if err := Save(original); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -73,6 +74,9 @@ func TestSave_RoundTrip(t *testing.T) {
 	}
 	if got := loaded.DeployedBots[DeployedBotKey("shop", "claude-code")]; got.SystemID != "shop" || got.LastDeployedAt != 1700000000 {
 		t.Errorf("DeployedBots lost or corrupted: %+v", got)
+	}
+	if got := loaded.BrowserDecisionRollout; got == nil || got.Version != 1 || !got.Enabled || got.Percentage != 25 {
+		t.Errorf("BrowserDecisionRollout lost or corrupted: %+v", got)
 	}
 }
 

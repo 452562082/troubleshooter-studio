@@ -13,11 +13,12 @@ const maxBrowserPlanStringBytes = 4096
 const (
 	BrowserPlanLegacyVersion = 1
 	BrowserPlanVersion       = 2
+	BrowserSceneVersion      = 1
 )
 
 func isSupportedBrowserAction(action string) bool {
 	switch action {
-	case "goto", "click", "fill", "press", "select", "upload_file", "wait_for", "screenshot":
+	case "goto", "click", "fill", "press", "select", "upload_file", "wait_for", "dismiss_surface", "screenshot":
 		return true
 	default:
 		return false
@@ -160,6 +161,8 @@ type BrowserAction struct {
 	Value           string          `yaml:"value,omitempty" json:"value,omitempty"`
 	Key             string          `yaml:"key,omitempty" json:"key,omitempty"`
 	FileRef         string          `yaml:"file_ref,omitempty" json:"file_ref,omitempty"`
+	State           string          `yaml:"state,omitempty" json:"state,omitempty"`
+	TimeoutMS       int             `yaml:"timeout_ms,omitempty" json:"timeout_ms,omitempty"`
 	ScreenshotAfter bool            `yaml:"screenshot_after,omitempty" json:"screenshot_after,omitempty"`
 }
 
@@ -201,6 +204,99 @@ type BrowserAccessibilityNode struct {
 	Href        string `json:"href,omitempty"`
 	Visible     bool   `json:"visible"`
 	Disabled    bool   `json:"disabled"`
+}
+
+// BrowserScene is a host-bound, bounded description of the page state that
+// produced a browser result. Element refs are only meaningful inside SceneID;
+// they are observation evidence, not durable locators or authorization to act.
+type BrowserScene struct {
+	Version       int                      `json:"version"`
+	SceneID       string                   `json:"scene_id"`
+	SceneSHA256   string                   `json:"scene_sha256"`
+	AttemptID     string                   `json:"attempt_id"`
+	CapturedAt    string                   `json:"captured_at"`
+	URL           string                   `json:"url"`
+	Title         string                   `json:"title"`
+	DeviceProfile string                   `json:"device_profile"`
+	Viewport      BrowserSceneViewport     `json:"viewport"`
+	ActiveSurface *BrowserSceneSurface     `json:"active_surface,omitempty"`
+	Frames        []BrowserSceneFrame      `json:"frames"`
+	Elements      []BrowserSceneElement    `json:"elements"`
+	TextBlocks    []BrowserSceneTextBlock  `json:"text_blocks"`
+	Capabilities  BrowserSceneCapabilities `json:"capabilities"`
+}
+
+type BrowserSceneViewport struct {
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
+
+type BrowserSceneSurface struct {
+	Ref   string `json:"ref"`
+	Type  string `json:"type"`
+	Name  string `json:"name"`
+	Modal bool   `json:"modal"`
+}
+
+type BrowserSceneFrame struct {
+	Ref        string `json:"ref"`
+	URL        string `json:"url,omitempty"`
+	SameOrigin bool   `json:"same_origin"`
+}
+
+type BrowserSceneElement struct {
+	Ref          string                       `json:"ref"`
+	FrameRef     string                       `json:"frame_ref"`
+	SurfaceRef   string                       `json:"surface_ref,omitempty"`
+	Role         string                       `json:"role"`
+	Name         string                       `json:"name"`
+	Tag          string                       `json:"tag,omitempty"`
+	LocatorHints BrowserSceneLocatorHints     `json:"locator_hints"`
+	States       BrowserSceneElementStates    `json:"states"`
+	Box          BrowserSceneBox              `json:"bbox"`
+	Relations    BrowserSceneElementRelations `json:"relations"`
+}
+
+type BrowserSceneLocatorHints struct {
+	TestID         string `json:"test_id,omitempty"`
+	Label          string `json:"label,omitempty"`
+	Placeholder    string `json:"placeholder,omitempty"`
+	SameOriginHref string `json:"same_origin_href,omitempty"`
+}
+
+type BrowserSceneElementStates struct {
+	Visible    bool `json:"visible"`
+	InViewport bool `json:"in_viewport"`
+	Enabled    bool `json:"enabled"`
+	Editable   bool `json:"editable"`
+	Obscured   bool `json:"obscured"`
+}
+
+type BrowserSceneBox struct {
+	X      int `json:"x"`
+	Y      int `json:"y"`
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
+
+type BrowserSceneElementRelations struct {
+	RowName   string `json:"row_name,omitempty"`
+	GroupName string `json:"group_name,omitempty"`
+}
+
+type BrowserSceneTextBlock struct {
+	Ref        string          `json:"ref"`
+	SurfaceRef string          `json:"surface_ref,omitempty"`
+	Text       string          `json:"text"`
+	Box        BrowserSceneBox `json:"bbox"`
+}
+
+type BrowserSceneCapabilities struct {
+	DOM              string `json:"dom"`
+	Accessibility    string `json:"accessibility"`
+	Screenshot       string `json:"screenshot"`
+	VisionGrounding  string `json:"vision_grounding"`
+	FrameObservation string `json:"frame_observation"`
 }
 
 type BrowserVerificationRequest struct {
@@ -256,18 +352,26 @@ type BrowserArtifactReference struct {
 }
 
 type BrowserVerificationResult struct {
-	Status               string
-	ErrorCode            string
-	ErrorMessage         string
-	FailedActionID       string
-	FinalURL             string
-	Title                string
-	ApplicationURL       string
-	ApplicationOrigin    string
-	LoginOrigin          string
-	FinalScreenshotPath  string
-	AccessibilitySummary []BrowserAccessibilityNode
-	Artifacts            []BrowserArtifactReference
+	Status                 string
+	ErrorCode              string
+	ErrorMessage           string
+	FailedActionID         string
+	FinalURL               string
+	Title                  string
+	ApplicationURL         string
+	ApplicationOrigin      string
+	LoginOrigin            string
+	FinalScreenshotPath    string
+	AccessibilitySummary   []BrowserAccessibilityNode
+	Scene                  *BrowserScene
+	Artifacts              []BrowserArtifactReference
+	ManualReproductionGate *BrowserManualReproductionGateProof
+	// autonomousTrace is Host-bound in-memory execution evidence. It is never
+	// serialized or returned through desktop/API DTOs; Coordinator may use it
+	// only to compile a validated Case-scoped Recipe v3 after success.
+	autonomousTrace          []AutonomousRecipeTraceStep
+	autonomousScenarioSHA256 string
+	autonomousRecipeVersion  int
 }
 
 type BrowserVerifier interface {
@@ -304,6 +408,8 @@ type browserActionYAML struct {
 	Value           yaml.Node `yaml:"value,omitempty"`
 	Key             yaml.Node `yaml:"key,omitempty"`
 	FileRef         yaml.Node `yaml:"file_ref,omitempty"`
+	State           yaml.Node `yaml:"state,omitempty"`
+	TimeoutMS       yaml.Node `yaml:"timeout_ms,omitempty"`
 	ScreenshotAfter yaml.Node `yaml:"screenshot_after,omitempty"`
 }
 
@@ -409,7 +515,7 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 			return BrowserPlan{}, fmt.Errorf("browser plan %s.action_id %q does not reference an action", prefix, capture.ActionID)
 		}
 		for _, action := range plan.Actions {
-			if action.ID == capture.ActionID && (action.Action == "screenshot" || action.Action == "wait_for") {
+			if action.ID == capture.ActionID && (action.Action == "screenshot" || action.Action == "wait_for" || action.Action == "dismiss_surface") {
 				return BrowserPlan{}, fmt.Errorf("browser plan %s.action_id %q does not reference a request-capable action", prefix, capture.ActionID)
 			}
 		}
@@ -461,7 +567,7 @@ func ParseBrowserPlan(data []byte) (BrowserPlan, error) {
 			return BrowserPlan{}, fmt.Errorf("browser plan %s.action_id %q does not reference an action", prefix, assertion.ActionID)
 		}
 		for _, action := range plan.Actions {
-			if action.ID == assertion.ActionID && (action.Action == "screenshot" || action.Action == "wait_for") {
+			if action.ID == assertion.ActionID && (action.Action == "screenshot" || action.Action == "wait_for" || action.Action == "dismiss_surface") {
 				return BrowserPlan{}, fmt.Errorf("browser plan %s.action_id %q does not reference a request-capable action", prefix, assertion.ActionID)
 			}
 		}
@@ -663,6 +769,8 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 	valuePresent := browserYAMLFieldPresent(raw.Value)
 	keyPresent := browserYAMLFieldPresent(raw.Key)
 	fileRefPresent := browserYAMLFieldPresent(raw.FileRef)
+	statePresent := browserYAMLFieldPresent(raw.State)
+	timeoutPresent := browserYAMLFieldPresent(raw.TimeoutMS)
 	screenshotAfterPresent := browserYAMLFieldPresent(raw.ScreenshotAfter)
 
 	require := func(field string, present bool) error {
@@ -696,6 +804,8 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 			browserActionFieldPresence{"value", valuePresent},
 			browserActionFieldPresence{"key", keyPresent},
 			browserActionFieldPresence{"file_ref", fileRefPresent},
+			browserActionFieldPresence{"state", statePresent},
+			browserActionFieldPresence{"timeout_ms", timeoutPresent},
 		); err != nil {
 			return BrowserAction{}, err
 		}
@@ -711,6 +821,16 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 		); err != nil {
 			return BrowserAction{}, err
 		}
+		if raw.Action == "click" {
+			if err := forbidFields(
+				browserActionFieldPresence{"state", statePresent},
+				browserActionFieldPresence{"timeout_ms", timeoutPresent},
+			); err != nil {
+				return BrowserAction{}, err
+			}
+		} else if (statePresent || timeoutPresent) && version != BrowserPlanVersion {
+			return BrowserAction{}, fmt.Errorf("browser plan %s.state and timeout_ms require version %d", prefix, BrowserPlanVersion)
+		}
 	case "fill", "select":
 		if err := require("locator", locatorPresent); err != nil {
 			return BrowserAction{}, err
@@ -722,6 +842,8 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 			browserActionFieldPresence{"url", urlPresent},
 			browserActionFieldPresence{"key", keyPresent},
 			browserActionFieldPresence{"file_ref", fileRefPresent},
+			browserActionFieldPresence{"state", statePresent},
+			browserActionFieldPresence{"timeout_ms", timeoutPresent},
 		); err != nil {
 			return BrowserAction{}, err
 		}
@@ -748,6 +870,8 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 			browserActionFieldPresence{"url", urlPresent},
 			browserActionFieldPresence{"value", valuePresent},
 			browserActionFieldPresence{"file_ref", fileRefPresent},
+			browserActionFieldPresence{"state", statePresent},
+			browserActionFieldPresence{"timeout_ms", timeoutPresent},
 		); err != nil {
 			return BrowserAction{}, err
 		}
@@ -762,6 +886,24 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 			browserActionFieldPresence{"url", urlPresent},
 			browserActionFieldPresence{"value", valuePresent},
 			browserActionFieldPresence{"key", keyPresent},
+			browserActionFieldPresence{"state", statePresent},
+			browserActionFieldPresence{"timeout_ms", timeoutPresent},
+		); err != nil {
+			return BrowserAction{}, err
+		}
+	case "dismiss_surface":
+		if version != BrowserPlanVersion {
+			return BrowserAction{}, fmt.Errorf("browser plan %s.action dismiss_surface requires version %d", prefix, BrowserPlanVersion)
+		}
+		if err := forbidFields(
+			browserActionFieldPresence{"locator", locatorPresent},
+			browserActionFieldPresence{"url", urlPresent},
+			browserActionFieldPresence{"value", valuePresent},
+			browserActionFieldPresence{"key", keyPresent},
+			browserActionFieldPresence{"file_ref", fileRefPresent},
+			browserActionFieldPresence{"state", statePresent},
+			browserActionFieldPresence{"timeout_ms", timeoutPresent},
+			browserActionFieldPresence{"screenshot_after", screenshotAfterPresent},
 		); err != nil {
 			return BrowserAction{}, err
 		}
@@ -772,6 +914,8 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 			browserActionFieldPresence{"value", valuePresent},
 			browserActionFieldPresence{"key", keyPresent},
 			browserActionFieldPresence{"file_ref", fileRefPresent},
+			browserActionFieldPresence{"state", statePresent},
+			browserActionFieldPresence{"timeout_ms", timeoutPresent},
 		); err != nil {
 			return BrowserAction{}, err
 		}
@@ -799,6 +943,23 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 	if err != nil {
 		return BrowserAction{}, err
 	}
+	state, err := decodeBrowserPlanYAMLString(prefix+".state", raw.State, false)
+	if err != nil {
+		return BrowserAction{}, err
+	}
+	if raw.Action == "wait_for" {
+		state = strings.ToLower(strings.TrimSpace(state))
+		if state != "" && state != "visible" && state != "hidden" {
+			return BrowserAction{}, fmt.Errorf("browser plan %s.state must be visible or hidden", prefix)
+		}
+	}
+	timeoutMS, err := decodeBrowserPlanYAMLInt(prefix+".timeout_ms", raw.TimeoutMS)
+	if err != nil {
+		return BrowserAction{}, err
+	}
+	if timeoutPresent && (timeoutMS < 1 || timeoutMS > 60_000) {
+		return BrowserAction{}, fmt.Errorf("browser plan %s.timeout_ms must be between 1 and 60000", prefix)
+	}
 	screenshotAfter, err := decodeBrowserPlanYAMLBool(prefix+".screenshot_after", raw.ScreenshotAfter)
 	if err != nil {
 		return BrowserAction{}, err
@@ -815,6 +976,8 @@ func validateBrowserAction(version, index int, raw browserActionYAML) (BrowserAc
 		Value:           value,
 		Key:             key,
 		FileRef:         fileRef,
+		State:           state,
+		TimeoutMS:       timeoutMS,
 		ScreenshotAfter: screenshotAfter,
 	}, nil
 }
@@ -944,6 +1107,21 @@ func decodeBrowserPlanYAMLBool(field string, node yaml.Node) (bool, error) {
 	var value bool
 	if err := node.Decode(&value); err != nil {
 		return false, fmt.Errorf("browser plan %s must be a boolean: %w", field, err)
+	}
+	return value, nil
+}
+
+func decodeBrowserPlanYAMLInt(field string, node yaml.Node) (int, error) {
+	if !browserYAMLFieldPresent(node) {
+		return 0, nil
+	}
+	node = resolveBrowserYAMLAlias(node)
+	if node.Tag == "!!null" || node.Tag != "!!int" {
+		return 0, fmt.Errorf("browser plan %s must be an integer", field)
+	}
+	var value int
+	if err := node.Decode(&value); err != nil {
+		return 0, fmt.Errorf("browser plan %s must be an integer: %w", field, err)
 	}
 	return value, nil
 }

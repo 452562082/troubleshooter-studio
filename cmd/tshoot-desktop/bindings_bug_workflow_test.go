@@ -612,6 +612,44 @@ func TestInitializeIncidentWorkflowOwnsBrowserController(t *testing.T) {
 	}
 }
 
+func TestInitializeIncidentWorkflowAppliesBrowserDecisionRolloutConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := userconfig.Save(&userconfig.Config{BrowserDecisionRollout: &userconfig.BrowserDecisionRolloutConfig{
+		Version: 1, Enabled: true, Percentage: 25,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{workflowRoot: t.TempDir()}
+	t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
+	if err := app.initializeIncidentWorkflow(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status, err := app.GetIncidentBrowserDecisionRolloutStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Enabled || status.Percentage != 25 || status.Source != "user_config" {
+		t.Fatalf("status=%+v", status)
+	}
+}
+
+func TestInitializeIncidentWorkflowRejectsInvalidBrowserDecisionRolloutConfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := userconfig.Save(&userconfig.Config{BrowserDecisionRollout: &userconfig.BrowserDecisionRolloutConfig{
+		Version: 1, Enabled: true, Percentage: 101,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{workflowRoot: t.TempDir()}
+	if err := app.initializeIncidentWorkflow(context.Background()); err == nil || !strings.Contains(err.Error(), "browser_decision_rollout") {
+		t.Fatalf("err=%v", err)
+	}
+	if app.workflowStore != nil || app.workflowRunner != nil {
+		t.Fatal("invalid rollout config initialized a partial workflow runtime")
+	}
+}
+
 func TestListIncidentCasesWorksWithoutWailsContext(t *testing.T) {
 	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
 	createPendingBindingCase(t, store, "case-nil-context")

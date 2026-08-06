@@ -69,6 +69,56 @@ function safeAttemptForDisplay(attempt: PhaseAttempt): PhaseAttempt {
 
 const currentAttempts = computed(() => props.detail.attempts.filter(item => item.phase !== 'legacy').map(safeAttemptForDisplay))
 const latestCurrentAttemptID = computed(() => currentAttempts.value[currentAttempts.value.length - 1]?.id || '')
+type EvidenceGroup = {
+  key: 'authoritative' | 'active' | 'failed'
+  title: string
+  description: string
+  artifacts: IncidentArtifact[]
+  open: boolean
+}
+const evidenceGroups = computed<EvidenceGroup[]>(() => {
+  const attempts = new Map(props.detail.attempts.map(attempt => [attempt.id, attempt]))
+  const authoritative: IncidentArtifact[] = []
+  const active: IncidentArtifact[] = []
+  const failed: IncidentArtifact[] = []
+  for (const artifact of props.detail.artifacts) {
+    const status = attempts.get(artifact.attempt_id)?.status
+    if (status === 'succeeded') authoritative.push(artifact)
+    else if (status === 'running' || status === 'queued') active.push(artifact)
+    else failed.push(artifact)
+  }
+  return [
+    {
+      key: 'authoritative',
+      title: '有效证据',
+      description: '来自已成功完成的 Attempt，可用于业务结论、排障和后续回归基线。',
+      artifacts: authoritative,
+      open: true,
+    },
+    {
+      key: 'active',
+      title: '当前执行证据',
+      description: '来自正在执行的 Attempt；完成并通过验收前，不作为最终业务结论。',
+      artifacts: active,
+      open: true,
+    },
+    {
+      key: 'failed',
+      title: '失败尝试诊断证据',
+      description: '仅用于定位登录、页面定位、运行时或协议失败并保留审计，不作为业务结论依据。',
+      artifacts: failed,
+      open: false,
+    },
+  ].filter(group => group.artifacts.length > 0) as EvidenceGroup[]
+})
+const authoritativeEvidenceCount = computed(() => evidenceGroups.value.find(group => group.key === 'authoritative')?.artifacts.length || 0)
+const activeEvidenceCount = computed(() => evidenceGroups.value.find(group => group.key === 'active')?.artifacts.length || 0)
+const failedEvidenceCount = computed(() => evidenceGroups.value.find(group => group.key === 'failed')?.artifacts.length || 0)
+const evidenceCountSummary = computed(() => [
+  `${authoritativeEvidenceCount.value} 条有效`,
+  activeEvidenceCount.value ? `${activeEvidenceCount.value} 条执行中` : '',
+  failedEvidenceCount.value ? `${failedEvidenceCount.value} 条失败历史` : '',
+].filter(Boolean).join(' · '))
 const attemptOutputScroll = ref<HTMLElement | null>(null)
 const previewURLs = ref<Record<string, string>>({})
 const previewErrors = ref<Record<string, string>>({})
@@ -273,25 +323,39 @@ watch(
     <details class="artifact-card evidence-card" aria-labelledby="evidence-title">
       <summary>
         <h3 id="evidence-title">验证证据</h3>
-        <span>{{ detail.artifacts.length }} 条</span>
+        <span>{{ evidenceCountSummary }}</span>
       </summary>
       <p v-if="detail.artifacts.length === 0" class="empty-copy">尚无证据</p>
-      <article v-for="artifact in detail.artifacts" :key="artifact.id" class="artifact-item evidence-item" :data-artifact-id="artifact.id">
-        <div class="artifact-item-heading">
-          <strong>{{ artifactLabel(artifact.kind) }}</strong>
-          <button class="btn artifact-save" type="button" :data-artifact-save="artifact.id" :disabled="saveStates[artifact.id] === 'saving'" @click="saveArtifact(artifact)">
-            {{ saveStates[artifact.id] === 'saving' ? '保存中…' : '保存副本' }}
+      <details
+        v-for="group in evidenceGroups"
+        :key="group.key"
+        class="evidence-attempt-group"
+        :class="`evidence-attempt-group-${group.key}`"
+        :data-evidence-group="group.key"
+        :open="group.open"
+      >
+        <summary>
+          <strong>{{ group.title }}</strong>
+          <span>{{ group.artifacts.length }} 条</span>
+        </summary>
+        <p class="evidence-group-description">{{ group.description }}</p>
+        <article v-for="artifact in group.artifacts" :key="artifact.id" class="artifact-item evidence-item" :data-artifact-id="artifact.id">
+          <div class="artifact-item-heading">
+            <strong>{{ artifactLabel(artifact.kind) }}</strong>
+            <button class="btn artifact-save" type="button" :data-artifact-save="artifact.id" :disabled="saveStates[artifact.id] === 'saving'" @click="saveArtifact(artifact)">
+              {{ saveStates[artifact.id] === 'saving' ? '保存中…' : '保存副本' }}
+            </button>
+          </div>
+          <span>{{ artifact.captured_at || '采集时间未知' }} · {{ artifact.environment || '环境未知' }} · {{ artifact.version || '版本未知' }}</span>
+          <small v-if="artifact.request_id">request {{ artifact.request_id }}</small>
+          <small v-if="artifact.trace_id">trace {{ artifact.trace_id }}</small>
+          <button v-if="artifact.kind === 'screenshot' && previewURLs[artifact.id]" class="screenshot-preview" type="button" :data-artifact-preview="artifact.id" :aria-label="`打开${artifactLabel(artifact.kind)}原图`" @click="openPreview(artifact, $event)">
+            <img :data-artifact-id="artifact.id" :src="previewURLs[artifact.id]" :alt="`${artifact.environment || '当前环境'}渲染截图缩略图`">
           </button>
-        </div>
-        <span>{{ artifact.captured_at || '采集时间未知' }} · {{ artifact.environment || '环境未知' }} · {{ artifact.version || '版本未知' }}</span>
-        <small v-if="artifact.request_id">request {{ artifact.request_id }}</small>
-        <small v-if="artifact.trace_id">trace {{ artifact.trace_id }}</small>
-        <button v-if="artifact.kind === 'screenshot' && previewURLs[artifact.id]" class="screenshot-preview" type="button" :data-artifact-preview="artifact.id" :aria-label="`打开${artifactLabel(artifact.kind)}原图`" @click="openPreview(artifact, $event)">
-          <img :data-artifact-id="artifact.id" :src="previewURLs[artifact.id]" :alt="`${artifact.environment || '当前环境'}渲染截图缩略图`">
-        </button>
-        <p v-if="previewErrors[artifact.id]" class="artifact-local-error" role="status">{{ previewErrors[artifact.id] }}</p>
-        <p v-if="saveStatus(artifact.id)" :class="saveStates[artifact.id] === 'failed' ? 'artifact-local-error' : 'artifact-local-status'" role="status">{{ saveStatus(artifact.id) }}</p>
-      </article>
+          <p v-if="previewErrors[artifact.id]" class="artifact-local-error" role="status">{{ previewErrors[artifact.id] }}</p>
+          <p v-if="saveStatus(artifact.id)" :class="saveStates[artifact.id] === 'failed' ? 'artifact-local-error' : 'artifact-local-status'" role="status">{{ saveStatus(artifact.id) }}</p>
+        </article>
+      </details>
     </details>
 
     <dialog v-if="selectedPreview && previewURLs[selectedPreview.id]" ref="previewDialog" class="screenshot-dialog" aria-modal="true" :aria-labelledby="previewDialogTitleID" @cancel.prevent="closePreview" @close="finishPreviewClose">
@@ -420,6 +484,13 @@ watch(
 .evidence-card > summary h3 { margin: 0; }
 .evidence-card > summary span { margin-left: auto; color: var(--c-muted); font-size: var(--fs-xs); }
 .evidence-card > summary:focus-visible { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; border-radius: var(--r-md); }
+.evidence-attempt-group { margin-top: var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); padding: 0 var(--sp-3); }
+.evidence-attempt-group > summary { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); min-height: 44px; cursor: pointer; color: var(--c-ink); }
+.evidence-attempt-group > summary span { color: var(--c-muted); font-size: var(--fs-xs); }
+.evidence-attempt-group > summary:focus-visible { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; border-radius: var(--r-sm); }
+.evidence-attempt-group-failed { border-color: #fed7aa; background: #fffaf5; }
+.evidence-attempt-group-failed > summary strong { color: #9a3412; }
+.evidence-group-description { margin: 0 0 var(--sp-2); color: var(--c-muted); font-size: var(--fs-xs); line-height: 1.55; }
 .root-cause-card h3, .remediation-plan h4 { color: var(--c-ink); font-size: var(--fs-md); font-weight: 700; line-height: 1.4; }
 .root-cause-card h3 { margin-bottom: var(--sp-2); }
 .root-cause-disputed { margin: 0 0 var(--sp-2); padding: 7px 9px; border-left: 3px solid #d97706; background: #fffbeb; color: #92400e; font-size: var(--fs-xs); line-height: 1.55; }

@@ -107,6 +107,8 @@ type App struct {
 	workflowRecoveryPending                   bool
 	workflowBrowserRecoveryBeforeOutcome      func() error
 	workflowBrowserRecoveryBeforeContinuation func() error
+	workflowBrowserDecisionPolicy             bughub.BrowserDecisionRolloutPolicy
+	workflowBrowserDecisionConfigured         bool
 	workflowInitErr                           error
 	workflowLoadBug                           func(string) (bughub.Bug, error)
 	workflowLoadBot                           func(string) (bughub.BotRef, error)

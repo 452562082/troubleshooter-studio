@@ -131,10 +131,12 @@ type browserRequestFactEvidence struct {
 }
 
 type browserResponseFactFieldEvidence struct {
-	Path         string `json:"path"`
-	ValueType    string `json:"value_type"`
-	Occurrences  int64  `json:"occurrences"`
-	UniqueValues int64  `json:"unique_values"`
+	Path            string   `json:"path"`
+	ValueType       string   `json:"value_type"`
+	Occurrences     int64    `json:"occurrences"`
+	UniqueValues    int64    `json:"unique_values"`
+	SampleValues    []string `json:"sample_values,omitempty"`
+	ValuesTruncated bool     `json:"values_truncated,omitempty"`
 }
 
 type browserResponseFactArrayEvidence struct {
@@ -157,15 +159,35 @@ type browserResponseFactCountRelationEvidence struct {
 	Equal          bool   `json:"equal"`
 }
 
+type browserResponseFactFieldOrderEvidence struct {
+	Path        string `json:"path"`
+	ValueType   string `json:"value_type"`
+	Occurrences int64  `json:"occurrences"`
+	Direction   string `json:"direction"`
+}
+
+type browserResponseFactCrossComparisonEvidence struct {
+	LeftActionID     string `json:"left_action_id"`
+	RightActionID    string `json:"right_action_id"`
+	FieldPath        string `json:"field_path"`
+	Aggregation      string `json:"aggregation"`
+	ValueType        string `json:"value_type"`
+	Relation         string `json:"relation"`
+	LeftOccurrences  int64  `json:"left_occurrences"`
+	RightOccurrences int64  `json:"right_occurrences"`
+}
+
 type browserResponseFactEvidence struct {
-	ActionID        string                                     `json:"action_id"`
-	Method          string                                     `json:"method"`
-	URL             string                                     `json:"url"`
-	Status          int64                                      `json:"status"`
-	Fields          []browserResponseFactFieldEvidence         `json:"fields"`
-	Arrays          []browserResponseFactArrayEvidence         `json:"arrays"`
-	EqualFieldPairs []browserResponseFactEqualPairEvidence     `json:"equal_field_pairs"`
-	CountRelations  []browserResponseFactCountRelationEvidence `json:"count_relations"`
+	ActionID                 string                                       `json:"action_id"`
+	Method                   string                                       `json:"method"`
+	URL                      string                                       `json:"url"`
+	Status                   int64                                        `json:"status"`
+	Fields                   []browserResponseFactFieldEvidence           `json:"fields"`
+	Arrays                   []browserResponseFactArrayEvidence           `json:"arrays"`
+	EqualFieldPairs          []browserResponseFactEqualPairEvidence       `json:"equal_field_pairs"`
+	CountRelations           []browserResponseFactCountRelationEvidence   `json:"count_relations"`
+	FieldOrders              []browserResponseFactFieldOrderEvidence      `json:"field_orders"`
+	CrossResponseComparisons []browserResponseFactCrossComparisonEvidence `json:"cross_response_comparisons"`
 }
 
 type browserEvaluatorEvidence struct {
@@ -752,14 +774,26 @@ func validBrowserObservedJSONPath(value string) bool {
 }
 
 func sanitizeBrowserResponseFactEvidence(record *browserResponseFactEvidence) error {
-	if strings.TrimSpace(record.ActionID) == "" || record.Status < 0 || len(record.Fields) > 64 || len(record.Arrays) > 32 || len(record.EqualFieldPairs) > 64 || len(record.CountRelations) > 32 || (len(record.Fields) == 0 && len(record.Arrays) == 0) {
+	if strings.TrimSpace(record.ActionID) == "" || record.Status < 0 || len(record.Fields) > 64 || len(record.Arrays) > 32 || len(record.EqualFieldPairs) > 64 || len(record.CountRelations) > 32 || len(record.FieldOrders) > 32 || len(record.CrossResponseComparisons) > 32 || (len(record.Fields) == 0 && len(record.Arrays) == 0) {
 		return errors.New("frozen browser response facts are invalid")
 	}
 	allowedTypes := map[string]bool{"null": true, "string": true, "number": true, "boolean": true, "undefined": true, "bigint": true}
 	for index := range record.Fields {
 		field := &record.Fields[index]
-		if !validBrowserObservedJSONPath(field.Path) || !allowedTypes[field.ValueType] || field.Occurrences < 1 || field.UniqueValues < 0 || field.UniqueValues > field.Occurrences {
+		if !validBrowserObservedJSONPath(field.Path) || !allowedTypes[field.ValueType] || field.Occurrences < 1 || field.UniqueValues < 0 || field.UniqueValues > field.Occurrences || len(field.SampleValues) > 64 || int64(len(field.SampleValues)) > field.UniqueValues {
 			return errors.New("frozen browser response fact field is invalid")
+		}
+		seenValues := make(map[string]struct{}, len(field.SampleValues))
+		for valueIndex := range field.SampleValues {
+			value := field.SampleValues[valueIndex]
+			if len([]byte(value)) > 512 || redactSensitiveText(value) != value || containsSensitiveData([]byte(value)) {
+				return errors.New("frozen browser response fact value is unsafe")
+			}
+			if _, duplicate := seenValues[value]; duplicate {
+				return errors.New("frozen browser response fact value is duplicated")
+			}
+			seenValues[value] = struct{}{}
+			field.SampleValues[valueIndex] = safeBoundedBrowserText(value, 512)
 		}
 		field.Path = safeBoundedBrowserText(field.Path, 256)
 	}
@@ -787,6 +821,22 @@ func sanitizeBrowserResponseFactEvidence(record *browserResponseFactEvidence) er
 		relation.ObjectPath = safeBoundedBrowserText(relation.ObjectPath, 256)
 		relation.CountField = safeBoundedBrowserText(relation.CountField, 64)
 		relation.ArrayField = safeBoundedBrowserText(relation.ArrayField, 64)
+	}
+	for index := range record.FieldOrders {
+		order := &record.FieldOrders[index]
+		if !validBrowserObservedJSONPath(order.Path) || (order.ValueType != "number" && order.ValueType != "datetime") || order.Occurrences < 2 || (order.Direction != "ascending" && order.Direction != "descending" && order.Direction != "constant" && order.Direction != "unordered") {
+			return errors.New("frozen browser response fact field order is invalid")
+		}
+		order.Path = safeBoundedBrowserText(order.Path, 256)
+	}
+	for index := range record.CrossResponseComparisons {
+		comparison := &record.CrossResponseComparisons[index]
+		if !validBrowserDecisionIdentifier(comparison.LeftActionID, 128) || !validBrowserDecisionIdentifier(comparison.RightActionID, 128) || comparison.LeftActionID == comparison.RightActionID || !validBrowserObservedJSONPath(comparison.FieldPath) || comparison.Aggregation != "max" || (comparison.ValueType != "number" && comparison.ValueType != "datetime") || (comparison.Relation != "less_than" && comparison.Relation != "equal" && comparison.Relation != "greater_than") || comparison.LeftOccurrences < 1 || comparison.RightOccurrences < 1 {
+			return errors.New("frozen browser cross-response comparison is invalid")
+		}
+		comparison.LeftActionID = safeBoundedBrowserText(comparison.LeftActionID, 128)
+		comparison.RightActionID = safeBoundedBrowserText(comparison.RightActionID, 128)
+		comparison.FieldPath = safeBoundedBrowserText(comparison.FieldPath, 256)
 	}
 	record.ActionID = safeBoundedBrowserText(record.ActionID, 128)
 	record.Method = safeBoundedBrowserText(record.Method, 16)

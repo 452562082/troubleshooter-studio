@@ -427,21 +427,9 @@ func (r *AgentPhaseRunner) withSupplementalValidationScreenshots(ctx context.Con
 	if r == nil || r.store == nil || strings.TrimSpace(attempt.ParentAttemptID) == "" {
 		return bug, nil
 	}
-	ancestorIDs := make(map[string]struct{})
-	parentID := strings.TrimSpace(attempt.ParentAttemptID)
-	for parentID != "" {
-		if _, duplicate := ancestorIDs[parentID]; duplicate {
-			return Bug{}, errors.New("validation evidence ancestry contains a cycle")
-		}
-		parent, err := r.store.GetAttempt(ctx, parentID)
-		if err != nil {
-			return Bug{}, err
-		}
-		if parent.CaseID != attempt.CaseID || parent.CycleNumber != attempt.CycleNumber {
-			return Bug{}, errors.New("validation evidence ancestor does not belong to the current Case cycle")
-		}
-		ancestorIDs[parent.ID] = struct{}{}
-		parentID = strings.TrimSpace(parent.ParentAttemptID)
+	ancestorIDs, err := r.currentCycleAncestorAttemptIDs(ctx, attempt, "validation evidence")
+	if err != nil {
+		return Bug{}, err
 	}
 	registered, err := r.store.ListEvidenceArtifacts(ctx, attempt.CaseID)
 	if err != nil {
@@ -498,6 +486,36 @@ func (r *AgentPhaseRunner) withSupplementalValidationScreenshots(ctx context.Con
 		})
 	}
 	return bug, nil
+}
+
+// currentCycleAncestorAttemptIDs follows the durable parent chain only while
+// it remains inside the current cycle. A new cycle intentionally points to the
+// prior cycle's terminal regression, so that boundary is a normal stop rather
+// than corrupt ancestry. Cross-Case and future-cycle links remain invalid.
+func (r *AgentPhaseRunner) currentCycleAncestorAttemptIDs(ctx context.Context, attempt PhaseAttempt, evidenceKind string) (map[string]struct{}, error) {
+	ancestorIDs := make(map[string]struct{})
+	parentID := strings.TrimSpace(attempt.ParentAttemptID)
+	for parentID != "" {
+		if _, duplicate := ancestorIDs[parentID]; duplicate {
+			return nil, fmt.Errorf("%s ancestry contains a cycle", evidenceKind)
+		}
+		parent, err := r.store.GetAttempt(ctx, parentID)
+		if err != nil {
+			return nil, err
+		}
+		if parent.CaseID != attempt.CaseID {
+			return nil, fmt.Errorf("%s ancestor does not belong to the current Case", evidenceKind)
+		}
+		if parent.CycleNumber > attempt.CycleNumber {
+			return nil, fmt.Errorf("%s ancestor belongs to a future Case cycle", evidenceKind)
+		}
+		if parent.CycleNumber < attempt.CycleNumber {
+			break
+		}
+		ancestorIDs[parent.ID] = struct{}{}
+		parentID = strings.TrimSpace(parent.ParentAttemptID)
+	}
+	return ancestorIDs, nil
 }
 
 func newAttemptRunClaimToken() (string, error) {
@@ -1178,22 +1196,14 @@ func (r *AgentPhaseRunner) browserUserClarifications(ctx context.Context, attemp
 		if len(input.SupplementalEvidence) == 0 {
 			return nil, nil
 		}
-		userInput, structured, err := validationPromptInput(input.SupplementalEvidence)
-		if err == nil {
-			result := make([]string, 0, 2)
-			if userInput != "" {
-				result = append(result, userInput)
-			}
-			if structured != "" {
-				result = append(result, structured)
-			}
-			return result, nil
+		userInput, _, err := validationPromptInput(input.SupplementalEvidence)
+		if err != nil {
+			return nil, fmt.Errorf("decode regression supplemental evidence: %w", err)
 		}
-		formatted, formatErr := formattedPromptJSON(input.SupplementalEvidence)
-		if formatErr != nil {
-			return nil, fmt.Errorf("decode regression supplemental evidence: %w", formatErr)
+		if userInput == "" {
+			return nil, nil
 		}
-		return []string{formatted}, nil
+		return []string{userInput}, nil
 	default:
 		return nil, nil
 	}
@@ -1243,7 +1253,7 @@ func buildStructuredInvestigationPrompt(bug Bug, bot BotRef) string {
 	sb.WriteString("请作为选定的 AI 排障机器人执行只读根因分析。先遵循 incident-investigator/SKILL.md 的取证流程。\n")
 	sb.WriteString("本 Studio 阶段契约优先于 incident-investigator 中面向普通交互式会话的 ASK_USER / missing_critical_evidence 兼容规则；不得把部署、配置、trace、日志、指标、数据库或 K8s 取证转为用户补证。\n")
 	sb.WriteString("Studio 已由验证 Agent 完成复现并冻结证据；第 1 步只是接收并校验 Studio structured investigation input 与 validation-evidence-manifest.json，不是再次复现。不得调用 bug-verifier、api-verifier、attachment-evidence-verifier，不得重新操作浏览器复现。\n")
-	sb.WriteString("证据责任必须分流：先读取 manifest 全部文件；request_facts 是首次浏览器执行从实际请求中自动发现或按白名单冻结的业务参数事实，必须优先用于 trace、日志和数据库关联；response_facts 是首次执行对真实 JSON 响应生成的无原始值结构摘要（字段路径、数组长度、唯一值数量、相等字段对、计数字段与数组长度关系）；已有 response_assertions 则是业务预期字段关系或请求阶段拒绝要求的权威机器判定，后续异步任务失败不能替代接口阶段应拒绝的要求。response_facts 已覆盖所需字段结构或关系时，不得仅因缺少原始 response body 或预声明 response_assertions 而写 validation_gaps。不得索要或持久化原始 request body；不得索要或持久化原始 response body。只有冻结证据确实缺失、损坏，或验证宿主尚未安全生成业务判断必需且无法由 response_facts 替代的精确断言时才写入 validation_gaps，Studio 才会自动交回验证 Agent 补采。\n")
+	sb.WriteString("证据责任必须分流：先读取 manifest 全部文件；request_facts 是首次浏览器执行从实际请求中自动发现或按白名单冻结的业务参数事实，必须优先用于 trace、日志和数据库关联；response_facts 是当前执行对真实 JSON 响应生成的有界业务事实（字段路径、非凭据 sample_values、values_truncated、数组长度、唯一值数量、相等字段对、计数字段与数组长度关系、数组字段顺序、同接口不同因果动作间最大数值/时间关系）。必须优先用 sample_values 对比当前账号、用户 ID、昵称、计数、时间和其它实际业务值，不得在已有值可判定时猜测账号变化或前置数据缺失；values_truncated=true 才表示该字段样本不完整。已有 response_assertions 则是业务预期字段关系或请求阶段拒绝要求的权威机器判定，后续异步任务失败不能替代接口阶段应拒绝的要求。response_facts 已覆盖所需业务值、字段结构、相等或顺序关系时，不得仅因缺少完整原始 response body 或预声明 response_assertions 而写 validation_gaps。不得索要或持久化原始 request body；不得索要或持久化完整原始 response body。只有冻结证据确实缺失、损坏，或验证宿主尚未安全生成业务判断必需且无法由 response_facts 替代的精确断言时才写入 validation_gaps，Studio 才会自动交回验证 Agent 补采。\n")
 	sb.WriteString("在最终输出前，必须根据环境和服务读 routing，并对本问题因果判断真正需要的部署版本、调用链、日志、指标、配置、数据库和 K8s 调用已安装的目标环境 skill / MCP；不得为填满七步而查询与候选根因无关的系统。对数据库，单集群时直接调 `<type>-<env>`；service-to-datastore-source 空映射不代表 MCP 不存在。未真实调用工具及其只读 fallback 前，不得声称“缺少映射后的只读工具”。仅在结论仍为 insufficient_info、该范围会改变候选根因判断且工具实际失败时写 unchecked_scopes；已有等价或更强证据时不得记录重复替代工具、可选观测项或 source map。root_cause_ready 时 unchecked_scopes 必须为 []；gaps 只允许记录必须由用户提供的权限、登录态、测试账号或外部资料。\n")
 	sb.WriteString("最终 YAML 必须显式输出 validation_gaps、gaps、unchecked_scopes 三个数组，无内容时也必须写 []。任何要求用户提供 deployment revision/image digest/rollout、trace/日志/指标、配置、数据库查询结果、K8s 状态或原始 response body 的 gaps 都是无效阶段结果。\n")
 	sb.WriteString("call_chain 精度必须与证据字段一致：source_mapped 必须同时提供 repo、实际部署 revision、file、正数 line 和 evidence；deployed_revision 必须提供 repo、实际部署 revision 和 evidence；runtime_verified 与 static_candidate 必须提供 evidence。缺少任一必填字段时必须主动降级到字段能够证明的更弱精度，绝不能在 revision 为空时输出 source_mapped。\n")

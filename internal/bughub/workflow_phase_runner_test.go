@@ -686,10 +686,12 @@ func TestStructuredInvestigationPromptExplainsRootCauseReadinessGate(t *testing.
 		"不得重新操作浏览器复现",
 		"validation_gaps",
 		"自动交回验证 Agent 补采",
-		"不得索要或持久化原始 response body",
+		"不得索要或持久化完整原始 response body",
 		"response_assertions",
 		"response_facts",
-		"不得仅因缺少原始 response body",
+		"sample_values",
+		"values_truncated",
+		"不得仅因缺少完整原始 response body",
 		"gaps 只允许记录必须由用户提供",
 		"unchecked_scopes",
 		"root_cause_ready 时 unchecked_scopes 必须为 []",
@@ -2789,6 +2791,42 @@ func TestAgentPhaseRunnerValidationPromptIncludesDurableContinuationContext(t *t
 	}
 }
 
+func TestRegressionBrowserClarificationsExcludeStructuredControlMetadata(t *testing.T) {
+	attempt := PhaseAttempt{
+		Phase: PhaseRegression,
+		InputJSON: []byte(`{
+			"supplemental_evidence": {
+				"previous_gap": "没有测试文件，需要什么测试文件",
+				"user_input": "本工单只需点击头像用户并读取接口返回的最新发布时间，不涉及上传或导入操作"
+			}
+		}`),
+	}
+	clarifications, err := (&AgentPhaseRunner{}).browserUserClarifications(context.Background(), attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clarifications) != 1 {
+		t.Fatalf("clarifications = %#v", clarifications)
+	}
+	if clarifications[0] != "本工单只需点击头像用户并读取接口返回的最新发布时间，不涉及上传或导入操作" {
+		t.Fatalf("only the explicit user input may be treated as a clarification: %#v", clarifications)
+	}
+}
+
+func TestRegressionBrowserRetryDecisionIsNotAUserClarification(t *testing.T) {
+	attempt := PhaseAttempt{
+		Phase:     PhaseRegression,
+		InputJSON: []byte(`{"supplemental_evidence":{"decision":"retry_current_regression"}}`),
+	}
+	clarifications, err := (&AgentPhaseRunner{}).browserUserClarifications(context.Background(), attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clarifications) != 0 {
+		t.Fatalf("internal retry metadata must not change the scenario contract basis: %#v", clarifications)
+	}
+}
+
 func TestAgentPhaseRunnerCarriesUploadedScreenshotsIntoValidationRetry(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident := createWorkflowCase(t, store, "case-validation-upload", CaseNotReproduced)
@@ -2844,6 +2882,84 @@ func TestAgentPhaseRunnerCarriesUploadedScreenshotsIntoValidationRetry(t *testin
 		!strings.HasSuffix(byID[fileArtifact.ID].Name, ".xlsx") ||
 		byID[fileArtifact.ID].LocalPath != fileArtifact.PathOrReference {
 		t.Fatalf("file attachment = %+v", byID[fileArtifact.ID])
+	}
+}
+
+func TestAgentPhaseRunnerStopsSupplementalEvidenceAtPriorCycleBoundary(t *testing.T) {
+	store := newOrchestratorStore(t)
+	incident := createWorkflowCase(t, store, "case-validation-cycle-boundary", CaseWaitingEvidence)
+	now := time.Now().UTC()
+	priorCycle := PhaseAttempt{
+		ID: "attempt-prior-cycle-regression", CaseID: incident.ID, CycleNumber: 1,
+		Phase: PhaseRegression, Mode: AttemptRegression, Status: AttemptStatusFailed,
+		AgentTarget: "codex", BotKey: "bot", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
+		StartedAt: now.Add(-2 * time.Minute), FinishedAt: &now,
+	}
+	currentCycle := PhaseAttempt{
+		ID: "attempt-current-cycle-fix", CaseID: incident.ID, CycleNumber: 2,
+		Phase: PhaseFix, Mode: "", Status: AttemptStatusSucceeded,
+		AgentTarget: "codex", BotKey: "bot", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
+		ParentAttemptID: priorCycle.ID, StartedAt: now.Add(-time.Minute), FinishedAt: &now,
+	}
+	for _, attempt := range []PhaseAttempt{priorCycle, currentCycle} {
+		if err := store.CreateAttempt(context.Background(), attempt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	retry := PhaseAttempt{
+		ID: "attempt-current-cycle-regression", CaseID: incident.ID, CycleNumber: 2,
+		Phase: PhaseRegression, Mode: AttemptRegression, Status: AttemptStatusRunning,
+		AgentTarget: "codex", BotKey: "bot",
+		InputJSON: mustJSON(map[string]any{"frontend_entries": []FrontendEntryBinding{{ID: "consumer"}}}), OutputJSON: []byte(`{}`),
+		ParentAttemptID: currentCycle.ID, StartedAt: now,
+	}
+	root := phaseArtifactsRoot(t)
+	registerScreenshot := func(attemptID, suffix string) EvidenceArtifact {
+		image := append([]byte(nil), browserPNGSignature...)
+		image = append(image, []byte(suffix)...)
+		artifact, err := RegisterArtifactBytes(context.Background(), store, ArtifactInput{
+			ArtifactsRoot: root, CaseID: incident.ID, AttemptID: attemptID,
+			Kind: "user_screenshot", Environment: "test", RedactionStatus: RedactionStatusNotRequired,
+		}, image)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return artifact
+	}
+	priorScreenshot := registerScreenshot(priorCycle.ID, "prior-cycle")
+	currentScreenshot := registerScreenshot(currentCycle.ID, "current-cycle")
+	registerRecipe := func(attemptID, startURL string) {
+		content, err := json.Marshal(BrowserManualReproductionRecipe{
+			Version: ManualReproductionRecipeVersion, FrontendEntryID: "consumer", FrontendEntryName: "C端", StartURL: startURL,
+			Actions: []BrowserManualReproductionAction{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := RegisterArtifactBytes(context.Background(), store, ArtifactInput{
+			ArtifactsRoot: root, CaseID: incident.ID, AttemptID: attemptID,
+			Kind: ManualReproductionArtifactKind, Environment: "test", RedactionStatus: RedactionStatusNotRequired,
+		}, content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	registerRecipe(priorCycle.ID, "https://prior.example.com/")
+	registerRecipe(currentCycle.ID, "https://current.example.com/")
+
+	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, root, nil)
+	got, err := runner.withSupplementalValidationScreenshots(context.Background(), retry, Bug{ID: incident.BugID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Attachments) != 1 || got.Attachments[0].ID != currentScreenshot.ID || got.Attachments[0].ID == priorScreenshot.ID {
+		t.Fatalf("cycle-scoped attachments = %+v", got.Attachments)
+	}
+	bundle, err := runner.browserManualReproductionBundle(context.Background(), retry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle == nil || len(bundle.Segments) != 1 || bundle.Segments[0].StartURL != "https://current.example.com/" {
+		t.Fatalf("cycle-scoped manual bundle = %+v", bundle)
 	}
 }
 

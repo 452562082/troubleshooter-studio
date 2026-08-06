@@ -726,9 +726,29 @@ func validBrowserRequestFieldPath(value string) bool {
 }
 
 func browserRequestFieldSensitive(value string) bool {
-	normalized := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(value, "-", "_"), ".", "_"))
-	for _, token := range []string{"password", "passwd", "secret", "token", "authorization", "auth", "cookie", "session", "api_key", "apikey", "private_key", "access_key", "captcha", "otp"} {
-		if strings.Contains(normalized, token) {
+	var normalized strings.Builder
+	var previous rune
+	for index, character := range value {
+		if character == '.' || character == '-' || character == '_' {
+			normalized.WriteByte('_')
+			previous = character
+			continue
+		}
+		if index > 0 && character >= 'A' && character <= 'Z' && ((previous >= 'a' && previous <= 'z') || (previous >= '0' && previous <= '9')) {
+			normalized.WriteByte('_')
+		}
+		normalized.WriteRune(character)
+		previous = character
+	}
+	parts := strings.FieldsFunc(strings.ToLower(normalized.String()), func(character rune) bool { return character == '_' })
+	for _, part := range parts {
+		switch part {
+		case "password", "passwd", "secret", "token", "authorization", "authentication", "auth", "cookie", "session", "apikey", "captcha", "otp":
+			return true
+		}
+	}
+	for index := 0; index+1 < len(parts); index++ {
+		if parts[index+1] == "key" && (parts[index] == "api" || parts[index] == "private" || parts[index] == "access") {
 			return true
 		}
 	}

@@ -162,7 +162,13 @@ const AUTOMATIC_RESPONSE_FACT_MAX_FIELDS = 64;
 const AUTOMATIC_RESPONSE_FACT_MAX_PAIRS = 64;
 const AUTOMATIC_RESPONSE_FACT_MAX_ARRAYS = 32;
 const AUTOMATIC_RESPONSE_FACT_MAX_COUNT_RELATIONS = 32;
-const SENSITIVE_BUSINESS_FIELD = /(?:password|passwd|secret|token|authorization|auth|cookie|session|api[_-]?key|private[_-]?key|access[_-]?key|captcha|otp)/i;
+const AUTOMATIC_RESPONSE_FACT_MAX_FIELD_ORDERS = 32;
+const AUTOMATIC_RESPONSE_FACT_MAX_CROSS_COMPARISONS = 64;
+const AUTOMATIC_RESPONSE_FACT_MAX_SAMPLE_VALUES = 256;
+const AUTOMATIC_RESPONSE_FACT_MAX_SAMPLES_PER_FIELD = 64;
+const AUTOMATIC_RESPONSE_FACT_SAMPLE_MAX_BYTES = 512;
+const INTERNAL_COMPARABLE_RESPONSE_VALUES = Symbol('comparable-response-values');
+const SENSITIVE_BUSINESS_FIELD = /(?:^|_)(?:password|passwd|secret|token|authorization|authentication|auth|cookie|session|api_key|apikey|private_key|access_key|captcha|otp)(?:_|$)/;
 const AUTH_ATTRIBUTED_ACTIONS = new Set(['click', 'fill', 'press', 'select', 'upload_file', 'dismiss_surface']);
 const NETWORK_PROTOCOLS = new Set(['http:', 'https:', 'ws:', 'wss:']);
 const BROWSER_LAUNCH_ARGS = Object.freeze([
@@ -674,7 +680,10 @@ function parseBoundedQueryValue(value) {
 }
 
 function automaticFieldSensitive(path) {
-  return SENSITIVE_BUSINESS_FIELD.test(path) || String(path).split('.').some((part) => part.toLowerCase() === 'code');
+  return String(path).split('.').some((part) => {
+    const normalized = part.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replaceAll('-', '_').toLowerCase();
+    return SENSITIVE_BUSINESS_FIELD.test(normalized) || normalized === 'code';
+  });
 }
 
 function automaticFactFields(value, prefix = '', result = []) {
@@ -736,6 +745,51 @@ function automaticResponseValueType(value) {
   return typeof value;
 }
 
+function automaticComparableResponseScalar(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return { value_type: 'number', value };
+  if (typeof value !== 'string'
+    || !/^\d{4}-\d{2}-\d{2}(?:[T\s]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/.test(value)) return null;
+  const parsed = Date.parse(value.includes(' ') ? value.replace(' ', 'T') : value);
+  return Number.isFinite(parsed) ? { value_type: 'datetime', value: parsed } : null;
+}
+
+function automaticComparableDirection(values) {
+  let ascending = true;
+  let descending = true;
+  let constant = true;
+  for (let index = 1; index < values.length; index += 1) {
+    ascending &&= values[index - 1] <= values[index];
+    descending &&= values[index - 1] >= values[index];
+    constant &&= values[index - 1] === values[index];
+  }
+  if (constant) return 'constant';
+  if (ascending) return 'ascending';
+  if (descending) return 'descending';
+  return 'unordered';
+}
+
+function automaticResponseSampleValue(value) {
+  if (value === null) return { value: 'null', truncated: false };
+  if (typeof value === 'number' || typeof value === 'boolean') return { value: String(value), truncated: false };
+  if (typeof value !== 'string') return null;
+  const truncated = Buffer.byteLength(value, 'utf8') > AUTOMATIC_RESPONSE_FACT_SAMPLE_MAX_BYTES;
+  let businessValue = value;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      parsed.username = '';
+      parsed.password = '';
+      parsed.search = '';
+      parsed.hash = '';
+      businessValue = parsed.toString();
+    }
+  } catch {
+    // Ordinary response strings are preserved below.
+  }
+  const bounded = boundedUTF8(businessValue, AUTOMATIC_RESPONSE_FACT_SAMPLE_MAX_BYTES);
+  return { value: redactConsoleText(bounded), truncated };
+}
+
 function automaticResponseFacts(payload) {
   const fields = new Map();
   const arrays = new Map();
@@ -743,13 +797,58 @@ function automaticResponseFacts(payload) {
   const countRelations = new Map();
   const queue = [{ value: payload, path: '', depth: 0 }];
   let visited = 0;
+  let sampledValues = 0;
+  const observeScalar = (childPath, child) => {
+    if (!(fields.size < AUTOMATIC_RESPONSE_FACT_MAX_FIELDS || fields.has(childPath))) return;
+    const state = fields.get(childPath) ?? {
+      path: childPath,
+      value_type: automaticResponseValueType(child),
+      occurrences: 0,
+      values: new Set(),
+      sample_values: [],
+      sample_value_set: new Set(),
+      values_truncated: false,
+      comparable_value_type: '',
+      comparable_values: [],
+      comparable_incompatible: false,
+    };
+    state.occurrences += 1;
+    const encodedValue = JSON.stringify(child);
+    const uniqueValue = !state.values.has(encodedValue);
+    if (state.values.size <= RESPONSE_ASSERTION_MAX_VISITED_NODES) state.values.add(encodedValue);
+    if (uniqueValue) {
+      const sample = automaticResponseSampleValue(child);
+      if (sample && !state.sample_value_set.has(sample.value)
+        && state.sample_values.length < AUTOMATIC_RESPONSE_FACT_MAX_SAMPLES_PER_FIELD
+        && sampledValues < AUTOMATIC_RESPONSE_FACT_MAX_SAMPLE_VALUES) {
+        state.sample_values.push(sample.value);
+        state.sample_value_set.add(sample.value);
+        sampledValues += 1;
+        state.values_truncated ||= sample.truncated;
+      } else if (!sample || !state.sample_value_set.has(sample.value)) {
+        state.values_truncated = true;
+      }
+    }
+    const comparable = automaticComparableResponseScalar(child);
+    if (comparable && !state.comparable_incompatible) {
+      if (!state.comparable_value_type) state.comparable_value_type = comparable.value_type;
+      if (state.comparable_value_type === comparable.value_type) state.comparable_values.push(comparable.value);
+      else state.comparable_incompatible = true;
+    }
+    fields.set(childPath, state);
+  };
   while (queue.length > 0 && visited < RESPONSE_ASSERTION_MAX_VISITED_NODES) {
     const { value, path, depth } = queue.shift();
     visited += 1;
     if (!value || typeof value !== 'object' || depth > 32) continue;
     if (Array.isArray(value)) {
-      if (path && arrays.size < AUTOMATIC_RESPONSE_FACT_MAX_ARRAYS && !arrays.has(path)) arrays.set(path, { path, length: value.length });
-      for (const child of value) queue.push({ value: child, path: `${path}[]`, depth: depth + 1 });
+      const arrayPath = path || 'root';
+      if (arrays.size < AUTOMATIC_RESPONSE_FACT_MAX_ARRAYS && !arrays.has(arrayPath)) arrays.set(arrayPath, { path: arrayPath, length: value.length });
+      for (const child of value) {
+        const childPath = `${arrayPath}[]`;
+        if (child && typeof child === 'object') queue.push({ value: child, path: childPath, depth: depth + 1 });
+        else observeScalar(childPath, child);
+      }
       continue;
     }
     const scalarEntries = [];
@@ -762,12 +861,7 @@ function automaticResponseFacts(payload) {
         queue.push({ value: child, path: childPath, depth: depth + 1 });
         continue;
       }
-      if (fields.size < AUTOMATIC_RESPONSE_FACT_MAX_FIELDS || fields.has(childPath)) {
-        const state = fields.get(childPath) ?? { path: childPath, value_type: automaticResponseValueType(child), occurrences: 0, values: new Set() };
-        state.occurrences += 1;
-        if (state.values.size <= RESPONSE_ASSERTION_MAX_VISITED_NODES) state.values.add(JSON.stringify(child));
-        fields.set(childPath, state);
-      }
+      observeScalar(childPath, child);
       scalarEntries.push([key, child]);
     }
     for (const [countField, countValue] of scalarEntries) {
@@ -794,11 +888,37 @@ function automaticResponseFacts(payload) {
       }
     }
   }
+  const comparableValues = [...fields.values()]
+    .filter((field) => !field.comparable_incompatible && field.comparable_values.length > 0)
+    .map((field) => ({
+      path: field.path,
+      value_type: field.comparable_value_type,
+      occurrences: field.comparable_values.length,
+      values: field.comparable_values,
+    }));
+  const fieldOrders = comparableValues
+    .filter((field) => (field.path.match(/\[\]/g) ?? []).length === 1 && field.occurrences > 1)
+    .slice(0, AUTOMATIC_RESPONSE_FACT_MAX_FIELD_ORDERS)
+    .map((field) => ({
+      path: field.path,
+      value_type: field.value_type,
+      occurrences: field.occurrences,
+      direction: automaticComparableDirection(field.values),
+    }));
   return {
-    fields: [...fields.values()].map(({ values, ...field }) => ({ ...field, unique_values: values.size })),
+    fields: [...fields.values()].map((field) => ({
+      path: field.path,
+      value_type: field.value_type,
+      occurrences: field.occurrences,
+      unique_values: field.values.size,
+      sample_values: field.sample_values,
+      values_truncated: field.values_truncated || field.sample_values.length < field.values.size,
+    })),
     arrays: [...arrays.values()],
     equal_field_pairs: [...equalPairs.values()],
     count_relations: [...countRelations.values()],
+    field_orders: fieldOrders,
+    comparable_values: comparableValues,
   };
 }
 
@@ -806,7 +926,7 @@ export function evaluateAutomaticResponseFactPayload(payload, metadata = {}) {
   if (!payload || typeof payload !== 'object') return null;
   const facts = automaticResponseFacts(payload);
   if (facts.fields.length === 0 && facts.arrays.length === 0) return null;
-  return {
+  const record = {
     action_id: String(metadata.actionID ?? ''),
     method: String(metadata.method ?? '').toUpperCase(),
     url: safeEndpointURL(metadata.url ?? ''),
@@ -815,7 +935,11 @@ export function evaluateAutomaticResponseFactPayload(payload, metadata = {}) {
     arrays: facts.arrays,
     equal_field_pairs: facts.equal_field_pairs,
     count_relations: facts.count_relations,
+    field_orders: facts.field_orders,
+    cross_response_comparisons: [],
   };
+  Object.defineProperty(record, INTERNAL_COMPARABLE_RESPONSE_VALUES, { value: facts.comparable_values });
+  return record;
 }
 
 async function evaluateAutomaticResponseFactForResponse(response, requestContext, headers = {}) {
@@ -979,7 +1103,7 @@ function createRequestFactCollector(captures = []) {
   };
 }
 
-function createAutomaticResponseFactCollector() {
+export function createAutomaticResponseFactCollector() {
   const observations = new Map();
   return {
     observe(record) {
@@ -988,7 +1112,43 @@ function createAutomaticResponseFactCollector() {
       if (!observations.has(key) && observations.size < 40) observations.set(key, record);
     },
     isFull() { return observations.size >= 40; },
-    snapshot() { return [...observations.values()]; },
+    snapshot() {
+      const records = [...observations.values()];
+      const safeRecords = records.map((record) => {
+        const { [INTERNAL_COMPARABLE_RESPONSE_VALUES]: ignored, ...safe } = record;
+        return { ...safe, cross_response_comparisons: [] };
+      });
+      let comparisonCount = 0;
+      for (let leftIndex = 0; leftIndex < records.length && comparisonCount < AUTOMATIC_RESPONSE_FACT_MAX_CROSS_COMPARISONS; leftIndex += 1) {
+        const left = records[leftIndex];
+        const leftValues = left[INTERNAL_COMPARABLE_RESPONSE_VALUES] ?? [];
+        for (let rightIndex = leftIndex + 1; rightIndex < records.length && comparisonCount < AUTOMATIC_RESPONSE_FACT_MAX_CROSS_COMPARISONS; rightIndex += 1) {
+          const right = records[rightIndex];
+          if (left.action_id === right.action_id || left.method !== right.method || left.url !== right.url) continue;
+          const rightByPath = new Map((right[INTERNAL_COMPARABLE_RESPONSE_VALUES] ?? []).map((field) => [field.path, field]));
+          for (const leftField of leftValues) {
+            const rightField = rightByPath.get(leftField.path);
+            if (!rightField || rightField.value_type !== leftField.value_type || safeRecords[leftIndex].cross_response_comparisons.length >= 32) continue;
+            const leftMaximum = Math.max(...leftField.values);
+            const rightMaximum = Math.max(...rightField.values);
+            const relation = leftMaximum === rightMaximum ? 'equal' : leftMaximum > rightMaximum ? 'greater_than' : 'less_than';
+            safeRecords[leftIndex].cross_response_comparisons.push({
+              left_action_id: left.action_id,
+              right_action_id: right.action_id,
+              field_path: leftField.path,
+              aggregation: 'max',
+              value_type: leftField.value_type,
+              relation,
+              left_occurrences: leftField.occurrences,
+              right_occurrences: rightField.occurrences,
+            });
+            comparisonCount += 1;
+            if (comparisonCount >= AUTOMATIC_RESPONSE_FACT_MAX_CROSS_COMPARISONS) break;
+          }
+        }
+      }
+      return safeRecords;
+    },
   };
 }
 
@@ -5197,7 +5357,7 @@ async function probeWorker(outputPath) {
   return {
     status: 'ready',
     sha256: createHash('sha256').update(content).digest('hex'),
-    protocol_version: 21,
+    protocol_version: 23,
     step_session_error_envelope: true,
     worker_result: workerResult,
   };

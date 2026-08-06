@@ -60,6 +60,26 @@ func TestBrowserScenarioRequiresUploadOnlyFromReproductionContext(t *testing.T) 
 	}
 }
 
+func TestBrowserScenarioRequiresUploadDoesNotCombineSeparateContexts(t *testing.T) {
+	request := BrowserCoordinatorRequest{
+		Bug:                Bug{Steps: "1. 进入关注 Tab\n2. 依次选择用户头像查看作者内容"},
+		UserClarifications: []string{`{"previous_gap":"没有测试文件，需要什么测试文件"}`},
+	}
+	if browserScenarioRequiresFileUpload(request, nil) {
+		t.Fatal("avatar selection and an unrelated historical file mention must not require a local file")
+	}
+}
+
+func TestBrowserScenarioLatestClarificationCanRejectInferredUpload(t *testing.T) {
+	request := BrowserCoordinatorRequest{
+		Bug:                Bug{Steps: "1. 选择文件\n2. 点击用户头像"},
+		UserClarifications: []string{"本工单只需点击头像用户并读取接口返回的最新发布时间，不涉及上传或导入操作"},
+	}
+	if browserScenarioRequiresFileUpload(request, nil) {
+		t.Fatal("an explicit latest clarification that the scenario has no upload must override stale reproduction text")
+	}
+}
+
 func TestNormalizeBrowserUploadFileNameRejectsExecutableAndPaths(t *testing.T) {
 	for _, test := range []struct {
 		name, mime string

@@ -500,6 +500,19 @@ request_captures:
 	}
 }
 
+func TestBrowserRequestFieldSensitiveDistinguishesAuthorFromAuth(t *testing.T) {
+	for _, field := range []string{"author_id", "authors[].nick_name", "is_author", "authority_level"} {
+		if browserRequestFieldSensitive(field) {
+			t.Fatalf("ordinary author business field %q was treated as a credential", field)
+		}
+	}
+	for _, field := range []string{"auth", "authToken", "authentication_status", "authorization_code", "client_secret", "api_key", "private-key", "access.key"} {
+		if !browserRequestFieldSensitive(field) {
+			t.Fatalf("credential field %q was accepted", field)
+		}
+	}
+}
+
 func TestParseBrowserPlanV2RejectsRequestCaptureOnNonRequestAction(t *testing.T) {
 	plan := `version: 2
 start_url: https://test.example.com/search

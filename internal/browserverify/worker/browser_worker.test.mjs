@@ -24,6 +24,7 @@ import {
   createGuardedLoginContext,
   createSupervisedBrowserContext,
   createArtifactBudget,
+  createAutomaticResponseFactCollector,
   createLoginAuthFailureTracker,
   createLoginNavigationTracker,
   createBoundedRecordCollector,
@@ -184,11 +185,19 @@ test('automatic query facts flatten bounded JSON parameters and omit credential 
   assert.equal(fact.url.includes('?'), false);
 });
 
-test('automatic response facts expose structure and equality counts without raw response values', () => {
+test('automatic response facts retain bounded business values while omitting credentials', () => {
   const fact = evaluateAutomaticResponseFactPayload({
     users: {
       total: 1,
-      list: [{ user_id: 'user-42', nick_name: 'chengzi', text: 'chengzi', signature: 'private biography' }],
+      list: [{
+        user_id: 'user-42',
+        author_id: 'author-42',
+        nick_name: 'chengzi',
+        text: 'chengzi',
+        signature: 'private biography',
+        avatar: 'https://cdn.test/avatar/user-42.png?token=top-secret&size=large',
+        access_token: 'must-never-be-persisted',
+      }],
     },
   }, {
     actionID: 'switch-user-results', method: 'GET', url: 'https://api.test/search?keywords=chengzi', status: 200,
@@ -197,11 +206,71 @@ test('automatic response facts expose structure and equality counts without raw 
   assert.ok(fact);
   assert.deepEqual(fact.arrays, [{ path: 'users.list', length: 1 }]);
   assert.ok(fact.fields.some((field) => field.path === 'users.list[].user_id' && field.occurrences === 1 && field.unique_values === 1));
+  assert.deepEqual(fact.fields.find((field) => field.path === 'users.list[].user_id').sample_values, ['user-42']);
+  assert.deepEqual(fact.fields.find((field) => field.path === 'users.list[].author_id').sample_values, ['author-42']);
+  assert.deepEqual(fact.fields.find((field) => field.path === 'users.list[].nick_name').sample_values, ['chengzi']);
+  assert.deepEqual(fact.fields.find((field) => field.path === 'users.total').sample_values, ['1']);
+  assert.deepEqual(fact.fields.find((field) => field.path === 'users.list[].avatar').sample_values, ['https://cdn.test/avatar/user-42.png']);
   assert.ok(fact.equal_field_pairs.some((pair) => pair.object_path === 'users.list[]' && pair.left_field === 'nick_name' && pair.right_field === 'text' && pair.matched_objects === 1));
   assert.deepEqual(fact.count_relations, [{ object_path: 'users', count_field: 'total', array_field: 'list', matched_objects: 1, equal: true }]);
   const encoded = JSON.stringify(fact);
-  for (const rawValue of ['user-42', 'chengzi', 'private biography']) assert.equal(encoded.includes(rawValue), false, rawValue);
+  for (const rawValue of ['user-42', 'author-42', 'chengzi', 'private biography']) assert.equal(encoded.includes(rawValue), true, rawValue);
+  for (const secret of ['top-secret', 'must-never-be-persisted']) assert.equal(encoded.includes(secret), false, secret);
   assert.equal(fact.url.includes('?'), false);
+});
+
+test('automatic response facts expose array order, cross-response comparison, and bounded values', () => {
+  const collector = createAutomaticResponseFactCollector();
+  collector.observe(evaluateAutomaticResponseFactPayload({
+    data: { videos: [{ show_at: '2026-08-06 09:30:00' }, { show_at: '2026-08-05 08:00:00' }] },
+  }, {
+    actionID: 'select-newer-author', method: 'POST', url: 'https://api.test/content/getFollowingVideoList', status: 200,
+  }));
+  collector.observe(evaluateAutomaticResponseFactPayload({
+    data: { videos: [{ show_at: '2026-08-04 07:00:00' }] },
+  }, {
+    actionID: 'select-older-author', method: 'POST', url: 'https://api.test/content/getFollowingVideoList', status: 200,
+  }));
+  collector.observe(evaluateAutomaticResponseFactPayload({ data: { videos: [] } }, {
+    actionID: 'select-empty-author', method: 'POST', url: 'https://api.test/content/getFollowingVideoList', status: 200,
+  }));
+
+  const facts = collector.snapshot();
+  assert.deepEqual(facts[0].field_orders, [{
+    path: 'data.videos[].show_at', value_type: 'datetime', occurrences: 2, direction: 'descending',
+  }]);
+  assert.deepEqual(facts[0].cross_response_comparisons, [{
+    left_action_id: 'select-newer-author', right_action_id: 'select-older-author',
+    field_path: 'data.videos[].show_at', aggregation: 'max', value_type: 'datetime',
+    relation: 'greater_than', left_occurrences: 2, right_occurrences: 1,
+  }]);
+  assert.deepEqual(facts[2].arrays, [{ path: 'data.videos', length: 0 }]);
+  const encoded = JSON.stringify(facts);
+  for (const rawValue of ['2026-08-06 09:30:00', '2026-08-05 08:00:00', '2026-08-04 07:00:00']) assert.equal(encoded.includes(rawValue), true, rawValue);
+});
+
+test('automatic response facts mark values truncated after the bounded sample budget', () => {
+  const fact = evaluateAutomaticResponseFactPayload({
+    data: Array.from({ length: 80 }, (_, index) => ({ user_id: `user-${index}` })),
+  }, { actionID: 'list-users', method: 'GET', url: 'https://api.test/users', status: 200 });
+
+  const field = fact.fields.find((item) => item.path === 'data[].user_id');
+  assert.equal(field.sample_values.length, 64);
+  assert.equal(field.values_truncated, true);
+  assert.equal(field.unique_values, 80);
+});
+
+test('automatic response facts retain scalar array values including a root array', () => {
+  const nested = evaluateAutomaticResponseFactPayload({ roles: ['editor', 'reviewer'] }, {
+    actionID: 'profile', method: 'GET', url: 'https://api.test/profile', status: 200,
+  });
+  assert.deepEqual(nested.fields.find((field) => field.path === 'roles[]').sample_values, ['editor', 'reviewer']);
+
+  const root = evaluateAutomaticResponseFactPayload(['author-1', 'author-2'], {
+    actionID: 'authors', method: 'GET', url: 'https://api.test/authors', status: 200,
+  });
+  assert.deepEqual(root.arrays, [{ path: 'root', length: 2 }]);
+  assert.deepEqual(root.fields.find((field) => field.path === 'root[]').sample_values, ['author-1', 'author-2']);
 });
 
 test('accessibilitySummary infers native search inputs as searchable text controls', async () => {

@@ -212,15 +212,22 @@ func browserPlanHasUpload(plan BrowserPlan) bool {
 	return false
 }
 
-func browserScenarioRequiresFileUpload(request BrowserCoordinatorRequest, observation *BrowserVerificationResult) bool {
-	values := []string{request.Bug.Steps}
-	if len(request.UserClarifications) > 0 {
-		values = append(values, request.UserClarifications[len(request.UserClarifications)-1])
+func browserTextRejectsFileUpload(value string) bool {
+	text := strings.ToLower(strings.TrimSpace(value))
+	for _, marker := range []string{
+		"不涉及上传", "不需要上传", "无需上传", "不用上传",
+		"不涉及文件选择", "不需要选择文件", "无需选择文件", "不用选择文件",
+		"does not require file upload", "doesn't require file upload", "no file upload required",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
 	}
-	if strings.TrimSpace(request.Bug.Steps) == "" {
-		values = append(values, request.Bug.Title, request.Bug.Description, request.Bug.Actual)
-	}
-	text := strings.ToLower(strings.Join(values, "\n"))
+	return false
+}
+
+func browserTextRequiresFileUpload(value string) bool {
+	text := strings.ToLower(strings.TrimSpace(value))
 	for _, marker := range []string{
 		"选择文件", "选取文件", "上传文件", "上传媒资", "上传素材", "上传图片", "上传视频", "上传音频",
 		"导入文件", "导入表格", "批量导入", "upload file", "choose file", "select file", "import file",
@@ -232,8 +239,28 @@ func browserScenarioRequiresFileUpload(request BrowserCoordinatorRequest, observ
 	if (strings.Contains(text, "选择") || strings.Contains(text, "选取")) && strings.Contains(text, "文件") {
 		return true
 	}
-	if (strings.Contains(text, "choose") || strings.Contains(text, "select")) && strings.Contains(text, "file") {
-		return true
+	return (strings.Contains(text, "choose") || strings.Contains(text, "select")) && strings.Contains(text, "file")
+}
+
+func browserScenarioRequiresFileUpload(request BrowserCoordinatorRequest, observation *BrowserVerificationResult) bool {
+	values := []string{request.Bug.Steps}
+	latestClarification := ""
+	if len(request.UserClarifications) > 0 {
+		latestClarification = request.UserClarifications[len(request.UserClarifications)-1]
+	}
+	if strings.TrimSpace(request.Bug.Steps) == "" {
+		values = append(values, request.Bug.Title, request.Bug.Description, request.Bug.Actual)
+	}
+	if strings.TrimSpace(latestClarification) != "" {
+		if browserTextRejectsFileUpload(latestClarification) {
+			return false
+		}
+		values = append(values, latestClarification)
+	}
+	for _, value := range values {
+		if browserTextRequiresFileUpload(value) {
+			return true
+		}
 	}
 	if observation != nil {
 		for _, node := range observation.AccessibilitySummary {

@@ -101,6 +101,7 @@ Agent **不得直接启动 Playwright**、Chromium、`browser_collect.mjs` 或�
 - 优先使用可复查证据：HAR、截图、console 导出、API 响应、trace id、日志查询和命令输出。
 - 引用前必须脱敏 token、cookie、password、authorization header、个人标识和敏感 query 值。
 - 每个结论都必须绑定具体 artifact、timestamp、request 或 command。
+- Studio 提供的 `response_facts.sample_values` 是当前真实响应中自动提取的有界、非凭据业务值，必须用于核对当前账号、用户 ID、昵称、计数、时间和跨接口映射；`values_truncated=true` 才表示样本不完整。`field_orders` 是数组内数值/时间字段的真实升降序事实；`cross_response_comparisons` 是同一接口在两个因果动作下最大数值/时间的真实大小关系。结合动作对应的页面目标、截图、样本值及空数组长度判断排序与空结果位置；已有这些事实时，不得索要完整原始响应或重复执行。
 - `reproduced` 必须同时填写非空 `observed_behavior`、`expected_behavior`，并至少登记一个本次 attempt 新采集且可由 Studio 注册的 artifact；只有文字描述、空 `evidence` 或无法注册的路径必须返回 `insufficient_info`。
 - 证据或环境访问不足时，使用 `insufficient_info` 并列出阻塞缺口。
 - 规划阶段可以返回 BrowserPlan 或使用 Studio 注入的 `assistance_status: needs_user_input` 协议提问。locator 失败后的现场决策阶段必须根据冻结证据三选一：返回继续执行的 BrowserPlan、返回 assistance 问用户业务事实，或直接返回 `ValidationResult`。目标元素按预期不存在时可以直接判定未复现/已修复，不得为了完成旧计划强行寻找或点击不存在的控件。

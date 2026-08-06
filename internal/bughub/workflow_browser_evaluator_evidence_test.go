@@ -536,22 +536,26 @@ func TestPrepareBrowserEvaluatorEvidenceRejectsInconsistentStepEffects(t *testin
 	}
 }
 
-func TestPrepareBrowserEvaluatorEvidenceIncludesAutomaticResponseFactsWithoutValues(t *testing.T) {
-	content := []byte(`[{"action_id":"switch-user-results","method":"GET","url":"https://app.example.com/api/search","status":200,"fields":[{"path":"users.list[].user_id","value_type":"string","occurrences":1,"unique_values":1},{"path":"users.list[].nick_name","value_type":"string","occurrences":1,"unique_values":1}],"arrays":[{"path":"users.list","length":1}],"equal_field_pairs":[{"object_path":"users.list[]","left_field":"nick_name","right_field":"text","matched_objects":1}],"count_relations":[{"object_path":"users","count_field":"total","array_field":"list","matched_objects":1,"equal":true}]}]`)
+func TestPrepareBrowserEvaluatorEvidenceIncludesAutomaticResponseFactBusinessValues(t *testing.T) {
+	content := []byte(`[{"action_id":"switch-user-results","method":"GET","url":"https://app.example.com/api/search","status":200,"fields":[{"path":"users.list[].user_id","value_type":"string","occurrences":1,"unique_values":1,"sample_values":["user-42"],"values_truncated":false},{"path":"users.list[].nick_name","value_type":"string","occurrences":1,"unique_values":1,"sample_values":["chengzi"],"values_truncated":false}],"arrays":[{"path":"users.list","length":1}],"equal_field_pairs":[{"object_path":"users.list[]","left_field":"nick_name","right_field":"text","matched_objects":1}],"count_relations":[{"object_path":"users","count_field":"total","array_field":"list","matched_objects":1,"equal":true}],"field_orders":[{"path":"users.list[].show_at","value_type":"datetime","occurrences":3,"direction":"descending"}],"cross_response_comparisons":[{"left_action_id":"select-newer","right_action_id":"select-older","field_path":"users.list[].show_at","aggregation":"max","value_type":"datetime","relation":"greater_than","left_occurrences":3,"right_occurrences":1}]}]`)
 	_, structured, cleanup, err := prepareBrowserEvaluatorEvidence(BrowserVerificationResult{}, []browserFrozenArtifact{{Kind: "response_facts", Content: content}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = cleanup() }()
-	for _, expected := range []string{`"response_facts"`, `"path":"users.list"`, `"length":1`, `"unique_values":1`, `"left_field":"nick_name"`, `"right_field":"text"`, `"count_field":"total"`, `"array_field":"list"`, `"equal":true`} {
+	for _, expected := range []string{`"response_facts"`, `"path":"users.list"`, `"length":1`, `"unique_values":1`, `"sample_values":["user-42"]`, `"sample_values":["chengzi"]`, `"left_field":"nick_name"`, `"right_field":"text"`, `"count_field":"total"`, `"array_field":"list"`, `"equal":true`, `"direction":"descending"`, `"left_action_id":"select-newer"`, `"right_action_id":"select-older"`, `"relation":"greater_than"`} {
 		if !strings.Contains(structured, expected) {
 			t.Fatalf("structured response facts lack %s: %s", expected, structured)
 		}
 	}
-	for _, rawValue := range []string{"user-42", "chengzi", "private biography"} {
-		if strings.Contains(structured, rawValue) {
-			t.Fatalf("structured response facts leaked %q: %s", rawValue, structured)
-		}
+}
+
+func TestPrepareBrowserEvaluatorEvidenceRejectsUnsafeResponseFactBusinessValue(t *testing.T) {
+	content := []byte(`[{"action_id":"switch-user-results","method":"GET","url":"https://app.example.com/api/search","status":200,"fields":[{"path":"users.list[].nick_name","value_type":"string","occurrences":1,"unique_values":1,"sample_values":["Authorization: Bearer abcdefghijklmnopqrstuvwxyz"],"values_truncated":false}],"arrays":[],"equal_field_pairs":[],"count_relations":[],"field_orders":[],"cross_response_comparisons":[]}]`)
+	_, _, cleanup, err := prepareBrowserEvaluatorEvidence(BrowserVerificationResult{}, []browserFrozenArtifact{{Kind: "response_facts", Content: content}})
+	if err == nil {
+		_ = cleanup()
+		t.Fatal("unsafe response fact business value was accepted")
 	}
 }
 

@@ -279,21 +279,9 @@ func (r *AgentPhaseRunner) browserManualReproductionBundle(ctx context.Context, 
 	if r == nil || r.store == nil || strings.TrimSpace(attempt.ParentAttemptID) == "" {
 		return nil, nil
 	}
-	ancestorIDs := make(map[string]struct{})
-	parentID := strings.TrimSpace(attempt.ParentAttemptID)
-	for parentID != "" {
-		if _, duplicate := ancestorIDs[parentID]; duplicate {
-			return nil, errors.New("manual reproduction evidence ancestry contains a cycle")
-		}
-		parent, err := r.store.GetAttempt(ctx, parentID)
-		if err != nil {
-			return nil, err
-		}
-		if parent.CaseID != attempt.CaseID || parent.CycleNumber != attempt.CycleNumber {
-			return nil, errors.New("manual reproduction evidence ancestor does not belong to the current Case cycle")
-		}
-		ancestorIDs[parent.ID] = struct{}{}
-		parentID = strings.TrimSpace(parent.ParentAttemptID)
+	ancestorIDs, err := r.currentCycleAncestorAttemptIDs(ctx, attempt, "manual reproduction evidence")
+	if err != nil {
+		return nil, err
 	}
 	artifacts, err := r.store.ListEvidenceArtifacts(ctx, attempt.CaseID)
 	if err != nil {

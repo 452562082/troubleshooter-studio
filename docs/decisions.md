@@ -2246,3 +2246,13 @@ Case 详情按 Case 返回全部 `EvidenceArtifact`，工作台过去直接把�
 ### 结果
 
 失败验证留下的截图、Network 和 Console 仍可用于解释为什么失败，但不会再与成功 attempt 的业务证据混为一组。用户可以默认聚焦当前有效结论，需要排查验证系统问题时再展开失败历史；可信边界与后端实际验收规则保持一致。
+
+---
+
+## 2026-08-06 · 浏览器响应事实保留有界业务值，凭据过滤与业务脱敏分层
+
+**背景**：`response_facts` 原先只保存字段路径、数量和相对关系，主动丢弃所有字段原值。验证页面出现“暂无关注用户”时，Agent 能证明 `getFollowingAuthors` 返回空数组，却无法读取当前 `user_id`、昵称、关注计数并与前一次执行或其它接口对比，只能把“账号变化”“业务数据被清理”“聚合接口异常”作为并列猜测，错误地向用户索要本可由现场响应直接判断的信息。
+
+**决策**：Worker 在现有 `response_facts.fields` 中增加有界 `sample_values` 与 `values_truncated`。普通业务标量按响应出现顺序保存，每字段最多 64 个、单响应最多 256 个、单值最多 512 bytes；Host 重新校验字段路径、数量、长度、重复值和敏感内容后才交给验证/排障 Agent。password、Token、Cookie、Authorization、session、密钥、验证码等字段继续整体跳过，值中出现凭据特征时写成 `[REDACTED]`；HTTP(S) 业务 URL 只保留去掉 userinfo、query 和 fragment 的稳定基址，完整原始 request/response body 仍不保存。Worker 合同升级为 browser runtime `1.61.1-r65`、probe protocol 23。
+
+**后果**：验证和排障 Agent 可以直接比较当前账号、用户 ID、昵称、计数、头像基址、发布时间等真实业务值，区分账号错配、前置数据变化和接口返回异常；UI 和普通 Case 证据仍不暴露凭据。大列表或长文本可能截断，Agent 必须读取 `values_truncated`，不得把有界样本冒充完整响应。

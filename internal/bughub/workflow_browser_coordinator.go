@@ -1517,10 +1517,26 @@ func browserScenarioIsMobile(context string) bool {
 }
 
 func browserScenarioDeviceProfile(request BrowserCoordinatorRequest) string {
+	if entries := browserAttemptFrontendEntryBindings(request.Attempt); len(entries) != 0 {
+		profile := strings.TrimSpace(entries[0].DeviceProfile)
+		if profile == "desktop" || profile == "mobile" {
+			return profile
+		}
+	}
 	if browserScenarioIsMobile(browserCurrentScenarioText(request)) {
 		return "mobile"
 	}
 	return "desktop"
+}
+
+func bindGeneratedBrowserDeviceProfile(request BrowserCoordinatorRequest, plan BrowserPlan) BrowserPlan {
+	// Device profile is selected by Studio together with the frontend entry. It
+	// is execution metadata, not a semantic decision for the planning Agent.
+	// Legacy version 1 plans cannot carry device_profile and remain unchanged.
+	if plan.Version == BrowserPlanVersion {
+		plan.DeviceProfile = browserScenarioDeviceProfile(request)
+	}
+	return plan
 }
 
 func browserScenarioRequiresResponseAssertion(context string) bool {
@@ -1550,6 +1566,7 @@ func validateAndBindGeneratedBrowserPlan(request BrowserCoordinatorRequest, raw,
 	if err != nil {
 		return BrowserPlan{}, err
 	}
+	plan = bindGeneratedBrowserDeviceProfile(request, plan)
 	plan, err = bindGeneratedBrowserScenarioContract(request, plan, scenarioSHA)
 	if err != nil {
 		return BrowserPlan{}, err
@@ -1818,6 +1835,8 @@ func browserPlanValidationDiagnosticFor(err error) browserPlanValidationDiagnost
 		return browserPlanValidationDiagnostic{Code: "plan_not_canonical", Message: "计划包含与持久化协议不一致的空字段或默认值"}
 	case strings.Contains(message, "broad or positional css"):
 		return browserPlanValidationDiagnostic{Code: "locator_positional_css_forbidden", Message: "同名控件使用了不稳定的位置型 CSS；应改用已观察行或区域内的结构化定位"}
+	case strings.Contains(message, "action url outside an observed same-origin navigation replacement"):
+		return browserPlanValidationDiagnostic{Code: "repair_navigation_unobserved", Message: "修复计划使用了页面现场未观察到的跳转地址；应保留业务动作并根据冻结现场调整定位"}
 	case strings.Contains(message, "frontend_entry_ids must cover"):
 		return browserPlanValidationDiagnostic{Code: "frontend_scope_incomplete", Message: "场景合同未覆盖全部已选择的应用端"}
 	case strings.Contains(message, "frontend_entry_ids must preserve"):
@@ -3407,8 +3426,11 @@ func validateBrowserRepair(original BrowserPlan, failedActionID string, repaired
 }
 
 func normalizeBrowserRepairScenarioContract(original, repaired BrowserPlan) BrowserPlan {
-	if original.Version == BrowserPlanVersion && repaired.Version == BrowserPlanLegacyVersion {
-		repaired.Version = original.Version
+	if original.Version == BrowserPlanVersion {
+		if repaired.Version == BrowserPlanLegacyVersion {
+			repaired.Version = original.Version
+		}
+		// Locator repair cannot change Host-owned execution metadata.
 		repaired.DeviceProfile = original.DeviceProfile
 	}
 	if original.ScenarioContract == nil {
@@ -3810,6 +3832,7 @@ func browserPlannerPrompt(request BrowserCoordinatorRequest, observation *Browse
 		"frontend_url": request.Bug.FrontendURL, "phase": request.Attempt.Phase, "mode": request.Attempt.Mode,
 		"cycle_number": request.Attempt.CycleNumber, "scope": browserPlannerScope(request.BasePrompt),
 		"scenario_contract_basis":        browserScenarioContractBasis(request),
+		"host_device_profile":            browserScenarioDeviceProfile(request),
 		"latest_user_clarification_role": "execution_guidance_unless_it_explicitly_changes_the_business_expectation_or_observed_bug",
 		"user_clarifications":            boundedBrowserClarifications(request.UserClarifications),
 	}
@@ -3891,7 +3914,7 @@ func browserPlannerPrompt(request BrowserCoordinatorRequest, observation *Browse
 		browserAssistanceRequestContract() +
 		"configured_frontend_observations contains fresh host observations from every selected application, including management/admin applications. Inspect those observations before asking for help. Menu names, visible control text, routes, page structure, and whether a control is currently present are Studio-observable facts, not user-owned business facts. Never ask the user to enumerate controls or explain how to navigate from a configured application landing page. When the Bug steps already name a menu or page, use that exact written text as a conservative exact text locator and let the host observation/locator-repair loop correct it from live evidence if necessary.\n" +
 		"When configured_frontend_entries contains multiple applications, treat every listed entry as required verification scope. Use the first entry as the start application and explicit goto actions for the others when the scenario crosses applications. scenario_contract.causal_action_ids must include at least one evidence-producing action while each selected entry is active. Do not drop an entry merely because the ticket wording focuses on another end. Ask the user only when the missing fact changes the business scenario or success criterion; do not ask because a selected application's current UI has not yet been navigated.\n" +
-		"Choose evidence from the current scenario instead of forcing every Bug into a visual-text check. For H5/mobile scenarios set device_profile: mobile; otherwise set device_profile: desktop. Use UI assertions for observable page state and response assertions for machine-verifiable request outcomes or JSON relationships. Keep browser actions that trigger the real evidence. The worker persists only explicitly listed bounded request fields and response comparison counts, never complete request or response bodies. Credential-like request fields are forbidden.\n" +
+		"Choose evidence from the current scenario instead of forcing every Bug into a visual-text check. device_profile is Host-owned execution metadata: omit it from the generated YAML; Studio binds host_device_profile after parsing. Use UI assertions for observable page state and response assertions for machine-verifiable request outcomes or JSON relationships. Keep browser actions that trigger the real evidence. The worker persists only explicitly listed bounded request fields and response comparison counts, never complete request or response bodies. Credential-like request fields are forbidden.\n" +
 		"Follow every numbered Bug reproduction step in order. Do not skip an explicit open/enter/switch-page step merely because a similarly named input is already visible on the landing page; represent that navigation as its own action before filling. When initial_page_observation contains a visible search textbox for that entry step, copy both its locator_kind and exact observed name, and set exact: true; do not replace it with a generic Search/搜索 navigation label, a different locator kind, or an invented placeholder. Plan actions for stable navigation and input needed to reach the observation page. Do not add a speculative click whose only purpose is to select or reopen the page, dialog, drawer, or tab that the immediately preceding action already opens. When a written step says a control such as 查看 opens the target detail surface, encode that click once and make the next action target the first required control inside the resulting surface; never click the target state's heading or tab label merely to restate that the state should be active. Every state-changing locator must identify exactly one visible intended control. Use a role locator only when the attached screenshot, written evidence, or an earlier host observation explicitly establishes that ARIA role; never infer link, tab, or searchbox merely from visible text. Otherwise prefer an exact label, placeholder, text, or test_id locator. Never use broad or positional CSS such as input, button, textarea, select, :first, or :nth-child. Choose click, fill, press, or select from the observed control and the written reproduction intent; do not substitute one interaction type merely because of a control keyword. Capture screenshots after causal state-changing actions so the settled input and result states are auditable. If the page exposes an observed loading indicator before async content, insert wait_for with state: hidden and a bounded timeout_ms before the evidence screenshot or assertion. Copy that loading locator from live observation; never invent a product-specific spinner. A screenshot taken while the declared loading indicator remains visible is not settled evidence. For absence Bugs such as 未展示/缺失/不显示, never wait_for the business element or value under test. Do not turn a dynamic business value from expected/actual behavior into a wait_for action merely to prove the outcome; put observable business checks in assertions and capture screenshots around the observation state. A missing business element or failed assertion will be evaluated from the captured evidence.\n" +
 		"For a file-input step, use upload_file only when controlled_upload_files contains the exact file to use. Set file_ref to one listed id; never output a filename or path as file_ref. Locate the actual file input by an exact label/test_id or a strict attribute CSS selector such as input[type=\"file\"][accept*=\".xlsx\"]. Do not click a submit/create action until the upload_file action has completed. A file selection may itself trigger the causal upload/import request: never invent a later submit/create click unless the Bug steps or observed page explicitly establish that separate control. If no controlled_upload_files entry exists, do not invent an upload or skip the prerequisite; Studio will request the missing file before planning.\n" +
 		"Strict action field matrix. Fields not listed for an action are forbidden:\n" +
@@ -3909,7 +3932,7 @@ func browserPlannerPrompt(request BrowserCoordinatorRequest, observation *Browse
 		"Response assertion schemas (version 2 only): field comparison uses {id: <unique>, action_id: <request-causing action>, url_contains: <optional stable path>, method: <optional uppercase method>, kind: json_fields_not_equal | json_fields_equal, left_field: <dot-separated JSON field path>, right_field: <dot-separated JSON field path>} and requires a same-action request_capture. Request-stage rejection uses {id: <unique>, action_id: <request-causing action>, url_contains: <optional stable path>, method: <optional uppercase method>, kind: http_status_rejected}; it forbids left_field/right_field and does not require request_captures. Field paths contain identifiers only; never include array indexes, values, credentials, or response samples.\n" +
 		"Scenario contract schema (version 2 plans only): {version: 1, goal: <concise current validation goal>, basis: bug | latest_user_clarification | evidence_refresh, frontend_entry_ids: [<configured entry ids in the exact selected order>], causal_action_ids: [<1-8 action ids that produce the required evidence>], evidence: [{kind: ui_assertions} | {kind: response_assertion, assertion_id: <response assertion id>} ]}. Include frontend_entry_ids when configured_frontend_entries is present, preserving its order. Include ui_assertions exactly once when assertions is non-empty. Reference every response_assertion exactly once. Every referenced response assertion must bind to one causal_action_id. Do not output context_sha256.\n" +
 		"Valid shape example (replace placeholder values with current configured values):\n" +
-		"version: 2\ndevice_profile: desktop\nscenario_contract:\n  version: 1\n  goal: <current validation goal>\n  basis: <scenario_contract_basis>\n  causal_action_ids: [capture-final]\n  evidence:\n    - kind: ui_assertions\nstart_url: <absolute configured HTTP(S) URL>\nactions:\n  - id: capture-final\n    action: screenshot\nassertions:\n  - kind: visible_text\n    value: <expected visible text>\n" +
+		"version: 2\nscenario_contract:\n  version: 1\n  goal: <current validation goal>\n  basis: <scenario_contract_basis>\n  causal_action_ids: [capture-final]\n  evidence:\n    - kind: ui_assertions\nstart_url: <absolute configured HTTP(S) URL>\nactions:\n  - id: capture-final\n    action: screenshot\nassertions:\n  - kind: visible_text\n    value: <expected visible text>\n" +
 		"Before responding, verify every action against the field matrix. " +
 		"Use the configured frontend_url as start_url. Respect is_prod and configured origins. Output exactly one of the two allowed YAML shapes and nothing else.\n"
 }
@@ -4062,8 +4085,9 @@ func browserPlannerBugEvidencePrompt(evidence []map[string]string) string {
 }
 
 func browserPlannerRetryPrompt(request BrowserCoordinatorRequest, observation *BrowserVerificationResult, validationErr error) string {
-	return "Your previous BrowserPlan was rejected by strict structural validation. " + browserPlanValidationHint(validationErr) +
-		" Generate a new response from scratch; if returning BrowserPlan, check every action against the field matrix. Do not repeat or quote the rejected output.\n" + browserPlannerPrompt(request, observation)
+	return browserPlannerPrompt(request, observation) +
+		"\nFinal correction for the rejected plan: Your previous BrowserPlan was rejected by strict structural validation. " + browserPlanValidationHint(validationErr) +
+		" Generate a new response from scratch; if returning BrowserPlan, check every action against the field matrix. Do not repeat or quote the rejected output.\n"
 }
 
 func browserPlanValidationHint(validationErr error) string {
@@ -4080,7 +4104,7 @@ func browserPlanValidationHint(validationErr error) string {
 	case strings.Contains(message, "scenario_contract"):
 		return "Generate a complete scenario_contract from the current Bug and latest user clarification. Copy scenario_contract_basis exactly, list the causal action ids, and cover every UI and response assertion."
 	case strings.Contains(message, "mobile device_profile"):
-		return "The current scenario is H5/mobile. Set version: 2 and device_profile: mobile."
+		return "Omit device_profile from generated YAML. Studio binds the configured frontend entry's device profile after parsing."
 	case strings.Contains(message, "http_status_rejected"):
 		return "The current scenario requires the causal business request itself to be rejected. Add a version 2 http_status_rejected response_assertion on the submit or upload action, with the stable endpoint path and uppercase method when known; do not use a later asynchronous result."
 	case strings.Contains(message, "requires response_assertions"):
@@ -4093,6 +4117,8 @@ func browserPlanValidationHint(validationErr error) string {
 		return "Use upload_file for the file-input step and set file_ref to an id from controlled_upload_files. Never emit a local path or filename as file_ref."
 	case strings.Contains(message, "broad or positional css"):
 		return "Use one stable accessible locator for the intended visible control; never use broad or positional CSS selectors. When the same control name appears in multiple rows, use a version 2 named role locator with a named role within scope copied from the observed row."
+	case strings.Contains(message, "action url outside an observed same-origin navigation replacement"):
+		return "Do not invent or guess a goto URL for the failed click. Keep the failed action as a click and replace only its locator with an exact locator grounded in failed_scene, accessibility, or the attached failed-page screenshot. A goto replacement is allowed only for an earlier causal click when the exact absolute href is present in the frozen structured evidence."
 	case strings.Contains(message, "assertions") && strings.Contains(message, "kind"):
 		return "Assertion kind must be exactly visible_text or not_visible_text for UI assertions; response assertion kind must be json_fields_not_equal, json_fields_equal, or http_status_rejected."
 	case strings.Contains(message, "screenshot"):

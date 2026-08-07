@@ -1184,15 +1184,57 @@ func TestBrowserPlannerRetryPromptReportsAllowedAssertionsWithoutEchoingRejected
 	}
 }
 
+func TestValidateAndBindGeneratedBrowserPlanBindsHostDeviceProfile(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "omitted", raw: validBrowserPlanYAML()},
+		{name: "wrong desktop", raw: strings.Replace(validBrowserPlanYAML(), "version: 2", "version: 2\ndevice_profile: desktop", 1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := browserCoordinatorRequest(t)
+			request.Bug.Title = "H5 用户搜索"
+			scenarioSHA, err := browserValidationRecipeScenarioSHA256(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := validateAndBindGeneratedBrowserPlan(request, test.raw, scenarioSHA, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.DeviceProfile != "mobile" {
+				t.Fatalf("device profile = %q, want host-bound mobile", plan.DeviceProfile)
+			}
+		})
+	}
+}
+
+func TestBrowserScenarioDeviceProfilePrefersSelectedFrontendEntry(t *testing.T) {
+	request := browserCoordinatorRequest(t)
+	request.Bug.Title = "H5 用户搜索"
+	request.Attempt.InputJSON = mustJSON(map[string]any{
+		"frontend_entries": []FrontendEntryBinding{{
+			ID: "admin", URL: "https://app.example.com/users", DeviceProfile: "desktop",
+		}},
+	})
+	if got := browserScenarioDeviceProfile(request); got != "desktop" {
+		t.Fatalf("device profile = %q, want selected entry profile desktop", got)
+	}
+}
+
 func TestBrowserPlannerPromptSelectsMobileHybridEvidenceForAPIFieldClarification(t *testing.T) {
 	request := browserCoordinatorRequest(t)
 	request.Bug.Title = "H5 用户搜索字段展示错误"
 	request.UserClarifications = []string{"搜索 chengzi 后检查接口响应：同一对象的 nick_name 和 text 应不同"}
 	prompt := browserPlannerPrompt(request, nil)
-	for _, expected := range []string{"device_profile: mobile", "request_captures", "response_assertions", "json_fields_not_equal", `"scenario_contract_basis":"latest_user_clarification"`, "installed bug-verifier skill"} {
+	for _, expected := range []string{`"host_device_profile":"mobile"`, "device_profile is Host-owned execution metadata", "request_captures", "response_assertions", "json_fields_not_equal", `"scenario_contract_basis":"latest_user_clarification"`, "installed bug-verifier skill"} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("planner prompt lacks hybrid validation contract %q:\n%s", expected, prompt)
 		}
+	}
+	if strings.Contains(prompt, "device_profile: desktop") || strings.Contains(prompt, "device_profile: mobile") {
+		t.Fatalf("planner prompt still asks the Agent to choose Host-owned device metadata:\n%s", prompt)
 	}
 }
 
@@ -2317,7 +2359,7 @@ func TestNormalizeBrowserPlanObservationGroundingPrefersObservedNavigationContro
 func TestBrowserCoordinatorObservesAndExecutesH5InSameMobileProfile(t *testing.T) {
 	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
 		{FinalYAML: `version: 2
-device_profile: mobile
+device_profile: desktop
 start_url: https://app.example.com/users
 actions:
   - id: enter-search-page
@@ -2355,6 +2397,9 @@ assertions:
 	}
 	if len(verifier.Requests) != 1 || verifier.Requests[0].Plan.DeviceProfile != "mobile" {
 		t.Fatalf("execution did not use mobile profile: %+v", verifier.Requests)
+	}
+	if executor.Calls != 2 {
+		t.Fatalf("host-correctable device profile triggered an Agent retry: calls=%d", executor.Calls)
 	}
 	got := verifier.Requests[0].Plan.Actions[0].Locator
 	if got == nil || got.Kind != "label" || got.Value != "打开搜索页" {
@@ -2757,6 +2802,72 @@ func TestBrowserRepairStrategyFingerprintTracksTheWholeCausalWindow(t *testing.T
 	}
 }
 
+func TestBrowserRepairRejectsUnobservedNavigationReplacementWithActionableDiagnostic(t *testing.T) {
+	original, err := ParseBrowserPlan([]byte(`version: 2
+device_profile: mobile
+scenario_contract:
+  version: 1
+  goal: 验证关注分类
+  basis: latest_user_clarification
+  frontend_entry_ids: [consumer-h5]
+  causal_action_ids: [open-following-category, capture-following-feed]
+  evidence: [{kind: ui_assertions}]
+start_url: https://funhub-web-test.guadd.fun/
+actions:
+  - {id: open-followed-user, action: click, locator: {kind: text, value: 蛋挞蛋挞, exact: true}, screenshot_after: true}
+  - {id: open-published-tab, action: click, locator: {kind: text, value: 发布, exact: true}, screenshot_after: true}
+  - {id: capture-published-content, action: screenshot}
+  - {id: return-home, action: goto, url: https://funhub-web-test.guadd.fun/}
+  - {id: open-following-category, action: click, locator: {kind: text, value: 关注, exact: true}, screenshot_after: true}
+  - {id: capture-following-feed, action: screenshot}
+assertions: [{kind: visible_text, value: 暂无关注内容}]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	original.ScenarioContract.ContextSHA256 = strings.Repeat("a", 64)
+	repairYAML := `version: 2
+device_profile: mobile
+scenario_contract:
+  version: 1
+  goal: 验证关注分类
+  basis: latest_user_clarification
+  frontend_entry_ids: [consumer-h5]
+  causal_action_ids: [open-following-category, capture-following-feed]
+  evidence: [{kind: ui_assertions}]
+  context_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+start_url: https://funhub-web-test.guadd.fun/
+actions:
+  - {id: open-followed-user, action: click, locator: {kind: text, value: 蛋挞蛋挞, exact: true}, screenshot_after: true}
+  - {id: open-published-tab, action: click, locator: {kind: text, value: 发布, exact: true}, screenshot_after: true}
+  - {id: capture-published-content, action: screenshot}
+  - {id: return-home, action: goto, url: https://funhub-web-test.guadd.fun/}
+  - {id: open-following-category, action: goto, url: https://funhub-web-test.guadd.fun/category/%E5%85%B3%E6%B3%A8, screenshot_after: true}
+  - {id: capture-following-feed, action: screenshot}
+assertions: [{kind: visible_text, value: 暂无关注内容}]
+`
+	_, err = ParseBrowserPlan([]byte(repairYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := browserCoordinatorRequest(t)
+	request.Policy = BrowserSecurityPolicy{
+		AllowedOrigins: []string{"https://funhub-web-test.guadd.fun"}, ApplicationOrigins: []string{"https://funhub-web-test.guadd.fun"}, StartOrigins: []string{"https://funhub-web-test.guadd.fun"},
+	}
+	_, err = validateAndNormalizeBrowserRepairCandidate(request, original, BrowserVerificationResult{FailedActionID: "open-following-category"}, browserEvaluatorEvidence{}, repairYAML)
+	if err == nil || !strings.Contains(err.Error(), "action URL outside an observed same-origin navigation replacement") {
+		t.Fatalf("unobserved navigation replacement error = %v", err)
+	}
+	diagnostic := browserPlanValidationDiagnosticFor(err)
+	if diagnostic.Code != "repair_navigation_unobserved" {
+		t.Fatalf("diagnostic = %+v", diagnostic)
+	}
+	hint := browserPlanValidationHint(err)
+	if !strings.Contains(hint, "Do not invent or guess a goto URL") || !strings.Contains(hint, "Keep the failed action as a click") {
+		t.Fatalf("repair hint is not actionable: %s", hint)
+	}
+}
+
 func TestBrowserCoordinatorRepairsLocatorOnlyOnce(t *testing.T) {
 	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
 		{FinalYAML: validBrowserPlanYAML()},
@@ -2785,6 +2896,42 @@ func TestBrowserCoordinatorRepairsLocatorOnlyOnce(t *testing.T) {
 	}
 	if !strings.Contains(executor.Prompts[1], "open-users") || strings.Contains(executor.Prompts[1], "storageState") {
 		t.Fatalf("unsafe or incomplete repair prompt: %s", executor.Prompts[1])
+	}
+}
+
+func TestBrowserCoordinatorCorrectsUnobservedRepairNavigationWithFrozenLocator(t *testing.T) {
+	invalidNavigationRepair := strings.Replace(
+		validBrowserPlanYAML(),
+		`action: click
+    locator:
+      kind: role
+      value: tab
+      name: 用户`,
+		`action: goto
+    url: https://app.example.com/users/direct`,
+		1,
+	)
+	executor := &scriptedPhaseExecutor{Results: []PhaseExecutionResult{
+		{FinalYAML: validBrowserPlanYAML()},
+		{FinalYAML: invalidNavigationRepair},
+		{FinalYAML: repairedRemainingPlanYAML()},
+		{FinalYAML: reproducedValidationYAML("browser/final.png")},
+	}}
+	verifier := &fakeBrowserVerifier{Results: []BrowserVerificationResult{
+		{Status: "locator_failed", ErrorCode: "locator_not_found", FailedActionID: "open-users", FinalURL: "https://app.example.com/users", Title: "用户", AccessibilitySummary: []BrowserAccessibilityNode{{Role: "tab", Name: "用户管理", Visible: true}}},
+		completedBrowserResult("browser/final.png"),
+	}}
+	result, err := (BrowserCoordinator{Executor: executor, Verifier: verifier}).Execute(context.Background(), browserCoordinatorRequest(t))
+	if err != nil || result.ErrorCode != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if executor.Calls != 4 || verifier.Calls != 2 || result.RepairCount != 1 {
+		t.Fatalf("agent=%d browser=%d result=%+v", executor.Calls, verifier.Calls, result)
+	}
+	if !strings.Contains(executor.Prompts[2], "repair_navigation_unobserved") ||
+		!strings.Contains(executor.Prompts[2], "Do not invent or guess a goto URL") ||
+		!strings.Contains(executor.Prompts[2], "Keep the failed action as a click") {
+		t.Fatalf("repair correction prompt is not actionable: %s", executor.Prompts[2])
 	}
 }
 
@@ -3008,6 +3155,8 @@ func TestBrowserCoordinatorRecoveryReusesDurablePrimaryAndRepairPlans(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	wantPrimary = bindGeneratedBrowserDeviceProfile(request, wantPrimary)
+	wantRepair = normalizeBrowserRepairScenarioContract(wantPrimary, wantRepair)
 	wantRepair = expandBrowserRepairForFreshContext(wantPrimary, "open-users", wantRepair)
 	wantPrimary.ScenarioContract = nil
 	wantRepair.ScenarioContract = nil

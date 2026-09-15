@@ -10,17 +10,13 @@ AI 排障机器人工作台。从代码仓库和运行环境创建机器人，�
 
 ## 下载与安装
 
-macOS 推荐桌面版，可从 [GitHub Releases](https://github.com/452562082/troubleshooter-studio/releases) 或 [GitLab Releases](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases) 下载，也可使用安装脚本：
+macOS 推荐桌面版，可从 [GitHub Releases](https://github.com/452562082/troubleshooter-studio/releases) 下载，也可使用安装脚本：
 
 ```bash
-# GitHub 源
 curl -fsSL https://raw.githubusercontent.com/452562082/troubleshooter-studio/main/scripts/install.sh | SOURCE=github bash
-
-# GitLab 源
-curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
 ```
 
-脚本安装到 `/Applications` 并启动应用。指定版本时给右侧 `bash` 设置 `VERSION=vX.Y.Z`；私有 GitLab 需向下载请求传入令牌，并导出 `GITLAB_TOKEN`。桌面包未签名/公证；手动下载后若提示“已损坏”，确认文件来自上述发布源后可执行：
+脚本安装到 `/Applications` 并启动应用。指定版本时给右侧 `bash` 设置 `VERSION=vX.Y.Z`。桌面包未签名/公证；手动下载后若提示“已损坏”，确认文件来自上述发布源后可执行：
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/TroubleshooterStudio.app

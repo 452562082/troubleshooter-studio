@@ -18,6 +18,10 @@ make ci
 
 `make ci` 包含 vet、lint、格式、类型检查、模块一致性、CLI 构建、依赖审计、Go 竞态测试、覆盖率、共享脚本测试及前端测试/构建。涉及桌面端时另运行 `make desktop-app`；改 Wails binding 后运行 `make wails-gen`。真实平台验收见[测试指南](docs/testing.md)。
 
+Go 拓扑集成测试也会调用 Python 查询脚本，因此运行 `go test` 的环境同样需要
+`scripts/requirements-test.txt` 中的依赖。CI 各 job 相互隔离，Go 测试 job 和脚本
+测试 job 必须分别准备 Python，不能依赖 runner 预装的 PyYAML。
+
 ## 目录
 
 | 路径 | 职责 |

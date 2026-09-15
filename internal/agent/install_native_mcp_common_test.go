@@ -164,18 +164,18 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 		}
 	}
 
-	// ── mongodb:走 npx mcp-mongo-server,凭据用 MCP_MONGODB_URI env(v2+ 支持) ──
+	// ── mongodb:走 npx mongodb-mcp-server,凭据用 MDB_MCP_CONNECTION_STRING env ──
 	// 自动 normalize URI 补 authSource=admin + directConnection=true(单节点绕
 	// Node driver wire 27 SDAM 兼容 bug,详见 ensureDirectConnection 注释)。
 	mongoSpec := servers["bot-mongodb-dev"].(map[string]any)
 	if mongoSpec["command"] != "npx" {
 		t.Errorf("mongodb command 应为 npx,实际 %v", mongoSpec["command"])
 	}
-	if got := argString(mongoSpec); got != "[-y mcp-mongo-server --read-only]" {
+	if got := argString(mongoSpec); got != "[-y mongodb-mcp-server@2.1.1]" {
 		t.Errorf("mongodb args mismatch: %s", got)
 	}
-	if envOf(mongoSpec)["MCP_MONGODB_URI"] != "mongodb://u:p@m.local:27017/app?authSource=admin&directConnection=true" {
-		t.Errorf("mongodb MCP_MONGODB_URI env mismatch: %v", envOf(mongoSpec))
+	if envOf(mongoSpec)["MDB_MCP_CONNECTION_STRING"] != "mongodb://u:p@m.local:27017/app?authSource=admin&directConnection=true" {
+		t.Errorf("mongodb MDB_MCP_CONNECTION_STRING env mismatch: %v", envOf(mongoSpec))
 	}
 
 	// ── postgres:@henkey/postgres-mcp-server,env POSTGRES_CONNECTION_STRING(凭据不落 args)──
@@ -188,10 +188,12 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 		t.Errorf("postgres POSTGRES_CONNECTION_STRING env mismatch: %v", envOf(pgSpec))
 	}
 
-	// ── redis:钉死 1.0.0 + URL 位置参数(防 @latest 漂移)──
-	// 上游包不接 env,凭据落 args。
-	if got := argString(servers["bot-redis-dev"]); got != "[-y @gongrzhe/server-redis-mcp@1.0.0 redis://default:rpw@r.local:6379/0]" {
-		t.Errorf("redis args mismatch: %s", got)
+	redisSpec := servers["bot-redis-dev"].(map[string]any)
+	if envOf(redisSpec)["REDIS_URL"] != "redis://default:rpw@r.local:6379/0" || strings.Contains(argString(redisSpec), "rpw") {
+		t.Errorf("Redis URI must be preserved in environment only: %v", redisSpec)
+	}
+	if envOf(mongoSpec)["MDB_MCP_READ_ONLY"] != "true" {
+		t.Error("MongoDB must preserve existing read-only mode")
 	}
 
 	// ── elasticsearch:env 段 ES_URL/USERNAME/PASSWORD + 必须禁 OTel(否则 stdout 污染) ──
@@ -844,10 +846,10 @@ func TestBuildMCPServers_DataStores_SameTypeInstancesUseStableIDs(t *testing.T) 
 	if _, ok := servers["redis-redis-2-test"]; !ok {
 		t.Fatalf("second redis instance must use its stable ID, got: %v", keysOf(servers))
 	}
-	if got := servers["redis-test"].(map[string]any)["args"].([]any)[2]; got != "redis://cache-a:6379/0" {
+	if got := envOf(servers["redis-test"])["REDIS_URL"]; got != "redis://cache-a:6379/0" {
 		t.Fatalf("first redis instance URL = %v, want cache-a", got)
 	}
-	if got := servers["redis-redis-2-test"].(map[string]any)["args"].([]any)[2]; got != "redis://cache-b:6379/0" {
+	if got := envOf(servers["redis-redis-2-test"])["REDIS_URL"]; got != "redis://cache-b:6379/0" {
 		t.Fatalf("second redis instance URL = %v, want cache-b", got)
 	}
 }
@@ -1008,12 +1010,7 @@ func TestBuildMCPServers_DataStores_Kafka_MultiCluster(t *testing.T) {
 	}
 }
 
-// TestBuildMCPServers_DataStores_RabbitMQ_Disabled 2026-05-15 起 rabbitmq mcp 不注册(方案 B:HTTP Management API fallback)。
-// 两个 PyPI 候选 amq-mcp-server-rabbitmq / rabbitmq-mcp-server 实测都跑不起来:
-//   - amq 包源码引用 fastmcp 不存在的 BearerAuthProvider(任何版本都没有)
-//   - rabbitmq-mcp-server 依赖声明缺一堆(tabulate / tomli / requests)
-//
-// SKILL rabbitmq-runtime-query 主路径走 HTTP Management API。这条护栏防止有人改回 mcp 注册。
+// RabbitMQ retains HTTP bindings until a published MCP supports bound credentials and proxy paths.
 func TestBuildMCPServers_DataStores_RabbitMQ_NotRegistered(t *testing.T) {
 	cfg := &config.SystemConfig{
 		Environments: []config.Environment{{ID: "test"}, {ID: "prod"}},
@@ -1031,7 +1028,7 @@ func TestBuildMCPServers_DataStores_RabbitMQ_NotRegistered(t *testing.T) {
 
 	for k := range servers {
 		if strings.Contains(k, "rabbitmq") {
-			t.Errorf("rabbitmq mcp 不应注册(方案 B,上游包 broken),got: %s", k)
+			t.Errorf("rabbitmq mcp 不应注册(HTTP 接入保留),got: %s", k)
 		}
 	}
 }
@@ -1106,9 +1103,9 @@ func TestBuildMCPServers_DataStores_CredsOverridesEndpoints(t *testing.T) {
 	creds := map[string]string{"MONGODB_URI_DEV": "mongodb://NEW@host/db"}
 	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true},
 		func(k string) string { return creds[k] })
-	got := envOf(servers["mongodb-dev"])["MCP_MONGODB_URI"]
+	got := envOf(servers["mongodb-dev"])["MDB_MCP_CONNECTION_STRING"]
 	if !strings.Contains(got, "mongodb://NEW@host/db") || strings.Contains(got, "OLD") {
-		t.Errorf("expected creds override endpoints, got MCP_MONGODB_URI: %s", got)
+		t.Errorf("expected creds override endpoints, got MDB_MCP_CONNECTION_STRING: %s", got)
 	}
 }
 

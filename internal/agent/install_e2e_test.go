@@ -142,7 +142,7 @@ func fakeCreds() map[string]string {
 //	prefix = MCPKeyPrefix() = "shop"
 //	grafana per env: shop-grafana-<env>
 //
-// 注 1:loki MCP 已合并进 grafana MCP(2026-05),query_loki_* 工具由 grafana mcp-grafana-npx
+// 注 1:loki MCP 已合并进 grafana MCP(2026-05),query_loki_* 工具由 grafana mcp-grafana
 // 提供;不再单独注册 shop-loki-<env>。
 //
 // 注 2:nacos per env(plan D):自研本地 MCP 脚本 `uv run --script nacos_mcp.py`。
@@ -202,7 +202,7 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 			}
 
 			// codex 不再走 CLI 注入(MCP 嵌入 agent toml 内联段),无需 stub。
-			// grafana/loki MCP 现在走 npx mcp-grafana-npx,IDE 启动时按需拉,不在 install 时下二进制 — 测试不再需要 fake binary。
+			// grafana/loki MCP 现在走 uvx mcp-grafana,IDE 启动时按需拉,不在 install 时下二进制 — 测试不再需要 fake binary。
 
 			// ── 1) generator 出 staging ───────────────────────────────────────
 			staging := buildStaging(t, cfg, yamlSrc, target)

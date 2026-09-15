@@ -508,13 +508,14 @@ describe('generateYAML', () => {
       deriveSkillsWhitelist: () => ['routing', 'k8s-runtime-query'],
       activeSourceTypes: ['kuboard'],
       sourceCreds: {
-        kuboard: { creds: { dev: { url: 'http://kuboard', access_key: 'shared-secret' } } },
+        kuboard: { creds: { dev: { url: 'http://kuboard', access_key: 'shared-secret', mcp_url: 'http://kuboard/mcp' } } },
       },
       OBS_TOOL_SPECS: [{
         key: 'k8s_runtime',
         fields: [
           { key: 'provider', label: 'Provider', secret: false, envVar: () => '', uiOnly: true },
           { key: 'url', label: 'URL', secret: false, envVar: () => 'KUBOARD_URL' },
+          { key: 'mcp_url', label: 'MCP URL', secret: false, envVar: () => 'KUBOARD_MCP_URL', optional: true },
           { key: 'access_key', label: 'Access key', secret: true, envVar: () => 'KUBOARD_ACCESS_KEY' },
         ],
       }],
@@ -523,8 +524,20 @@ describe('generateYAML', () => {
     }))
     const parsed = yaml.load(out) as any
     const endpoint = parsed.infrastructure.observability.k8s_runtime.endpoints[0]
-    expect(endpoint).toMatchObject({ env: 'dev', url: 'http://kuboard', access_key: '{{KUBOARD_ACCESS_KEY}}' })
+    expect(endpoint).toMatchObject({ env: 'dev', url: 'http://kuboard', access_key: '{{KUBOARD_ACCESS_KEY}}', mcp_url: 'http://kuboard/mcp' })
     expect(out).not.toContain('shared-secret')
+  })
+
+  it('keeps optional native Kuboard MCP URLs out of legacy YAML', () => {
+    const ctx = makeCtx({ activeSourceTypes: ['kuboard'], sourceCreds: { kuboard: { creds: { dev: { url: 'http://kuboard' } } } },
+      CC_FIELDS_BY_TYPE: { kuboard: [
+        { key: 'url', label: 'URL', secret: false, envVar: () => 'KUBOARD_URL' },
+        { key: 'mcp_url', label: 'MCP', secret: false, envVar: () => 'KUBOARD_MCP_URL', optional: true },
+      ] },
+    })
+    expect(generateYAML(ctx)).not.toContain('KUBOARD_MCP_URL')
+    ctx.sourceCreds.kuboard!.creds.dev!.mcp_url = 'http://kuboard/mcp'
+    expect(generateYAML(ctx)).toContain('mcp_url: "http://kuboard/mcp"')
   })
 
   it('emits Doris data store endpoints from scannedDS', () => {
@@ -554,5 +567,31 @@ describe('generateYAML', () => {
     expect(doris.endpoints[0].dsn).toBe('{{DORIS_DSN_DEV}}')
     expect(out).not.toContain('user:pass@tcp(doris-fe:9030)/warehouse')
     expect(parsed.generation.skills_whitelist).toContain('doris-runtime-query')
+  })
+})
+
+
+describe('SkyWalking authentication', () => {
+  it('keeps passwords out of previews and preserves them in explicit deploy exports', () => {
+    const ctx = makeCtx({
+      enabledObservability: { skywalking: true },
+      OBS_TOOL_SPECS: [{key: 'skywalking', fields: [
+        {key: 'url', label: 'OAP URL', secret: false, envVar: () => 'SKYWALKING_URL_DEV'},
+        {key: 'user', label: '用户名', secret: false, envVar: () => 'SKYWALKING_USER_DEV'},
+        {key: 'pass', label: '密码', secret: true, envVar: () => 'SKYWALKING_PASS_DEV'},
+      ]}],
+      toolInputs: {
+        'obs:skywalking:dev:url': 'https://oap.example',
+        'obs:skywalking:dev:user': 'audit',
+        'obs:skywalking:dev:pass': 'fixture-password',
+      },
+    })
+    const preview = generateYAML(ctx)
+    expect(preview).not.toContain('fixture-password')
+    expect(preview).toContain('{{SKYWALKING_PASS_DEV}}')
+    const exported = yaml.load(generateYAML(ctx, {includeSecrets: true})) as any
+    expect(exported.infrastructure.observability.skywalking.endpoints[0]).toMatchObject({
+      env: 'dev', url: 'https://oap.example', user: 'audit', pass: 'fixture-password',
+    })
   })
 })

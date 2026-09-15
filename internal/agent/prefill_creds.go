@@ -57,6 +57,7 @@ func PrefillCredsFromYAML(cfg *config.SystemConfig) map[string]string {
 				put(envVar("CONSUL_HOST", cc.ID, ep.Env), ep.Host)
 				put(envVar("CONSUL_TOKEN", cc.ID, ep.Env), ep.Token)
 			case "kuboard":
+				put(envVar("KUBOARD_MCP_URL", cc.ID, ep.Env), ep.MCPURL)
 				put(envVar("KUBOARD_URL", cc.ID, ep.Env), ep.URL)
 				put(envVar("KUBOARD_ACCESS_KEY", cc.ID, ep.Env), ep.AccessKey)
 				put(envVar("KUBOARD_USER", cc.ID, ep.Env), ep.User)
@@ -72,6 +73,7 @@ func PrefillCredsFromYAML(cfg *config.SystemConfig) map[string]string {
 			if !one2all {
 				up := strings.ToUpper(ep.Env)
 				put("KUBOARD_URL_"+up, ep.URL)
+				put("KUBOARD_MCP_URL_"+up, ep.MCPURL)
 				put("KUBOARD_ACCESS_KEY_"+up, ep.AccessKey)
 				put("KUBOARD_USER_"+up, ep.Username)
 				put("KUBOARD_PASS_"+up, ep.Password)
@@ -112,6 +114,21 @@ func PrefillCredsFromYAML(cfg *config.SystemConfig) map[string]string {
 			up := strings.ToUpper(env)
 			if _, exists := out["JAEGER_URL_"+up]; !exists {
 				put("JAEGER_URL_"+up, url)
+			}
+		}
+	}
+
+	if obs.SkyWalking.Enabled {
+		for _, ep := range obs.SkyWalking.Endpoints {
+			up := strings.ToUpper(ep.Env)
+			put("SKYWALKING_URL_"+up, ep.URL)
+			put("SKYWALKING_USER_"+up, ep.User)
+			put("SKYWALKING_PASS_"+up, ep.Pass)
+		}
+		for env, u := range obs.SkyWalking.URLByEnv {
+			key := "SKYWALKING_URL_" + strings.ToUpper(env)
+			if out[key] == "" {
+				put(key, u)
 			}
 		}
 	}

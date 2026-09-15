@@ -5,20 +5,19 @@
 // UI 渲染成级联下拉(免去手填集群名 / namespace / cm 名)。
 //
 // API 路径(对照 https://kb.guadd.fun/swagger-ui/index.html):
-//  1. POST /api/login.kuboard.cn/v4/login         body {username,password}  → {data:{accessToken}}
+//  1. POST /api/login.kuboard.cn/v4/login         body {username,password(base64),userSource}  → {data:{accessToken}}
 //  2. GET  /api/cluster.kuboard.cn/v4/cluster-cache/cluster-namespace-tree?apiGroupName=&resource=configmaps&namespaced=true
 //     → {data:{treeItems:[{id,name,children:[{name (ns)}]}]}}     一次拿全部 cluster→ns 树
 //  3. GET  /api/cluster.kuboard.cn/v4/cluster-cache?apiGroup=&resource=configmaps&namespaced=true&clusterId=<uid>&pageSize=5000
 //     → {data:{list:[{data:{metadata:{namespace,name}}}]}}        per cluster 拉全部 cm,客户端按 ns 分组
 //
-// 鉴权 header 是 Kb-Access-Key(不是标准 Authorization Bearer),value 可以是:
-//   - 登录返回的 accessToken
-//   - 用户在 Kuboard 后台 个人中心 → API 访问凭证 创建的 user-key-secret(免账密)
+// v4 登录 JWT 使用 Authorization: Bearer；持久访问密钥使用 Kb-Access-Key。
 package main
 
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/agent"
 	"github.com/xiaolong/troubleshooter-studio/internal/dsprobe"
 )
 
@@ -49,6 +49,7 @@ type KuboardNamespace struct {
 type KuboardResources struct {
 	Clusters []KuboardCluster `json:"clusters"`
 	Notes    []string         `json:"notes,omitempty"`
+	MCPURL   string           `json:"mcp_url,omitempty"`
 }
 
 // KuboardListResources 登 Kuboard v4 + 列资源树。
@@ -115,7 +116,10 @@ func (a *App) KuboardListResources(kuboardURL, username, password, accessKey, cl
 
 	// 3) per-(cluster, ns):逐个 ns 调 direct 拉 cm 列表(direct 不带 namespace 返空,
 	//    必须 per-ns 调用)。多个 HTTP 请求并行也可,先简单串行,够用了。
-	res := &KuboardResources{}
+	res := &KuboardResources{MCPURL: agent.DiscoverKuboardMCP(ctx, base, accessKey)}
+	if res.MCPURL != "" {
+		res.Notes = append(res.Notes, "已识别 Kuboard 官方 MCP，部署后优先使用；HTTP 查询保留兼容。")
+	}
 	for _, item := range tree {
 		entry := KuboardCluster{Name: item.Name}
 		// 过滤系统 ns,收集真正要拉 cm 的 ns 列表
@@ -158,7 +162,7 @@ func kuboardClusterNamespaceTree(ctx context.Context, c *http.Client, base, toke
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Kb-Access-Key", token)
+	setKuboardV4Auth(req, token)
 	req.Header.Set("User-Agent", kuboardUserAgent)
 	resp, err := c.Do(req)
 	if err != nil {
@@ -207,8 +211,17 @@ func kuboardClusterNamespaceTree(ctx context.Context, c *http.Client, base, toke
 
 // ── Kuboard v4 API client ─────────────────────────────────────────────
 
+// Login returns a JWT; persistent access keys use the separate key.secret format.
+func setKuboardV4Auth(req *http.Request, token string) {
+	if strings.Count(token, ".") == 2 {
+		req.Header.Set("Authorization", "Bearer "+token)
+	} else {
+		req.Header.Set("Kb-Access-Key", token)
+	}
+}
+
 func kuboardLoginV4(ctx context.Context, c *http.Client, base, user, pass string) (string, error) {
-	body, _ := json.Marshal(map[string]string{"username": user, "password": pass})
+	body, _ := json.Marshal(map[string]string{"username": user, "password": base64.StdEncoding.EncodeToString([]byte(pass)), "userSource": "dao"})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		base+"/api/login.kuboard.cn/v4/login", bytes.NewReader(body))
 	if err != nil {
@@ -260,7 +273,7 @@ func kuboardListConfigMapsV4(ctx context.Context, c *http.Client, base, token, c
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Kb-Access-Key", token)
+	setKuboardV4Auth(req, token)
 	req.Header.Set("User-Agent", kuboardUserAgent)
 	resp, err := c.Do(req)
 	if err != nil {
@@ -427,7 +440,7 @@ func kuboardDirectGET(s *kuboardSetupResult, query string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Kb-Access-Key", s.token)
+	setKuboardV4Auth(req, s.token)
 	req.Header.Set("User-Agent", kuboardUserAgent)
 	resp, err := s.client.Do(req)
 	if err != nil {

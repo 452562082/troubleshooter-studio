@@ -1,11 +1,14 @@
 package agent
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -317,4 +320,58 @@ func envSliceToMap(items []string) map[string]string {
 		}
 	}
 	return out
+}
+
+func TestReadMCPHTTPResponseDoesNotWaitForSSEClose(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer func() { _ = reader.Close() }()
+	defer func() { _ = writer.Close() }()
+	go func() {
+		_, _ = io.WriteString(writer, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n")
+	}()
+	done := make(chan error, 1)
+	go func() { _, err := readMCPHTTPResponse(reader); done <- err }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("must consume the response without waiting for SSE EOF")
+	}
+}
+
+func TestDoProbeMCPHTTPServerRejectsRedirectAndRedactsRPCError(t *testing.T) {
+	for _, redirect := range []bool{true, false} {
+		targetCalled := false
+		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { targetCalled = true; w.WriteHeader(http.StatusOK) }))
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if redirect {
+				http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+				return
+			}
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"secret-token","data":"secret-token"}}`)
+		}))
+		result := doProbeMCPHTTPServer(context.Background(), server.URL, map[string]string{"Authorization": "Bearer secret-token"}, time.Second)
+		server.Close()
+		target.Close()
+		if result.Err == nil || strings.Contains(result.Err.Error(), "secret-token") || targetCalled {
+			t.Fatalf("unsafe probe result: %+v", result)
+		}
+	}
+}
+
+func TestReadMCPResponseSkipsNotificationsAndUnrelatedResults(t *testing.T) {
+	input := `{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}
+{"jsonrpc":"2.0","id":1,"result":{}}
+{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"find"}]}}
+`
+	result, err := readMCPResponse(context.Background(), bufio.NewReader(strings.NewReader(input)), 2)
+	if err != nil || !reflect.DeepEqual(mcpToolNames(result), []string{"find"}) {
+		t.Fatalf("result=%v err=%v", result, err)
+	}
+	_, err = readMCPResponse(context.Background(), bufio.NewReader(strings.NewReader(`{"jsonrpc":"2.0","id":1,"result":{}}`+"\n")), 2)
+	if err == nil {
+		t.Fatal("missing matching response must fail")
+	}
 }

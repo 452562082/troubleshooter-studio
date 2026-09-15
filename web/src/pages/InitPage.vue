@@ -1101,15 +1101,12 @@ async function runK8sRtPreload(envID: string) {
   const obsAccessKey = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'access_key')] || '').trim()
   const obsUser = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'username')] || '').trim()
   const obsPass = toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'password')] || ''
-  const obsAuthMode = (toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'auth_mode')] || '').trim()
   const fallback = sourceCreds['kuboard']?.creds?.[envID] || {}
   const url = obsURL || (fallback.url || '').trim()
   const accessKey = obsAccessKey || (fallback.access_key || '').trim()
   const username = obsUser || (fallback.username || '').trim()
   const password = obsPass || fallback.password || ''
   const clusterHint = (fallback.cluster_hint || '').trim() // Kuboard v3 必填(v4 忽略)
-  // auth_mode 默认 access_key(没填过时按推荐项算,跟 isFieldHidden 同款兜底)
-  const authMode = obsAuthMode || (fallback.auth_mode || '').trim() || 'access_key'
   if (!url) {
     toast.error(`${envID}: 先填 Kuboard URL(可观测性 K8s 运行时 字段)`)
     return
@@ -1118,16 +1115,10 @@ async function runK8sRtPreload(envID: string) {
     toast.error(`${envID}: 鉴权填 API 访问凭证 或 用户名+密码`)
     return
   }
-  // Kuboard v3 走 access-key 时鉴权靠 Cookie KuboardUsername,必须有用户名;v4 access-key
-  // 不需要。前端无法可靠区分 v3/v4,故 access-key 模式下用户名空就拦截 —— 现场默认是 v3,
-  // 漏填用户名会在运行时报 no-username。v4 用户可忽略此要求改用「用户名+密码」鉴权。
-  if (authMode === 'access_key' && !username) {
-    toast.error(`${envID}: Kuboard v3(API 访问凭证)需要填用户名;若是 v4 可改用「用户名+密码」鉴权`)
-    return
-  }
   kuboardStateByEnv[envID] = { status: 'loading' }
   try {
     const res = await kuboardListResources(url, username, password, accessKey, clusterHint)
+    toolInputs[toolKeyFor('obs', 'k8s_runtime', envID, 'mcp_url')] = res.mcp_url || ''
     const clusters = (res.clusters || []).map(c => ({
       name: c.name,
       namespaces: (c.namespaces || []).map(n => ({ name: n.name, configmaps: n.configmaps || [] })),
@@ -1300,6 +1291,7 @@ const CC_FIELDS_BY_TYPE = computed<Record<string, CredField[]>>(() => {
     // Kuboard 模式:鉴权下拉二选一(API 访问凭证 / 用户名+密码),根据选择条件展开对应字段
     kuboard: [
       { key: 'url', label: 'Kuboard URL', secret: false, envVar: (e) => `KUBOARD_URL_${e.toUpperCase()}`, placeholder: 'https://kuboard.example.com' },
+      { key: 'mcp_url', label: '官方 MCP 地址（可选）', secret: false, envVar: (e) => `KUBOARD_MCP_URL_${e.toUpperCase()}`, placeholder: '拉取资源时自动识别；旧版留空', optional: true },
       {
         key: 'auth_mode', label: '鉴权方式', secret: false, envVar: () => '',
         options: [
@@ -1308,7 +1300,7 @@ const CC_FIELDS_BY_TYPE = computed<Record<string, CredField[]>>(() => {
         ],
         uiOnly: true,
       },
-      { key: 'access_key', label: 'API 访问凭证', secret: true, envVar: (e) => `KUBOARD_ACCESS_KEY_${e.toUpperCase()}`, placeholder: 'v3: 密钥ID.密钥(如 scyfw6txxw7i.x6t2…);v4: 单串 token', showWhen: { field: 'auth_mode', equals: 'access_key' } },
+      { key: 'access_key', label: 'API 访问凭证', secret: true, envVar: (e) => `KUBOARD_ACCESS_KEY_${e.toUpperCase()}`, placeholder: '官方 MCP 使用访问密钥中的 key-id.key-secret', showWhen: { field: 'auth_mode', equals: 'access_key' } },
       // username 两种鉴权模式都显示:Kuboard v3 免账密(access-key)其实走 Cookie KuboardUsername=<user>,
       //   必须有用户名;v4 走 access-key 时可留空。故不设 showWhen,两模式都可填。
       { key: 'username', label: '用户名(v3 必填 / Cookie KuboardUsername)', secret: false, envVar: (e) => `KUBOARD_USER_${e.toUpperCase()}`, placeholder: 'Kuboard v3 走 access-key 时也要填;v4 可留空', optional: true },
@@ -1832,6 +1824,8 @@ const OBS_TOOL_SPECS: ToolSpec[] = [
     key: 'skywalking', label: 'SkyWalking', description: '国产 APM 追踪',
     fields: [
       { key: 'url', label: 'OAP URL', secret: false, envVar: (e) => `SKYWALKING_URL_${e.toUpperCase()}`, placeholder: 'http://skywalking-oap-dev:12800' },
+      { key: 'user', label: '用户名（可选）', secret: false, envVar: (e) => `SKYWALKING_USER_${e.toUpperCase()}`, optional: true },
+      { key: 'pass', label: '密码（可选）', secret: true, envVar: (e) => `SKYWALKING_PASS_${e.toUpperCase()}`, optional: true },
     ],
   },
   {
@@ -1877,6 +1871,7 @@ const OBS_TOOL_SPECS: ToolSpec[] = [
         optional: true,
       },
       { key: 'api_key', label: 'one2all Bearer Token', secret: true, envVar: () => 'ONE2ALL_TOKEN', placeholder: 'o2a_xxx', showWhen: { field: 'provider', equals: 'one2all' } },
+      { key: 'mcp_url', label: '官方 MCP 地址（可选）', secret: false, envVar: (e) => `KUBOARD_MCP_URL_${e.toUpperCase()}`, placeholder: '拉取资源时自动识别；旧版留空', optional: true, showWhen: { field: 'provider', equals: 'kuboard' } },
       {
         key: 'auth_mode', label: '鉴权方式', secret: false, envVar: () => '',
         options: [

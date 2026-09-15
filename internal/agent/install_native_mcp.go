@@ -87,7 +87,7 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 		fmt.Fprintln(os.Stderr, line)
 	}
 
-	// 清老版本下载到 <root>/bin/ 的 mcp-grafana 孤儿二进制(本会话改 npx mcp-grafana-npx 后
+	// 清老版本下载到 <root>/bin/ 的 mcp-grafana 孤儿二进制(本会话改 uvx mcp-grafana 后
 	// 不再用)。re-install 顺手清,不用等 uninstall — 几十 MiB 留在那纯占盘。
 	removeLegacyGrafanaBin(root)
 
@@ -133,12 +133,29 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 
 	// 避免 server_key + tool_name 拼起来超过 IDE 60 字符的 tool 名限制。
 	// IDE 走 PruneEmpty=true 模式 —— 避免把 "" 当真值喂给后端进程触发无效连接。
+
+	officialPaths := map[string]string{}
+	for _, entry := range []struct {
+		name    string
+		release officialMCPRelease
+	}{{"consul", consulMCPRelease}, {"skywalking", skywalkingMCPRelease}} {
+		if !usesOfficialMCP(cfg, entry.name) {
+			continue
+		}
+		path, err := ensureOfficialMCP(entry.release, emit)
+		if err != nil {
+			emit(fmt.Sprintf("[warn] %s MCP 安装失败，继续使用 HTTP/API: %v", entry.name, err))
+			continue
+		}
+		officialPaths[entry.name] = path
+	}
 	servers := BuildMCPServers(cfg, MCPBuildOptions{
-		AgentID:             cfg.MCPKeyPrefix(),
-		PruneEmpty:          true,
-		KafkaMCPBinaryPath:  kafkaBinPath,
-		NacosMCPScriptPath:  nacosScriptPath,
-		CodeGraphBinaryPath: codeGraphBinPath,
+		OfficialMCPBinaryPaths: officialPaths,
+		AgentID:                cfg.MCPKeyPrefix(),
+		PruneEmpty:             true,
+		KafkaMCPBinaryPath:     kafkaBinPath,
+		NacosMCPScriptPath:     nacosScriptPath,
+		CodeGraphBinaryPath:    codeGraphBinPath,
 	}, get)
 
 	if t == TargetOpenCode {
@@ -287,14 +304,14 @@ func writeMCPServersWithVerify(path string, servers map[string]any, maxRetries i
 }
 
 // removeLegacyGrafanaBin 清掉早期版本下载到 <root>/bin/mcp-grafana[.exe] 的孤儿二进制。
-// 改走 npx mcp-grafana-npx 后,这文件留着也没人用(每个 IDE root ~30 MiB)。
+// 改走 uvx mcp-grafana 后,这文件留着也没人用(每个 IDE root ~30 MiB)。
 // install / uninstall 都该跑一次确保收尸,文件不存在 / 没权限删 / 任何错误都吞掉(只是清理优化,不该阻断主流程)。
 func removeLegacyGrafanaBin(root string) {
 	for _, name := range []string{"mcp-grafana", "mcp-grafana.exe"} {
 		legacy := filepath.Join(root, "bin", name)
 		if _, err := os.Stat(legacy); err == nil {
 			if rmErr := os.Remove(legacy); rmErr == nil {
-				fmt.Fprintf(os.Stderr, "[info] 清掉老 %s 孤儿二进制(已改走 npx mcp-grafana-npx)\n", legacy)
+				fmt.Fprintf(os.Stderr, "[info] 清掉老 %s 孤儿二进制(已改走 uvx mcp-grafana)\n", legacy)
 			}
 		}
 	}

@@ -88,6 +88,18 @@ func writeCredsByType(creds map[string]any, cfg *config.SystemConfig, get func(s
 		}
 	}
 
+	// Keep authenticated GraphQL fallback usable when no official binary exists.
+	if cfg.Infrastructure.Observability.SkyWalking.Enabled {
+		section := map[string]any{}
+		prefill := PrefillCredsFromYAML(cfg)
+		for _, e := range envs {
+			up := strings.ToUpper(e.ID)
+			value := func(key string) string { return firstNonEmpty(get(key+up), prefill[key+up]) }
+			section[e.ID] = map[string]any{"url": value("SKYWALKING_URL_"), "user": value("SKYWALKING_USER_"), "pass": value("SKYWALKING_PASS_")}
+		}
+		creds["skywalking"] = section
+	}
+
 	// K8s runtime 可以在没有 kuboard 配置源时独立启用。此时也要生成脚本能够
 	// 自动发现的 kuboard.<env> 凭据段，保证导入可部署 YAML 后无需再次填写。
 	if cfg.Infrastructure.Observability.K8sRuntime.Enabled &&

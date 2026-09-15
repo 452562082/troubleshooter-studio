@@ -27,6 +27,18 @@ import (
 // by the ES 7/8 clusters this project supports.
 const elasticsearchMCPPackage = "@elastic/mcp-server-elasticsearch@0.1.1"
 
+// Pin the upstream packages whose CLI and tool contracts are runtime-probed.
+const (
+	mongodbMCPPackage = "mongodb-mcp-server@2.1.1"
+	redisMCPPackage   = "redis-mcp-server==0.5.1"
+	grafanaMCPPackage = "mcp-grafana==1.4.2"
+)
+
+// The upstream Redis CLI accepts a URI only as an argument. Invoke that same
+// CLI in-process so the URI (including credentials and TLS options) stays out
+// of the process command line. No Redis protocol or URI parsing is duplicated.
+const redisMCPLauncher = `import os; from src.main import cli; cli(["--url", os.environ["REDIS_URL"]])`
+
 // normalizeMongoURI 修复 mongodb URI 密码段含保留字符但未 URL-encode 的常见情况。
 //
 // MongoDB 官方文档明确要求 username/password 里的 `@ / ? # [ ] %` 必须 URL-encode,
@@ -299,6 +311,9 @@ func parseMySQLDSN(dsn string) (host, port, user, pass, db string) {
 
 // MCPBuildOptions 控制 BuildMCPServers 的行为差异。
 type MCPBuildOptions struct {
+	// OfficialMCPBinaryPaths contains checksum-verified managed binaries; missing paths use HTTP/API fallback.
+	OfficialMCPBinaryPaths map[string]string
+
 	// AgentID:MCP server key 前缀(如 "truss-bot")。空字符串 = 不加前缀(单 agent 项目级)。
 	// IDE 共享 settings.json 池必须设非空,避免多 system 同名 mcp 互相覆盖。
 	AgentID string
@@ -399,6 +414,9 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 	// ensure 失败(NacosMCPScriptPath 空)时 buildNacos 跳过注册,nacos 回落到 config-executor
 	// SKILL 的 HTTP fallback(scripts/nacos_config.py)—— fallback 始终保留,降级不致盲。
 	b.buildNacos(servers)
+	b.buildKuboard(servers)
+	b.buildConsul(servers)
+	b.buildSkyWalking(servers)
 	b.buildGrafana(servers)
 	b.buildJaeger(servers)
 	b.buildELK(servers)

@@ -189,6 +189,7 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
             break
           case 'kuboard':
             put('KUBOARD_URL', envCreds.url)
+            put('KUBOARD_MCP_URL', envCreds.mcp_url)
             put('KUBOARD_USER', envCreds.username)
             put('KUBOARD_PASS', envCreds.password)
             put('KUBOARD_ACCESS_KEY', envCreds.access_key)

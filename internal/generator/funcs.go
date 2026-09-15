@@ -695,6 +695,7 @@ type endpointView struct {
 	Env           string
 	Addr          string
 	NamespaceHint string
+	MCPURL        string
 }
 
 func toConfigCenterView(cc config.ConfigCenter) ConfigCenterView {
@@ -705,7 +706,7 @@ func toConfigCenterView(cc config.ConfigCenter) ConfigCenterView {
 	}
 	for _, ep := range cc.Endpoints {
 		out.Endpoints = append(out.Endpoints, endpointView{
-			Env: ep.Env, Addr: ep.Addr, NamespaceHint: ep.NamespaceHint,
+			Env: ep.Env, Addr: ep.Addr, NamespaceHint: ep.NamespaceHint, MCPURL: ep.MCPURL,
 		})
 	}
 	return out

@@ -35,7 +35,7 @@ func WriteIDECredsFile(cfg *config.SystemConfig, creds map[string]string) error 
 // 全 nacos 的 cfg 不写(脚本不需要),避免噪音文件。
 func WriteCredsFileToHome(homeSubdir string, cfg *config.SystemConfig, get func(string) string) error {
 	// 任一源是 apollo/consul/env-vars/kuboard 才真有"非 MCP 读 creds.json"的需求。
-	needs := false
+	needs := cfg.Infrastructure.Observability.SkyWalking.Enabled
 	for _, cc := range cfg.Infrastructure.ConfigCenters {
 		if needsCreds(cc.Type) {
 			needs = true

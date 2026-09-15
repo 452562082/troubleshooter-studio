@@ -84,6 +84,14 @@ func (g *Generator) shouldSkipFile(rel string) bool {
 		return false
 	}
 	name := filepath.Base(rel)
+	if name == "consul_config.py" {
+		for _, cc := range g.Ctx.Infrastructure.ConfigCenters {
+			if cc.Type == "consul" {
+				return false
+			}
+		}
+		return true
+	}
 	switch configType {
 	case "nacos":
 		return !map[string]bool{

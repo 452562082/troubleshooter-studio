@@ -4,28 +4,8 @@ package agent
 
 import "strings"
 
-// buildGrafana:grafana / loki / prom 都走 mcp-grafana-npx(社区 wrapper,首次跑时自动下
-// grafana/mcp-grafana 官方 Go 二进制到 npm 缓存,exec 同款进程;stdout 干净不污染 stdio)。
-// loki 跟 grafana 共用同一个底层二进制,只是多 `--disable-search/dashboard/datasource` 把它
-// 收成"只剩 Loki/Prom 查询"。
-//
-// 历史:之前我们自己下 grafana 官方 Go 二进制到 <root>/bin/mcp-grafana(占位 sentinel
-// 替换路径),200 行 ensure_mcp_grafana.go + 4 平台各 30MiB 冗余。换 npx wrapper 后:
-//   - 跟其他 7 家 npx MCP 同款代码路径,统一
-//   - npm 缓存跨 4 IDE 共享(~/.npm/_npx/<hash>/),消除冗余
-//   - 删 200 行 ensure 逻辑 + 占位 / placeholder 替换 / npx fallback / uninstall codex bin 清理
-//
-// 代价:依赖第三方 6.7KB wrapper(animalnots,Apache-2.0),只是"下载+exec"几十行,风险小。
-//
-// 上游 mcp-grafana README:GRAFANA_API_KEY **已标 deprecated**,推 GRAFANA_SERVICE_ACCOUNT_TOKEN
-// (Grafana 9.1+ 用 service account token 替代 API key,值跟 token 字符串完全兼容,
-// 改名是为强调"用新 token API 创建,不用老 admin API key")。我们 wizard 字段叫
-// GRAFANA_API_KEY_<env>(用户语境上更直白),发到 mcp 时换成现行规范名 SERVICE_ACCOUNT_TOKEN。
-//
-// 2026-05-15 runtime probe 后已知:6 个 disable flag 之后仍暴露 28 个工具,其中 5 个写
-// (create_annotation / create_folder / update_annotation / update_dashboard /
-// generate_deeplink — 最后一个其实只读)。我们没传 `--disable-write` 给 mcp 层硬约束,
-// 走 SKILL 软约束(routing/SKILL.md.tmpl "grafana mcp 写工具软约束" 段)。
+// Grafana uses the official platform wheel through uvx. Loki and Prometheus
+// share this process; existing tool selection and token/basic auth are preserved.
 func (b *mcpBuilder) buildGrafana(servers map[string]any) {
 	if !b.cfg.Infrastructure.Observability.Grafana.Enabled {
 		return
@@ -33,8 +13,8 @@ func (b *mcpBuilder) buildGrafana(servers map[string]any) {
 	for _, e := range b.cfg.Environments {
 		up := strings.ToUpper(e.ID)
 		servers[b.keyFor("grafana", "", e.ID)] = map[string]any{
-			"command": "npx",
-			"args": []any{"-y", "mcp-grafana-npx",
+			"command": "uvx",
+			"args": []any{grafanaMCPPackage,
 				"--disable-incident", "--disable-alerting", "--disable-oncall",
 				"--disable-admin", "--disable-sift", "--disable-pyroscope",
 			},

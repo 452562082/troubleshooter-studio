@@ -147,6 +147,8 @@ infrastructure:
       - env: dev
         addr: "{{CONFIG_CENTER_DEV_ADDR}}"
         namespace_hint: "dev"        # [optional] 辅助路由推断
+        # Kuboard endpoints 可填 mcp_url: "https://kuboard.example.com/mcp"
+        # 使用 access_key 鉴权；向导自动发现后填写，旧版留空走 HTTP。
       - env: prod
         addr: "{{CONFIG_CENTER_PROD_ADDR}}"
         namespace_hint: "prod"
@@ -224,8 +226,11 @@ infrastructure:
       datasource_uid_by_env: {}
     skywalking:
       enabled: false
-      url_by_env:
-        dev: "{{SKYWALKING_DEV_URL}}"
+      endpoints:                    # 官方 MCP；不支持的平台使用 GraphQL API
+        - env: dev
+          url: "{{SKYWALKING_URL_DEV}}"
+          user: ""                  # 可选 Basic Auth 用户名
+          pass: ""                  # 可选密码，仅显式可部署导出保存
     tempo:
       enabled: false
       url_by_env:
@@ -237,6 +242,8 @@ infrastructure:
     k8s_runtime:
       enabled: false
       provider: kuboard              # kuboard / one2all
+      # endpoints 可逐环境填写 env / url / access_key / mcp_url。
+      # mcp_url 为已启用的官方 MCP 完整地址；旧版省略，走 HTTP。
       url_by_env:
         dev: "{{KUBOARD_DEV_URL}}"
         prod: "{{KUBOARD_PROD_URL}}"

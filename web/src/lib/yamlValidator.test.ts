@@ -219,7 +219,7 @@ describe('computeStepErrors', () => {
   })
 
   // ── step 8:可观测性 ────────────────────────────────────────────────
-  // Loki/Prometheus/Tempo 启用必须 Grafana 启用(本系统通过 mcp-grafana-npx 内置工具查,无独立 MCP 包)。
+  // Loki/Prometheus/Tempo 启用必须 Grafana 启用(本系统通过 mcp-grafana 内置工具查,无独立 MCP 包)。
   it('step 8 flags loki/prom/tempo enabled but grafana off', () => {
     const errs = computeStepErrors(makeCtx({
       step: 8,

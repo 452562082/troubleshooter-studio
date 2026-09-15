@@ -5,6 +5,25 @@ description: 通用配置中心执行技能（后端：{{.Infrastructure.Primary
 
 # 配置中心执行器（{{.Infrastructure.PrimaryConfigCenter.Type}}）
 
+Kuboard：若 routing 给出 `mcp_server`，先发现该服务器的真实工具及参数，按已确定的
+cluster、namespace、ConfigMap 坐标执行只读查询；不能臆造工具名。官方 MCP 不可用或
+缺少历史、配置解析等能力时使用下文 HTTP 脚本。401/403 必须报告认证或权限不足，
+不能切换账号或后端绕过权限。未配置官方 MCP 的旧环境继续使用 `kuboard-http`。
+
+{{- $hasConsul := false}}
+{{- range .Infrastructure.ConfigCenters}}{{if eq .Type "consul"}}{{$hasConsul = true}}{{end}}{{end}}
+{{- if $hasConsul}}
+Consul：`runtime: consul-mcp` 优先使用当前系统、配置源、环境绑定的官方 MCP
+（`{{.System.ID}}-consul-<env>`，多源为 `{{.System.ID}}-consul-<source>-<env>`）。
+先查看实际工具 schema；`kv_get` 读取指定 key，`kv_keys` 只列已确定 prefix。
+`kv_get` 的 `raw` 参数为字符串 `"false"` / `"true"`；默认返回的 `Value` 是 Base64，
+解码一次再解析配置。host/token 已绑定到进程环境，不通过工具参数传递。
+未安装或缺少所需工具时才使用下文 HTTP 脚本；认证失败直接报告，不能换身份绕过。
+此规则也适用于非主配置源的 Consul。HTTP 兜底使用
+`python3 scripts/consul_config.py --agent-id {{.AgentID}} --env <env> --source <source> get --key <key>`，
+配置源 ID 来自 routing；单源 `default` 可省略。默认连接普通 Consul API，不设置企业分区。
+{{- end}}
+
 本技能只负责配置层执行：
 - 读取配置
 - 查看历史
@@ -15,11 +34,11 @@ description: 通用配置中心执行技能（后端：{{.Infrastructure.Primary
 
 ## 前置(每次调用前必读)
 
-1. **先调 `routing` 拿坐标** — `namespaceId / group / dataId`(nacos) / `appId / cluster / namespaces[]`(apollo) / `kv_prefix / default_context`(consul) / `cluster / namespace / configmap`(kuboard)都必须从 routing 输出取,**不许自己拼或猜**。routing 会在每条服务上标 `runtime`:`nacos-mcp` 走 nacos MCP 工具,`apollo-http` / `consul-http` 走对应 HTTP 脚本,`kuboard-http` 表示使用 routing 已生成的 Kuboard ConfigMap 坐标。
+1. **先调 `routing` 拿坐标** — `namespaceId / group / dataId`(nacos) / `appId / cluster / namespaces[]`(apollo) / `kv_prefix / default_context`(consul) / `cluster / namespace / configmap`(kuboard)都必须从 routing 输出取,**不许自己拼或猜**。routing 会在每条服务上标 `runtime`:`nacos-mcp` 走 nacos MCP 工具,`consul-mcp` 走 Consul MCP，`apollo-http` 走 HTTP 脚本,`kuboard-http` 表示使用 routing 已生成的 Kuboard ConfigMap 坐标。
 2. **凭据**:
    - **nacos 主路径走 MCP,凭据已在 MCP env 里,不需要 source 任何东西**,直接调 `{{.System.ID}}-nacos-<env>` 的工具。
    - nacos **HTTP fallback** 才需 `source scripts/.env`(拿 `CC_ADDR_<ENV>` 等)。
-   - apollo / consul / kuboard 凭据走 `~/.tshoot/<agent-id>-creds.json`,脚本按 `--agent-id --env` 自取,不需 source。
+   - apollo / consul / kuboard 的 HTTP 路径凭据走 `~/.tshoot/<agent-id>-creds.json`,脚本按 `--agent-id --env` 自取,不需 source。
 
 ## 多环境硬约束（必读）
 
@@ -115,23 +134,21 @@ python3 scripts/apollo_config.py list-namespaces \
 
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "consul"}}
 
-### 当前后端：Consul（走 HTTP 脚本，生态暂无稳定 MCP 包）
+### 当前后端：Consul（官方 MCP 优先，HTTP 脚本兜底）
 
 install.sh 已把 `host + token` 按 env 写入 `~/.tshoot/{{.AgentID}}-creds.json`（0600）。
 
 读取单个 KV：
 ```bash
-python3 scripts/consul_config.py get \
-  --agent-id {{.AgentID}} --env <env> --key <key>
+python3 scripts/consul_config.py --agent-id {{.AgentID}} --env <env> get --key <key>
 ```
 
 列 prefix 下所有 key：
 ```bash
-python3 scripts/consul_config.py list \
-  --agent-id {{.AgentID}} --env <env> --prefix <prefix>
+python3 scripts/consul_config.py --agent-id {{.AgentID}} --env <env> list --prefix <prefix>
 ```
 
-`routing` 会返回 `runtime: consul-http` + `kv_prefix / default_context / host`；组装 key 时形如 `<kv_prefix>/<default_context>` 或按实际约定。
+`routing` 会返回 `runtime: consul-mcp` + `kv_prefix / default_context / host`；组装 key 时形如 `<kv_prefix>/<default_context>` 或按实际约定。
 {{- end}}
 
 {{- if eq .Infrastructure.PrimaryConfigCenter.Type "env-vars"}}
@@ -161,7 +178,7 @@ python3 scripts/resolve_runtime_static.py --agent-id {{.AgentID}} --env <env>
 
 ### 当前后端：Kuboard（HTTP 脚本读取 ConfigMap）
 
-本系统通过 Kuboard 管理 K8s ConfigMap。`routing` 会返回 `runtime: kuboard-http`
+本系统通过 Kuboard 管理 K8s ConfigMap。未启用官方 MCP 时，`routing` 返回 `runtime: kuboard-http`
 以及向导挑出的 `cluster / namespace / configmap / configmap_key` 坐标。
 
 读取 ConfigMap：

@@ -25,6 +25,7 @@ action 列表:
 """
 
 import argparse
+import base64
 import json
 import os
 import sys
@@ -231,7 +232,7 @@ class KuboardClient:
         try:
             r = self.session.post(
                 self.base + '/api/login.kuboard.cn/v4/login',
-                json={'username': self.username, 'password': self.password},
+                json={'username': self.username, 'password': base64.b64encode(self.password.encode('utf-8')).decode('ascii'), 'userSource': 'dao'},
                 timeout=10,
             )
         except Exception as e:
@@ -247,6 +248,12 @@ class KuboardClient:
         self._token = tok
         return tok
 
+    def auth_headers(self) -> dict[str, str]:
+        token = self.token()
+        if token.count('.') == 2:
+            return {'Authorization': 'Bearer ' + token}
+        return {'Kb-Access-Key': token}
+
     def cluster_uid(self) -> str:
         if self._cluster_uid:
             return self._cluster_uid
@@ -255,7 +262,7 @@ class KuboardClient:
         r = self.session.get(
             self.base + '/api/cluster.kuboard.cn/v4/cluster-cache/cluster-namespace-tree'
             '?apiGroupName=&resource=configmaps&namespaced=true',
-            headers={'Kb-Access-Key': self.token()}, timeout=10,
+            headers=self.auth_headers(), timeout=10,
         )
         if r.status_code >= 400:
             fail('cluster-tree-http', f'HTTP {r.status_code}: {r.text[:200]}')
@@ -290,7 +297,7 @@ class KuboardClient:
             self.base + '/api/cluster.kuboard.cn/v4/cluster-cache/direct'
             f'?clusterId={self.cluster_uid()}&apiVersion=v1&{query}'
         )
-        r = self.session.get(u, headers={'Kb-Access-Key': self.token()}, timeout=15)
+        r = self.session.get(u, headers=self.auth_headers(), timeout=15)
         if r.status_code >= 400:
             fail('direct-http', f'HTTP {r.status_code}: {redact(r.text)[:300]};URL={u}')
         return r.json()
@@ -311,7 +318,7 @@ class KuboardClient:
             f'&clusterIdNamespaces={self.cluster_uid()}%2F{urllib.parse.quote(namespace)}'
             f'&orderBy=name'
         )
-        r = self.session.get(u, headers={'Kb-Access-Key': self.token()}, timeout=15)
+        r = self.session.get(u, headers=self.auth_headers(), timeout=15)
         if r.status_code >= 400:
             fail('list-http', f'HTTP {r.status_code}: {redact(r.text)[:300]};URL={u}')
         body = r.json()
@@ -346,7 +353,7 @@ class KuboardClient:
             self.base + '/api/cluster.kuboard.cn/v4/cluster-cache/pod-logs'
             f'?clusterId={self.cluster_uid()}&' + '&'.join(params)
         )
-        r = self.session.get(u, headers={'Kb-Access-Key': self.token()}, timeout=20)
+        r = self.session.get(u, headers=self.auth_headers(), timeout=20)
         if r.status_code >= 400:
             return f'[error: HTTP {r.status_code} {redact(r.text)[:200]}]'
         # 响应是 plain text logs;direct/log 端点也可能返 JSON wrap

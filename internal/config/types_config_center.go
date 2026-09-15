@@ -18,6 +18,9 @@ type ConfigCenterEndpoint struct {
 	MetaURL   string `yaml:"meta_url,omitempty"`
 	Host      string `yaml:"host,omitempty"`
 	AccessKey string `yaml:"access_key,omitempty"`
+	// MCPURL is set after native MCP discovery, or explicitly for a supported
+	// Kuboard server. Empty keeps the legacy HTTP integration.
+	MCPURL string `yaml:"mcp_url,omitempty"`
 }
 
 type CredentialAuth struct {

@@ -7,7 +7,7 @@
 //     撞坑;rabbitmq 这次靠人工 probe 才发现。
 //   - 本文件把那条人工 probe 工程化:每次 self-test 对每个 servers[<name>] 起一次子进程,
 //     发 initialize + tools/list,验证 (a) 进程能起 (b) 工具列表非空。两条护栏覆盖大部分
-//     "包能起 / 凭据被接受 / 协议没崩"的真错配。
+//     "包能起 / 工具能列出 / 协议没崩"的真错配。
 //
 // **不做**的事(避免过度规约):
 //   - 不为通用 MCP 强制工具名清单跟 SKILL.md 文档对照 —— CodeGraph 是例外:它只有
@@ -15,8 +15,8 @@
 //   - 不真调任何工具(无副作用),只 tools/list
 //   - 不验证写工具是否被拦截(那是 LLM SKILL 软约束的事,跟 mcp probe 无关)
 //
-// 顺带覆盖 P2.6 "凭据热验证":如果凭据错,大部分 mcp 进程起不来或 tools/list 拒绝 → probe FAIL
-// 自动暴露(nacos mcp-router 那种 silent-fallback 设计是反模式,正经 mcp 会失败叫出来)。
+// tools/list 不保证后端认证成功：Redis/Grafana/MongoDB 可延迟到 tools/call 才连接。
+// 真正的查询验收必须另做有界只读调用，并检查正文里的错误信息。
 package agent
 
 import (
@@ -56,8 +56,9 @@ var probeMCPHTTPFunc = doProbeMCPHTTPServer
 func doProbeMCPHTTPServer(ctx context.Context, rawURL string, headers map[string]string, timeout time.Duration) MCPProbeResult {
 	pctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	client := &http.Client{Timeout: timeout}
+	client := &http.Client{Timeout: timeout, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	sessionID := ""
+	protocolVersion := "2025-03-26"
 	post := func(method string, id any, expectResponse bool) (map[string]any, error) {
 		message := map[string]any{"jsonrpc": "2.0", "method": method}
 		if id != nil {
@@ -66,7 +67,7 @@ func doProbeMCPHTTPServer(ctx context.Context, rawURL string, headers map[string
 		switch method {
 		case "initialize":
 			message["params"] = map[string]any{
-				"protocolVersion": "2024-11-05",
+				"protocolVersion": protocolVersion,
 				"capabilities":    map[string]any{},
 				"clientInfo":      map[string]any{"name": "tshoot-self-test", "version": "0"},
 			}
@@ -90,7 +91,9 @@ func doProbeMCPHTTPServer(ctx context.Context, rawURL string, headers map[string
 		}
 		if sessionID != "" {
 			req.Header.Set("Mcp-Session-Id", sessionID)
-			req.Header.Set("MCP-Protocol-Version", "2024-11-05")
+		}
+		if method != "initialize" {
+			req.Header.Set("MCP-Protocol-Version", protocolVersion)
 		}
 		resp, err := client.Do(req)
 		if err != nil {
@@ -115,8 +118,13 @@ func doProbeMCPHTTPServer(ctx context.Context, rawURL string, headers map[string
 	if err != nil {
 		return MCPProbeResult{Err: fmt.Errorf("initialize: %w", err)}
 	}
-	if rpcErr, ok := initialized["error"].(map[string]any); ok {
-		return MCPProbeResult{Err: fmt.Errorf("initialize RPC error: %v", rpcErr)}
+	if _, ok := initialized["error"].(map[string]any); ok {
+		return MCPProbeResult{Err: errors.New("initialize RPC error")}
+	}
+	if result, ok := initialized["result"].(map[string]any); ok {
+		if version, ok := result["protocolVersion"].(string); ok && version != "" {
+			protocolVersion = version
+		}
 	}
 	if _, err := post("notifications/initialized", nil, false); err != nil {
 		return MCPProbeResult{Err: fmt.Errorf("initialized notification: %w", err)}
@@ -125,35 +133,62 @@ func doProbeMCPHTTPServer(ctx context.Context, rawURL string, headers map[string
 	if err != nil {
 		return MCPProbeResult{Err: fmt.Errorf("tools/list: %w", err)}
 	}
-	if rpcErr, ok := listed["error"].(map[string]any); ok {
-		return MCPProbeResult{Err: fmt.Errorf("tools/list RPC error: %v", rpcErr)}
+	if _, ok := listed["error"].(map[string]any); ok {
+		return MCPProbeResult{Err: errors.New("tools/list RPC error")}
 	}
 	return MCPProbeResult{Tools: mcpToolNames(listed)}
 }
 
 func readMCPHTTPResponse(body io.Reader) (map[string]any, error) {
-	data, err := io.ReadAll(io.LimitReader(body, 2<<20))
+	// Decode a response as soon as it arrives. Streamable HTTP may leave an SSE
+	// stream open after the result; waiting for EOF would reject a healthy MCP.
+	reader := bufio.NewReader(io.LimitReader(body, 2<<20))
+	for {
+		prefix, err := reader.Peek(1)
+		if err != nil {
+			return nil, err
+		}
+		if !strings.ContainsRune(" \r\n\t", rune(prefix[0])) {
+			break
+		}
+		if _, err := reader.ReadByte(); err != nil {
+			return nil, err
+		}
+	}
+	prefix, err := reader.Peek(1)
 	if err != nil {
 		return nil, err
 	}
-	var direct map[string]any
-	if json.Unmarshal(data, &direct) == nil {
-		return direct, nil
+	if prefix[0] == '{' {
+		var response map[string]any
+		err := json.NewDecoder(reader).Decode(&response)
+		return response, err
 	}
-	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 4096), 2<<20)
+	var data string
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		line := scanner.Text()
+		if line == "" {
+			data = ""
+			continue
+		}
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
-		if json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data:"))), &direct) == nil {
-			return direct, nil
+		data += strings.TrimSpace(strings.TrimPrefix(line, "data:")) + "\n"
+		var response map[string]any
+		if json.Unmarshal([]byte(data), &response) == nil {
+			if response["result"] != nil || response["error"] != nil {
+				return response, nil
+			}
+			data = "" // Ignore notifications preceding the requested response.
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
-	return nil, errors.New("response did not contain a JSON-RPC message")
+	return nil, errors.New("response did not contain a JSON-RPC result")
 }
 
 func mcpToolNames(response map[string]any) []string {
@@ -248,12 +283,12 @@ func doProbeMCPServer(ctx context.Context, command string, args, env []string, t
 	if err := writeJSONLine(stdin, initReq); err != nil {
 		return MCPProbeResult{Err: fmt.Errorf("send initialize: %w", err), StderrTail: tailStderr()}
 	}
-	initResp, err := readJSONLine(pctx, reader)
+	initResp, err := readMCPResponse(pctx, reader, 1)
 	if err != nil {
 		return MCPProbeResult{Err: fmt.Errorf("read initialize resp: %w", err), StderrTail: tailStderr()}
 	}
-	if e, ok := initResp["error"].(map[string]any); ok {
-		return MCPProbeResult{Err: fmt.Errorf("initialize error: %v", e), StderrTail: tailStderr()}
+	if initResp["error"] != nil {
+		return MCPProbeResult{Err: errors.New("initialize RPC error"), StderrTail: tailStderr()}
 	}
 
 	// 2. notifications/initialized
@@ -270,15 +305,29 @@ func doProbeMCPServer(ctx context.Context, command string, args, env []string, t
 	}); err != nil {
 		return MCPProbeResult{Err: fmt.Errorf("send tools/list: %w", err), StderrTail: tailStderr()}
 	}
-	toolsResp, err := readJSONLine(pctx, reader)
+	toolsResp, err := readMCPResponse(pctx, reader, 2)
 	if err != nil {
 		return MCPProbeResult{Err: fmt.Errorf("read tools/list resp: %w", err), StderrTail: tailStderr()}
 	}
-	if e, ok := toolsResp["error"].(map[string]any); ok {
-		return MCPProbeResult{Err: fmt.Errorf("tools/list error: %v", e), StderrTail: tailStderr()}
+	if toolsResp["error"] != nil {
+		return MCPProbeResult{Err: errors.New("tools/list RPC error"), StderrTail: tailStderr()}
 	}
 
 	return MCPProbeResult{Tools: mcpToolNames(toolsResp)}
+}
+
+// Servers may emit notifications (for example tools/list_changed) between RPC
+// responses. Only consume the result/error for the request we actually sent.
+func readMCPResponse(ctx context.Context, r *bufio.Reader, id int) (map[string]any, error) {
+	for {
+		msg, err := readJSONLine(ctx, r)
+		if err != nil {
+			return nil, err
+		}
+		if msg["jsonrpc"] == "2.0" && msg["id"] == float64(id) && (msg["result"] != nil || msg["error"] != nil) {
+			return msg, nil
+		}
+	}
 }
 
 func writeJSONLine(w io.Writer, msg map[string]any) error {

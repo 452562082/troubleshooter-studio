@@ -3495,6 +3495,7 @@ export namespace main {
 	export class KuboardResources {
 	    clusters: KuboardCluster[];
 	    notes?: string[];
+	    mcp_url?: string;
 
 	    static createFrom(source: any = {}) {
 	        return new KuboardResources(source);
@@ -3504,6 +3505,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.clusters = this.convertValues(source["clusters"], KuboardCluster);
 	        this.notes = source["notes"];
+	        this.mcp_url = source["mcp_url"];
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

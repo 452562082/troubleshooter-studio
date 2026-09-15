@@ -1574,3 +1574,87 @@ func TestGenerate_WithAnalysis_UpgradesInferredToVerified(t *testing.T) {
 		t.Errorf("order-worker/dev dataId expected order-worker.yaml, got %v", row["dataId"])
 	}
 }
+
+func TestGenerateKuboardNativeMCPRoutingAndLegacyFallback(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	cfg.Infrastructure.ConfigCenters = []config.ConfigCenter{{ID: "ops", Type: "kuboard", Endpoints: []config.ConfigCenterEndpoint{
+		{Env: "dev", URL: "https://kb.example", MCPURL: "https://kb.example/mcp"},
+		{Env: "prod", URL: "https://old-kb.example"},
+	}}}
+	cfg.Infrastructure.Observability.K8sRuntime = config.K8sRuntime{Enabled: true, Provider: "kuboard", Endpoints: []config.ObsEndpoint{{Env: "dev", MCPURL: "https://runtime.example/mcp"}, {Env: "prod"}}}
+	for i := range cfg.Repos {
+		cfg.Repos[i].ConfigSource = "ops"
+	}
+	out := t.TempDir()
+	if err := New(cfg, filepath.Join(projectRoot(t), "templates"), out).Generate(); err != nil {
+		t.Fatal(err)
+	}
+	rows := loadConfigMap(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml"))
+	native := rows["dev"]["order-service"]
+	if native["mcp_server"] != "shop-kuboard-ops-dev" || native["runtime"] != nil {
+		t.Fatalf("native routing=%v", native)
+	}
+	legacy := rows["prod"]["order-service"]
+	if legacy["runtime"] != "kuboard-http" || legacy["mcp_server"] != nil {
+		t.Fatalf("legacy routing=%v", legacy)
+	}
+	data, err := os.ReadFile(filepath.Join(out, "templates/workspace-template/skills/routing/references/observability-map.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obs map[string]any
+	if err := yaml.Unmarshal(data, &obs); err != nil {
+		t.Fatal(err)
+	}
+	nativeServers := obs["k8s_runtime"].(map[string]any)["mcp_server_by_env"].(map[string]any)
+	if !reflect.DeepEqual(nativeServers, map[string]any{"dev": "shop-k8s-kuboard-dev"}) {
+		t.Fatalf("runtime routing=%v", nativeServers)
+	}
+
+}
+
+func TestGenerateConsulOfficialRouting(t *testing.T) {
+	cfg := loadCfg(t, "examples/consul-troubleshooter.yaml")
+	cfg.Infrastructure.Observability.SkyWalking.Enabled = true
+	cfg.Generation.SkillsWhitelist = append(cfg.Generation.SkillsWhitelist, "skywalking-query")
+	out := t.TempDir()
+	if err := New(cfg, filepath.Join(projectRoot(t), "templates"), out).Generate(); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(out, "templates/workspace-template/skills")
+	rows := loadConfigMap(t, filepath.Join(base, "routing/references/config-map.yaml"))
+	for env, services := range rows {
+		for service, row := range services {
+			if row["runtime"] != "consul-mcp" || row["mcp_server"] != nil {
+				t.Fatalf("%s/%s: %v", env, service, row)
+			}
+		}
+	}
+	for file, wants := range map[string][]string{
+		"config-executor/SKILL.md":  {"kv_get", "kv_keys", "--source <source>", "consul_config.py"},
+		"skywalking-query/SKILL.md": {"iot-skywalking-<env>", "query_traces", "query_services_topology", "GraphQL API"},
+	} {
+		data := readFile(t, filepath.Join(base, file))
+		for _, want := range wants {
+			if !strings.Contains(data, want) {
+				t.Errorf("%s missing %s", file, want)
+			}
+		}
+	}
+}
+
+func TestGenerateConsulSecondarySourceKeepsFallback(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	cfg.Infrastructure.ConfigCenters = append(cfg.Infrastructure.ConfigCenters, config.ConfigCenter{ID: "ops", Type: "consul"})
+	out := t.TempDir()
+	if err := New(cfg, filepath.Join(projectRoot(t), "templates"), out).Generate(); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(out, "templates/workspace-template/skills/config-executor")
+	if _, err := os.Stat(filepath.Join(base, "scripts/consul_config.py")); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(readFile(t, filepath.Join(base, "SKILL.md")), "--source <source>") {
+		t.Fatal("missing secondary source guidance")
+	}
+}

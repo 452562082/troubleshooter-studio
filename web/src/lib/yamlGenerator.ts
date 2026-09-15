@@ -479,6 +479,7 @@ export function generateYAML(ctx: YAMLGenContext, options: YAMLGenOptions = {}):
           if (f.uiOnly) continue
           if (ctx.isFieldHidden(type, env.id, f, (k) => (envCreds[k] || ''))) continue
           const v = (envCreds[f.key] || '').trim()
+          if (f.key === 'mcp_url' && !v) continue
           if (v) {
             if (f.secret && !includeSecrets) {
               const ph = placeholderName(f.envVar(env.id), placeholderSourceID)

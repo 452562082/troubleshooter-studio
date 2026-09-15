@@ -1,7 +1,11 @@
-// 配置所需的 MCP 清单；三平台共用。
+// 配置所需的 MCP 清单；四平台共用。
 package agent
 
-import "github.com/xiaolong/troubleshooter-studio/internal/config"
+import (
+	"runtime"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
+)
 
 func requiredMCPKeys(cfg *config.SystemConfig, agentID string) []string {
 	withAgent := func(name string) string {
@@ -11,6 +15,27 @@ func requiredMCPKeys(cfg *config.SystemConfig, agentID string) []string {
 		return agentID + "-" + name
 	}
 	var out []string
+	platform := runtime.GOOS + "/" + runtime.GOARCH
+	if consulMCPRelease.hashes[platform] != "" {
+		for _, cc := range cfg.Infrastructure.ConfigCenters {
+			if cc.Type == "consul" {
+				for _, env := range cfg.Environments {
+					out = append(out, withAgent(mcpKey("consul", cc.ID, env.ID)))
+				}
+			}
+		}
+	}
+	if cfg.Infrastructure.Observability.SkyWalking.Enabled && skywalkingMCPRelease.hashes[platform] != "" {
+		for _, env := range cfg.Environments {
+			out = append(out, withAgent("skywalking-"+env.ID))
+		}
+	}
+
+	for _, ep := range kuboardMCPEndpoints(cfg) {
+		if ep.url != "" {
+			out = append(out, ep.serverKey(agentID))
+		}
+	}
 	if cfg.CodeIntelligence.UsesCodeGraph() {
 		out = append(out, withAgent("codegraph"))
 	}
@@ -28,7 +53,7 @@ func requiredMCPKeys(cfg *config.SystemConfig, agentID string) []string {
 			out = append(out, withAgent("grafana-"+e.ID))
 		}
 	}
-	// loki MCP 已合并进 grafana MCP(同款 mcp-grafana-npx 二进制本就含 query_loki_*),
+	// loki MCP 已合并进 grafana MCP(同款 mcp-grafana 二进制本就含 query_loki_*),
 	// 不再单独注册 loki-<env>。validate 阶段强制 Loki.Enabled ⇒ Grafana.Enabled,
 	// 这里也就没"独立 loki" 期望了。
 	// jaeger / elk:2026-05 都从 curl 占位升级到真 MCP(uvx opentelemetry-mcp /

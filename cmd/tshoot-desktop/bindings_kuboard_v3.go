@@ -372,7 +372,7 @@ func (s *kuboardSetupResult) listK8sObjectsGroup(apiPath, apiGroup, resource, na
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Kb-Access-Key", s.token)
+	setKuboardV4Auth(req, s.token)
 	req.Header.Set("User-Agent", kuboardUserAgent)
 	resp, err := s.client.Do(req)
 	if err != nil {

@@ -7,7 +7,7 @@
 #     nacos-mcp    → 调 nacos MCP(<system.id>-nacos[-source]-<env>)的 get_config 等工具;
 #                    MCP 不可用时 config-executor 回落 scripts/nacos_config.py(plan D)
 #     apollo-http  → scripts/apollo_config.py(生态暂无稳定 Apollo MCP)
-#     consul-http  → scripts/consul_config.py(同上)
+#     consul-mcp   → 官方 Consul MCP，未安装时 scripts/consul_config.py 兜底
 #     kuboard-http → 配置坐标来自 Kuboard service_map；不要找 MCP server 或 kubectl 脚本
 #     one2all-mcp  → 调 one2all-remote MCP(<system.id>-one2all)的 platform_get_configmap 等工具;
 #                    单一 streamable-http 实例,所有 env 通过 cluster_id 区分
@@ -115,10 +115,14 @@ environments:
         status: inferred
         {{- end}}
         {{- else if eq $cc "kuboard"}}
-        # kuboard:**不通过 MCP**。这里仅记录向导挑出的 ConfigMap 坐标,
-        # agent 看到 runtime: kuboard-http 就 **不要** 尝试找 mcp_server 或 kubectl 脚本。
+        {{- $mcpURL := ""}}
+        {{- range $endpoints}}{{if eq .Env $envID}}{{$mcpURL = .MCPURL}}{{end}}{{end}}
         configmap_key: {{$svc | printf "%q"}}
+        {{- if $mcpURL}}
+        mcp_server: {{mcpKeyForAgentSource $.System.ID "kuboard" $sourceID $envID | printf "%q"}}
+        {{- else}}
         runtime: kuboard-http
+        {{- end}}
         status: inferred
         {{- else if eq $cc "one2all"}}
         # one2all:走 one2all-remote MCP server,调 platform_get_configmap / platform_get_secret。
@@ -144,7 +148,7 @@ environments:
         {{- if $f.ServerAddr}}
         host: {{$f.ServerAddr | printf "%q"}}
         {{- end}}
-        runtime: {{printf "%s-http" $cc}}
+        runtime: consul-mcp
         status: verified
         source: {{$f.SourceFile | printf "%q"}}
         {{- else if $p}}
@@ -153,12 +157,12 @@ environments:
         {{- if $p.ServerAddr}}
         host: {{$p.ServerAddr | printf "%q"}}
         {{- end}}
-        runtime: {{printf "%s-http" $cc}}
+        runtime: consul-mcp
         status: verified
         {{- else}}
         kv_prefix: "config"
         default_context: {{$svc | printf "%q"}}
-        runtime: {{printf "%s-http" $cc}}
+        runtime: consul-mcp
         status: inferred
         {{- end}}
         {{- else}}

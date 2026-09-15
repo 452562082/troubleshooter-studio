@@ -207,13 +207,13 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 	}
 
 	// 老产物清理:之前版本会下 mcp-grafana go 二进制到 <root>/bin/mcp-grafana
-	// (Windows 加 .exe)。现已改走 npx mcp-grafana-npx,旧二进制留着没人用,遇到就清掉。
+	// (Windows 加 .exe)。现已改走 uvx mcp-grafana,旧二进制留着没人用,遇到就清掉。
 	// 老 codex agent 共用 + 其它 IDE 各一份的判断已不再适用 — 反正只是个 30MiB 的孤儿。
 	for _, name := range []string{"mcp-grafana", "mcp-grafana.exe"} {
 		legacy := filepath.Join(root, "bin", name)
 		if _, err := os.Stat(legacy); err == nil {
 			if rmErr := os.Remove(legacy); rmErr == nil {
-				logf("[ok] 老 %s 二进制已删(改走 npx mcp-grafana-npx)", legacy)
+				logf("[ok] 老 %s 二进制已删(改走 uvx mcp-grafana)", legacy)
 			}
 		}
 	}

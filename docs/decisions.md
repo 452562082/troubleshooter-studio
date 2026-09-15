@@ -19,8 +19,9 @@ Studio 负责配置建模、仓库扫描、生成、部署和故障闭环；生�
 | 能力 | 当前决定 | 原因 |
 |---|---|---|
 | Nacos | 自研本地 MCP，运行时登录及刷新 token；HTTP 脚本兜底 | 安装时固定 token 会过期 |
-| Apollo、Consul | HTTP/API 主路径，继续收凭据 | 已有可用替代，无需虚假注册 MCP |
-| RabbitMQ | HTTP Management API，继续收凭据 | 原 MCP 候选未通过运行时探测 |
+| Apollo | HTTP/API 主路径，继续收凭据 | 已有可用替代，无需虚假注册 MCP |
+| Consul | 原 HTTP-only 决策 SUPERSEDED | 见下文 2026-09-15 Consul、SkyWalking 接入 |
+| RabbitMQ | HTTP Management API，继续收凭据 | 旧候选启动失败原因 SUPERSEDED，见下文凭据绑定与 URL 兼容限制 |
 | feishu_project | 不注册 MCP，停收凭据 | 当前无成熟接入或替代能力 |
 | PostgreSQL | `@henkey/postgres-mcp-server` | 替换已归档的旧包，凭据通过环境传入 |
 
@@ -63,3 +64,46 @@ Schema 0.2 的资源目录统一仓库、服务、工作负载与环境映射；
 2026-09-15 的 CI 修复补齐遗漏的 lint、Python requests 和依赖安全更新，并修正新版 Git 下测试数据构造差异。检查结果绑定分支与 commit；`test` 通过不代表 `main` 已更新，历史失败运行不会自动变绿。
 
 发布只走 CI，同步两端 commit 和 tag 后再发版。具体流程见 [CI 与发版](CI-RELEASE.md)。
+
+## 2026-09-15：官方 MCP 接入与 Kuboard 渐进兼容
+
+Grafana 改用官方 `mcp-grafana==1.4.2` 平台包；Redis 使用官方
+`redis-mcp-server==0.5.1`；MongoDB 使用官方 `mongodb-mcp-server@2.1.1`。
+固定版本后以实际工具发现和查询为准。Redis 通过环境传递完整 URI，由上游 CLI
+解析，避免凭据进入进程参数；MongoDB 保留已有只读策略和连接兼容处理。
+
+Kuboard 在资源拉取后用持久访问密钥探测 `/mcp`；成功才记录可选 `mcp_url`，
+生成并部署原生 HTTP MCP。配置源与独立 K8s 连接分别命名，保留旧版 HTTP、
+历史与配置解析能力；401/403 不得通过更换身份绕过。未确认的官方候选不自动
+替换现有后端，Nacos 登录续期仍使用自研实现。HTTP 探测遵循协商版本并即时
+读取 SSE 结果，不等待连接关闭，不向重定向目标传递凭据。
+
+安装探测按请求 ID 匹配响应，忽略工具更新通知；MongoDB 查询先取已配置
+connectionId。Redis 认证失败可能返回普通 Error 文本，skill 同时检查正文，
+不能把 tools/list 或 isError=false 当成后端可用的证明。
+
+## 2026-09-15：Consul、SkyWalking 官方 MCP
+
+Consul 使用 HashiCorp `consul-mcp-server 0.1.4`；不复用 PATH 中的旧版，避免
+[0.1.0–0.1.3 的后端覆盖和令牌隔离问题](https://discuss.hashicorp.com/t/hcsec-2026-24-multiple-vulnerabilities-impacting-hashicorp-consul-mcp-server/77612)。
+按配置源与环境绑定地址、ACL token，默认普通 Consul API，不设置企业分区。
+关闭启动时的外部文档下载。routing 用 `runtime: consul-mcp`，HTTP 脚本兜底并
+按明确的 source 读取凭据，禁止凭据缺失时跨源回退。
+
+SkyWalking 使用 Apache `swmcp 0.2.0`，绑定 OAP URL 与可选 Basic Auth；密码由
+环境变量传递。两者下载固定发布包并核对逐平台 SHA256，缓存损坏则重装。
+macOS/Linux 支持 amd64、arm64；Consul 另支持 Windows amd64，SkyWalking
+暂无 Windows 发布包，继续 GraphQL API。二进制可用后仍必须做 runtime probe。
+上游 SkyWalking 0.2.0 包的握手版本仍报告 0.1.0，以发布包摘要确认安装版本。
+
+RabbitMQ 的已发布 `amq-mcp-server-rabbitmq 4.0.0` 已能启动并列工具，旧的
+“候选无法启动”原因不再成立。但该版本仍要求 `connect` 的工具参数携带凭据，
+按 hostname/port 重建 Management URL，不保留反向代理路径；继续使用已绑定
+凭据的 HTTP Management API，不按主分支 README 未发布的功能直接替换。
+
+## 2026-09-15：Kuboard v4 真实认证契约
+
+Kuboard v4.2.2 与临时 K3s 实测发现，登录需要 UTF-8 密码的 Base64 编码及
+`userSource: dao`。登录 JWT 必须使用 `Authorization: Bearer`，持久访问密钥
+继续使用 `Kb-Access-Key`；桌面资源查询、ConfigMap 和运行时脚本统一处理。
+成功登录不能替代后续资源读取验收；错误凭据保持失败，不切换身份。

@@ -17,7 +17,12 @@ import (
 // 顺序:每个 config_centers 源依次走自己的字段块 → grafana / jaeger / elk / model / lark / feishu。
 func DerivePrompts(cfg *config.SystemConfig) []deploy.Prompt {
 	var out []deploy.Prompt
+	seen := map[string]bool{}
 	add := func(name, prompt string, secret bool) {
+		if seen[name] {
+			return
+		}
+		seen[name] = true
 		out = append(out, deploy.Prompt{Name: name, Prompt: prompt, Secret: secret})
 	}
 
@@ -76,6 +81,7 @@ func DerivePrompts(cfg *config.SystemConfig) []deploy.Prompt {
 			// 不再 install 时问。
 			for _, e := range envs {
 				add(envVar("KUBOARD_URL", cc.ID, e.ID), "Kuboard URL ("+sourcePrefix+e.ID+") [https://kuboard.example.com]: ", false)
+				add(envVar("KUBOARD_MCP_URL", cc.ID, e.ID), "Kuboard 官方 MCP URL ("+sourcePrefix+e.ID+",可选;旧版留空): ", false)
 				add(envVar("KUBOARD_ACCESS_KEY", cc.ID, e.ID), "Kuboard API 访问凭证 ("+sourcePrefix+e.ID+",留空走账密): ", true)
 				add(envVar("KUBOARD_USER", cc.ID, e.ID), "Kuboard 用户名 ("+sourcePrefix+e.ID+",已填 access_key 可留空) []: ", false)
 				add(envVar("KUBOARD_PASS", cc.ID, e.ID), "Kuboard 密码 ("+sourcePrefix+e.ID+",已填 access_key 可留空) []: ", true)
@@ -87,14 +93,14 @@ func DerivePrompts(cfg *config.SystemConfig) []deploy.Prompt {
 	if cfg.UsesOne2All() {
 		addOne2All()
 	}
-	// K8s runtime 可独立于配置中心启用。没有 kuboard 配置源时，仍需为其连接
-	// 信息提供标准 KUBOARD_*_<ENV> 凭据槽；可部署 YAML 会自动 prefill 这些值。
+	// K8s runtime 有独立连接。具名 Kuboard 配置源存在时也要保留运行时凭据；
+	// legacy default 源共用相同凭据名，由 add 去重。
 	if cfg.Infrastructure.Observability.K8sRuntime.Enabled &&
-		!strings.EqualFold(strings.TrimSpace(cfg.Infrastructure.Observability.K8sRuntime.Provider), "one2all") &&
-		!hasConfigCenterType(cfg, "kuboard") {
+		!strings.EqualFold(strings.TrimSpace(cfg.Infrastructure.Observability.K8sRuntime.Provider), "one2all") {
 		for _, e := range envs {
 			up := strings.ToUpper(e.ID)
 			add("KUBOARD_URL_"+up, "K8s 运行时 Kuboard URL ("+e.ID+") []: ", false)
+			add("KUBOARD_MCP_URL_"+up, "Kuboard 官方 MCP URL ("+e.ID+",可选;旧版留空): ", false)
 			add("KUBOARD_ACCESS_KEY_"+up, "K8s 运行时 Kuboard API 访问凭证 ("+e.ID+",留空走账密): ", true)
 			add("KUBOARD_USER_"+up, "K8s 运行时 Kuboard 用户名 ("+e.ID+") []: ", false)
 			add("KUBOARD_PASS_"+up, "K8s 运行时 Kuboard 密码 ("+e.ID+") []: ", true)
@@ -122,6 +128,15 @@ func DerivePrompts(cfg *config.SystemConfig) []deploy.Prompt {
 				"Jaeger URL ("+e.ID+") [http://jaeger-xxx:16686]: ",
 				false,
 			)
+		}
+	}
+
+	if cfg.Infrastructure.Observability.SkyWalking.Enabled {
+		for _, e := range envs {
+			up := strings.ToUpper(e.ID)
+			add("SKYWALKING_URL_"+up, "SkyWalking OAP URL ("+e.ID+") []: ", false)
+			add("SKYWALKING_USER_"+up, "SkyWalking 用户名 ("+e.ID+",可选) []: ", false)
+			add("SKYWALKING_PASS_"+up, "SkyWalking 密码 ("+e.ID+",可选) []: ", true)
 		}
 	}
 

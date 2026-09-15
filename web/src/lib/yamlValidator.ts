@@ -325,7 +325,7 @@ export function computeStepErrors(ctx: ValidatorContext): Set<string> {
 
   if (step === 8) {
     // 可观测性:Loki/Prometheus/Tempo 启用必须 Grafana 启用(它们在本系统通过
-    // mcp-grafana-npx 内置工具查询,无独立 MCP 包)— 跟 health_observability.go 同款规则。
+    // mcp-grafana 内置工具查询,无独立 MCP 包)— 跟 health_observability.go 同款规则。
     const grafanaOn = !!ctx.enabledObservability['grafana']
     for (const k of ['loki', 'prometheus', 'tempo']) {
       if (ctx.enabledObservability[k] && !grafanaOn) {

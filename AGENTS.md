@@ -16,14 +16,16 @@ Studio 的 CLI、桌面和 HTTP 入口共享 `internal/`；生成物安装到 Cl
 
 | 接入情况 | 凭据与能力 |
 |---|---|
-| Apollo、Consul、RabbitMQ | 不注册 MCP，有成熟 HTTP/API 替代，继续收凭据 |
+| Apollo、RabbitMQ | 不注册 MCP，有成熟 HTTP/API 替代，继续收凭据 |
 | feishu_project | 当前无可用替代，停收凭据，不宣称接入成功 |
+| Consul、SkyWalking | 下载固定版本官方 MCP 并校验 SHA256；无发布包或安装失败时保留 HTTP/API |
 | Nacos | 自研本地 `nacos_mcp.py`，运行时登录/刷新；`nacos_config.py` 仅兜底 |
 
 builder 文件位于 `internal/agent/`：
 
 - `install_native_mcp_common.go`：入口与共享 helper。
 - `install_native_mcp_obs.go`：Grafana、Jaeger、ELK。
+- `install_native_mcp_official.go` / `ensure_official_mcp.go`：Consul、SkyWalking 与固定版本安装。
 - `install_native_mcp_data_stores.go`：数据层。
 - `install_native_mcp_messaging.go`：飞书相关能力。
 

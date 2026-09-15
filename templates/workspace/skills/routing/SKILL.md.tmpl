@@ -14,13 +14,14 @@ config-map.yaml 里每条服务定位都带**两类指针之一**:
 | `mcp_server: <name>` | 该服务通过 MCP server 访问(grafana / jaeger / elk / 数据层 / lark / feishu_project 用) | **原样调用 mcp**(不要拆 agent-id 前缀 / 不要改格式 / 不要推断)。查不到先 self-test,不要自己改名试。 |
 | `runtime: <type>-(mcp\|http)` | 该服务配置走配置中心,统一交给 `config-executor` SKILL 处理 | 走 `config-executor` SKILL,由它按 runtime 值决定调 MCP 还是 HTTP 脚本 |
 
-**配置中心访问方式(2026 plan D 起)**:
+**配置中心访问方式**:
+- **consul → 官方 MCP 优先**（`runtime: consul-mcp`），HTTP 脚本兜底，配置源与环境均由 routing 确定。
 - **nacos → MCP 主路径**(`runtime: nacos-mcp`):config-executor 调 `{{.System.ID}}-nacos[-source]-<env>` 这个 MCP 的 `get_config` / `list_configs` / `get_config_history` / `list_config_history` 工具。MCP 进程自己拿 username/password 跑 login + 后台 refresh,token 短 TTL 无所谓 —— 这是 plan D 相比当年 bake-token 方案的本质区别。MCP 不可用时 config-executor 回落 `scripts/nacos_config.py` HTTP 脚本。
-- apollo / consul:生态暂无稳定 MCP,走 HTTP 脚本(`apollo-http` / `consul-http`)
+- apollo：走 HTTP 脚本（`apollo-http`）。
 - kuboard:`runtime: kuboard-http` 仅表示配置坐标来自 Kuboard service_map；不要找 MCP server 或 kubectl 脚本。
 - one2all:走 one2all-remote MCP(`platform_get_configmap / platform_get_secret`,单一 streamable-http 实例,键 `one2all-mcp`)
 
-五个 runtime 值:`nacos-mcp` / `apollo-http` / `consul-http` / `kuboard-http` / `one2all-mcp`。**LLM 看到 runtime 字段就交给 config-executor SKILL,不要因为是 nacos-mcp 或 one2all-mcp 就跳过 config-executor 直接乱猜工具名**。
+五个 runtime 值:`nacos-mcp` / `apollo-http` / `consul-mcp` / `kuboard-http` / `one2all-mcp`。**LLM 看到 runtime 字段就交给 config-executor SKILL,不要因为是 nacos-mcp 或 one2all-mcp 就跳过 config-executor 直接乱猜工具名**。
 
 凭据位置:
 - nacos:install 阶段写进 MCP env(`NACOS_HOST/PORT/USERNAME/PASSWORD`),MCP 工具调用不碰凭据。HTTP fallback 才读 `<workspace>/scripts/.env`(`CC_ADDR_<ENV>` 等,需先 `source scripts/.env`)
@@ -36,23 +37,14 @@ config-map.yaml 里每条服务定位都带**两类指针之一**:
 
 **禁止行为**:先调 `list_datasources` 看到多个 loki/prometheus → 把每个 UID 都查一遍。用户在配置时已选定唯一的"排障专用 datasource",其他 datasource 即便 grafana 列出了也是噪音。本 env 没配 UID → 报"该 env 缺 `datasource_uid_by_env.<env>`,请回 wizard 补",不要瞎选。
 
-## grafana mcp 写工具软约束(2026-05-15 runtime probe 后加)
+## Grafana MCP 写工具软约束
 
-实测 grafana mcp(`mcp-grafana-npx`)在我们的 6 个 disable flag 之后仍**暴露 28 个工具**,其中
-**5 个是写工具**:
+使用官方 `mcp-grafana`，工具名与参数以运行时发现结果为准。常规排障只读日志、指标、数据源和看板；
+禁止自行创建、更新或删除 annotation、folder、dashboard、datasource、snapshot，或安装 plugin。
+`grafana_api_request` 是通用入口，只允许明确的只读请求；不确定副作用时不调用。
+`generate_deeplink` 仅生成链接，可用于只读定位。
 
-```
-create_annotation / create_folder / update_annotation / update_dashboard / generate_deeplink
-```
-
-`generate_deeplink` 实际是生成 URL 不改 grafana 状态,算只读。其余 4 个真写:
-
-**排障禁调清单**:
-- `create_annotation` / `update_annotation` — 排障是诊断,不该改 grafana 状态;真要标记事件用 incident-investigator 的故障快报输出
-- `create_folder` — 排障不该建文件夹
-- `update_dashboard` — 排障不该改 dashboard
-
-**为什么不在 mcp 层硬约束(`--disable-write` flag)**:跟 mysql/redis/kafka produce_message 同款软约束哲学 — 留口子给紧急人工指令(用户在 IDE 里明确说"标记一下故障时间点")可绕过,常规排障 LLM 不主动调。LLM 自主调这 4 个写工具视为越权,立刻 abort 并告知用户。
+写能力保留给用户明确授权的操作，不在 builder 中新增硬禁写开关。
 
 ## 映射文件清单
 

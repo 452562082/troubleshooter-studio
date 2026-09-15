@@ -40,21 +40,18 @@ description: 通过环境动态查询 MongoDB 数据。先通过 routing 获取�
 **主路径:mcp tool**(已预注册,首选)
 
 ```text
-查 mcp tools 列表 → 找名字含 `mongodb-<env>` 的工具。runtime probe 实测 v2.0.2 暴露 8 个:
+先发现对应服务器的工具与参数。当前使用 MongoDB 官方 mongodb-mcp-server 2.1.1：
+  list-connections  — 获取 source=preconfigured 的 connectionId（首次查询会自动连接）
+  find              — 按 filter 查询，限制返回条数
+  aggregate         — 聚合；禁止 $out / $merge 等写阶段
+  count             — 文档计数
+  list-collections  — 列集合
+  collection-indexes / collection-schema / explain / db-stats — 元数据和查询分析
+保留原有只读模式；不要调用 connect/disconnect 切换到别的环境或部署。
+查询必须传入该服务器 list-connections 返回的 connectionId，不自行创建连接。
+连接串已通过环境配置，不再传 URI/host/password。以 tools/list 的实际 schema 为准，
+不要使用旧实现的 query/listCollections/serverInfo 名称。
 
-只读(排障主用):
-  query           — 按 filter 查文档(替代 mongosh 的 find)
-  aggregate       — pipeline 聚合
-  count           — 计数
-  listCollections — 列 db 下所有 collection(快速看数据形态)
-  serverInfo      — 看 server 版本 / 状态
-
-写工具(SKILL 软约束禁调,**排障不需要**):
-  update / insert / createIndex
-  注:install 传了 --read-only flag,这 3 个工具调用时会被运行时拦截返错。
-  即便没被拦截,排障也不该调它们 — 看到 LLM 调直接视为越权 abort。
-
-连接串已 bake 进 server,不要再传 URI/host/port,只需传 db / collection / filter / pipeline / limit。
 ```
 
 **fallback 1:mongosh CLI(只读)**

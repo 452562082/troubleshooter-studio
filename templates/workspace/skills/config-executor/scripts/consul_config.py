@@ -32,11 +32,15 @@ def _find_creds_file(agent_id: str) -> str:
     )
 
 
-def load_creds(agent_id: str, backend: str, env: str) -> dict:
+def load_creds(agent_id: str, backend: str, env: str, source: str = "") -> dict:
     path = _find_creds_file(agent_id)
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    env_data = data.get(backend, {}).get(env)
+    section = data.get(backend, {})
+    # A named source must never silently fall back to another source's token.
+    if source and source != "default":
+        section = section.get(source, {})
+    env_data = section.get(env)
     if not env_data:
         raise ValueError(f"creds missing {backend}.{env} (in {path})")
     return env_data
@@ -56,7 +60,7 @@ def http_get(url: str, token: str | None, timeout: int = 10) -> bytes:
 
 
 def _base_url(args: argparse.Namespace) -> tuple[str, str | None]:
-    creds = load_creds(args.agent_id, "consul", args.env)
+    creds = load_creds(args.agent_id, "consul", args.env, args.source)
     host = (args.host or creds.get("host", "")).rstrip("/")
     if host and not host.startswith("http"):
         host = "http://" + host
@@ -96,6 +100,7 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Consul KV HTTP API 客户端")
     p.add_argument("--agent-id", required=True)
     p.add_argument("--env", required=True)
+    p.add_argument("--source", default="", help="routing 的配置源 ID；多源时必填")
     p.add_argument("--host", help="覆盖 creds 的 host")
     p.add_argument("--token", help="覆盖 creds 的 token")
     sub = p.add_subparsers(dest="cmd", required=True)

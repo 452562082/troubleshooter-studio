@@ -31,6 +31,10 @@ web/node_modules/
 # vitest / vite 偶尔在仓库根起 cache(本来不该,但 cwd 切换时会),跟 web/node_modules/ 一样不入库
 /node_modules/
 
+# 本地测试/基准运行生成的临时报告与证据，不作为固定 fixture 入库
+/report.json
+/cmd/tshoot-desktop/artifacts/
+
 # 本机凭证草稿(init wizard / install.sh 自动生成)
 scripts/.env
 .tshoot/

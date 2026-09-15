@@ -1,18 +1,13 @@
-// install_native_mcp_common.go —— Claude Code / Cursor / Codex / Openclaw 四家共享的
 // MCP server 派生逻辑。
 //
-// 之前 install_native_mcp.go::buildMCPServersForCfg(IDE 用)和 install_native_openclaw_mcp.go::
-// injectMCPServers(openclaw 用)两套实现长得几乎一样:都按 cfg.Infrastructure.ConfigCenters
 // 跑 nacos × env、grafana per env、loki per env、lark messaging、feishu_project tracking。
 // 改一处忘改另一处的事故已经踩过,抽一个 BuildMCPServers 共用。
 //
 // 区别用 MCPBuildOptions 控制:
 //   - PruneEmpty:IDE 要(避免 settings.json 里把 "" 喂给后端,触发"无效连接"重试风暴);
-//     openclaw 不要(保留全 schema 让 agent 自决)。
 //
 // 老的 IncludeRawObsCurl(原本控制 jaeger/elk 走 curl 占位)在两家分别迁到真 MCP 后
 // 就没人用了 — 2026-05 jaeger 走 uvx opentelemetry-mcp,2026-05 elk 走
-// @elastic/mcp-server-elasticsearch,两家 IDE / openclaw 都注册,选项已删。
 //
 // 命名:统一走 mcpKeyForAgent(agentID, prefix, sourceID, envID),单源走 "<prefix>-<env>",
 // 多源走 "<prefix>-<sourceID>-<env>",IDE 共享 settings 池下加 agentID 前缀防撞名。
@@ -26,6 +21,23 @@ import (
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 )
+
+// v0.1.1 is the last Elastic MCP release backed by @elastic/elasticsearch 8.x.
+// v0.2.0+ moved to the 9.x client, which sends compatible-with=9 and is rejected
+// by the ES 7/8 clusters this project supports.
+const elasticsearchMCPPackage = "@elastic/mcp-server-elasticsearch@0.1.1"
+
+// Pin the upstream packages whose CLI and tool contracts are runtime-probed.
+const (
+	mongodbMCPPackage = "mongodb-mcp-server@2.1.1"
+	redisMCPPackage   = "redis-mcp-server==0.5.1"
+	grafanaMCPPackage = "mcp-grafana==1.4.2"
+)
+
+// The upstream Redis CLI accepts a URI only as an argument. Invoke that same
+// CLI in-process so the URI (including credentials and TLS options) stays out
+// of the process command line. No Redis protocol or URI parsing is duplicated.
+const redisMCPLauncher = `import os; from src.main import cli; cli(["--url", os.environ["REDIS_URL"]])`
 
 // normalizeMongoURI 修复 mongodb URI 密码段含保留字符但未 URL-encode 的常见情况。
 //
@@ -299,20 +311,20 @@ func parseMySQLDSN(dsn string) (host, port, user, pass, db string) {
 
 // MCPBuildOptions 控制 BuildMCPServers 的行为差异。
 type MCPBuildOptions struct {
+	// OfficialMCPBinaryPaths contains checksum-verified managed binaries; missing paths use HTTP/API fallback.
+	OfficialMCPBinaryPaths map[string]string
+
 	// AgentID:MCP server key 前缀(如 "truss-bot")。空字符串 = 不加前缀(单 agent 项目级)。
 	// IDE 共享 settings.json 池必须设非空,避免多 system 同名 mcp 互相覆盖。
 	AgentID string
 
 	// PruneEmpty:env block 里 value=="" 的 entry 丢掉(IDE 走这条,避免 IDE 把字面 "" 当
-	// 真值传给后端进程造成无效连接);openclaw 留着等 agent 自决,所以 false。
 	PruneEmpty bool
 
 	// KafkaMCPBinaryPath:kafka-mcp-server binary 绝对路径。
 	//
-	// **隐式契约**:production 调用方(install_native_mcp.go / install_native_openclaw_mcp.go)
 	// 必须先调 EnsureKafkaMCPInstalled 拿绝对路径再传进来。绝对路径关键 — mac launchd GUI
 	// 启动子进程 PATH 不含 brew prefix,字面 "kafka-mcp-server" 找不到 ENOENT 静默挂(同
-	// findOpenclawCLI 修过的坑,commit e44c74d)。
 	//
 	// 空字符串 = 回落 PATH 形式字面 "kafka-mcp-server"。仅两种场景用空:
 	//  (a) ensure 失败 fallback(用户装好后重跑 install 会拿到绝对路径)
@@ -332,7 +344,6 @@ type MCPBuildOptions struct {
 // BuildMCPServers 按 cfg.Infrastructure 派生 {server_key: spec} 扁平 map。
 // 调用方:
 //   - install_native_mcp.go(IDE)→ 把返回值 merge 进 settings["mcpServers"]
-//   - install_native_openclaw_mcp.go → 把返回值 merge 进 root["mcp"]["servers"]
 //
 // get(envVarName) 由调用方提供:从 creds map / 老 .env merge 后的合并视图取值。返回 ""
 // 表示该字段没填,IDE 模式下整条字段会被 prune(见 PruneEmpty)。
@@ -366,7 +377,6 @@ func (b *mcpBuilder) keyFixed(name string) string {
 //     难穷举,默认全开防御 — 跨语言通用 OTel 规范变量,单纯关掉自动 telemetry,不影响
 //     业务功能)。callsite 显式设了别的值会覆盖这个默认。
 //  2. PruneEmpty=true 时把 value=="" 的 entry 删掉(IDE 走这条,避免字面 "" 喂给后端
-//     进程触发"无效连接"重试风暴);openclaw 留全等 agent 自决。
 func (b *mcpBuilder) envBlock(m map[string]any) map[string]any {
 	if _, has := m["OTEL_SDK_DISABLED"]; !has {
 		m["OTEL_SDK_DISABLED"] = "true"
@@ -404,6 +414,9 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 	// ensure 失败(NacosMCPScriptPath 空)时 buildNacos 跳过注册,nacos 回落到 config-executor
 	// SKILL 的 HTTP fallback(scripts/nacos_config.py)—— fallback 始终保留,降级不致盲。
 	b.buildNacos(servers)
+	b.buildKuboard(servers)
+	b.buildConsul(servers)
+	b.buildSkyWalking(servers)
 	b.buildGrafana(servers)
 	b.buildJaeger(servers)
 	b.buildELK(servers)
@@ -425,7 +438,6 @@ func BuildMCPServers(cfg *config.SystemConfig, opts MCPBuildOptions, get func(st
 // 跳过条件:
 //   - NacosMCPScriptPath 空(EnsureNacosMCPScript 失败)→ 整段跳过,nacos 回落 SKILL HTTP fallback
 //   - PruneEmpty(IDE)且 addr/user/pass 任一缺 → 跳过该 env,避免注册一个起不来的死 mcp
-//     (openclaw PruneEmpty=false 时保留空 schema 让 agent 自决填)
 func (b *mcpBuilder) buildNacos(servers map[string]any) {
 	scriptPath := b.opts.NacosMCPScriptPath
 	if scriptPath == "" {

@@ -48,19 +48,23 @@ func TestPlatformStoreUpsertNormalizesBotMappings(t *testing.T) {
 			{BotKey: "  /repo/base|codex  ", Env: " prod "},
 			{BotKey: "/repo/base|codex", Env: "test"},
 			{BotKey: "  ", Env: "dev"},
+			{BotKey: "/repo/base|cursor", Env: "test"},
 			{BotKey: "/repo/base|claude-code"},
 		},
 	})
 	if err != nil {
 		t.Fatalf("Upsert: %v", err)
 	}
-	if len(got.BotMappings) != 2 {
+	if len(got.BotMappings) != 3 {
 		t.Fatalf("bot mappings = %+v", got.BotMappings)
 	}
 	if got.BotMappings[0].BotKey != "/repo/base|codex" || got.BotMappings[0].Env != "prod" {
 		t.Fatalf("first mapping = %+v", got.BotMappings[0])
 	}
-	if got.BotMappings[1].BotKey != "/repo/base|claude-code" || got.BotMappings[1].Env != "" {
+	if got.BotMappings[1].BotKey != "/repo/base|cursor" || got.BotMappings[1].Env != "test" {
+		t.Fatalf("cursor mapping = %+v", got.BotMappings[1])
+	}
+	if got.BotMappings[2].BotKey != "/repo/base|claude-code" || got.BotMappings[2].Env != "" {
 		t.Fatalf("second mapping = %+v", got.BotMappings[1])
 	}
 }

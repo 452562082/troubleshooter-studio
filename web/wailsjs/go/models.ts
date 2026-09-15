@@ -107,78 +107,13 @@ export namespace agent {
 		    return a;
 		}
 	}
-	export class SelfTestCheck {
-	    name: string;
-	    status: string;
-	    detail: string;
-
-	    static createFrom(source: any = {}) {
-	        return new SelfTestCheck(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.name = source["name"];
-	        this.status = source["status"];
-	        this.detail = source["detail"];
-	    }
-	}
-	export class SelfTestResult {
-	    checks: SelfTestCheck[];
-	    ok: boolean;
-
-	    static createFrom(source: any = {}) {
-	        return new SelfTestResult(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.checks = this.convertValues(source["checks"], SelfTestCheck);
-	        this.ok = source["ok"];
-	    }
-
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
-	export class UninstallOpenclawResult {
-	    WorkspaceMovedTo: string;
-	    OpenclawJSONClean: boolean;
-	    CredsRemoved: boolean;
-	    Log: string[];
-
-	    static createFrom(source: any = {}) {
-	        return new UninstallOpenclawResult(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.WorkspaceMovedTo = source["WorkspaceMovedTo"];
-	        this.OpenclawJSONClean = source["OpenclawJSONClean"];
-	        this.CredsRemoved = source["CredsRemoved"];
-	        this.Log = source["Log"];
-	    }
-	}
 
 }
 
 export namespace aitools {
 
 	export class Result {
+	    config_root?: string;
 	    installed: boolean;
 	    version?: string;
 	    path?: string;
@@ -190,6 +125,7 @@ export namespace aitools {
 
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.config_root = source["config_root"];
 	        this.installed = source["installed"];
 	        this.version = source["version"];
 	        this.path = source["path"];
@@ -293,6 +229,32 @@ export namespace analyzer {
 	        this.default_context = source["default_context"];
 	    }
 	}
+	export class MessagingEndpoint {
+	    broker: string;
+	    direction: string;
+	    destination_kind: string;
+	    destination: string;
+	    routing_key?: string;
+	    source?: string;
+	    line?: number;
+	    strength?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new MessagingEndpoint(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.broker = source["broker"];
+	        this.direction = source["direction"];
+	        this.destination_kind = source["destination_kind"];
+	        this.destination = source["destination"];
+	        this.routing_key = source["routing_key"];
+	        this.source = source["source"];
+	        this.line = source["line"];
+	        this.strength = source["strength"];
+	    }
+	}
 	export class RoleHint {
 	    role: string;
 	    reason: string;
@@ -341,6 +303,7 @@ export namespace analyzer {
 	    api_routes?: APIRoute[];
 	    endpoints?: topology.Endpoint[];
 	    data_store_usages?: DataStoreUsage[];
+	    messaging_endpoints?: MessagingEndpoint[];
 	    schema_tables?: SchemaTable[];
 	    role_hint?: RoleHint;
 	    warnings?: string[];
@@ -362,6 +325,7 @@ export namespace analyzer {
 	        this.api_routes = this.convertValues(source["api_routes"], APIRoute);
 	        this.endpoints = this.convertValues(source["endpoints"], topology.Endpoint);
 	        this.data_store_usages = this.convertValues(source["data_store_usages"], DataStoreUsage);
+	        this.messaging_endpoints = this.convertValues(source["messaging_endpoints"], MessagingEndpoint);
 	        this.schema_tables = this.convertValues(source["schema_tables"], SchemaTable);
 	        this.role_hint = this.convertValues(source["role_hint"], RoleHint);
 	        this.warnings = source["warnings"];
@@ -517,6 +481,20 @@ export namespace analyzerpipe {
 
 export namespace bughub {
 
+	export class AgentAvailability {
+	    status: string;
+	    message: string;
+
+	    static createFrom(source: any = {}) {
+	        return new AgentAvailability(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.status = source["status"];
+	        this.message = source["message"];
+	    }
+	}
 	export class AgentUsage {
 	    input_tokens?: number;
 	    output_tokens?: number;
@@ -690,6 +668,10 @@ export namespace bughub {
 	    // Go type: time
 	    last_context_at?: any;
 	    raw_preview?: string;
+	    inbox_state?: string;
+	    // Go type: time
+	    archived_at?: any;
+	    archive_reason?: string;
 
 	    static createFrom(source: any = {}) {
 	        return new Bug(source);
@@ -733,6 +715,9 @@ export namespace bughub {
 	        this.last_context = source["last_context"];
 	        this.last_context_at = this.convertValues(source["last_context_at"], null);
 	        this.raw_preview = source["raw_preview"];
+	        this.inbox_state = source["inbox_state"];
+	        this.archived_at = this.convertValues(source["archived_at"], null);
+	        this.archive_reason = source["archive_reason"];
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -752,6 +737,22 @@ export namespace bughub {
 		    }
 		    return a;
 		}
+	}
+	export class CaseHistoryDeleteResult {
+	    bug_id: string;
+	    case_ids: string[];
+	    cleanup_warning?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new CaseHistoryDeleteResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.bug_id = source["bug_id"];
+	        this.case_ids = source["case_ids"];
+	        this.cleanup_warning = source["cleanup_warning"];
+	    }
 	}
 	export class DeploymentObservation {
 	    id: string;
@@ -814,58 +815,35 @@ export namespace bughub {
 		    return a;
 		}
 	}
-	export class EvidenceArtifact {
+	export class FrontendEntryBinding {
 	    id: string;
-	    case_id: string;
-	    attempt_id: string;
-	    kind: string;
-	    path_or_reference: string;
-	    sha256: string;
-	    // Go type: time
-	    captured_at: any;
-	    environment: string;
-	    version: string;
-	    request_id: string;
-	    trace_id: string;
-	    redaction_status: string;
+	    name: string;
+	    url: string;
+	    config_url?: string;
+	    repo?: string;
+	    device_profile?: string;
+	    resolution_source: string;
+	    score?: number;
+	    reason?: string;
+	    config_sha256?: string;
 
 	    static createFrom(source: any = {}) {
-	        return new EvidenceArtifact(source);
+	        return new FrontendEntryBinding(source);
 	    }
 
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
-	        this.case_id = source["case_id"];
-	        this.attempt_id = source["attempt_id"];
-	        this.kind = source["kind"];
-	        this.path_or_reference = source["path_or_reference"];
-	        this.sha256 = source["sha256"];
-	        this.captured_at = this.convertValues(source["captured_at"], null);
-	        this.environment = source["environment"];
-	        this.version = source["version"];
-	        this.request_id = source["request_id"];
-	        this.trace_id = source["trace_id"];
-	        this.redaction_status = source["redaction_status"];
+	        this.name = source["name"];
+	        this.url = source["url"];
+	        this.config_url = source["config_url"];
+	        this.repo = source["repo"];
+	        this.device_profile = source["device_profile"];
+	        this.resolution_source = source["resolution_source"];
+	        this.score = source["score"];
+	        this.reason = source["reason"];
+	        this.config_sha256 = source["config_sha256"];
 	    }
-
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
 	}
 	export class IncidentCase {
 	    id: string;
@@ -873,6 +851,8 @@ export namespace bughub {
 	    source: string;
 	    system_id: string;
 	    environment: string;
+	    frontend_entry?: FrontendEntryBinding;
+	    frontend_entries?: FrontendEntryBinding[];
 	    status: string;
 	    cycle_number: number;
 	    current_attempt_id: string;
@@ -898,6 +878,8 @@ export namespace bughub {
 	        this.source = source["source"];
 	        this.system_id = source["system_id"];
 	        this.environment = source["environment"];
+	        this.frontend_entry = this.convertValues(source["frontend_entry"], FrontendEntryBinding);
+	        this.frontend_entries = this.convertValues(source["frontend_entries"], FrontendEntryBinding);
 	        this.status = source["status"];
 	        this.cycle_number = source["cycle_number"];
 	        this.current_attempt_id = source["current_attempt_id"];
@@ -1209,51 +1191,6 @@ export namespace bughub {
 	        this.still_reproduces_rate = source["still_reproduces_rate"];
 	    }
 	}
-	export class WorkflowReminder {
-	    case_id: string;
-	    bug_id: string;
-	    environment: string;
-	    // Go type: time
-	    waiting_since: any;
-	    waiting_age: number;
-	    sequence: number;
-	    reservation_key: string;
-	    delivery_attempt: number;
-
-	    static createFrom(source: any = {}) {
-	        return new WorkflowReminder(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.case_id = source["case_id"];
-	        this.bug_id = source["bug_id"];
-	        this.environment = source["environment"];
-	        this.waiting_since = this.convertValues(source["waiting_since"], null);
-	        this.waiting_age = source["waiting_age"];
-	        this.sequence = source["sequence"];
-	        this.reservation_key = source["reservation_key"];
-	        this.delivery_attempt = source["delivery_attempt"];
-	    }
-
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
 
 }
 
@@ -1462,29 +1399,26 @@ export namespace config {
 
 }
 
-export namespace deploy {
+export namespace discover {
 
-	export class Prompt {
+	export class ProjectRepository {
 	    name: string;
-	    prompt: string;
-	    secret: boolean;
+	    url?: string;
+	    local_path?: string;
+	    sub_path?: string;
 
 	    static createFrom(source: any = {}) {
-	        return new Prompt(source);
+	        return new ProjectRepository(source);
 	    }
 
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.name = source["name"];
-	        this.prompt = source["prompt"];
-	        this.secret = source["secret"];
+	        this.url = source["url"];
+	        this.local_path = source["local_path"];
+	        this.sub_path = source["sub_path"];
 	    }
 	}
-
-}
-
-export namespace discover {
-
 	export class InternalAgent {
 	    id: string;
 	    role: string;
@@ -1507,6 +1441,7 @@ export namespace discover {
 	    agent_id?: string;
 	    role?: string;
 	    internal_agents?: InternalAgent[];
+	    project_repositories?: ProjectRepository[];
 	    target: string;
 	    generated_at: string;
 	    troubleshooter_yaml: string;
@@ -1525,6 +1460,7 @@ export namespace discover {
 	        this.agent_id = source["agent_id"];
 	        this.role = source["role"];
 	        this.internal_agents = this.convertValues(source["internal_agents"], InternalAgent);
+	        this.project_repositories = this.convertValues(source["project_repositories"], ProjectRepository);
 	        this.target = source["target"];
 	        this.generated_at = source["generated_at"];
 	        this.troubleshooter_yaml = source["troubleshooter_yaml"];
@@ -1597,6 +1533,7 @@ export namespace discover {
 		    return a;
 		}
 	}
+
 
 
 }
@@ -1884,6 +1821,7 @@ export namespace labelprobe {
 export namespace main {
 
 	export class AIToolsDetectResult {
+	    opencode?: aitools.Result;
 	    claude_code?: aitools.Result;
 	    cursor?: aitools.Result;
 	    codex?: aitools.Result;
@@ -1894,6 +1832,7 @@ export namespace main {
 
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.opencode = this.convertValues(source["opencode"], aitools.Result);
 	        this.claude_code = this.convertValues(source["claude_code"], aitools.Result);
 	        this.cursor = this.convertValues(source["cursor"], aitools.Result);
 	        this.codex = this.convertValues(source["codex"], aitools.Result);
@@ -1916,24 +1855,6 @@ export namespace main {
 		    }
 		    return a;
 		}
-	}
-	export class AckIncidentWorkflowReminderInput {
-	    case_id: string;
-	    reservation_key: string;
-	    delivery_attempt: number;
-	    actor_id: string;
-
-	    static createFrom(source: any = {}) {
-	        return new AckIncidentWorkflowReminderInput(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.case_id = source["case_id"];
-	        this.reservation_key = source["reservation_key"];
-	        this.delivery_attempt = source["delivery_attempt"];
-	        this.actor_id = source["actor_id"];
-	    }
 	}
 	export class AnalyzeInput {
 	    yaml_text: string;
@@ -2112,6 +2033,36 @@ export namespace main {
 		    }
 		    return a;
 		}
+	}
+	export class BugHistoryDeleteInput {
+	    bug_id: string;
+
+	    static createFrom(source: any = {}) {
+	        return new BugHistoryDeleteInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.bug_id = source["bug_id"];
+	    }
+	}
+	export class BugHistoryDeleteResult {
+	    bug_id: string;
+	    deleted: boolean;
+	    deleted_cases: number;
+	    cleanup_warning?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new BugHistoryDeleteResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.bug_id = source["bug_id"];
+	        this.deleted = source["deleted"];
+	        this.deleted_cases = source["deleted_cases"];
+	        this.cleanup_warning = source["cleanup_warning"];
+	    }
 	}
 	export class BugInvestigationCancelInput {
 	    run_id: string;
@@ -2443,6 +2394,30 @@ export namespace main {
 	        this.err = source["err"];
 	    }
 	}
+	export class CompleteIncidentRemediationInput {
+	    case_id: string;
+	    expected_version: number;
+	    idempotency_key: string;
+	    actor_id: string;
+	    root_cause_attempt_id: string;
+	    summary: string;
+	    evidence: string;
+
+	    static createFrom(source: any = {}) {
+	        return new CompleteIncidentRemediationInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.expected_version = source["expected_version"];
+	        this.idempotency_key = source["idempotency_key"];
+	        this.actor_id = source["actor_id"];
+	        this.root_cause_attempt_id = source["root_cause_attempt_id"];
+	        this.summary = source["summary"];
+	        this.evidence = source["evidence"];
+	    }
+	}
 	export class ContinueIncidentCaseInput {
 	    case_id: string;
 	    expected_version: number;
@@ -2477,6 +2452,44 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.type = source["type"];
 	        this.fields = source["fields"];
+	    }
+	}
+	export class DeleteIncidentHistoryInput {
+	    case_id: string;
+	    bug_id: string;
+
+	    static createFrom(source: any = {}) {
+	        return new DeleteIncidentHistoryInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.bug_id = source["bug_id"];
+	    }
+	}
+	export class DisputeIncidentRootCauseInput {
+	    case_id: string;
+	    expected_version: number;
+	    idempotency_key: string;
+	    actor_id: string;
+	    root_cause_attempt_id: string;
+	    reason: string;
+	    evidence_artifact_ids?: string[];
+
+	    static createFrom(source: any = {}) {
+	        return new DisputeIncidentRootCauseInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.expected_version = source["expected_version"];
+	        this.idempotency_key = source["idempotency_key"];
+	        this.actor_id = source["actor_id"];
+	        this.root_cause_attempt_id = source["root_cause_attempt_id"];
+	        this.reason = source["reason"];
+	        this.evidence_artifact_ids = source["evidence_artifact_ids"];
 	    }
 	}
 	export class FileNode {
@@ -2624,20 +2637,87 @@ export namespace main {
 		    return a;
 		}
 	}
-	export class IncidentDeploymentVerification {
-	    provider: string;
-	    available: boolean;
-	    hint: string;
+	export class IncidentArtifact {
+	    id: string;
+	    case_id: string;
+	    attempt_id: string;
+	    kind: string;
+	    sha256: string;
+	    size: number;
+	    // Go type: time
+	    captured_at: any;
+	    environment: string;
+	    version: string;
+	    request_id: string;
+	    trace_id: string;
 
 	    static createFrom(source: any = {}) {
-	        return new IncidentDeploymentVerification(source);
+	        return new IncidentArtifact(source);
 	    }
 
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.provider = source["provider"];
-	        this.available = source["available"];
-	        this.hint = source["hint"];
+	        this.id = source["id"];
+	        this.case_id = source["case_id"];
+	        this.attempt_id = source["attempt_id"];
+	        this.kind = source["kind"];
+	        this.sha256 = source["sha256"];
+	        this.size = source["size"];
+	        this.captured_at = this.convertValues(source["captured_at"], null);
+	        this.environment = source["environment"];
+	        this.version = source["version"];
+	        this.request_id = source["request_id"];
+	        this.trace_id = source["trace_id"];
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class IncidentArtifactPreview {
+	    artifact_id: string;
+	    mime_type: string;
+	    base64_data: string;
+	    size: number;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentArtifactPreview(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.artifact_id = source["artifact_id"];
+	        this.mime_type = source["mime_type"];
+	        this.base64_data = source["base64_data"];
+	        this.size = source["size"];
+	    }
+	}
+	export class IncidentBugTicketResolution {
+	    state: string;
+	    source_status?: string;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentBugTicketResolution(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.state = source["state"];
+	        this.source_status = source["source_status"];
 	    }
 	}
 	export class IncidentTransitionEvent {
@@ -2790,12 +2870,13 @@ export namespace main {
 	export class IncidentCaseDetail {
 	    case: bughub.IncidentCase;
 	    attempts: IncidentPhaseAttempt[];
-	    artifacts: bughub.EvidenceArtifact[];
+	    phase_events: bughub.InvestigationEvent[];
+	    artifacts: IncidentArtifact[];
 	    approvals: IncidentApproval[];
 	    code_changes: IncidentCodeChange[];
 	    deployment_observations: bughub.DeploymentObservation[];
 	    events: IncidentTransitionEvent[];
-	    deployment_verification: IncidentDeploymentVerification;
+	    bug_ticket_resolution: IncidentBugTicketResolution;
 
 	    static createFrom(source: any = {}) {
 	        return new IncidentCaseDetail(source);
@@ -2805,12 +2886,13 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.case = this.convertValues(source["case"], bughub.IncidentCase);
 	        this.attempts = this.convertValues(source["attempts"], IncidentPhaseAttempt);
-	        this.artifacts = this.convertValues(source["artifacts"], bughub.EvidenceArtifact);
+	        this.phase_events = this.convertValues(source["phase_events"], bughub.InvestigationEvent);
+	        this.artifacts = this.convertValues(source["artifacts"], IncidentArtifact);
 	        this.approvals = this.convertValues(source["approvals"], IncidentApproval);
 	        this.code_changes = this.convertValues(source["code_changes"], IncidentCodeChange);
 	        this.deployment_observations = this.convertValues(source["deployment_observations"], bughub.DeploymentObservation);
 	        this.events = this.convertValues(source["events"], IncidentTransitionEvent);
-	        this.deployment_verification = this.convertValues(source["deployment_verification"], IncidentDeploymentVerification);
+	        this.bug_ticket_resolution = this.convertValues(source["bug_ticket_resolution"], IncidentBugTicketResolution);
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -2832,7 +2914,106 @@ export namespace main {
 		}
 	}
 
+	export class IncidentEvidenceFile {
+	    artifact_id: string;
+	    name: string;
+	    mime_type: string;
+	    size: number;
 
+	    static createFrom(source: any = {}) {
+	        return new IncidentEvidenceFile(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.artifact_id = source["artifact_id"];
+	        this.name = source["name"];
+	        this.mime_type = source["mime_type"];
+	        this.size = source["size"];
+	    }
+	}
+	export class IncidentEvidenceFileInput {
+	    name: string;
+	    mime_type: string;
+	    base64_data: string;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentEvidenceFileInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.mime_type = source["mime_type"];
+	        this.base64_data = source["base64_data"];
+	    }
+	}
+	export class IncidentEvidenceImage {
+	    artifact_id: string;
+	    name: string;
+	    mime_type: string;
+	    size: number;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentEvidenceImage(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.artifact_id = source["artifact_id"];
+	        this.name = source["name"];
+	        this.mime_type = source["mime_type"];
+	        this.size = source["size"];
+	    }
+	}
+	export class IncidentEvidenceImageInput {
+	    name: string;
+	    mime_type: string;
+	    base64_data: string;
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentEvidenceImageInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.mime_type = source["mime_type"];
+	        this.base64_data = source["base64_data"];
+	    }
+	}
+	export class IncidentEvidenceSelection {
+	    images: IncidentEvidenceImageInput[];
+	    files: IncidentEvidenceFileInput[];
+
+	    static createFrom(source: any = {}) {
+	        return new IncidentEvidenceSelection(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.images = this.convertValues(source["images"], IncidentEvidenceImageInput);
+	        this.files = this.convertValues(source["files"], IncidentEvidenceFileInput);
+	    }
+
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 
 
 	export class InfraCredBatchInput {
@@ -3314,6 +3495,7 @@ export namespace main {
 	export class KuboardResources {
 	    clusters: KuboardCluster[];
 	    notes?: string[];
+	    mcp_url?: string;
 
 	    static createFrom(source: any = {}) {
 	        return new KuboardResources(source);
@@ -3323,6 +3505,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.clusters = this.convertValues(source["clusters"], KuboardCluster);
 	        this.notes = source["notes"];
+	        this.mcp_url = source["mcp_url"];
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -3403,34 +3586,6 @@ export namespace main {
 	        this.saved = source["saved"];
 	        this.missing = source["missing"];
 	        this.suggest_repos_root = source["suggest_repos_root"];
-	    }
-	}
-	export class NotifyIncidentDeployedInput {
-	    case_id: string;
-	    expected_version: number;
-	    idempotency_key: string;
-	    actor_id: string;
-	    observed_version: string;
-	    observed_commits?: Record<string, string>;
-	    version_source?: string;
-	    notification_text?: string;
-	    input_json?: Record<string, any>;
-
-	    static createFrom(source: any = {}) {
-	        return new NotifyIncidentDeployedInput(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.case_id = source["case_id"];
-	        this.expected_version = source["expected_version"];
-	        this.idempotency_key = source["idempotency_key"];
-	        this.actor_id = source["actor_id"];
-	        this.observed_version = source["observed_version"];
-	        this.observed_commits = source["observed_commits"];
-	        this.version_source = source["version_source"];
-	        this.notification_text = source["notification_text"];
-	        this.input_json = source["input_json"];
 	    }
 	}
 	export class One2AllNsEntry {
@@ -3594,52 +3749,6 @@ export namespace main {
 		    return a;
 		}
 	}
-	export class OpenClawDetectResult {
-	    ok: boolean;
-	    installed: boolean;
-	    installed_but_empty: boolean;
-	    install_dir?: string;
-	    config_path?: string;
-	    version?: string;
-	    models?: openclaw.ModelEntry[];
-	    auth_providers?: string[];
-	    err?: string;
-
-	    static createFrom(source: any = {}) {
-	        return new OpenClawDetectResult(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.ok = source["ok"];
-	        this.installed = source["installed"];
-	        this.installed_but_empty = source["installed_but_empty"];
-	        this.install_dir = source["install_dir"];
-	        this.config_path = source["config_path"];
-	        this.version = source["version"];
-	        this.models = this.convertValues(source["models"], openclaw.ModelEntry);
-	        this.auth_providers = source["auth_providers"];
-	        this.err = source["err"];
-	    }
-
-		convertValues(a: any, classs: any, asMap: boolean = false): any {
-		    if (!a) {
-		        return a;
-		    }
-		    if (a.slice && a.map) {
-		        return (a as any[]).map(elem => this.convertValues(elem, classs));
-		    } else if ("object" === typeof a) {
-		        if (asMap) {
-		            for (const key of Object.keys(a)) {
-		                a[key] = new classs(a[key]);
-		            }
-		            return a;
-		        }
-		        return new classs(a);
-		    }
-		    return a;
-		}
-	}
 	export class OpenYAMLResult {
 	    path: string;
 	    content: string;
@@ -3672,10 +3781,33 @@ export namespace main {
 	        this.size = source["size"];
 	    }
 	}
+	export class ReconsiderIncidentRemediationInput {
+	    case_id: string;
+	    expected_version: number;
+	    idempotency_key: string;
+	    actor_id: string;
+	    root_cause_attempt_id: string;
+	    proposal: string;
+
+	    static createFrom(source: any = {}) {
+	        return new ReconsiderIncidentRemediationInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.expected_version = source["expected_version"];
+	        this.idempotency_key = source["idempotency_key"];
+	        this.actor_id = source["actor_id"];
+	        this.root_cause_attempt_id = source["root_cause_attempt_id"];
+	        this.proposal = source["proposal"];
+	    }
+	}
 	export class ResetIncidentCaseInput {
 	    case_id: string;
 	    new_case_id: string;
 	    bot_key: string;
+	    bot_environment?: string;
 	    expected_version: number;
 	    idempotency_key: string;
 	    actor_id: string;
@@ -3690,45 +3822,79 @@ export namespace main {
 	        this.case_id = source["case_id"];
 	        this.new_case_id = source["new_case_id"];
 	        this.bot_key = source["bot_key"];
+	        this.bot_environment = source["bot_environment"];
 	        this.expected_version = source["expected_version"];
 	        this.idempotency_key = source["idempotency_key"];
 	        this.actor_id = source["actor_id"];
 	        this.input_json = source["input_json"];
 	    }
 	}
-	export class RunInstallResult {
-	    log: string;
-	    exit_code: number;
-	    ok: boolean;
-
-	    static createFrom(source: any = {}) {
-	        return new RunInstallResult(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.log = source["log"];
-	        this.exit_code = source["exit_code"];
-	        this.ok = source["ok"];
-	    }
-	}
-	export class SnoozeIncidentWorkflowReminderInput {
+	export class StartIncidentCaseInput {
 	    case_id: string;
-	    // Go type: time
-	    until: any;
-	    actor_id: string;
+	    bug_id?: string;
+	    bot_key?: string;
+	    bot_environment?: string;
+	    expected_version: number;
 	    idempotency_key: string;
+	    actor_id: string;
+	    input_json?: Record<string, any>;
 
 	    static createFrom(source: any = {}) {
-	        return new SnoozeIncidentWorkflowReminderInput(source);
+	        return new StartIncidentCaseInput(source);
 	    }
 
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.case_id = source["case_id"];
-	        this.until = this.convertValues(source["until"], null);
-	        this.actor_id = source["actor_id"];
+	        this.bug_id = source["bug_id"];
+	        this.bot_key = source["bot_key"];
+	        this.bot_environment = source["bot_environment"];
+	        this.expected_version = source["expected_version"];
 	        this.idempotency_key = source["idempotency_key"];
+	        this.actor_id = source["actor_id"];
+	        this.input_json = source["input_json"];
+	    }
+	}
+	export class UninstallBotResult {
+	    target: string;
+	    staging_moved_to?: string;
+	    user_agent_md?: string;
+	    user_skills_dir?: string;
+	    user_scripts_dir?: string;
+	    mcp_removed?: string[];
+	    log?: string[];
+
+	    static createFrom(source: any = {}) {
+	        return new UninstallBotResult(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.target = source["target"];
+	        this.staging_moved_to = source["staging_moved_to"];
+	        this.user_agent_md = source["user_agent_md"];
+	        this.user_skills_dir = source["user_skills_dir"];
+	        this.user_scripts_dir = source["user_scripts_dir"];
+	        this.mcp_removed = source["mcp_removed"];
+	        this.log = source["log"];
+	    }
+	}
+	export class UploadIncidentEvidenceFilesInput {
+	    case_id: string;
+	    attempt_id: string;
+	    expected_version: number;
+	    files: IncidentEvidenceFileInput[];
+
+	    static createFrom(source: any = {}) {
+	        return new UploadIncidentEvidenceFilesInput(source);
+	    }
+
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.case_id = source["case_id"];
+	        this.attempt_id = source["attempt_id"];
+	        this.expected_version = source["expected_version"];
+	        this.files = this.convertValues(source["files"], IncidentEvidenceFileInput);
 	    }
 
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -3749,59 +3915,41 @@ export namespace main {
 		    return a;
 		}
 	}
-	export class StartIncidentCaseInput {
+	export class UploadIncidentEvidenceImagesInput {
 	    case_id: string;
-	    bug_id?: string;
-	    bot_key?: string;
+	    attempt_id: string;
 	    expected_version: number;
-	    idempotency_key: string;
-	    actor_id: string;
-	    input_json?: Record<string, any>;
+	    images: IncidentEvidenceImageInput[];
 
 	    static createFrom(source: any = {}) {
-	        return new StartIncidentCaseInput(source);
+	        return new UploadIncidentEvidenceImagesInput(source);
 	    }
 
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.case_id = source["case_id"];
-	        this.bug_id = source["bug_id"];
-	        this.bot_key = source["bot_key"];
+	        this.attempt_id = source["attempt_id"];
 	        this.expected_version = source["expected_version"];
-	        this.idempotency_key = source["idempotency_key"];
-	        this.actor_id = source["actor_id"];
-	        this.input_json = source["input_json"];
-	    }
-	}
-	export class UninstallBotResult {
-	    target: string;
-	    workspace_moved_to?: string;
-	    openclaw_json_clean?: boolean;
-	    creds_removed?: boolean;
-	    staging_moved_to?: string;
-	    user_agent_md?: string;
-	    user_skills_dir?: string;
-	    user_scripts_dir?: string;
-	    mcp_removed?: string[];
-	    log?: string[];
-
-	    static createFrom(source: any = {}) {
-	        return new UninstallBotResult(source);
+	        this.images = this.convertValues(source["images"], IncidentEvidenceImageInput);
 	    }
 
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.target = source["target"];
-	        this.workspace_moved_to = source["workspace_moved_to"];
-	        this.openclaw_json_clean = source["openclaw_json_clean"];
-	        this.creds_removed = source["creds_removed"];
-	        this.staging_moved_to = source["staging_moved_to"];
-	        this.user_agent_md = source["user_agent_md"];
-	        this.user_skills_dir = source["user_skills_dir"];
-	        this.user_scripts_dir = source["user_scripts_dir"];
-	        this.mcp_removed = source["mcp_removed"];
-	        this.log = source["log"];
-	    }
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 	export class UserConfigResult {
 	    default_repos_root: string;
@@ -3858,31 +4006,6 @@ export namespace main {
 		    }
 		    return a;
 		}
-	}
-
-}
-
-export namespace openclaw {
-
-	export class ModelEntry {
-	    id: string;
-	    provider?: string;
-	    label?: string;
-	    source?: string;
-	    primary?: boolean;
-
-	    static createFrom(source: any = {}) {
-	        return new ModelEntry(source);
-	    }
-
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.id = source["id"];
-	        this.provider = source["provider"];
-	        this.label = source["label"];
-	        this.source = source["source"];
-	        this.primary = source["primary"];
-	    }
 	}
 
 }

@@ -2,7 +2,11 @@ package bughub
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -27,6 +31,47 @@ type ArtifactInput struct {
 	captured        *capturedArtifactSource
 }
 
+type EvidenceArtifactContent struct {
+	Artifact EvidenceArtifact
+	Content  []byte
+}
+
+func ReadEvidenceArtifact(ctx context.Context, store *CaseStore, caseID, artifactID string) (EvidenceArtifactContent, error) {
+	return readEvidenceArtifact(ctx, store, "", caseID, artifactID)
+}
+
+func ReadEvidenceArtifactFromRoot(ctx context.Context, store *CaseStore, artifactsRoot, caseID, artifactID string) (EvidenceArtifactContent, error) {
+	return readEvidenceArtifact(ctx, store, artifactsRoot, caseID, artifactID)
+}
+
+func readEvidenceArtifact(ctx context.Context, store *CaseStore, artifactsRoot, caseID, artifactID string) (EvidenceArtifactContent, error) {
+	if store == nil {
+		return EvidenceArtifactContent{}, errors.New("case store is required")
+	}
+	artifacts, err := store.ListEvidenceArtifacts(ctx, caseID)
+	if err != nil {
+		return EvidenceArtifactContent{}, err
+	}
+	for _, artifact := range artifacts {
+		if artifact.ID != artifactID {
+			continue
+		}
+		attempt, err := store.GetAttempt(ctx, artifact.AttemptID)
+		if err != nil || artifact.CaseID != caseID || attempt.CaseID != caseID {
+			return EvidenceArtifactContent{}, errors.New("registered artifact ownership is invalid")
+		}
+		captured, err := captureRegisteredArtifact(artifact.PathOrReference, artifactsRoot, caseID, artifact.SHA256)
+		if err != nil {
+			return EvidenceArtifactContent{}, err
+		}
+		if captured.SHA256 != artifact.SHA256 {
+			return EvidenceArtifactContent{}, errors.New("registered artifact digest changed")
+		}
+		return EvidenceArtifactContent{Artifact: artifact, Content: captured.Content}, nil
+	}
+	return EvidenceArtifactContent{}, os.ErrNotExist
+}
+
 func registerCapturedArtifact(ctx context.Context, store *CaseStore, input ArtifactInput, captured capturedArtifactSource) (EvidenceArtifact, error) {
 	input.captured = &captured
 	return registerArtifactWithHooks(ctx, store, input, artifactHooks{})
@@ -34,6 +79,33 @@ func registerCapturedArtifact(ctx context.Context, store *CaseStore, input Artif
 
 func RegisterArtifact(ctx context.Context, store *CaseStore, input ArtifactInput) (EvidenceArtifact, error) {
 	return registerArtifactWithHooks(ctx, store, input, artifactHooks{})
+}
+
+// RegisterArtifactBytes publishes evidence supplied by a trusted host UI
+// without first exposing a caller-controlled temporary path. The same size,
+// credential, ownership and content-addressed idempotency checks used by
+// RegisterArtifact still apply.
+func RegisterArtifactBytes(ctx context.Context, store *CaseStore, input ArtifactInput, content []byte) (EvidenceArtifact, error) {
+	if len(content) == 0 {
+		return EvidenceArtifact{}, errors.New("artifact content is required")
+	}
+	if int64(len(content)) > maxEvidenceArtifactBytes {
+		return EvidenceArtifact{}, fmt.Errorf("%w: declared size %d exceeds maximum %d bytes", ErrEvidenceArtifactTooLarge, len(content), maxEvidenceArtifactBytes)
+	}
+	digest := sha256.Sum256(content)
+	capturedAt := input.CapturedAt.UTC()
+	if capturedAt.IsZero() {
+		capturedAt = time.Now().UTC()
+	}
+	// registerArtifactWithHooks requires a non-empty source label even when a
+	// pre-captured immutable byte slice is supplied. This value is never stored.
+	input.SourcePath = "host-upload"
+	captured := capturedArtifactSource{
+		Content:    append([]byte(nil), content...),
+		SHA256:     hex.EncodeToString(digest[:]),
+		CapturedAt: capturedAt,
+	}
+	return registerCapturedArtifact(ctx, store, input, captured)
 }
 
 func registerArtifactWithHooks(ctx context.Context, store *CaseStore, input ArtifactInput, hooks artifactHooks) (EvidenceArtifact, error) {
@@ -101,7 +173,7 @@ func registerArtifactWithHooks(ctx context.Context, store *CaseStore, input Arti
 	if err != nil {
 		return EvidenceArtifact{}, err
 	}
-	defer publication.Close()
+	defer func() { _ = publication.Close() }()
 	artifact := EvidenceArtifact{
 		ID:     deterministicWorkflowID("artifact:" + input.CaseID + ":" + input.AttemptID + ":" + input.Kind + ":" + captured.SHA256),
 		CaseID: input.CaseID, AttemptID: input.AttemptID, Kind: input.Kind,

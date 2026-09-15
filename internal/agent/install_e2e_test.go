@@ -2,7 +2,6 @@
 //
 // 此前测试格局:
 //   - install_native_test.go       只测"文件拷贝"那一步,用手搓的 3 文件 staging
-//   - install_native_openclaw_*    OpenClaw 单 target 装得很细
 //   - 三 IDE target 各自的 MCP merge / creds.json / 卸载链 没有任何端到端覆盖
 //
 // 此 E2E 真跑 generator(从 examples/shop-troubleshooter.yaml 起步),走完整链:
@@ -39,7 +38,7 @@ func projectRoot(t *testing.T) string {
 }
 
 // loadShopCfg 从 examples/shop-troubleshooter.yaml 读 cfg。yaml 里 generation.targets 写的是
-// openclaw,但 GenerateClaudeCode/Cursor/Codex 不读这个字段,我们直接调它们三个产出
+// claude-code；测试直接调用 GenerateClaudeCode/Cursor/Codex 产出
 // 三家 staging。yaml 选这份是因为:① workspace_name=shop-bot 是 ASCII,生成的 agent
 // 文件名干净;② nacos+grafana+loki 都开了,MCP merge 会真触发(不止派生一两条 server)。
 func loadShopCfg(t *testing.T) (*config.SystemConfig, []byte) {
@@ -143,7 +142,7 @@ func fakeCreds() map[string]string {
 //	prefix = MCPKeyPrefix() = "shop"
 //	grafana per env: shop-grafana-<env>
 //
-// 注 1:loki MCP 已合并进 grafana MCP(2026-05),query_loki_* 工具由 grafana mcp-grafana-npx
+// 注 1:loki MCP 已合并进 grafana MCP(2026-05),query_loki_* 工具由 grafana mcp-grafana
 // 提供;不再单独注册 shop-loki-<env>。
 //
 // 注 2:nacos per env(plan D):自研本地 MCP 脚本 `uv run --script nacos_mcp.py`。
@@ -162,7 +161,7 @@ func expectedMCPKeys() []string {
 }
 
 func expectedAgentNames(cfg *config.SystemConfig) []string {
-	return []string{cfg.ResolveID(), cfg.System.ID + "-validator", cfg.System.ID + "-fixer"}
+	return []string{cfg.ResolveID(), cfg.System.ID + "-fixer"}
 }
 
 // TestE2E_IDEInstallChain 把三家 IDE target 都跑一遍 init→gen→install→merge MCP→
@@ -203,7 +202,7 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 			}
 
 			// codex 不再走 CLI 注入(MCP 嵌入 agent toml 内联段),无需 stub。
-			// grafana/loki MCP 现在走 npx mcp-grafana-npx,IDE 启动时按需拉,不在 install 时下二进制 — 测试不再需要 fake binary。
+			// grafana/loki MCP 现在走 uvx mcp-grafana,IDE 启动时按需拉,不在 install 时下二进制 — 测试不再需要 fake binary。
 
 			// ── 1) generator 出 staging ───────────────────────────────────────
 			staging := buildStaging(t, cfg, yamlSrc, target)
@@ -273,11 +272,20 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 				assertJSONHasMCPKeys(t, cursorPath, expectedKeys)
 				assertFileMode(t, cursorPath, 0o600)
 			case "codex":
-				// codex MCP 嵌入 agent toml 内联 [mcp_servers.<key>] 段,不再走全局 config.toml。
+				// codex MCP 同时嵌入 agent toml(交互式 subagent)与隔离
+				// runtime CODEX_HOME(Studio 后台 codex exec),不污染全局 config.toml。
 				for _, name := range agentNames {
 					path := agentMDLocationFor(rootDir, target, name)
 					assertCodexAgentTOMLHasMCPKeys(t, path, expectedKeys)
 					assertFileMode(t, path, 0o600)
+					runtimeHome := filepath.Join(rootDir, "tshoot-runtimes", name)
+					runtimeConfig := filepath.Join(runtimeHome, "config.toml")
+					assertCodexAgentTOMLHasMCPKeys(t, runtimeConfig, expectedKeys)
+					assertFileMode(t, runtimeConfig, 0o600)
+					assertFileMode(t, runtimeHome, 0o700)
+					if _, err := os.Stat(filepath.Join(rootDir, "tshoot-"+name+".config.toml")); !os.IsNotExist(err) {
+						t.Fatalf("obsolete Codex MCP profile still exists for %s", name)
+					}
 				}
 			}
 
@@ -293,7 +301,7 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 			if agents[0].Meta.SystemID != cfg.System.ID || agents[0].Meta.Target != target {
 				t.Errorf("scan meta 不对:%+v", agents[0].Meta)
 			}
-			if len(agents[0].Meta.InternalAgents) != 3 {
+			if len(agents[0].Meta.InternalAgents) != 2 {
 				t.Errorf("scan meta should include internal agents, got %+v", agents[0].Meta.InternalAgents)
 			}
 			installedDir := agents[0].Path
@@ -368,6 +376,7 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 			case "codex":
 				for _, name := range agentNames {
 					assertCodexAgentTOMLAbsent(t, agentMDLocationFor(rootDir, target, name))
+					assertCodexAgentTOMLAbsent(t, filepath.Join(rootDir, "tshoot-runtimes", name))
 				}
 			}
 
@@ -491,7 +500,7 @@ func assertCodexAgentTOMLAbsent(t *testing.T, tomlPath string) {
 //	WriteIDECredsFile —— apollo / consul / env-vars / kuboard 才会写
 //	~/.tshoot/<agent_id>-creds.json,nacos-only(shop)直接 skip。
 //
-// 这条文件给 OpenClaw 那批"非 MCP 走脚本"的 skill 用(apollo_config.py /
+// 这条文件给"非 MCP 走脚本"的 skill 用(apollo_config.py /
 // consul_config.py / kuboard 配套),IDE 平台部署时也得镜像写一份,否则脚本报
 // "creds file missing"。
 //

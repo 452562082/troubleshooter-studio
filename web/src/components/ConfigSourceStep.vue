@@ -21,6 +21,41 @@ function toggleCmDropdown(key: string) {
 function closeAllCmDropdown() {
   cmDropdownOpen.value = {}
 }
+function configMapKey(envID: string, svc: string): string {
+  return wizard.svcKey(envID, svc)
+}
+function selectedConfigMaps(envID: string, svc: string): string[] {
+  return (props.one2allSvcMap[configMapKey(envID, svc)]?.configmap || '')
+    .split(',').map(item => item.trim()).filter(Boolean)
+}
+function availableConfigMaps(envID: string, svc: string): string[] {
+  const loc = props.one2allSvcMap[configMapKey(envID, svc)]
+  return wizard.one2allConfigMapsFor(envID, loc?.cluster_id || '', loc?.namespace || '')
+}
+function configMapOptions(envID: string, svc: string): string[] {
+  return [...new Set([...availableConfigMaps(envID, svc), ...selectedConfigMaps(envID, svc)])]
+}
+function isStaleConfigMap(envID: string, svc: string, configMap: string): boolean {
+  return !availableConfigMaps(envID, svc).includes(configMap)
+}
+function configMapSummary(envID: string, svc: string): string {
+  const selected = selectedConfigMaps(envID, svc)
+  const available = availableConfigMaps(envID, svc)
+  if (selected.length > 0) {
+    const staleCount = selected.filter(item => !available.includes(item)).length
+    return staleCount > 0
+      ? `${selected.length} 个 ConfigMap · ${staleCount} 个候选已失效`
+      : `${selected.length} 个 ConfigMap`
+  }
+  return available.length > 0 ? '请选择 ConfigMap' : '暂无 ConfigMap 候选'
+}
+function toggleConfigMap(envID: string, svc: string, configMap: string, checked: boolean) {
+  const selected = selectedConfigMaps(envID, svc)
+  const next = checked
+    ? [...new Set([...selected, configMap])]
+    : selected.filter(item => item !== configMap)
+  emit('setOne2AllLoc', envID, svc, 'configmap', next.join(','))
+}
 // 点击下拉面板外任意位置关闭
 function onDocMouseDown(e: MouseEvent) {
   const target = e.target as HTMLElement
@@ -37,8 +72,10 @@ import NamespaceServiceMap from './NamespaceServiceMap.vue'
 import KuboardServiceMap from './KuboardServiceMap.vue'
 import SecondarySourcePanel from './SecondarySourcePanel.vue'
 import CredsShareWarning from './CredsShareWarning.vue'
+import type { ConfigSourceInstance } from '../lib/configSourceInstances'
 
 const DATA_ID_CONFIG_TYPES = new Set(['nacos', 'apollo', 'consul'])
+const MULTI_INSTANCE_SOURCE_TYPES = DATA_ID_CONFIG_TYPES
 
 interface SourceCredsEntry { creds: Record<string, Record<string, string>>; rawExtra?: Record<string, unknown> }
 interface CCHubEnvState {
@@ -50,61 +87,72 @@ interface CCHubEnvState {
 // 通用 reactive + helper 走 inject(避免每个 prop 单独透传)
 const wizard = inject(WizardStoreKey)!
 
-defineProps<{
-  // Step 5 专属
+const props = defineProps<{
+  // “读取运行配置” 专属
   configTypeOptions: string[]
   configTypeDescriptions: Record<string, string>
   enabledSourceTypes: Record<string, boolean>
   activeSourceTypes: string[]
+  sourceInstances: ConfigSourceInstance[]
   isMultiSource: boolean
   configCenterType: string
   ccFieldsByType: Record<string, CredField[]>
 
-  // Step 5 专属:凭证 / 状态 reactive map
+  // “读取运行配置” 专属:凭证 / 状态 reactive map
   ccCredInputs: Record<string, string>
   sourceCreds: Record<string, SourceCredsEntry>
   ccHubStateByEnv: Record<string, CCHubEnvState | undefined>
+  sourceEnvNamespaces: Record<string, string>
   envNamespaces: Record<string, string>
   serviceConfigSel: Record<string, string>
   serviceConfigGroup: Record<string, string>
   kuboardSvcMap: Record<string, KuboardSvcLocator>
 	  one2allSvcMap: Record<string, One2AllSvcLocator>
 
-  // Step 5 专属 helper
+  // “读取运行配置” 专属 helper
   ccKeyFor: (type: string, envID: string, field: string) => string
   isFieldHidden: (t: string, envID: string, f: CredField, getSibling: (k: string) => string) => boolean
   envScanned: (envID: string) => boolean
-  namespacesFor: (envID: string) => CCHubNamespace[]
-  entriesForNamespace: (envID: string, ns: string) => CCHubEntry[]
-  getServiceSource: (svc: string) => string
+  namespacesFor: (envID: string, sourceID?: string) => CCHubNamespace[]
+  entriesForNamespace: (envID: string, ns: string, sourceID?: string) => CCHubEntry[]
+  getServiceSource: (svc: string, envID?: string) => string
 }>()
 
+const primarySourceID = () => props.sourceInstances[0]?.id || props.configCenterType
+
 const emit = defineEmits<{
+  useRuntimeConnection: [provider: 'kuboard' | 'one2all']
   toggleSourceType: [type: string, checked: boolean]
+  addSourceInstance: [type: string]
+  removeSourceInstance: [sourceID: string]
   updateCred: [key: string, value: string]
   clearCred: [key: string]
   runKuboardPreload: [envID: string]
   runOne2AllPreload: [envID: string, purpose: 'config_source']
   runCCHubPreload: [envID: string]
-  setServiceSource: [svc: string, source: string]
+  setServiceSource: [svc: string, source: string, envID: string]
   namespaceChanged: [envID: string, namespace: string]
   dataIdChanged: [envID: string, svc: string]
   setKuboardLoc: [envID: string, svc: string, field: 'cluster' | 'namespace' | 'configmap', value: string]
   setOne2AllLoc: [envID: string, svc: string, field: 'cluster_id' | 'namespace' | 'configmap', value: string]
   preloadKuboardFromSource: [sourceType: string, envID: string]
+  preloadCCHubInstance: [envID: string, sourceID: string]
+  instanceNamespaceChanged: [envID: string, namespace: string, sourceID: string]
+  instanceDataIdChanged: [envID: string, svc: string, sourceID: string]
 }>()
 </script>
 
 <template>
   <div class="card lg">
-    <h2>配置源</h2>
+    <h2>运行配置</h2>
+    <p class="help-text">选择项目使用的平台，连接后选择服务对应的配置。多实例和详细接入说明按需展开。</p>
 
     <!-- 多源:顶部多选,勾哪些 type 就声明哪些源 -->
     <div class="form-group">
       <label>
         系统用到的配置源(可多选)
         <span class="field-hint">
-          — 一种源勾一次(nacos / apollo / kuboard 等);多选会让你为每个服务挑走哪个源,单选则全员默认走它
+          — 只选择项目正在使用的平台
         </span>
       </label>
       <div class="source-types-checkboxes">
@@ -119,16 +167,39 @@ const emit = defineEmits<{
             :checked="!!enabledSourceTypes[t]"
             @change="(e) => emit('toggleSourceType', t, (e.target as HTMLInputElement).checked)"
           />
-          <span class="source-type-pill-name">{{ t }}</span>
+          <span class="source-type-pill-name">{{ t === 'none' ? '暂不连接' : t }}</span>
           <span class="source-type-pill-desc">{{ configTypeDescriptions[t] }}</span>
         </label>
       </div>
       <div v-if="activeSourceTypes.length === 0" class="alert warn" style="margin-top:8px;">
-        至少勾选一个配置源(若系统真不用配置中心,后面 Step 6/7 也基本啥都填不了)
+        选择配置来源；暂不连接时选择“无配置源”，之后仍可补充
       </div>
       <div v-else-if="isMultiSource" class="multi-source-mgr-hint">
-        🔀 多源模式:每个源独立填写下面的连接信息;Step 6/7 数据层和可观测会按服务的源路由
+        🔀 多源模式:每个源独立填写下面的连接信息;后续 数据层和可观测会按服务的源路由
       </div>
+      <details v-if="activeSourceTypes.some(t => t !== 'none')" class="source-instance-list"><summary>高级：管理多个配置实例</summary>
+        <div v-for="instance in sourceInstances" :key="instance.id" class="source-instance-row">
+          <span><code>{{ instance.id }}</code> · {{ instance.type }}</span>
+          <button
+            v-if="MULTI_INSTANCE_SOURCE_TYPES.has(instance.type)"
+            type="button"
+            class="btn-link"
+            @click="emit('addSourceInstance', instance.type)"
+          >+ 同类型实例</button>
+          <button
+            v-if="sourceInstances.length > 1"
+            type="button"
+            class="btn-link danger"
+            @click="emit('removeSourceInstance', instance.id)"
+          >移除</button>
+        </div>
+      </details>
+    </div>
+
+    <div v-if="enabledSourceTypes.kuboard || enabledSourceTypes.one2all" class="runtime-reuse-offer">
+      <span>这个连接也能查询服务状态与容器日志，无需再填一次。</span>
+      <button v-if="enabledSourceTypes.kuboard" class="btn" @click="emit('useRuntimeConnection', 'kuboard')">复用 Kuboard 查看服务状态</button>
+      <button v-if="enabledSourceTypes.one2all" class="btn" @click="emit('useRuntimeConnection', 'one2all')">复用 one2all 查看服务状态</button>
     </div>
 
     <!-- 凭证表单:主源(activeSourceTypes[0])完整功能(连接 + 预读 + namespace + 服务 dataId 选择)。
@@ -138,13 +209,13 @@ const emit = defineEmits<{
       <label>
         <code>{{ configCenterType }}</code> 连接配置
         <span v-if="isMultiSource" class="auto-tag" style="background:#dbeafe;color:#1e40af;">主源 · 完整 preload</span>
-        <span class="field-hint">— 按环境维度填写,保存后写入 troubleshooter.yaml(标 <code># ⚠ secret</code> 注释),部署时注入到目标平台的 MCP Server env</span>
+        <span class="field-hint">— 按环境填写，密码仅保存在系统钥匙串</span>
       </label>
-      <CredsShareWarning title="⚠ 凭证与共享提醒">
-        <li>这里填的账号密码会以明文写入 <code>troubleshooter.yaml</code>(每条带 <code># ⚠ secret</code> 注释),并部署时注入到机器人 MCP Server 的 env 块 + <code>~/.tshoot/&lt;agent-id&gt;-creds.json</code>。</li>
-        <li>分享 yaml 请限**团队内部 / 私有仓库**,<strong>不要提交到公开代码仓库</strong>。</li>
+      <details class="wizard-advanced"><summary>凭据保存与共享说明</summary><CredsShareWarning title="凭据保存">
+        <li>账号、密码和 Token 保存到操作系统钥匙串；<code>troubleshooter.yaml</code> 只写 <code v-text="'{{ENV_VAR}}'"></code> 引用。</li>
+        <li>连接地址和资源名称仍会进入 YAML；分享前请确认其中不包含内部敏感拓扑。</li>
 
-      </CredsShareWarning>
+      </CredsShareWarning></details>
     <!-- one2all 专属:全局连接(单一 MCP server,不分 env) -->
     <div v-if="configCenterType === 'one2all'" class="cc-env-block">
       <div class="cc-env-head">
@@ -213,10 +284,10 @@ const emit = defineEmits<{
         <ServiceChecklist
           v-if="wizard.allServiceNames.length > 0"
           :services="wizard.allServiceNames"
-          :source-i-d="configCenterType"
+          :source-i-d="primarySourceID()"
           :hint-html="`勾选要走 <code>${configCenterType}</code> 源的服务;点下面&quot;拉取配置&quot;会列出这些服务对应的配置项`"
-          :get-service-source="getServiceSource"
-          @toggle="(svc, checked) => emit('setServiceSource', svc, checked ? configCenterType : '')"
+          :get-service-source="(svc) => getServiceSource(svc, env.id)"
+          @toggle="(svc, checked) => emit('setServiceSource', svc, checked ? primarySourceID() : '', env.id)"
         />
 
         <!-- 真实预加载:nacos/apollo/consul 专属;one2all/kuboard 不适用 -->
@@ -235,10 +306,10 @@ const emit = defineEmits<{
         <NamespaceServiceMap
           v-if="DATA_ID_CONFIG_TYPES.has(configCenterType)
                 && envScanned(env.id)
-                && wizard.allServiceNames.filter(s => getServiceSource(s) === configCenterType).length > 0"
+                && wizard.allServiceNames.filter(s => getServiceSource(s, env.id) === primarySourceID()).length > 0"
           :env-i-d="env.id"
           :config-center-type="configCenterType"
-          :services="wizard.allServiceNames.filter(s => getServiceSource(s) === configCenterType)"
+          :services="wizard.allServiceNames.filter(s => getServiceSource(s, env.id) === primarySourceID())"
           :env-namespaces="envNamespaces"
           :service-config-sel="serviceConfigSel"
           :service-config-group="serviceConfigGroup"
@@ -255,7 +326,7 @@ const emit = defineEmits<{
                     && wizard.allServiceNames.length === 0"
           class="cc-map-block cc-map-hint"
         >
-          先在 Step 4 填好 repos 的 <code>service_names</code>,这里才有服务列表可映射。
+          先在 “选择项目” 填好 repos 的 <code>service_names</code>,这里才有服务列表可映射。
         </div>
         <div
           v-else-if="DATA_ID_CONFIG_TYPES.has(configCenterType)
@@ -270,9 +341,9 @@ const emit = defineEmits<{
         <KuboardServiceMap
           v-if="configCenterType === 'kuboard'
                 && wizard.kuboardStateByEnv[env.id]?.status === 'ok'
-                && wizard.allServiceNames.filter(s => getServiceSource(s) === configCenterType).length > 0"
+                && wizard.allServiceNames.filter(s => getServiceSource(s, env.id) === primarySourceID()).length > 0"
           :env-i-d="env.id"
-          :services="wizard.allServiceNames.filter(s => getServiceSource(s) === configCenterType)"
+          :services="wizard.allServiceNames.filter(s => getServiceSource(s, env.id) === primarySourceID())"
           :kuboard-svc-map="kuboardSvcMap"
           :clusters="wizard.kuboardClustersOf(env.id)"
           :svc-key="wizard.svcKey"
@@ -297,7 +368,7 @@ const emit = defineEmits<{
         <div
           v-if="configCenterType === 'one2all'
                 && wizard.one2allStateByEnv[env.id]?.status === 'ok'
-                && wizard.allServiceNames.filter(s => getServiceSource(s) === 'one2all').length > 0"
+                && wizard.allServiceNames.filter(s => getServiceSource(s, env.id) === 'one2all').length > 0"
           class="cc-map-block"
         >
           <div class="cc-map-head">
@@ -307,7 +378,7 @@ const emit = defineEmits<{
           </div>
           <div class="cc-map-svc-list">
             <div
-              v-for="svc in wizard.allServiceNames.filter(s => getServiceSource(s) === 'one2all')"
+              v-for="svc in wizard.allServiceNames.filter(s => getServiceSource(s, env.id) === 'one2all')"
               :key="'o2a-' + env.id + '-' + svc"
               class="cc-map-svc-row"
             >
@@ -336,42 +407,34 @@ const emit = defineEmits<{
                   :key="n" :value="n"
                 >{{ n }}</option>
               </select>
-              <!-- ConfigMap 折叠多选/手填 -->
+              <!-- ConfigMap 始终使用折叠多选。候选为空时不回退自由输入，避免控件形态
+                   随预加载结果跳变；旧值未出现在本次结果中时标为失效并允许取消。 -->
               <span class="cm-dropdown" style="min-width:180px;position:relative;">
-                <template v-if="wizard.one2allConfigMapsFor(env.id, one2allSvcMap[wizard.svcKey(env.id, svc)]?.cluster_id || '', one2allSvcMap[wizard.svcKey(env.id, svc)]?.namespace || '').length > 0">
-                  <button
-                    type="button"
-                    class="cm-toggle"
-                    @click="toggleCmDropdown(wizard.svcKey(env.id, svc))"
+                <button
+                  type="button"
+                  class="cm-toggle"
+                  :class="{ 'cm-toggle--stale': selectedConfigMaps(env.id, svc).some(cm => isStaleConfigMap(env.id, svc, cm)) }"
+                  :disabled="configMapOptions(env.id, svc).length === 0"
+                  @click="toggleCmDropdown(configMapKey(env.id, svc))"
+                >
+                  {{ configMapSummary(env.id, svc) }} <span aria-hidden="true">▾</span>
+                </button>
+                <div v-if="cmDropdownOpen[configMapKey(env.id, svc)]" class="cm-panel" @mousedown.prevent>
+                  <label
+                    v-for="cm in configMapOptions(env.id, svc)"
+                    :key="cm"
+                    class="cm-check-label"
+                    :class="{ 'cm-check-label--stale': isStaleConfigMap(env.id, svc, cm) }"
                   >
-                    {{ (one2allSvcMap[wizard.svcKey(env.id, svc)]?.configmap || '').split(',').filter(Boolean).length || 0 }} 个 ConfigMap ▾
-                  </button>
-                  <div v-if="cmDropdownOpen[wizard.svcKey(env.id, svc)]" class="cm-panel" @mousedown.prevent>
-                    <label
-                      v-for="cm in wizard.one2allConfigMapsFor(env.id, one2allSvcMap[wizard.svcKey(env.id, svc)]?.cluster_id || '', one2allSvcMap[wizard.svcKey(env.id, svc)]?.namespace || '')"
-                      :key="cm"
-                      class="cm-check-label"
-                    >
-                      <input
-                        type="checkbox"
-                        :checked="(one2allSvcMap[wizard.svcKey(env.id, svc)]?.configmap || '').split(',').includes(cm)"
-                        @change="(e: any) => emit('setOne2AllLoc', env.id, svc, 'configmap',
-                          e.target.checked
-                            ? [...new Set([...(one2allSvcMap[wizard.svcKey(env.id, svc)]?.configmap || '').split(',').filter(Boolean), cm])].join(',')
-                            : (one2allSvcMap[wizard.svcKey(env.id, svc)]?.configmap || '').split(',').filter((x: string) => x !== cm).join(','))"
-                      />
-                      {{ cm }}
-                    </label>
-                  </div>
-                </template>
-                <input
-                  v-else
-                  :value="one2allSvcMap[wizard.svcKey(env.id, svc)]?.configmap || ''"
-                  class="cc-input"
-                  style="width:180px;"
-                  placeholder="ConfigMap 名(多个逗号分隔)"
-                  @input="(e: any) => emit('setOne2AllLoc', env.id, svc, 'configmap', e.target.value)"
-                />
+                    <input
+                      type="checkbox"
+                      :checked="selectedConfigMaps(env.id, svc).includes(cm)"
+                      @change="(e: any) => toggleConfigMap(env.id, svc, cm, e.target.checked)"
+                    />
+                    <span>{{ cm }}</span>
+                    <small v-if="isStaleConfigMap(env.id, svc, cm)">本次未读取到</small>
+                  </label>
+                </div>
               </span>
             </div>
           </div>
@@ -383,13 +446,21 @@ const emit = defineEmits<{
 
     <!-- 副源连接表单:每个非主源 type 一份;主源在上面已渲染。 -->
     <SecondarySourcePanel
-      v-for="t in activeSourceTypes.slice(1).filter(t2 => ccFieldsByType[t2])"
-      :key="`secsrc-${t}`"
-      :source-type="t"
-      :fields="ccFieldsByType[t]"
+      v-for="instance in sourceInstances.slice(1).filter(item => ccFieldsByType[item.type])"
+      :key="`secsrc-${instance.id}`"
+      :source-i-d="instance.id"
+      :source-type="instance.type"
+      :fields="ccFieldsByType[instance.type]"
       :environments="wizard.environments"
       :all-service-names="wizard.allServiceNames"
       :source-creds="sourceCreds"
+      :cc-hub-state-by-env="ccHubStateByEnv"
+      :source-env-namespaces="sourceEnvNamespaces"
+      :service-config-sel="serviceConfigSel"
+      :service-config-group="serviceConfigGroup"
+      :namespaces-for="namespacesFor"
+      :entries-for-namespace="entriesForNamespace"
+      :has-error="wizard.hasError"
       :kuboard-state-by-env="wizard.kuboardStateByEnv"
       :kuboard-svc-map="kuboardSvcMap"
       :is-field-hidden="isFieldHidden"
@@ -397,37 +468,33 @@ const emit = defineEmits<{
       :svc-key="wizard.svcKey"
       :kuboard-namespaces-for="wizard.kuboardNamespacesFor"
       :kuboard-config-maps-for="wizard.kuboardConfigMapsFor"
-      @preload-kuboard="(srcType, envID) => emit('preloadKuboardFromSource', srcType, envID)"
-      @toggle-service-source="(svc, checked, srcType) => emit('setServiceSource', svc, checked ? srcType : '')"
+      @preload-kuboard="(srcID, envID) => emit('preloadKuboardFromSource', srcID, envID)"
+      @toggle-service-source="(svc, checked, srcID, envID) => emit('setServiceSource', svc, checked ? srcID : '', envID)"
       @set-kuboard-loc="(envID, svc, field, value) => emit('setKuboardLoc', envID, svc, field, value)"
+      @preload-c-c-hub="(envID, srcID) => emit('preloadCCHubInstance', envID, srcID)"
+      @namespace-changed="(envID, value, srcID) => emit('instanceNamespaceChanged', envID, value, srcID)"
+      @data-id-changed="(envID, svc, srcID) => emit('instanceDataIdChanged', envID, svc, srcID)"
     />
 
-    <!-- env-vars 源(无远程连接,但每个 env 各数据层的静态连接串在 Step 6 数据层里按 data_store 维度填) -->
-    <div v-if="enabledSourceTypes['env-vars']" class="form-group">
+    <!-- env-vars 源(无远程连接,但每个 env 各数据层的静态连接串在 “查询业务数据” 数据层里按 data_store 维度填) -->
+    <details v-if="enabledSourceTypes['env-vars']" class="form-group"><summary>环境变量说明</summary>
       <p class="help-text">
-        <strong>env-vars</strong> 源:机器人直接读取仓库内 <code>.env</code> 文件 + Step 6 数据层里填的静态连接串。
-        这里没有连接信息要填,具体数据层(redis / mysql / ...)的 endpoint 走 Step 6 的"数据层"页。
+        <strong>env-vars</strong> 源:机器人直接读取仓库内 <code>.env</code> 文件 + “查询业务数据” 数据层里填的静态连接串。
+        这里没有连接信息要填,具体数据层(redis / mysql / ...)的 endpoint 走 “查询业务数据” 的"数据层"页。
       </p>
-    </div>
+    </details>
 
     <!-- none 源:整个系统不接配置中心,本步无需任何输入,继续往下走即可 -->
     <div v-if="enabledSourceTypes['none']" class="form-group">
       <p class="help-text" style="background:#fffbeb;border-left-color:#f59e0b;color:#92400e;line-height:1.7;">
-        <strong>不使用任何配置源</strong><br/>
-        系统的连接串 / 业务配置不来自 nacos/apollo/consul/kuboard,也不走 <code>.env</code>。本步骤无需填写,直接"下一步"即可。
-        <br/>
-        下游影响:
-        <br/>
-        ① <code>config-executor</code> skill 不会装到工作区(机器人不会主动去读配置中心);
-        <br/>
-        ② Step 6 数据层连接串需要在仓库代码里硬编码 / 部署时手动注入,机器人不再帮忙读;
-        <br/>
-        ③ 生成的 <code>troubleshooter.yaml</code> 仅占位 <code>config_center.type: none</code>。
+        <strong>暂不连接配置源</strong><br/>
+        仍可分析代码、连接日志和运行平台。机器人暂时无法读取配置中心，也无法从中自动识别数据库连接。
+        需要时可以返回这里补充。
       </p>
     </div>
 
     <!-- kuboard 源说明:简短引导用户填 URL + 鉴权,点拉取按钮自动加载 K8s 资源 -->
-    <div v-if="enabledSourceTypes['kuboard']" class="form-group">
+    <details v-if="enabledSourceTypes['kuboard']" class="form-group"><summary>Kuboard 接入帮助</summary>
       <p class="help-text" style="background:#eff6ff;border-left-color:#3b82f6;color:#1e3a8a;line-height:1.7;">
         <strong>Kuboard 源使用说明</strong><br/>
         通过 Kuboard v4 API 读 K8s ConfigMap,本机无需 <code>~/.kube/config</code>,适合<strong>能登 Kuboard、拿不到 kubeconfig</strong> 的场景。
@@ -440,10 +507,10 @@ const emit = defineEmits<{
         <br/>
         填好 URL + 任一鉴权 → 点 <strong>📥 从 Kuboard 读取可选项</strong>,集群 / namespace / ConfigMap 自动下拉,再为每个服务挑对应位置即可。
       </p>
-    </div>
+    </details>
 
     <!-- one2all 源说明:通过 one2all-remote MCP 读 ConfigMap/Secret,免 kubeconfig -->
-    <div v-if="enabledSourceTypes['one2all']" class="form-group">
+    <details v-if="enabledSourceTypes['one2all']" class="form-group"><summary>one2all 接入帮助</summary>
       <p class="help-text" style="background:#f0fdf4;border-left-color:#22c55e;color:#166534;line-height:1.7;">
         <strong>one2all-remote 源使用说明</strong><br/>
         通过 one2all-remote MCP server(streamable-http)读 K8s ConfigMap / Secret + K8s 运行时状态(pod / deployment / event / log)。
@@ -457,12 +524,14 @@ const emit = defineEmits<{
         <br/>
         Token 由部署阶段注入 MCP server 的 <code>Authorization: Bearer xxx</code> header,LLM 调 MCP 工具不碰凭据。
       </p>
-    </div>
+    </details>
 
   </div>
 </template>
 
 <style scoped>
+.runtime-reuse-offer { display:flex; gap:12px; align-items:center; flex-wrap:wrap; background:#eff6ff; padding:14px; border-radius:10px; margin:16px 0; font-size:13px; color:#1e40af; }
+summary { cursor:pointer; min-height:36px; font-size:13px; color:#475569; }
 /* one2all ConfigMap 折叠下拉 */
 .cm-dropdown { display: inline-block; vertical-align: middle; }
 .cm-toggle {
@@ -471,6 +540,8 @@ const emit = defineEmits<{
   white-space: nowrap;
 }
 .cm-toggle:hover { border-color: #3b82f6; color: #1e40af; }
+.cm-toggle:disabled { cursor: not-allowed; color: #94a3b8; background: #f8fafc; }
+.cm-toggle--stale { border-color: #f59e0b; color: #92400e; background: #fffbeb; }
 .cm-panel {
   position: absolute; top: 100%; left: 0; z-index: 100;
   background: #fff; border: 1px solid #d1d5db; border-radius: 8px;
@@ -483,4 +554,25 @@ const emit = defineEmits<{
 }
 .cm-check-label:hover { background: #eff6ff; }
 .cm-check-label input[type="checkbox"] { margin: 0; accent-color: #3b82f6; }
+.cm-check-label--stale { color: #92400e; background: #fffbeb; }
+.cm-check-label small { margin-left: auto; color: #b45309; white-space: nowrap; }
+.source-instance-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+.source-instance-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 32px;
+  color: #475569;
+}
+.source-instance-row > span { margin-right: auto; }
+.source-instance-row code { color: #1d4ed8; font-weight: 700; }
+.btn-link.danger { color: #dc2626; }
 </style>

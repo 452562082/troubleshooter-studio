@@ -1,0 +1,73 @@
+system:
+  id: catalog-demo
+  name: Resource Catalog Demo
+  description: Schema 0.2 environment-specific resource bindings
+
+agent:
+  name: Catalog Demo Troubleshooter
+
+environments:
+  - id: dev
+    api_domain: https://api-dev.example.com
+    web_domain: https://web-dev.example.com
+    is_prod: false
+  - id: prod
+    api_domain: https://api.example.com
+    web_domain: https://web.example.com
+    is_prod: true
+
+repos:
+  - name: commerce
+    url: git@example.com:demo/commerce.git
+    stack: go
+    role: backend
+    service_names: [order-service]
+    env_branches: {dev: develop, prod: main}
+  - name: storefront
+    url: git@example.com:demo/storefront.git
+    stack: node
+    role: frontend
+    env_branches: {dev: develop, prod: main}
+
+resource_catalog:
+  services:
+    - id: order-service
+      repository: commerce
+      config_sources: {dev: nacos-dev, prod: nacos-prod}
+      data_stores: {dev: [orders-redis], prod: [orders-redis]}
+      workloads: {dev: order-service, prod: order-service}
+  workloads:
+    - id: order-service
+      repository: commerce
+      service: order-service
+      names: {dev: order-service-dev, prod: order-service}
+    - id: storefront
+      repository: storefront
+      names: {dev: storefront-dev, prod: storefront}
+
+infrastructure:
+  config_centers:
+    - id: nacos-dev
+      type: nacos
+      endpoints:
+        - {env: dev, addr: nacos-dev.example.com:8848, user: "{{CC_USER_NACOS_DEV_DEV}}", pass: "{{CC_PASS_NACOS_DEV_DEV}}"}
+    - id: nacos-prod
+      type: nacos
+      endpoints:
+        - {env: prod, addr: nacos.example.com:8848, user: "{{CC_USER_NACOS_PROD_PROD}}", pass: "{{CC_PASS_NACOS_PROD_PROD}}"}
+  data_stores:
+    - id: orders-redis
+      type: redis
+      enabled: true
+      readonly_enforced: true
+      endpoints:
+        - {env: dev, service: order-service, url: "{{REDIS_URL_DEV}}"}
+        - {env: prod, service: order-service, url: "{{REDIS_URL_PROD}}"}
+
+generation:
+  targets: [codex]
+  skills_whitelist: [routing, config-executor, redis-runtime-query]
+
+meta:
+  schema_version: "0.2"
+  tshoot_template_ref: {repo: builtin, ref: main}

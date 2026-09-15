@@ -60,9 +60,11 @@ function makeFlow(targets: Array<'claude-code' | 'cursor'> = ['claude-code']) {
     targetLabels: { 'claude-code': 'Claude Code', cursor: 'Cursor' },
     homeDir: ref('/home/test'),
     activeSourceTypes: computed(() => []),
+    sourceInstances: computed(() => []),
     sourceCreds: {},
     environments: [],
     enabledDataStores: {},
+    dataStoreTypes: {},
     enabledObservability: {},
     toolInputs: {},
     OBS_TOOL_SPECS: [],
@@ -230,5 +232,21 @@ describe('useDeployFlow CodeGraph report and retry', () => {
     await older
 
     expect(flow.codeGraphReport.value).toEqual(newerReport)
+  })
+})
+
+describe('per-platform deployment recovery', () => {
+  it('retains successes and retries only the failed target with unchanged configuration', async () => {
+    bridgeMocks.importAndDeploy.mockReset()
+    bridgeMocks.importAndDeploy.mockResolvedValueOnce({}).mockRejectedValueOnce(new Error('connection failed')).mockResolvedValueOnce({})
+    const { flow, router } = makeFlow(['claude-code', 'cursor'])
+    await flow.runOneClickDeploy()
+    expect(flow.targetStates['claude-code'].status).toBe('success')
+    expect(flow.targetStates.cursor.status).toBe('error')
+    expect(flow.deployComplete.value).toBe(false)
+    await flow.runOneClickDeploy()
+    expect(bridgeMocks.importAndDeploy.mock.calls.map(call => call[1])).toEqual(['claude-code', 'cursor', 'cursor'])
+    expect(flow.deployComplete.value).toBe(true)
+    expect(router.push).not.toHaveBeenCalled()
   })
 })

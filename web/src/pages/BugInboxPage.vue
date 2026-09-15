@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, useId, watch } from 'vue'
+import { computed, onActivated, onMounted, ref, useId, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import BugTicketDetail from '../components/BugTicketDetail.vue'
 import BugTicketList from '../components/BugTicketList.vue'
@@ -10,6 +10,7 @@ import {
   type DiscoveredBot,
   bugHookBaseURL,
   clearBugPlatformLogin,
+  deleteBugHistory,
   deleteBugPlatform,
   discoverBots,
   fetchBugByID,
@@ -27,6 +28,12 @@ import { useBugTickets } from '../lib/useBugTickets'
 
 const router = useRouter()
 const tickets = useBugTickets({ listBugs, fetchBugByID })
+const ticketView = ref<'inbox' | 'history'>('inbox')
+const inboxBugs = computed(() => tickets.bugs.value.filter(bug => bug.inbox_state !== 'history'))
+const historyBugs = computed(() => tickets.bugs.value.filter(bug => bug.inbox_state === 'history'))
+const visibleBugs = computed(() => tickets.filteredBugs.value.filter(bug => ticketView.value === 'history'
+  ? bug.inbox_state === 'history'
+  : bug.inbox_state !== 'history'))
 const platformConfigInstanceID = useId()
 const botSearchID = `${platformConfigInstanceID}-bot-search`
 const manualBugFieldID = `${platformConfigInstanceID}-manual-bug`
@@ -46,10 +53,13 @@ const syncingBugs = ref(false)
 const fetchingBug = ref(false)
 const attachmentPreviewing = ref(false)
 const attachmentPreview = ref<BugAttachmentPreviewResult | null>(null)
+const deletingBugHistory = ref(false)
 const platformDraft = ref(emptyPlatformDraft())
 const selectedPlatform = computed(() => platforms.value.find(platform => platform.id === selectedPlatformID.value))
 const selectedPlatformHasSession = computed(() => Boolean(selectedPlatform.value?.session_header))
-const allBotRefs = computed(() => installedBots.value.filter(bot => !bot.ghost).map(discoveredBotToRef))
+const allBotRefs = computed(() => installedBots.value
+  .filter(bot => !bot.ghost && supportsIncidentWorkflowTarget(bot.meta.target))
+  .map(discoveredBotToRef))
 const configuredPlatformBots = computed(() => platformDraft.value.bot_mappings.map(mapping => ({
   mapping,
   bot: botRefByKey(mapping.bot_key),
@@ -81,7 +91,9 @@ watch(selectedPlatform, platform => {
     password: '',
     token: '',
     hook_secret: platform.hook_secret || '',
-    bot_mappings: (platform.bot_mappings || []).map(mapping => ({ bot_key: mapping.bot_key, env: mapping.env || '' })),
+    bot_mappings: (platform.bot_mappings || [])
+      .filter(mapping => supportsIncidentWorkflowTarget(botTargetFromKey(mapping.bot_key)))
+      .map(mapping => ({ bot_key: mapping.bot_key, env: mapping.env || '' })),
     enabled: platform.enabled,
     poll_enabled: Boolean(platform.poll_enabled),
     poll_interval_minutes: platform.poll_interval_minutes || 5,
@@ -92,12 +104,43 @@ onMounted(async () => {
   await Promise.all([loadPlatforms(), loadInstalledBots(), loadHookBase(), loadTickets()])
 })
 
+let hasActivatedOnce = false
+onActivated(() => {
+  if (!hasActivatedOnce) {
+    hasActivatedOnce = true
+    return
+  }
+  void refreshActivatedTickets()
+})
+
+async function refreshActivatedTickets() {
+  const selectedID = tickets.selectedID.value
+  await loadTickets()
+  const selected = tickets.bugs.value.find(bug => bug.id === selectedID)
+  if (selected?.inbox_state === 'history') {
+    tickets.select(selected.id)
+    ticketView.value = 'history'
+  }
+  ensureVisibleTicketSelection()
+}
+
 async function loadTickets() {
   try {
     await tickets.load()
+    ensureVisibleTicketSelection()
   } catch (error) {
     toastError('读取 Bug 工单', error)
   }
+}
+
+function ensureVisibleTicketSelection() {
+  if (visibleBugs.value.some(bug => bug.id === tickets.selectedID.value)) return
+  tickets.select(visibleBugs.value[0]?.id || '')
+}
+
+function selectTicketView(view: 'inbox' | 'history') {
+  ticketView.value = view
+  ensureVisibleTicketSelection()
 }
 
 async function loadPlatforms() {
@@ -232,17 +275,37 @@ async function deleteSelectedPlatform() {
   }
 }
 
-async function syncSelectedPlatform() {
-  const platform = selectedPlatform.value
-  if (!platform) return toast.error('请先选择平台')
+function syncErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String((error as any)?.message ?? error)
+}
+
+async function syncEnabledPlatforms() {
+  const enabled = platforms.value.filter(platform => platform.enabled)
+  if (!enabled.length) {
+    toast.info('请先启用 Bug 平台')
+    return
+  }
   syncingBugs.value = true
+  let stored = 0
+  const failures: string[] = []
   try {
-    const result = await syncBugPlatform(platform.id)
-    if (result.selected_bug_id) tickets.select(result.selected_bug_id)
+    for (const platform of enabled) {
+      try {
+        const result = await syncBugPlatform(platform.id)
+        stored += result.stored
+      } catch (error) {
+        failures.push(`${platform.name || platform.id}：${syncErrorMessage(error)}`)
+      }
+    }
     await loadTickets()
-    toast.success(`已同步指派给我的 Bug,新增/更新 ${result.stored} 条`)
-  } catch (error) {
-    toastError('同步 Bug', error)
+    const succeeded = enabled.length - failures.length
+    if (!failures.length) {
+      toast.success(`已同步 ${succeeded} 个平台，新增/更新 ${stored} 条`)
+    } else if (succeeded > 0) {
+      toast.error(`已同步 ${succeeded} 个平台，${failures.length} 个平台失败；新增/更新 ${stored} 条。${failures.join('；')}`)
+    } else {
+      toast.error(`所有已启用平台同步失败：${failures.join('；')}`)
+    }
   } finally {
     syncingBugs.value = false
   }
@@ -256,6 +319,7 @@ async function fetchManualBug() {
   fetchingBug.value = true
   try {
     await tickets.fetchByID({ platform_id: platform.id, bug_id: bugID })
+    ticketView.value = tickets.selectedBug.value?.inbox_state === 'history' ? 'history' : 'inbox'
     toast.success('Bug 已拉取')
   } catch (error) {
     toastError('拉取 Bug', error)
@@ -282,8 +346,37 @@ async function previewAttachment(index: number) {
   }
 }
 
+async function deleteSelectedBugHistory(bugID: string) {
+  const bug = tickets.bugs.value.find(item => item.id === bugID)
+  if (!bug || bug.inbox_state !== 'history' || deletingBugHistory.value) return
+  const confirmed = await confirmDialog({
+    title: '删除 Bug 本地历史',
+    message: `确定删除「${bug.title}」吗？这会永久删除 Studio 本机保存的工单快照、附件缓存和关联故障闭环历史，但不会删除或修改禅道中的工单。`,
+    confirmText: '永久删除',
+    cancelText: '取消',
+    danger: true,
+    defaultAction: 'cancel',
+  })
+  if (!confirmed) return
+  deletingBugHistory.value = true
+  try {
+    const result = await deleteBugHistory({ bug_id: bugID })
+    await loadTickets()
+    ensureVisibleTicketSelection()
+    if (result.cleanup_warning) toast.error(result.cleanup_warning)
+    else toast.success('Bug 本地历史已删除')
+  } catch (error) {
+    toastError('删除 Bug 本地历史', error)
+  } finally {
+    deletingBugHistory.value = false
+  }
+}
+
 function openIncident(bugID: string) {
-  void router.push({ path: '/incidents', query: { bug_id: bugID } })
+  void router.push({ path: '/incidents', query: {
+    bug_id: bugID,
+    ...(ticketView.value === 'history' ? { view: 'history' } : {}),
+  } })
 }
 
 function newPlatform() {
@@ -325,6 +418,15 @@ function discoveredBotToRef(bot: DiscoveredBot): BotRef {
     internal_agents: bot.meta.internal_agents || [],
     envs: bot.environments || [],
   }
+}
+
+function supportsIncidentWorkflowTarget(target: string): boolean {
+  return ['codex', 'claude-code', 'cursor', 'opencode'].includes(target.trim().toLowerCase())
+}
+
+function botTargetFromKey(key: string): string {
+  const separator = key.lastIndexOf('|')
+  return separator >= 0 ? key.slice(separator + 1) : ''
 }
 
 function botRefByKey(key: string): BotRef {
@@ -494,17 +596,16 @@ function eventValue(event: Event): string {
 
       <section class="platform-config-section sync-access-section" aria-labelledby="sync-access-title">
         <header class="section-heading"><div><h2 id="sync-access-title">同步与接入</h2><p>同步指派给我的 Bug，或按 ID 主动拉取。</p></div></header>
-        <div class="sync-settings">
-          <label class="toggle-control"><input v-model="platformDraft.poll_enabled" type="checkbox"><span class="toggle-track" aria-hidden="true"><span></span></span><span>后台定时同步</span></label>
-          <label class="interval-control">每 <input v-model.number="platformDraft.poll_interval_minutes" aria-label="后台同步间隔分钟" type="number" min="1" :disabled="!platformDraft.poll_enabled"> 分钟</label>
-        </div>
-        <div class="trigger-row">
-          <button class="compact-button secondary-button" type="button" data-action="sync-platform" :disabled="!selectedPlatform || syncingBugs" @click="syncSelectedPlatform">
-            <svg aria-hidden="true" viewBox="0 0 24 24" fill="none"><path d="M20 7h-5V2M4 17h5v5M18.5 11a7 7 0 0 0-11.9-4.9L4 8M5.5 13a7 7 0 0 0 11.9 4.9L20 16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
-            {{ syncingBugs ? '同步中…' : '从平台同步' }}
-          </button>
-          <label class="field-label manual-bug-field" :for="manualBugFieldID"><span>指定 Bug</span><input :id="manualBugFieldID" v-model="manualBugID" class="form-control" placeholder="Bug ID 或飞书消息" @keyup.enter="fetchManualBug"></label>
-          <button class="compact-button secondary-button" type="button" data-action="fetch-bug" :disabled="!selectedPlatform || !manualBugID.trim() || fetchingBug" @click="fetchManualBug">拉取指定 Bug</button>
+        <div class="sync-control-row">
+          <div class="sync-settings">
+            <label class="toggle-control"><input v-model="platformDraft.poll_enabled" type="checkbox"><span class="toggle-track" aria-hidden="true"><span></span></span><span>后台定时同步</span></label>
+            <label class="interval-control">每 <input v-model.number="platformDraft.poll_interval_minutes" aria-label="后台同步间隔分钟" type="number" min="1" :disabled="!platformDraft.poll_enabled"> 分钟</label>
+          </div>
+          <span class="sync-control-divider" aria-hidden="true"></span>
+          <div class="manual-bug-row">
+            <label class="field-label manual-bug-field" :for="manualBugFieldID"><span>指定 Bug</span><input :id="manualBugFieldID" v-model="manualBugID" class="form-control" placeholder="Bug ID 或飞书消息" @keyup.enter="fetchManualBug"></label>
+            <button class="compact-button secondary-button" type="button" data-action="fetch-bug" :disabled="!selectedPlatform || !manualBugID.trim() || fetchingBug" @click="fetchManualBug">拉取指定 Bug</button>
+          </div>
         </div>
         <div class="hook-row"><strong>Hook URL</strong><code>{{ hookURL || '保存平台后生成' }}</code><button class="compact-button secondary-button" type="button" data-action="copy-hook-url" :disabled="!hookURL" @click="copyHookURL">复制</button></div>
       </section>
@@ -513,25 +614,37 @@ function eventValue(event: Event): string {
 
     <section class="inbox-workspace" data-overflow-safe="true">
       <aside class="ticket-list-panel" data-overflow-safe="true">
-        <button class="compact-button secondary-button refresh-button" type="button" data-action="refresh-tickets" :aria-label="tickets.loading.value ? '正在刷新本地 Bug 列表' : '刷新本地 Bug 列表'" :disabled="tickets.loading.value" @click="loadTickets">
-          <svg aria-hidden="true" :class="{ spinning: tickets.loading.value }" viewBox="0 0 24 24" fill="none"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
-          {{ tickets.loading.value ? '刷新中…' : '刷新列表' }}
-        </button>
+        <div class="ticket-view-tabs" role="tablist" aria-label="Bug 工单范围">
+          <button type="button" role="tab" data-ticket-view="inbox" :aria-selected="ticketView === 'inbox'" :class="{ active: ticketView === 'inbox' }" @click="selectTicketView('inbox')">收件箱 <span>{{ inboxBugs.length }}</span></button>
+          <button type="button" role="tab" data-ticket-view="history" :aria-selected="ticketView === 'history'" :class="{ active: ticketView === 'history' }" @click="selectTicketView('history')">历史 <span>{{ historyBugs.length }}</span></button>
+        </div>
         <BugTicketList
-          :bugs="tickets.filteredBugs.value"
+          :bugs="visibleBugs"
           :selected-id="tickets.selectedID.value"
           :loading="tickets.loading.value"
           :query="tickets.query.value"
+          :title="ticketView === 'history' ? '历史工单' : 'Bug 收件箱'"
+          :empty-text="ticketView === 'history' ? '暂无历史工单' : '暂无待处理 Bug'"
           @select="tickets.select"
           @update:query="tickets.query.value = $event"
-        />
+        >
+          <template #actions>
+            <button class="compact-button secondary-button refresh-button" type="button" data-action="sync-enabled-platforms" :aria-label="syncingBugs ? '正在同步我的 Bug' : '同步我的 Bug'" :disabled="syncingBugs || tickets.loading.value" @click="syncEnabledPlatforms">
+              <svg aria-hidden="true" :class="{ spinning: syncingBugs }" viewBox="0 0 24 24" fill="none"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+              {{ syncingBugs ? '同步中…' : '同步我的 Bug' }}
+            </button>
+          </template>
+        </BugTicketList>
       </aside>
       <main class="ticket-detail-panel" data-overflow-safe="true">
         <BugTicketDetail
           :bug="tickets.selectedBug.value"
           mode="full"
+          :allow-delete-history="ticketView === 'history'"
+          :deleting-history="deletingBugHistory"
           @preview-attachment="previewAttachment"
           @open-incident="openIncident"
+          @delete-history="deleteSelectedBugHistory"
         />
       </main>
     </section>
@@ -555,6 +668,11 @@ function eventValue(event: Event): string {
 
 <style scoped>
 .bug-inbox-page { min-width: 0; display: grid; gap: var(--sp-3); color: var(--c-text); }
+.ticket-view-tabs { min-width: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); }
+.ticket-view-tabs button { min-width: 0; min-height: 36px; padding: 0 10px; border: 0; border-radius: calc(var(--r-md) - 3px); background: transparent; color: var(--c-muted); font: inherit; font-weight: 700; cursor: pointer; }
+.ticket-view-tabs button span { margin-left: 4px; font-size: var(--fs-xs); }
+.ticket-view-tabs button.active { background: var(--c-surf); color: #1d4ed8; box-shadow: 0 1px 3px rgba(15, 23, 42, .12); }
+.ticket-view-tabs button:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 1px; }
 .bug-header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); }
 .bug-header h1 { margin: 0; color: var(--c-ink); font-size: 24px; }
 .bug-header p { margin: 4px 0 0; color: var(--c-muted); font-size: var(--fs-sm); }
@@ -642,16 +760,16 @@ function eventValue(event: Event): string {
 .platform-config .interval-control { min-height: var(--config-control-height); }
 .interval-control input { width: 72px; min-height: 36px; padding: 0 8px; }
 .platform-config .interval-control input { min-height: var(--config-control-height); }
-.trigger-row { min-width: 0; display: grid; grid-template-columns: auto minmax(180px, 1fr) auto; align-items: end; gap: var(--sp-2); }
+.sync-control-row { min-width: 0; display: grid; grid-template-columns: auto 1px minmax(0, 1fr); align-items: end; gap: var(--sp-3); }
+.sync-control-divider { align-self: stretch; width: 1px; background: var(--c-line); }
+.manual-bug-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: var(--sp-2); }
 .hook-row { flex-wrap: wrap; }
 .hook-row code { min-width: 0; flex: 1; padding: 7px 9px; overflow-wrap: anywhere; border-radius: var(--r-sm); background: var(--c-surf-2); color: var(--c-muted); }
 .danger-link { min-height: 36px; padding: 0 6px; display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--c-danger); font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer; }
 .danger-link:hover:not(:disabled) { color: #7f1d1d; text-decoration: underline; text-underline-offset: 3px; }
 .inbox-workspace { min-width: 0; display: grid; grid-template-columns: minmax(250px, 330px) minmax(0, 1fr); gap: var(--sp-3); }
 .ticket-list-panel, .ticket-detail-panel { min-width: 0; border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); }
-.ticket-list-panel { position: relative; padding: var(--sp-3); overflow: auto; }
-.ticket-list-panel :deep(.list-heading) { padding-right: 112px; }
-.refresh-button { position: absolute; z-index: 1; top: var(--sp-2); right: var(--sp-2); }
+.ticket-list-panel { position: relative; min-height: 0; padding: var(--sp-3); display: grid; align-content: start; gap: var(--sp-3); overflow: auto; }
 .refresh-button svg { width: 16px; height: 16px; }
 .refresh-button svg.spinning { animation: refresh-spin 800ms linear infinite; }
 @keyframes refresh-spin { to { transform: rotate(360deg); } }
@@ -692,6 +810,8 @@ function eventValue(event: Event): string {
 }
 @media (max-width: 900px) {
   .basic-row, .auth-row { grid-template-columns: minmax(0, 1fr); }
+  .sync-control-row { grid-template-columns: minmax(0, 1fr); }
+  .sync-control-divider { width: 100%; height: 1px; }
   .inbox-workspace { grid-template-columns: minmax(0, 1fr); }
   .ticket-list-panel { max-height: 360px; }
 }
@@ -700,7 +820,8 @@ function eventValue(event: Event): string {
   .config-disclosure, .platform-chip, .bot-picker-row, .platform-config .interval-control input { min-height: 44px; }
   .compact-button, .danger-link, .toggle-control { min-height: 44px; }
   .platform-config .form-control, .platform-config .compact-button, .platform-config .toggle-control { min-height: 44px; }
-  .trigger-row, .bot-config-row { grid-template-columns: minmax(0, 1fr); }
+  .manual-bug-row, .bot-config-row { grid-template-columns: minmax(0, 1fr); }
+  .manual-bug-row .compact-button { width: 100%; }
   .bot-config-row .icon-button { justify-self: end; width: 44px; height: 44px; }
   .config-footer { align-items: stretch; flex-direction: column; }
   .config-footer .danger-link { align-self: flex-start; }

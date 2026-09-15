@@ -6,16 +6,17 @@
 #   make build        # 出单平台 CLI 二进制 bin/tshoot,version 从 git 读
 #   make desktop      # 出 Wails 桌面 app (cmd/tshoot-desktop)
 #   make release      # 交叉编译出 dist/bin/tshoot-<os>-<arch>
-#   make test         # 全量 go test,含 race
-#   make lint         # go vet + gofmt -l
+#   make test         # Go 竞态测试、覆盖率门槛和共享脚本测试
+#   make lint         # go vet + golangci-lint + gofmt + vue-tsc
+#   make ci           # 完整检查,包含依赖审计和前端测试/构建
 #   make demo         # make build 后立即 ./bin/tshoot demo
 #   make clean        # 清临时产物
 #
-# 发布(本地仅 dry-run,真发布走 GitLab CI manual button — 详见 docs/CI-RELEASE.md):
+# 发布(本地仅预览,合入 main 后由两端 CI 发版 — 详见 docs/CI-RELEASE.md):
 #   make release-notes              # 看下次发版会是什么 changelog(只 print,不动 git)
 #   scripts/release.sh patch --print-only    # 看版本号会算成几(本地预览)
 #   make release-tag VERSION=v0.7.0 # ⚠ 仅在迁移/特殊场景用:本地打个 tag 不 push 不 publish
-#                                   # 真要发版本应该:提 MR 合到 main → 在 Pipeline 点 release:* 按钮
+#                                   # 正式发版:PR/MR 合入 main,由 commit marker 选择发布类型
 #   make release-publish VERSION=v0.7.0 # 对已有 tag 重传 binary(需 GITLAB_TOKEN,运维场景)
 #
 # 已删:make bump-{patch,minor,major} / make tag-and-release —— 强制所有 release 走 CI,
@@ -31,6 +32,8 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 BIN     ?= bin/tshoot
 WEB_SRC := web
 WEB_DIST := internal/webui/dist
+GOLANGCI_LINT ?= golangci-lint
+GOLANGCI_LINT_VERSION := 2.12.2
 
 # 多平台矩阵(可按需扩)。windows 编译时 release recipe 自动加 .exe 后缀。
 PLATFORMS := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64
@@ -52,6 +55,7 @@ web:
 		cd $(WEB_SRC) && npm ci --ignore-scripts --silent && npm run build && cd - >/dev/null; \
 		rm -rf $(WEB_DIST); \
 		mkdir -p $(WEB_DIST); \
+		touch $(WEB_DIST)/.gitkeep; \
 		cp -R $(WEB_SRC)/dist/. $(WEB_DIST)/; \
 		echo "✓ web embedded"; \
 	fi
@@ -196,7 +200,7 @@ check-token-github:
 	fi
 
 # 注:本地一键发布(make tag-and-release / bump-{patch,minor,major})已删 — 强制
-# release 走 GitLab CI manual button,真正的 release 流程见 docs/CI-RELEASE.md。
+# 正式发布走 CI,流程见 docs/CI-RELEASE.md。
 # 想本地 dry-run:make release-notes 看 changelog,scripts/release.sh patch --print-only 看版本号。
 
 # ── 快速试跑:build 后立即 demo ──────────────────────────────────
@@ -224,12 +228,27 @@ audit:
 .PHONY: lint
 lint:
 	go vet ./...
-	@out="$$(git ls-files -z '*.go' | xargs -0 gofmt -l)"; \
+	@version="$$($(GOLANGCI_LINT) version)" || exit $$?; \
+	case "$$version" in *"version $(GOLANGCI_LINT_VERSION) "*) ;; \
+	  *) echo "需要 golangci-lint $(GOLANGCI_LINT_VERSION)，与 CI 保持一致；可通过 GOLANGCI_LINT 指定路径"; exit 1 ;; esac
+	$(GOLANGCI_LINT) run --timeout=3m
+	@out="$$(git ls-files --cached --others --exclude-standard -z '*.go' | xargs -0 sh -c 'for f do if [ -f "$$f" ]; then gofmt -l "$$f" || exit; fi; done' sh)" || exit $$?; \
 	if [ -n "$$out" ]; then \
 	  echo "gofmt 未通过:"; echo "$$out"; exit 1; \
 	fi
 	@echo "✓ go vet + gofmt clean"
 	cd $(WEB_SRC) && npx vue-tsc --noEmit
+
+# 提交前运行完整 CI 门禁，防止只跑单测遗漏 lint / 依赖审计。
+.PHONY: ci
+ci:
+	@test "$$(node --version)" = "v$$(cat .nvmrc)" || { echo "请先切换到 .nvmrc 指定的 Node 版本（nvm use）"; exit 1; }
+	$(MAKE) lint
+	go mod tidy -diff
+	$(MAKE) build
+	$(MAKE) audit
+	$(MAKE) test
+	cd $(WEB_SRC) && npm test && npm run build
 
 # ── 清理 ────────────────────────────────────────────────────────
 .PHONY: clean

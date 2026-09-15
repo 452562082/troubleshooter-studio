@@ -24,9 +24,10 @@ const (
 )
 
 type CodeGraphRepoTarget struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
-	Head string `json:"head,omitempty"`
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Branch string `json:"branch,omitempty"`
+	Head   string `json:"head,omitempty"`
 }
 
 type CodeGraphIndexOptions struct {
@@ -117,7 +118,7 @@ func BuildCodeGraphRepoTargets(cfg *config.SystemConfig, repoPaths map[string]st
 	targets := make([]CodeGraphRepoTarget, 0, len(cfg.Repos))
 	seenPaths := make(map[string]struct{}, len(cfg.Repos))
 	for _, repo := range cfg.Repos {
-		if !repo.Analysis.Enabled {
+		if !repo.Analysis.IsEnabled() {
 			continue
 		}
 
@@ -138,6 +139,9 @@ func BuildCodeGraphRepoTargets(cfg *config.SystemConfig, repoPaths map[string]st
 		seenPaths[absolutePath] = struct{}{}
 
 		target := CodeGraphRepoTarget{Name: repo.Name, Path: absolutePath}
+		if output, err := exec.Command("git", "-C", absolutePath, "branch", "--show-current").Output(); err == nil {
+			target.Branch = strings.TrimSpace(string(output))
+		}
 		if output, err := exec.Command("git", "-C", absolutePath, "rev-parse", "HEAD").Output(); err == nil {
 			target.Head = strings.TrimSpace(string(output))
 		}

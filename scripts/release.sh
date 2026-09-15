@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # release.sh —— 一站式 release(算版本 → 创 tag → push → publish)。
 #
-# **本脚本仅供 GitLab CI 调用**,本地 release 已禁用 — 强制所有 release 都过 main pipeline,
+# **本脚本仅供 CI 调用**,本地 release 已禁用 — 强制所有 release 都过 main pipeline,
 # 版本号决策有 audit trail,git history 干净统一(都是 CI 用同一身份打 tag)。
 #
 # 用法(CI):
@@ -12,17 +12,17 @@
 # 用法(本地)— 仅 dry-run 预览:
 #   想看下次发版的 changelog 长啥样:  make release-notes
 #   想看下版本号会算成几:            scripts/release.sh patch --print-only
-#   想发布?提 MR → main → GitLab Pipeline 点 release:* 按钮
+#   想发布?提交 PR/MR → main → 由 GitHub Actions / GitLab CI 发布
 #
-# CI 触发流(.gitlab-ci.yml 调用):
+# CI 触发流(.github/workflows/ci.yml / .gitlab-ci.yml 调用):
 #   1. 校 $CI 已设(CI 环境标志,本地误调用直接拒绝)
-#   2. 校 GITLAB_TOKEN 已注入(发布产物 + push tag 用)
+#   2. 由对应平台校验发布凭据和 tag push 权限
 #   3. 拿上一 tag,按 LEVEL 算下一版本号(SemVer 严格 vX.Y.Z)
 #   4. 工作树脏 / tag 重名检查
 #   5. scripts/changelog.sh 生成 release notes(commit subject 自动归集)
 #   6. git tag -a -F - 写 annotation
 #   7. git push origin <branch> + git push origin <tag>
-#   8. publish-gitlab-release.sh:多平台编 + 打 dmg + 调 GitLab API 上传 Release
+#   8. 按 PUBLISH_TARGET 多平台编译、打 dmg，并上传到当前 CI 平台的 Release
 set -euo pipefail
 
 LEVEL="${1:-}"
@@ -44,11 +44,11 @@ esac
 # 加 --print-only 例外:本地预览版本号(算给看,不动任何东西)。
 if [ -z "${CI:-}" ] && [ -z "$PRINT_ONLY" ]; then
     cat >&2 <<'EOF'
-❌ scripts/release.sh 仅供 GitLab CI 调用,本地 release 已禁用。
+❌ scripts/release.sh 仅供 CI 调用,本地 release 已禁用。
 
 想发版:
-  1) 提 MR 合到 main
-  2) main pipeline 跑完 → 点 release:patch / release:minor / release:major manual 按钮
+  1) 提 PR/MR 合到 main
+  2) 等待 main 的 GitHub Actions / GitLab CI 发布任务
   详见 docs/CI-RELEASE.md
 
 本地预览(不动 git):

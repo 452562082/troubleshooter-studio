@@ -18,6 +18,8 @@ defineProps<{
   services: string[]
   /** envID → namespace ID;v-model 直接读写 */
   envNamespaces: Record<string, string>
+  /** 多实例时 namespace map 使用 sourceID::env；默认仍用 envID。 */
+  namespaceMapKey?: string
   /** svcKey → 选中的 dataId */
   serviceConfigSel: Record<string, string>
   /** svcKey → 选中条目的 group(展示用,从 entry.group 派生) */
@@ -53,7 +55,7 @@ const emit = defineEmits<{
         <span class="cc-map-ns-env">{{ envID || '?' }}</span>
         <span class="cc-map-ns-arrow">→</span>
         <select
-          :value="envNamespaces[envID] || ''"
+          :value="envNamespaces[namespaceMapKey || envID] || ''"
           class="cc-map-select"
           :class="{ error: hasError(`cc.${configCenterType}.${envID}.namespace`) }"
           @change="(e: any) => emit('namespaceChanged', envID, e.target.value)"

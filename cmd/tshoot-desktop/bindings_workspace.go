@@ -1,7 +1,6 @@
 // bindings_workspace.go —— 已装机器人工作目录浏览 / 编辑 binding。
 //
 // 给 BotsPage 的"📂 浏览工作目录"功能用:用户能在桌面 app 内打开机器人的实际部署
-// 目录(~/.openclaw/workspace/<name> / ~/.claude/skills/<name> 等),以目录树展开
 // 看每个 skill / SKILL.md / scripts/ 的内容,并在 app 内直接编辑保存 ——
 // 不必反复改 yaml + 重部署,适合调试一个 skill 里的细节(改个变量、试个 prompt 文案)。
 //
@@ -11,8 +10,7 @@
 //     防止 ".." 路径穿越访问 app 不该碰的位置。
 //   - 写入限制:文件大小 <= 1MB(防止用户误粘海量内容把磁盘塞满);文本编码内容
 //     不要求严格,但二进制(含 \0)的文件不允许在 UI 编辑,只能查看。
-//   - 隐藏文件(. 开头)默认参与列表(skill 配置 / .clawhub/lock.json 都可能要看),
-//     但前端会用图标提示这些是 OpenClaw 元数据,改之前自己心里有数。
+//   - 隐藏文件(. 开头)默认参与列表(skill 配置 都可能要看),
 package main
 
 import (
@@ -43,7 +41,6 @@ type FileNode struct {
 const maxWritableFileSize int64 = 1 * 1024 * 1024
 
 // 列树时跳过的目录:.git 仅占空间没人编辑;.DS_Store 之类 OS 噪音也不展示。
-// 注:.clawhub / .openclaw 等 OpenClaw 元数据 dir 仍展示(用户可能要看 lock.json)。
 var workspaceTreeExcludeDirs = map[string]bool{
 	".git": true, ".svn": true, ".hg": true,
 	"node_modules": true, "__pycache__": true,
@@ -172,7 +169,7 @@ func (a *App) ReadBotWorkspaceFile(rootPath, relPath string) (*ReadFileResult, e
 // UI 编辑器走纯文本,塞 NUL 进去基本是 bug 不是特性。
 //
 // 不创建新文件:relPath 必须指向已存在的文件;新增文件需要走系统级 file manager(避免
-// 被 binding 滥用成"任意写盘"通道)。也不允许写入根 tshoot.json / .clawhub/lock.json
+// 被 binding 滥用成"任意写盘"通道)。也不允许写入根 tshoot.json
 // 这种 generator 管理的文件,改了下次重部署会被覆盖,先在 UI 上拦掉省得用户白干。
 func (a *App) WriteBotWorkspaceFile(rootPath, relPath, content string) error {
 	if err := assertBotWorkspacePath(rootPath); err != nil {
@@ -197,8 +194,7 @@ func (a *App) WriteBotWorkspaceFile(rootPath, relPath, content string) error {
 	}
 	// generator 管理的元数据文件不让 UI 编辑(改了重部署即覆盖,徒增混乱)
 	base := filepath.Base(abs)
-	rel := filepath.ToSlash(relPath)
-	if base == "tshoot.json" || rel == ".clawhub/lock.json" {
+	if base == "tshoot.json" {
 		return fmt.Errorf("file %q 由 generator 管理,UI 编辑会在下次部署时被覆盖,请通过修改 troubleshooter.yaml + 重新部署来更新", base)
 	}
 	return os.WriteFile(abs, []byte(content), info.Mode().Perm())
@@ -413,7 +409,6 @@ func containsString(items []string, target string) bool {
 //     否则若 workspace 下有 `link → ~/.ssh/id_rsa`,旧逻辑(只 filepath.Abs)
 //     校验 link 名仍在 root 下就放行,os.ReadFile 跟链接读到根外敏感文件。
 //
-// rootPath 自己可能本身就是 symlink(用户用 `~/.openclaw/workspace/<bot>` 装的 bot 通过
 // /private 链接拿到),所以先 EvalSymlinks(root)拿到真实根,再比对 EvalSymlinks(abs)。
 // 文件还没创建时(WriteBotWorkspaceFile 写新文件)EvalSymlinks 会报 not-exist —— 那就退化到
 // EvalSymlinks(filepath.Dir(abs)) + Base 拼出"父目录解析后 + 文件名"做校验,父目录里有 symlink
@@ -504,12 +499,7 @@ func cachedDiscoverBotPaths() ([]string, error) {
 	if time.Since(botPathsCache.loadedAt) < botPathsCacheTTL && botPathsCache.paths != nil {
 		return botPathsCache.paths, nil
 	}
-	roots := []string{
-		"~/.openclaw/workspace",
-		"~/.claude/skills",
-		"~/.cursor/skills",
-		"~/.codex/skills",
-	}
+	roots := discover.DefaultRoots()
 	found, err := discover.Scan(roots)
 	if err != nil {
 		return nil, err

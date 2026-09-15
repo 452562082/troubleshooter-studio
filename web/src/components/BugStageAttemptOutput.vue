@@ -1,0 +1,128 @@
+<script setup lang="ts">
+import { computed } from 'vue'
+import type { PhaseAttempt } from '../lib/bridge/bugWorkflow'
+import { presentStageAttempt } from '../lib/incidentStageOutput'
+
+const props = defineProps<{ attempt: PhaseAttempt; latest: boolean }>()
+const view = computed(() => presentStageAttempt(props.attempt))
+const showAttemptError = computed(() => {
+  if (!props.attempt.error_message) return false
+  const recoveredInvestigationResult = props.attempt.phase === 'investigation' && props.attempt.status === 'failed' &&
+    props.attempt.error_code === 'invalid_phase_result' && props.attempt.output_json?.investigation_status === 'insufficient_info'
+  return !recoveredInvestigationResult
+})
+
+const evidenceTypeLabels: Record<string, string> = {
+  screenshot: '截图', network: 'Network', console: 'Console', browser_actions: '浏览器操作轨迹',
+  trace: '调用链', log: '日志', metric: '指标', command: '命令输出', code: '代码', config: '配置', data: '数据',
+}
+
+function formatTime(value: string): string {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
+}
+
+function groupTypeLabel(group: { label: string; value: string }[]): string {
+  const kind = group.find(field => field.label === '类型')?.value || ''
+  return evidenceTypeLabels[kind] || kind
+}
+</script>
+
+<template>
+  <details class="stage-attempt" :class="`tone-${view.tone}`" :open="latest">
+    <summary :aria-label="`${view.phaseLabel}，${view.resultLabel}，${view.attemptStatusLabel}`">
+      <span class="stage-phase">{{ view.phaseLabel }}</span>
+      <span class="stage-result">{{ view.resultLabel }}</span>
+      <span class="stage-attempt-status">{{ view.attemptStatusLabel }}</span>
+      <time v-if="view.finishedAt || view.startedAt" :datetime="view.finishedAt || view.startedAt">{{ formatTime(view.finishedAt || view.startedAt) }}</time>
+    </summary>
+    <div class="stage-result-body">
+      <p v-if="view.environment" class="stage-environment">环境 <strong>{{ view.environment }}</strong></p>
+      <p v-if="showAttemptError" data-attempt-error class="stage-error" role="alert">{{ attempt.error_message }}</p>
+      <p v-if="view.sections.length === 0" class="stage-empty">本次暂无可展示的阶段结果</p>
+      <component :is="section.groupLabel || section.title === '调用链定位' ? 'details' : 'section'" v-for="(section, sectionIndex) in view.sections" :key="`${sectionIndex}-${section.title}`" class="stage-section" :class="section.tone ? `tone-${section.tone}` : ''">
+        <summary v-if="section.groupLabel || section.title === '调用链定位'" class="supporting-summary">{{ section.title }} <span>{{ section.groups?.length || 0 }} 条</span></summary>
+        <h4 v-else>{{ section.title }}</h4>
+        <p v-if="section.text" class="stage-text">{{ section.text }}</p>
+        <dl v-if="section.fields?.length" class="stage-fields"><div v-for="(field, fieldIndex) in section.fields" :key="fieldIndex"><dt>{{ field.label }}</dt><dd :class="{ mono: field.mono }">{{ field.value }}</dd></div></dl>
+        <ul v-if="section.items?.length"><li v-for="(item, itemIndex) in section.items" :key="itemIndex">{{ item }}</li></ul>
+        <div v-if="section.groups?.length" class="stage-groups" :class="{ 'evidence-groups': section.groupLabel }">
+          <article v-for="(group, index) in section.groups" :key="index" class="stage-group-card" :data-stage-group="section.groupLabel ? index + 1 : undefined">
+            <header v-if="section.groupLabel" class="stage-group-heading">
+              <strong>{{ section.groupLabel }} {{ index + 1 }}</strong>
+              <span v-if="groupTypeLabel(group)">{{ groupTypeLabel(group) }}</span>
+            </header>
+            <dl><div v-for="(field, fieldIndex) in group" :key="fieldIndex" :class="{ 'wide-field': field.label === '路径' }"><dt>{{ field.label }}</dt><dd :class="{ mono: field.mono }">{{ field.value }}</dd></div></dl>
+          </article>
+        </div>
+        <p v-if="section.emptyText" class="stage-empty">{{ section.emptyText }}</p>
+      </component>
+    </div>
+  </details>
+</template>
+
+<style scoped>
+.stage-attempt { container: stage-report / inline-size; min-width: 0; border: 1px solid var(--c-line); border-left-width: 3px; border-radius: var(--r-md); background: #fff; color: var(--c-text); font-size: var(--fs-base); line-height: 1.6; }
+.stage-attempt + .stage-attempt { margin-top: var(--sp-2); }
+.stage-attempt > summary { box-sizing: border-box; display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 10px 14px; cursor: pointer; list-style: none; color: var(--c-ink); }
+.stage-attempt > summary::-webkit-details-marker { display: none; }
+.stage-attempt > summary::before { content: '›'; color: var(--c-muted); font-size: 18px; transform: rotate(0deg); transition: transform 160ms ease; }
+.stage-attempt[open] > summary::before { transform: rotate(90deg); }
+.stage-attempt > summary:focus-visible { outline: 3px solid rgba(37, 99, 235, .55); outline-offset: 2px; border-radius: var(--r-md); }
+.stage-phase { font-size: var(--fs-md); font-weight: 700; }
+.stage-result { border: 1px solid var(--c-line); border-radius: 999px; padding: 2px 8px; background: var(--c-soft); font-size: var(--fs-xs); font-weight: 700; }
+.stage-attempt-status, time { color: var(--c-muted); font-size: var(--fs-xs); }
+time { margin-left: auto; overflow-wrap: anywhere; }
+.tone-success { border-left-color: #15803d; }
+.tone-warning { border-left-color: #d97706; }
+.tone-danger { border-left-color: #dc2626; }
+.tone-info { border-left-color: #2563eb; }
+.tone-success > summary .stage-result { border-color: #bbf7d0; background: #f0fdf4; color: #166534; }
+.tone-warning > summary .stage-result { border-color: #fde68a; background: #fffbeb; color: #92400e; }
+.tone-danger > summary .stage-result { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
+.tone-info > summary .stage-result { border-color: #bfdbfe; background: #eff6ff; color: #1d4ed8; }
+.stage-result-body { display: grid; gap: 14px; padding: 4px 16px 16px; }
+.stage-environment, .stage-error, .stage-empty { margin: 0; font-size: var(--fs-sm); }
+.stage-environment { color: var(--c-muted); }
+.stage-environment strong { color: var(--c-ink); }
+.stage-error { border-radius: var(--r-sm); padding: 8px 10px; background: #fef2f2; color: #991b1b; }
+.stage-section { min-width: 0; border-top: 1px solid var(--c-line); padding-top: 12px; }
+.stage-section.tone-warning { border-left: 3px solid #d97706; padding-left: 10px; }
+.supporting-summary { padding: 4px 0; cursor: pointer; color: var(--c-muted); font-size: 13px; }
+.supporting-summary span { margin-left: 6px; font-size: 11px; }
+.stage-section[open] > .supporting-summary { margin-bottom: 12px; }
+.stage-section h4 { margin: 0 0 6px; color: var(--c-ink); font-size: var(--fs-sm); }
+.stage-text { margin: 0; font-size: var(--fs-base); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.stage-section ul { margin: 0; padding-left: 20px; }
+.stage-section li { margin: 3px 0; font-size: var(--fs-base); line-height: 1.6; overflow-wrap: anywhere; }
+.stage-fields, .stage-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0; }
+.stage-fields > div:last-child:nth-child(odd) { grid-column: 1 / -1; }
+.stage-fields > div { min-width: 0; margin: 0; border-radius: var(--r-sm); padding: 10px 12px; background: var(--c-soft, #f8fafc); }
+.stage-group-card { min-width: 0; overflow: hidden; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf); }
+.stage-group-card > dl { display: grid; gap: 7px; min-width: 0; margin: 0; padding: 8px 10px; }
+.stage-group-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 36px; padding: 7px 12px; border-bottom: 1px solid var(--c-line); background: var(--c-soft); }
+.stage-group-heading strong { color: var(--c-ink); font-size: var(--fs-sm); }
+.stage-group-heading span { border-radius: 999px; padding: 2px 8px; background: #dbeafe; color: #1d4ed8; font-size: var(--fs-xs); font-weight: 700; }
+.stage-groups dl > div { min-width: 0; display: grid; grid-template-columns: minmax(72px, auto) minmax(0, 1fr); gap: 8px; }
+.stage-groups dd { word-break: break-word; }
+.stage-groups .wide-field { grid-template-columns: minmax(72px, auto) minmax(0, 1fr); }
+dt { color: var(--c-muted); font-size: 12px; margin-bottom: 4px; }
+dd { min-width: 0; margin: 0; font-size: var(--fs-base); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.mono { font-size: var(--fs-sm); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.stage-empty { color: var(--c-muted); }
+@container stage-report (max-width: 560px) {
+  .stage-attempt > summary { flex-wrap: wrap; }
+  time { width: 100%; margin-left: 26px; }
+  .stage-result-body { padding-left: 12px; }
+  .stage-fields, .stage-groups { grid-template-columns: minmax(0, 1fr); }
+}
+
+.stage-attempt > summary { background: #f8fafc; border-radius: 8px 8px 0 0; }
+.stage-attempt[open] > summary { border-bottom: 1px solid var(--c-line); margin-bottom: 10px; }
+.stage-section h4 { font-size: 13px; font-weight: 650; margin-bottom: 8px; }
+.stage-text, .stage-section li, dd { line-height: 1.75; }
+.stage-groups .stage-group-card > dl > div { grid-template-columns: 80px minmax(0, 1fr); padding: 4px 0; }
+.stage-group-card > dl > div + div { border-top: 1px solid #f1f5f9; }
+.supporting-summary:focus-visible { outline: 2px solid #2563eb; outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) { .stage-attempt > summary::before { transition: none; } }
+</style>

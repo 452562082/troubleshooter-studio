@@ -2,6 +2,7 @@ package generator
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -58,6 +59,7 @@ func TestGenerate_ServiceTopology(t *testing.T) {
 		Report: analyzer.Report{Repos: []analyzer.RepoAnalysis{{
 			Name:            "mall-web",
 			DownstreamCalls: []analyzer.DownstreamCall{{Target: "legacy-bff"}},
+			Messaging:       []analyzer.MessagingEndpoint{{Broker: "kafka", Direction: "producer", DestinationKind: "topic", Destination: "orders.created", Source: "src/events.ts", Line: 12, Strength: "scanned_literal"}},
 		}}},
 		Topology: topology.Snapshot{
 			SchemaVersion: topology.SchemaVersion,
@@ -122,6 +124,17 @@ func TestGenerate_ServiceTopology(t *testing.T) {
 	}
 	if strings.Index(evidence, `id: "mall-bff:in"`) > strings.Index(evidence, `id: "mall-web:out"`) {
 		t.Fatalf("endpoints are not sorted by id:\n%s", evidence)
+	}
+
+	asyncTopology := readFile(t, filepath.Join(refs, "async-topology.yaml"))
+	var asyncDocument map[string]any
+	if err := yaml.Unmarshal([]byte(asyncTopology), &asyncDocument); err != nil {
+		t.Fatalf("async topology is not valid yaml: %v\n%s", err, asyncTopology)
+	}
+	for _, want := range []string{`broker: "kafka"`, `destination: "orders.created"`, `location: "src/events.ts:12"`, `evidence_kind: "static_navigation"`} {
+		if !strings.Contains(asyncTopology, want) {
+			t.Fatalf("async topology missing %q:\n%s", want, asyncTopology)
+		}
 	}
 
 	deps := readFile(t, filepath.Join(refs, "service-dependency-map.yaml"))
@@ -370,8 +383,14 @@ func TestGenerate_CodeIntelligenceOptIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertExists(t, out, []string{"templates/workspace-template/skills/code-intelligence-query/SKILL.md"})
-	if got := readFile(t, filepath.Join(out, "templates/workspace-template/skills/code-intelligence-query/SKILL.md")); !strings.Contains(got, "codegraph_explore") {
-		t.Fatal(got)
+	codeIntelligenceSkill := readFile(t, filepath.Join(out, "templates/workspace-template/skills/code-intelligence-query/SKILL.md"))
+	if !strings.Contains(codeIntelligenceSkill, "codegraph_explore") || !strings.Contains(codeIntelligenceSkill, "code-intelligence-manifest.json") {
+		t.Fatal(codeIntelligenceSkill)
+	}
+	for _, forbidden := range []string{"$HOME/.tshoot/bin/codegraph", "codegraph status", "codegraph sync"} {
+		if strings.Contains(codeIntelligenceSkill, forbidden) {
+			t.Fatalf("generated Agent skill still executes sandboxed CodeGraph CLI %q:\n%s", forbidden, codeIntelligenceSkill)
+		}
 	}
 	if got := readFile(t, filepath.Join(out, "templates/workspace-template/skills/incident-investigator/SKILL.md")); !strings.Contains(got, "code-intelligence-query") {
 		t.Fatal(got)
@@ -475,17 +494,22 @@ func TestWriteTshootMetaIncludesAgentRole(t *testing.T) {
 	tr := filepath.Join(projectRoot(t), "templates")
 	g := New(cfg, tr, out)
 	g.TroubleshooterYAMLSource = []byte("system:\n  id: shop\n")
+	repoPath := filepath.Join(t.TempDir(), "shop")
+	g.Ctx.RepoLocalPaths = map[string]string{cfg.Repos[0].Name: repoPath}
 
 	dir := filepath.Join(out, "meta")
-	if err := g.writeTshootMetaForRole(dir, "codex", AgentRoleValidator); err != nil {
+	if err := g.writeTshootMetaForRole(dir, "codex", AgentRoleFixer); err != nil {
 		t.Fatalf("writeTshootMetaForRole: %v", err)
 	}
 	data := readFile(t, filepath.Join(dir, "tshoot.json"))
-	if !strings.Contains(data, `"agent_id": "shop-validator"`) {
+	if !strings.Contains(data, `"agent_id": "shop-fixer"`) {
 		t.Fatalf("agent_id missing from meta:\n%s", data)
 	}
-	if !strings.Contains(data, `"role": "validator"`) {
+	if !strings.Contains(data, `"role": "fixer"`) {
 		t.Fatalf("role missing from meta:\n%s", data)
+	}
+	if !strings.Contains(data, `"project_repositories"`) || !strings.Contains(data, repoPath) {
+		t.Fatalf("project ownership missing from meta:\n%s", data)
 	}
 
 	troubleshooterDir := filepath.Join(out, "troubleshooter-meta")
@@ -555,6 +579,47 @@ func TestGenerate_MultiSource_ConfigMapRoutesPerService(t *testing.T) {
 	// 多源块 sources: 应被声明
 	if !strings.Contains(cm, "sources:") {
 		t.Errorf("多源场景 config-map 应有 sources: 块")
+	}
+}
+
+func TestGenerate_ResourceCatalogRoutesSameServicePerEnvironment(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	cfg.Infrastructure.ConfigCenters = append(cfg.Infrastructure.ConfigCenters, config.ConfigCenter{
+		ID: "prod-nacos", Type: "nacos",
+		Endpoints: []config.ConfigCenterEndpoint{{Env: "prod", Addr: "prod-nacos:8848"}},
+	})
+	found := false
+	for i := range cfg.ResourceCatalog.Services {
+		if cfg.ResourceCatalog.Services[i].ID != "product-service" {
+			continue
+		}
+		if cfg.ResourceCatalog.Services[i].ConfigSources == nil {
+			cfg.ResourceCatalog.Services[i].ConfigSources = map[string]string{}
+		}
+		cfg.ResourceCatalog.Services[i].ConfigSources["prod"] = "prod-nacos"
+		found = true
+	}
+	if !found {
+		t.Fatal("fixture should derive product-service resource")
+	}
+
+	out := t.TempDir()
+	if err := New(cfg, filepath.Join(projectRoot(t), "templates"), out).Generate(); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	cm := readFile(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml"))
+	devStart := strings.Index(cm, "  dev:")
+	prodStart := strings.Index(cm, "  prod:")
+	if devStart < 0 || prodStart < 0 || prodStart <= devStart {
+		t.Fatalf("environment blocks missing:\n%s", cm)
+	}
+	devBlock := cm[devStart:prodStart]
+	prodBlock := cm[prodStart:]
+	if strings.Contains(devBlock, `config_source: "prod-nacos"`) {
+		t.Fatalf("dev must keep legacy/default source:\n%s", devBlock)
+	}
+	if !strings.Contains(prodBlock, `config_source: "prod-nacos"`) {
+		t.Fatalf("prod must use resource catalog source:\n%s", prodBlock)
 	}
 }
 
@@ -631,6 +696,17 @@ func TestGenerate_FrontendEntryMap(t *testing.T) {
 	}
 	if !strings.Contains(fm, "candidate_downstream:") {
 		t.Errorf("frontend-entry-map should include candidate_downstream, got:\n%s", fm)
+	}
+	for _, want := range []string{
+		`id: "consumer-h5"`,
+		`id: "admin"`,
+		`url: "https://admin-dev.mall.example.com/console"`,
+		`device_profile: "mobile"`,
+		`- "/console"`,
+	} {
+		if !strings.Contains(fm, want) {
+			t.Fatalf("frontend-entry-map missing named application %q:\n%s", want, fm)
+		}
 	}
 }
 
@@ -828,7 +904,7 @@ func TestGenerate_FrontendEntryMapMatchesBackendRoutes(t *testing.T) {
 	}
 	orderCandidate := orderCandidates[0]
 	if orderCandidate.Service != "order-service" || orderCandidate.Match != "pattern" ||
-		orderCandidate.Route != "/api/orders/:id" || orderCandidate.Method != "GET" || orderCandidate.Source != "handler.go" {
+		orderCandidate.Route != "/api/orders/:id" || orderCandidate.Method != http.MethodGet || orderCandidate.Source != "handler.go" {
 		t.Fatalf("order route candidate = %#v", orderCandidate)
 	}
 	paymentCandidates := candidates["/api/payments/submit"].RouteCandidates
@@ -837,7 +913,7 @@ func TestGenerate_FrontendEntryMapMatchesBackendRoutes(t *testing.T) {
 	}
 	paymentCandidate := paymentCandidates[0]
 	if paymentCandidate.Service != "payment-service" || paymentCandidate.Match != "exact" ||
-		paymentCandidate.Route != "/api/payments/submit" || paymentCandidate.Method != "POST" || paymentCandidate.Source != "routes.ts" {
+		paymentCandidate.Route != "/api/payments/submit" || paymentCandidate.Method != http.MethodPost || paymentCandidate.Source != "routes.ts" {
 		t.Fatalf("payment route candidate = %#v", paymentCandidate)
 	}
 	searchCandidates := candidates["/api/search/items"].RouteCandidates
@@ -846,7 +922,7 @@ func TestGenerate_FrontendEntryMapMatchesBackendRoutes(t *testing.T) {
 	}
 	searchCandidate := searchCandidates[0]
 	if searchCandidate.Service != "search-service" || searchCandidate.Match != "prefix" ||
-		searchCandidate.Route != "/api/search" || searchCandidate.Method != "GET" || searchCandidate.Source != "search.go" {
+		searchCandidate.Route != "/api/search" || searchCandidate.Method != http.MethodGet || searchCandidate.Source != "search.go" {
 		t.Fatalf("search route candidate = %#v", searchCandidate)
 	}
 	noRouteCandidates := candidates["/api/no-route"].RouteCandidates
@@ -965,7 +1041,7 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 	}
 
 	// scripts/ 目录已不再生成 —— install / self-test / uninstall 全部由原生 Go
-	// 实现(agent.InstallNativeOpenclaw / SelfTestOpenclaw / UninstallNativeOpenclaw)
+	// 实现(agent.InstallNative / ProbeMCPServersFromConfig / UninstallNative)
 	if _, err := os.Stat(filepath.Join(out, "scripts")); err == nil {
 		t.Errorf("scripts/ 目录不应存在(install/self-test/uninstall 已 port 到 Go)")
 	}
@@ -1012,8 +1088,8 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "console_analyzer.py")); err != nil {
 		t.Errorf("console_analyzer.py should be generated: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "browser_collect.mjs")); err != nil {
-		t.Errorf("browser_collect.mjs should be generated: %v", err)
+	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "browser_collect.mjs")); !os.IsNotExist(err) {
+		t.Errorf("retired browser collector must not be generated: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "sentry_fetch.py")); err != nil {
 		t.Errorf("sentry_fetch.py should be generated: %v", err)
@@ -1039,6 +1115,16 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 	if !strings.Contains(ii, "frontend-repro-investigator") {
 		t.Errorf("incident-investigator should hand client symptoms to frontend-repro-investigator")
 	}
+	for _, required := range []string{
+		"单集群场景不得因空映射放弃查询",
+		"不得声称“缺少数据库只读工具”",
+		"不允许重新索要或持久化原始 response body",
+		"才能 ASK_USER，并写入 `gaps`",
+	} {
+		if !strings.Contains(ii, required) {
+			t.Errorf("incident-investigator missing responsibility rule %q", required)
+		}
+	}
 }
 
 // 配置中心 prompt 派生由 agent.DerivePrompts 验证,
@@ -1063,8 +1149,8 @@ func TestGenerate_Apollo(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(out, "templates/workspace-template/skills/config-executor/scripts/apollo_config.py")); err != nil {
 		t.Errorf("apollo_config.py should exist: %v", err)
 	}
-	// install.sh 已被 InstallNativeOpenclaw 替换;Apollo 的 prompt / creds.json
-	// 写入由 install_prompts_test.go 和 install_native_openclaw_test.go 覆盖。
+	// install.sh 已被 InstallNative 替换;Apollo 的 prompt / creds.json
+	// 写入由 install_prompts_test.go 和 install_native_test.go 覆盖。
 	// SKILL.md 必须指向脚本
 	skillMD := readFile(t, filepath.Join(out, "templates/workspace-template/skills/config-executor/SKILL.md"))
 	if !strings.Contains(skillMD, "apollo_config.py") {
@@ -1126,111 +1212,6 @@ func TestGenerate_Consul(t *testing.T) {
 	}
 }
 
-func TestGenerate_ClawhubLock(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
-	out := t.TempDir()
-	tr := filepath.Join(projectRoot(t), "templates")
-	if err := New(cfg, tr, out).Generate(); err != nil {
-		t.Fatal(err)
-	}
-
-	lockPath := filepath.Join(out, "templates/workspace-template/.clawhub/lock.json")
-	data, err := os.ReadFile(lockPath)
-	if err != nil {
-		t.Fatalf("lock.json missing: %v", err)
-	}
-	var lock struct {
-		Version int `json:"version"`
-		Skills  map[string]struct {
-			Version     string `json:"version"`
-			InstalledAt int64  `json:"installedAt"`
-		} `json:"skills"`
-	}
-	if err := json.Unmarshal(data, &lock); err != nil {
-		t.Fatalf("parse lock.json: %v", err)
-	}
-	if lock.Version != 1 {
-		t.Errorf("lock.version expected 1, got %d", lock.Version)
-	}
-	// shop-troubleshooter.yaml 的 skills_whitelist 应完整写入 lock.json。
-	wantSkills := []string{
-		"routing",
-		"incident-investigator",
-		"config-executor",
-		"redis-runtime-query",
-		"mongodb-runtime-query",
-		"es-runtime-query",
-		"mysql-runtime-query",
-		"kafka-runtime-query",
-		"tracing-query",
-		"elk-log-query",
-		"frontend-repro-investigator",
-		"diagram-generator",
-	}
-	for _, s := range wantSkills {
-		entry, ok := lock.Skills[s]
-		if !ok {
-			t.Errorf("lock.json missing skill %q", s)
-			continue
-		}
-		if entry.InstalledAt == 0 {
-			t.Errorf("%s.installedAt should be non-zero", s)
-		}
-		if entry.Version == "" {
-			t.Errorf("%s.version should be non-empty", s)
-		}
-	}
-	// 不在白名单里的 skill 不应出现
-	for _, s := range []string{"nonexistent-skill"} {
-		if _, ok := lock.Skills[s]; ok {
-			t.Errorf("lock.json should not contain disabled skill %q", s)
-		}
-	}
-}
-
-func TestGenerate_ClawhubLock_EmptySkills(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
-	// 清空白名单 + 禁用所有 data stores，还要清掉 config center；
-	// 验证必备 skill 仍应生成,避免 validator agent 指向不存在的入口。
-	cfg.Generation.SkillsWhitelist = []string{"__none__"}
-	out := t.TempDir()
-	tr := filepath.Join(projectRoot(t), "templates")
-	if err := New(cfg, tr, out).Generate(); err != nil {
-		t.Fatal(err)
-	}
-	lockPath := filepath.Join(out, "templates/workspace-template/.clawhub/lock.json")
-	data, err := os.ReadFile(lockPath)
-	if err != nil {
-		t.Fatalf("lock.json should exist even with no skills: %v", err)
-	}
-	var lock struct {
-		Version int                    `json:"version"`
-		Skills  map[string]interface{} `json:"skills"`
-	}
-	if err := json.Unmarshal(data, &lock); err != nil {
-		t.Fatal(err)
-	}
-	if lock.Version != 1 {
-		t.Errorf("version expected 1, got %d", lock.Version)
-	}
-	want := map[string]bool{
-		"api-verifier":                 true,
-		"attachment-evidence-verifier": true,
-		"bug-fixer":                    true,
-		"bug-verifier":                 true,
-		"frontend-repro-investigator":  true,
-		"grafana-observability-query":  true,
-	}
-	if len(lock.Skills) != len(want) {
-		t.Fatalf("expected validator baseline and observability skills, got %v", lock.Skills)
-	}
-	for skill := range want {
-		if _, ok := lock.Skills[skill]; !ok {
-			t.Errorf("lock.json missing validator baseline skill %q: %v", skill, lock.Skills)
-		}
-	}
-}
-
 func TestGenerate_FrontendReproArtifacts(t *testing.T) {
 	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
 	out := t.TempDir()
@@ -1242,10 +1223,13 @@ func TestGenerate_FrontendReproArtifacts(t *testing.T) {
 	assertExists(t, root, []string{
 		"skills/frontend-repro-investigator/SKILL.md",
 		"skills/frontend-repro-investigator/scripts/har_analyzer.py",
+		"skills/frontend-repro-investigator/scripts/source_map_locator.py",
 		"skills/routing/references/frontend-entry-map.yaml",
+		"skills/routing/references/async-topology.yaml",
 	})
 	assertNotExists(t, root, []string{
 		"skills/frontend-repro-investigator/scripts/test_har_analyzer.py",
+		"skills/frontend-repro-investigator/scripts/test_source_map_locator.py",
 	})
 }
 
@@ -1258,53 +1242,8 @@ func TestGenerateIncludesBugVerifierSkill(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	root := filepath.Join(out, "templates/workspace-template")
-	assertExists(t, root, []string{
-		"skills/api-verifier/SKILL.md",
-		"skills/attachment-evidence-verifier/SKILL.md",
-		"skills/attachment-evidence-verifier/scripts/attachment_manifest.py",
-		"skills/bug-fixer/SKILL.md",
-		"skills/bug-verifier/SKILL.md",
-		"skills/frontend-repro-investigator/SKILL.md",
-	})
-
-	data := readFile(t, filepath.Join(root, "skills/bug-verifier/SKILL.md"))
-	for _, want := range []string{
-		"verification_status",
-		"environment",
-		"observed_behavior",
-		"expected_behavior",
-		"evidence",
-		"screenshots",
-		"network",
-		"reproduced",
-		"not_reproduced",
-		"insufficient_info",
-		"fixed_verified",
-		"still_reproduces",
-		"gaps",
-		"entry:",
-		"frontend_url",
-		"api_url",
-		"console_errors",
-		"trace_ids",
-		"request_ids",
-		"attachments",
-		"attachment-evidence-verifier",
-		"api-verifier",
-		"frontend-repro-investigator",
-		"handoff_to_troubleshooter",
-		"不读取业务源码",
-		"建议改动",
-	} {
-		if !strings.Contains(data, want) {
-			t.Fatalf("bug-verifier skill missing %q:\n%s", want, data)
-		}
-	}
-	for _, forbidden := range []string{"最可能根因", "RCA", "inconclusive"} {
-		if strings.Contains(data, forbidden) {
-			t.Fatalf("bug-verifier skill should not contain %q:\n%s", forbidden, data)
-		}
-	}
+	assertExists(t, root, []string{"skills/bug-fixer/SKILL.md", "skills/frontend-repro-investigator/SKILL.md"})
+	assertNotExists(t, root, []string{"skills/api-verifier", "skills/attachment-evidence-verifier", "skills/bug-verifier", "skills/frontend-repro-investigator/scripts/browser_collect.mjs"})
 }
 
 func TestGenerateIncludesValidatorSkillsEvenWhenWhitelistOmitsThem(t *testing.T) {
@@ -1319,10 +1258,7 @@ func TestGenerateIncludesValidatorSkillsEvenWhenWhitelistOmitsThem(t *testing.T)
 	}
 	root := filepath.Join(out, "templates/workspace-template")
 	assertExists(t, root, []string{
-		"skills/api-verifier/SKILL.md",
-		"skills/attachment-evidence-verifier/SKILL.md",
 		"skills/bug-fixer/SKILL.md",
-		"skills/bug-verifier/SKILL.md",
 		"skills/frontend-repro-investigator/SKILL.md",
 		"skills/grafana-observability-query/SKILL.md",
 	})
@@ -1340,8 +1276,8 @@ func TestSkillAllowedForAgentRoleScopesValidatorAndTroubleshooter(t *testing.T) 
 		"tracing-query",
 	}
 	for _, skill := range validatorAllowed {
-		if !SkillAllowedForAgentRole(skill, AgentRoleValidator) {
-			t.Fatalf("validator should allow %s", skill)
+		if SkillAllowedForAgentRole(skill, AgentRoleValidator) {
+			t.Fatalf("retired validator should not allow %s", skill)
 		}
 	}
 	validatorDenied := []string{
@@ -1378,6 +1314,33 @@ func TestSkillAllowedForAgentRoleScopesValidatorAndTroubleshooter(t *testing.T) 
 	}
 }
 
+func TestBuildCodexRootSkillIndexMatchesTroubleshooterRole(t *testing.T) {
+	root := t.TempDir()
+	for _, skill := range []string{"incident-investigator", "routing", "bug-verifier", "api-verifier", "attachment-evidence-verifier", "bug-fixer"} {
+		dir := filepath.Join(root, "skills", skill)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: "+skill+"\n---\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	content, err := buildCodexRootSkillMD(root, &Context{SystemConfig: &config.SystemConfig{System: config.System{ID: "base", Name: "Base"}}}, "base-troubleshooter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"incident-investigator/SKILL.md", "routing/SKILL.md", "子 skill 索引(共 2 个)"} {
+		if !strings.Contains(content, required) {
+			t.Fatalf("root skill missing %q:\n%s", required, content)
+		}
+	}
+	for _, forbidden := range []string{"bug-verifier/SKILL.md", "api-verifier/SKILL.md", "attachment-evidence-verifier/SKILL.md", "bug-fixer/SKILL.md"} {
+		if strings.Contains(content, forbidden) {
+			t.Fatalf("troubleshooter root skill indexed %q:\n%s", forbidden, content)
+		}
+	}
+}
+
 // assertExists 检查一组相对路径都存在于 base 下，否则报告缺失。
 func assertExists(t *testing.T, base string, rels []string) {
 	t.Helper()
@@ -1397,8 +1360,8 @@ func assertNotExists(t *testing.T, base string, rels []string) {
 	}
 }
 
-// TestGenerate_MultiTargets_All 覆盖 4 target 全开的共享 staging 路径：
-// openclaw 跑完后，其产物目录被复用为 SharedStaging，后续 target 不再重复渲染 workspace。
+// TestGenerate_MultiTargets_All 覆盖三平台共用 staging 的路径：
+// 共享 workspace 渲染完成后，各平台复用 SharedStaging。
 // 对每个 target 目录断言关键产物存在。
 func TestGenerate_MultiTargets_All(t *testing.T) {
 	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
@@ -1407,13 +1370,13 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 
 	g := New(cfg, tr, out)
 
-	// openclaw
+	// 共享 workspace
 	if err := g.Generate(); err != nil {
-		t.Fatalf("openclaw: %v", err)
+		t.Fatalf("workspace: %v", err)
 	}
 	g.SharedStaging = g.OutputDir
 
-	// non-openclaw targets 复用 staging
+	// 三平台复用 staging
 	if err := g.GenerateClaudeCode(); err != nil {
 		t.Fatalf("claude-code: %v", err)
 	}
@@ -1432,43 +1395,33 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 	// install.sh 已删除 —— 装到 ~/.claude|cursor/ 现在由 agent.InstallNative 完成
 	assertExists(t, out+"-claude-code", []string{
 		"agents/shop-bot.md",
-		"agents/shop-validator.md",
 		"agents/shop-fixer.md",
 		"agents-meta/shop-bot/tshoot.json",
-		"agents-meta/shop-validator/tshoot.json",
 		"agents-meta/shop-fixer/tshoot.json",
 		"skills/routing/SKILL.md",
 	})
 	assertExists(t, out+"-cursor", []string{
 		"agents/shop-bot.md",
-		"agents/shop-validator.md",
 		"agents/shop-fixer.md",
 		"agents-meta/shop-bot/tshoot.json",
-		"agents-meta/shop-validator/tshoot.json",
 		"agents-meta/shop-fixer/tshoot.json",
 		"skills/routing/SKILL.md",
 	})
 	assertExists(t, out+"-codex", []string{
 		"agents/shop-bot.toml",
-		"agents/shop-validator.toml",
 		"agents/shop-fixer.toml",
 		"agents-meta/shop-bot/tshoot.json",
-		"agents-meta/shop-validator/tshoot.json",
 		"agents-meta/shop-fixer/tshoot.json",
 		"skills/routing/SKILL.md",
 	})
 	assertAgentMetaRole(t, filepath.Join(out+"-claude-code", "agents-meta/shop-bot/tshoot.json"), "shop-bot", "troubleshooter")
-	assertAgentMetaRole(t, filepath.Join(out+"-claude-code", "agents-meta/shop-validator/tshoot.json"), "shop-validator", "validator")
 	assertAgentMetaRole(t, filepath.Join(out+"-claude-code", "agents-meta/shop-fixer/tshoot.json"), "shop-fixer", "fixer")
 
 	assertTroubleshooterAgentDefinition(t, filepath.Join(out+"-claude-code", "agents/shop-bot.md"))
-	assertValidatorAgentDefinition(t, filepath.Join(out+"-claude-code", "agents/shop-validator.md"))
 	assertFixerAgentDefinition(t, filepath.Join(out+"-claude-code", "agents/shop-fixer.md"))
 	assertTroubleshooterAgentDefinition(t, filepath.Join(out+"-cursor", "agents/shop-bot.md"))
-	assertValidatorAgentDefinition(t, filepath.Join(out+"-cursor", "agents/shop-validator.md"))
 	assertFixerAgentDefinition(t, filepath.Join(out+"-cursor", "agents/shop-fixer.md"))
 	assertTroubleshooterAgentDefinition(t, filepath.Join(out+"-codex", "agents/shop-bot.toml"))
-	assertValidatorAgentDefinition(t, filepath.Join(out+"-codex", "agents/shop-validator.toml"))
 	assertFixerAgentDefinition(t, filepath.Join(out+"-codex", "agents/shop-fixer.toml"))
 
 	// copyDirRecursive (claude-code / cursor 路径) 也必须过滤 test_*.py。脚本被复制两份:
@@ -1485,10 +1438,10 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 	}
 }
 
-// TestGenerate_MultiTargets_NoOpenclaw 覆盖"非 openclaw 独占"路径：
+// TestGenerate_MultiTargets_TemporaryStaging 覆盖独立临时 staging 路径：
 // 调用方先把 workspace 渲染到一个临时 staging，再跑各 target。
-// openclaw 产物目录不会被创建。
-func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
+// 基础输出目录不会作为可部署平台创建。
+func TestGenerate_MultiTargets_TemporaryStaging(t *testing.T) {
 	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	out := filepath.Join(t.TempDir(), "sys")
 	tr := filepath.Join(projectRoot(t), "templates")
@@ -1512,26 +1465,22 @@ func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
 		t.Fatalf("codex: %v", err)
 	}
 
-	// openclaw 目录不应存在
+	// 基础输出目录不应存在
 	if _, err := os.Stat(out); err == nil {
-		t.Errorf("openclaw output dir %s should NOT exist when openclaw not in targets", out)
+		t.Errorf("base output dir %s should NOT exist when staging is temporary", out)
 	}
 
 	// 其它 target 产物存在(install.sh 已挪到 InstallNative,产物里只剩纯素材)
 	assertExists(t, out+"-claude-code", []string{
 		"agents/shop-bot.md",
-		"agents/shop-validator.md",
 		"agents/shop-fixer.md",
 		"agents-meta/shop-bot/tshoot.json",
-		"agents-meta/shop-validator/tshoot.json",
 		"agents-meta/shop-fixer/tshoot.json",
 	})
 	assertExists(t, out+"-codex", []string{
 		"agents/shop-bot.toml",
-		"agents/shop-validator.toml",
 		"agents/shop-fixer.toml",
 		"agents-meta/shop-bot/tshoot.json",
-		"agents-meta/shop-validator/tshoot.json",
 		"agents-meta/shop-fixer/tshoot.json",
 	})
 }
@@ -1559,34 +1508,6 @@ func assertTroubleshooterAgentDefinition(t *testing.T, path string) {
 	} {
 		if !strings.Contains(data, want) {
 			t.Fatalf("troubleshooter agent %s missing %q:\n%s", path, want, data)
-		}
-	}
-}
-
-func assertValidatorAgentDefinition(t *testing.T, path string) {
-	t.Helper()
-	data := readFile(t, path)
-	for _, want := range []string{
-		"bug-verifier",
-		"验证",
-		"主动复现",
-		"修复后复查",
-		"验证报告",
-		"不读取业务源码",
-		"原因判断交给排障 Agent",
-	} {
-		if !strings.Contains(data, want) {
-			t.Fatalf("validator agent %s missing %q:\n%s", path, want, data)
-		}
-	}
-	for _, forbidden := range []string{
-		"RCA",
-		"根因",
-		"incident-investigator",
-		"故障快报",
-	} {
-		if strings.Contains(data, forbidden) {
-			t.Fatalf("validator agent %s should not contain %q:\n%s", path, forbidden, data)
 		}
 	}
 }
@@ -1651,5 +1572,89 @@ func TestGenerate_WithAnalysis_UpgradesInferredToVerified(t *testing.T) {
 	}
 	if row["dataId"] != "order-worker.yaml" {
 		t.Errorf("order-worker/dev dataId expected order-worker.yaml, got %v", row["dataId"])
+	}
+}
+
+func TestGenerateKuboardNativeMCPRoutingAndLegacyFallback(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	cfg.Infrastructure.ConfigCenters = []config.ConfigCenter{{ID: "ops", Type: "kuboard", Endpoints: []config.ConfigCenterEndpoint{
+		{Env: "dev", URL: "https://kb.example", MCPURL: "https://kb.example/mcp"},
+		{Env: "prod", URL: "https://old-kb.example"},
+	}}}
+	cfg.Infrastructure.Observability.K8sRuntime = config.K8sRuntime{Enabled: true, Provider: "kuboard", Endpoints: []config.ObsEndpoint{{Env: "dev", MCPURL: "https://runtime.example/mcp"}, {Env: "prod"}}}
+	for i := range cfg.Repos {
+		cfg.Repos[i].ConfigSource = "ops"
+	}
+	out := t.TempDir()
+	if err := New(cfg, filepath.Join(projectRoot(t), "templates"), out).Generate(); err != nil {
+		t.Fatal(err)
+	}
+	rows := loadConfigMap(t, filepath.Join(out, "templates/workspace-template/skills/routing/references/config-map.yaml"))
+	native := rows["dev"]["order-service"]
+	if native["mcp_server"] != "shop-kuboard-ops-dev" || native["runtime"] != nil {
+		t.Fatalf("native routing=%v", native)
+	}
+	legacy := rows["prod"]["order-service"]
+	if legacy["runtime"] != "kuboard-http" || legacy["mcp_server"] != nil {
+		t.Fatalf("legacy routing=%v", legacy)
+	}
+	data, err := os.ReadFile(filepath.Join(out, "templates/workspace-template/skills/routing/references/observability-map.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obs map[string]any
+	if err := yaml.Unmarshal(data, &obs); err != nil {
+		t.Fatal(err)
+	}
+	nativeServers := obs["k8s_runtime"].(map[string]any)["mcp_server_by_env"].(map[string]any)
+	if !reflect.DeepEqual(nativeServers, map[string]any{"dev": "shop-k8s-kuboard-dev"}) {
+		t.Fatalf("runtime routing=%v", nativeServers)
+	}
+
+}
+
+func TestGenerateConsulOfficialRouting(t *testing.T) {
+	cfg := loadCfg(t, "examples/consul-troubleshooter.yaml")
+	cfg.Infrastructure.Observability.SkyWalking.Enabled = true
+	cfg.Generation.SkillsWhitelist = append(cfg.Generation.SkillsWhitelist, "skywalking-query")
+	out := t.TempDir()
+	if err := New(cfg, filepath.Join(projectRoot(t), "templates"), out).Generate(); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(out, "templates/workspace-template/skills")
+	rows := loadConfigMap(t, filepath.Join(base, "routing/references/config-map.yaml"))
+	for env, services := range rows {
+		for service, row := range services {
+			if row["runtime"] != "consul-mcp" || row["mcp_server"] != nil {
+				t.Fatalf("%s/%s: %v", env, service, row)
+			}
+		}
+	}
+	for file, wants := range map[string][]string{
+		"config-executor/SKILL.md":  {"kv_get", "kv_keys", "--source <source>", "consul_config.py"},
+		"skywalking-query/SKILL.md": {"iot-skywalking-<env>", "query_traces", "query_services_topology", "GraphQL API"},
+	} {
+		data := readFile(t, filepath.Join(base, file))
+		for _, want := range wants {
+			if !strings.Contains(data, want) {
+				t.Errorf("%s missing %s", file, want)
+			}
+		}
+	}
+}
+
+func TestGenerateConsulSecondarySourceKeepsFallback(t *testing.T) {
+	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
+	cfg.Infrastructure.ConfigCenters = append(cfg.Infrastructure.ConfigCenters, config.ConfigCenter{ID: "ops", Type: "consul"})
+	out := t.TempDir()
+	if err := New(cfg, filepath.Join(projectRoot(t), "templates"), out).Generate(); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(out, "templates/workspace-template/skills/config-executor")
+	if _, err := os.Stat(filepath.Join(base, "scripts/consul_config.py")); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(readFile(t, filepath.Join(base, "SKILL.md")), "--source <source>") {
+		t.Fatal("missing secondary source guidance")
 	}
 }

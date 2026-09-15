@@ -1,7 +1,6 @@
 // Package discover 负责从本机文件系统反向识别已安装的排障机器人。
 //
 // 核心锚点是各 target 产物根下的 tshoot.json —— tshoot 在 gen 时写入它，
-// install.sh 会把它拷到最终部署路径（~/.openclaw/workspace/<name>/tshoot.json
 // 或目标项目根）。discover 扫到这个文件 = 这是 Troubleshooter Studio 生成的机器人。
 package discover
 
@@ -25,6 +24,16 @@ type InternalAgent struct {
 	Role string `json:"role"`
 }
 
+// ProjectRepository 是业务项目与机器人之间的机器可判定归属证据。
+// URL 可跨机器共享；LocalPath 是部署机器上的强匹配证据；SubPath 用于 monorepo。
+// 该字段只做 IDE 路由，不替代 routing skill 内更完整的仓库/服务映射。
+type ProjectRepository struct {
+	Name      string `json:"name"`
+	URL       string `json:"url,omitempty"`
+	LocalPath string `json:"local_path,omitempty"`
+	SubPath   string `json:"sub_path,omitempty"`
+}
+
 // Meta 是 tshoot.json 的 schema。字段尽量稳定，新增字段要向后兼容。
 type Meta struct {
 	// SchemaVersion 让未来扩字段时不破坏旧机器人的 discover
@@ -43,8 +52,11 @@ type Meta struct {
 	Role           string          `json:"role,omitempty"`
 	InternalAgents []InternalAgent `json:"internal_agents,omitempty"`
 
-	// Target 是本产物的部署形态：openclaw / claude-code / cursor / embedded
-	Target string `json:"target"`
+	// ProjectRepositories 供用户级 IDE 的全局路由入口判断“当前项目属于哪台机器人”。
+	// 老产物没有该字段时仍可被 discover 读取；路由器会回退到 ~/.tshoot/config.json
+	// 里的 repo_paths_by_system，本字段是 additive schema。
+	ProjectRepositories []ProjectRepository `json:"project_repositories,omitempty"`
+	Target              string              `json:"target"`
 
 	// GeneratedAt RFC3339 时间戳
 	GeneratedAt string `json:"generated_at"`
@@ -80,7 +92,6 @@ type DiscoveredAgent struct {
 	// 由调用方(bindings_repo.go DiscoverBots)在 Scan 后 enrichment 填。Scan 自身
 	// 不依赖 aitools 包,这字段对纯 discover 调用方(CLI tshoot discover)是 false +
 	// 无意义(不影响展示),BotsPage 用它标 "⚠ IDE 已卸载,机器人不可用"。
-	// openclaw target 始终视为 available(openclaw 是产品自带,不靠探测三方 IDE)。
 	IDEAvailable bool `json:"ide_available"`
 
 	// Ghost 标"~/.tshoot/config.json deployed_bots 里有但 disk 上 tshoot.json 不在"。

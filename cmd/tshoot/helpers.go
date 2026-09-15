@@ -161,4 +161,3 @@ func extractEmbeddedFS(fsys embed.FS, rootSubdir, tmpPrefix string) (string, err
 
 // ── discover：扫本机已装机器人 ───────────────────────────────────
 // tshoot discover [--roots <path1>,<path2>] [--format text|json]
-// 默认扫 ~/.openclaw/workspace + CWD(discover.DefaultRoots 的语义)。

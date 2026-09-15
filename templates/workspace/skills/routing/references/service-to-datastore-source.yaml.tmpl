@@ -20,7 +20,7 @@
 #     例如 MCP key `mongodb-mongo-commerce-test` → source 是 `mongo-commerce`。
 #
 # source 名怎么知道:
-#   - 命令行跑 `cat ~/.openclaw/openclaw.json | jq '.mcp.servers | keys'`(或对应 IDE config),
+#   - 命令行跑 `cat ~/.tshoot/AI 客户端.json | jq '.mcp.servers | keys'`(或对应 IDE config),
 #     看注册了哪些 `<type>-<source>-<env>` 形态的 key,从中挑出 source 段填入本表。
 #   - 也可以从 troubleshooter.yaml 的 endpoints[] URI 反推:URI 形如
 #     `mongodb://mongo-commerce.test.example.com:27017/...`,source 就是 host 第一段

@@ -16,11 +16,10 @@ import (
 
 var (
 	ErrMergeApprovalStale       = errors.New("merge approval target HEAD is stale")
-	ErrGitWorktreeDirty         = errors.New("repository worktree is dirty")
 	ErrGitDetachedHEAD          = errors.New("repository is on a detached HEAD")
 	ErrGitRemoteNotSSH          = errors.New("push remote is not SSH")
 	ErrGitMergeConflict         = errors.New("git merge would conflict")
-	ErrStudioWorktree           = errors.New("Studio dedicated worktree is invalid")
+	ErrStudioWorktree           = errors.New("studio dedicated worktree is invalid")
 	ErrFixRemoteMismatch        = errors.New("remote fix branch does not match the checkpoint")
 	ErrFixInspectionUnavailable = errors.New("remote fix inspection is temporarily unavailable")
 )
@@ -293,9 +292,13 @@ func (s *GitIntegrationService) inspectRepo(ctx context.Context, caseID string, 
 	cmd.Env = gitEnvironment()
 	output, mergeErr := cmd.CombinedOutput()
 	if mergeErr != nil {
-		result.Conflict = true
 		result.Error = strings.TrimSpace(string(output))
-		return result, nil
+		var exitErr *exec.ExitError
+		if errors.As(mergeErr, &exitErr) && exitErr.ExitCode() == 1 {
+			result.Conflict = true
+			return result, nil //nolint:nilerr // merge-tree exit 1 is the inspected conflict result, not a failed inspection.
+		}
+		return result, fmt.Errorf("inspect merge tree: %w", mergeErr)
 	}
 	return result, nil
 }
@@ -344,17 +347,16 @@ func (s *GitIntegrationService) mergeRepo(ctx context.Context, req MergeRequest,
 	} else if statErr != nil {
 		return inspection, statErr
 	} else if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return inspection, errors.New("Studio worktree path is not a real directory")
+		return inspection, errors.New("studio worktree path is not a real directory")
 	} else if _, gitErr := os.Lstat(filepath.Join(worktree, ".git")); gitErr != nil {
 		return inspection, errors.New("existing Studio worktree is not registered with Git")
 	}
-	if err := gitRun(ctx, worktree, "config", "user.name", "Troubleshooter Studio"); err != nil {
+	identity, err := resolveGitIdentity(ctx, path)
+	if err != nil {
+		inspection.Error = err.Error()
 		return inspection, err
 	}
-	if err := gitRun(ctx, worktree, "config", "user.email", "studio@localhost"); err != nil {
-		return inspection, err
-	}
-	if err := gitRun(ctx, worktree, "merge", "--no-edit", change.FixCommit); err != nil {
+	if err := gitRunWithIdentity(ctx, worktree, identity, "merge", "--no-edit", change.FixCommit); err != nil {
 		inspection.Conflict = true
 		inspection.Error = err.Error()
 		return inspection, ErrGitMergeConflict
@@ -392,13 +394,9 @@ func (s *GitIntegrationService) validateRepository(ctx context.Context, caseID s
 	if err != nil {
 		return "", "", err
 	}
-	status, err := gitOutput(ctx, path, "status", "--porcelain")
-	if err != nil {
-		return "", "", err
-	}
-	if status != "" {
-		return "", "", ErrGitWorktreeDirty
-	}
+	// The configured checkout is only the Git object store and remote source.
+	// All merges happen in a Studio-owned dedicated worktree, so user edits and
+	// untracked files in this checkout are unrelated and must remain untouched.
 	branch, err := gitOutput(ctx, path, "symbolic-ref", "--short", "HEAD")
 	if err != nil || branch == "" {
 		return "", "", ErrGitDetachedHEAD
@@ -508,8 +506,79 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 	return strings.TrimSpace(string(output)), nil
 }
 
+const (
+	legacyStudioGitUserName  = "Troubleshooter Studio"
+	legacyStudioGitUserEmail = "studio@localhost"
+)
+
+type gitIdentity struct {
+	Name  string
+	Email string
+}
+
+func resolveGitIdentity(ctx context.Context, sourcePath string) (gitIdentity, error) {
+	if identity, ok := readGitIdentity(ctx, sourcePath); ok && !isLegacyStudioGitIdentity(identity) {
+		return identity, nil
+	}
+	if identity, ok := readGitIdentity(ctx, sourcePath, "--global"); ok && !isLegacyStudioGitIdentity(identity) {
+		return identity, nil
+	}
+	for _, keys := range [][2]string{
+		{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"},
+		{"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"},
+	} {
+		identity := gitIdentity{
+			Name:  strings.TrimSpace(os.Getenv(keys[0])),
+			Email: strings.TrimSpace(os.Getenv(keys[1])),
+		}
+		if identity.Name != "" && identity.Email != "" && !isLegacyStudioGitIdentity(identity) {
+			return identity, nil
+		}
+	}
+	return gitIdentity{}, errors.New(
+		"personal Git identity is not configured; set it before starting a fix: " +
+			`git config --global user.name "<your name>" and ` +
+			`git config --global user.email "<your email>"`,
+	)
+}
+
+func readGitIdentity(ctx context.Context, sourcePath string, scope ...string) (gitIdentity, bool) {
+	args := append([]string{"config"}, scope...)
+	name, nameErr := gitOutput(ctx, sourcePath, append(args, "--get", "user.name")...)
+	email, emailErr := gitOutput(ctx, sourcePath, append(args, "--get", "user.email")...)
+	identity := gitIdentity{Name: strings.TrimSpace(name), Email: strings.TrimSpace(email)}
+	return identity, nameErr == nil && emailErr == nil && identity.Name != "" && identity.Email != ""
+}
+
+func isLegacyStudioGitIdentity(identity gitIdentity) bool {
+	return strings.EqualFold(strings.TrimSpace(identity.Name), legacyStudioGitUserName) ||
+		strings.EqualFold(strings.TrimSpace(identity.Email), legacyStudioGitUserEmail)
+}
+
+func configureStandaloneGitIdentity(ctx context.Context, sourcePath, destinationPath string) error {
+	identity, err := resolveGitIdentity(ctx, sourcePath)
+	if err != nil {
+		return err
+	}
+	if err := gitRun(ctx, destinationPath, "config", "--local", "user.name", identity.Name); err != nil {
+		return err
+	}
+	return gitRun(ctx, destinationPath, "config", "--local", "user.email", identity.Email)
+}
+
+func gitRunWithIdentity(ctx context.Context, dir string, identity gitIdentity, args ...string) error {
+	scopedArgs := []string{"-c", "user.name=" + identity.Name, "-c", "user.email=" + identity.Email}
+	return gitRun(ctx, dir, append(scopedArgs, args...)...)
+}
+
 func gitEnvironment() []string {
-	return append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_MERGE_AUTOEDIT=no")
+	env := os.Environ()
+	if strings.TrimSpace(os.Getenv("HOME")) == "" {
+		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+			env = append(env, "HOME="+home)
+		}
+	}
+	return append(env, "GIT_TERMINAL_PROMPT=0", "GIT_MERGE_AUTOEDIT=no")
 }
 func normalizedRemote(remote string) string {
 	if strings.TrimSpace(remote) == "" {
@@ -522,7 +591,7 @@ func isFullGitObjectID(value string) bool {
 		return false
 	}
 	for _, ch := range value {
-		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') && (ch < 'A' || ch > 'F') {
 			return false
 		}
 	}
@@ -539,7 +608,7 @@ func (s *GitIntegrationService) worktreePath(caseID, repo, targetHead, fixCommit
 
 func prepareStudioWorktreeRoot(root string) error {
 	if strings.TrimSpace(root) == "" {
-		return errors.New("Studio worktree root is required")
+		return errors.New("studio worktree root is required")
 	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return err
@@ -549,7 +618,7 @@ func prepareStudioWorktreeRoot(root string) error {
 		return err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return errors.New("Studio worktree root must be a real directory")
+		return errors.New("studio worktree root must be a real directory")
 	}
 	return os.Chmod(root, 0o700)
 }

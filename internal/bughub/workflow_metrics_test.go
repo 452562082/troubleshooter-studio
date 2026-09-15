@@ -116,6 +116,26 @@ func TestWorkflowMetricsExcludesArchivedCasesFromOutcomes(t *testing.T) {
 	}
 }
 
+func TestWorkflowMetricsTracksNonCodeRemediationSeparatelyFromCodeFix(t *testing.T) {
+	t0 := time.Date(2026, 7, 19, 8, 0, 0, 0, time.UTC)
+	closed := t0.Add(6 * time.Hour)
+	incident := IncidentCase{ID: "remediation", BugID: "bug-remediation", Status: CaseFixedVerified, CycleNumber: 1, CreatedAt: t0, UpdatedAt: closed, ClosedAt: &closed}
+	events := []TransitionEvent{
+		metricEvent("wait-remediation", CaseRootCauseReady, CaseWaitingRemediation, "remediation_confirmation_requested", "studio", t0.Add(time.Hour)),
+		metricEvent("remediation-applied", CaseWaitingRemediation, CaseRemediationApplied, "remediation_regression_reserved", "user", t0.Add(3*time.Hour)),
+		metricEvent("regression-started", CaseRemediationApplied, CaseRegressionValidating, "regression_started", "studio", t0.Add(3*time.Hour)),
+		metricEvent("regression-done", CaseRegressionValidating, CaseFixedVerified, "regression_fixed", "agent", closed),
+	}
+
+	metrics := FoldWorkflowMetrics(closed, []WorkflowCaseHistory{{Case: incident, Events: events}})
+	if got := metrics.MedianStageDuration[WorkflowStageRemediation]; got != 2*time.Hour {
+		t.Fatalf("remediation duration=%s", got)
+	}
+	if _, found := metrics.MedianStageDuration[WorkflowStageFix]; found {
+		t.Fatalf("non-code remediation contributed to code fix stage: %+v", metrics.MedianStageDuration)
+	}
+}
+
 func metricEvent(id string, from, to CaseStatus, eventType, actor string, at time.Time) TransitionEvent {
 	return TransitionEvent{ID: id, CaseID: "case", FromStatus: from, ToStatus: to, EventType: eventType, ActorType: actor, ActorID: actor, IdempotencyKey: id, PayloadJSON: []byte(`{}`), CreatedAt: at}
 }

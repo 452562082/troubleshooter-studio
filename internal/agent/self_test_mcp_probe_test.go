@@ -1,12 +1,60 @@
 package agent
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestDoProbeMCPHTTPServerInitializesSessionAndListsTools(t *testing.T) {
+	const token = "Bearer test-token"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != token {
+			http.Error(w, "api key required", http.StatusUnauthorized)
+			return
+		}
+		var message map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&message); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		switch message["method"] {
+		case "initialize":
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Mcp-Session-Id", "session-1")
+			_, _ = w.Write([]byte("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}}}}\n\n"))
+		case "notifications/initialized":
+			if request.Header.Get("Mcp-Session-Id") != "session-1" {
+				http.Error(w, "session required", http.StatusBadRequest)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			if request.Header.Get("Mcp-Session-Id") != "session-1" || request.Header.Get("MCP-Protocol-Version") != "2024-11-05" {
+				http.Error(w, "protocol session required", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"list_deployments"}]}}`))
+		default:
+			http.Error(w, "unknown method", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	result := doProbeMCPHTTPServer(context.Background(), server.URL, map[string]string{"Authorization": token}, 5*time.Second)
+	if result.Err != nil || len(result.Tools) != 1 || result.Tools[0] != "list_deployments" {
+		t.Fatalf("HTTP MCP probe result=%+v", result)
+	}
+}
 
 func TestProbeMCPServersFromConfig_InheritsEnvironmentAndSpecOverrides(t *testing.T) {
 	t.Setenv("TSHOOT_PARENT_ENV", "parent")
@@ -46,6 +94,57 @@ func TestProbeMCPServersFromConfig_InheritsEnvironmentAndSpecOverrides(t *testin
 	}
 	if len(checks) != 1 || !strings.Contains(checks[0], "PASS") {
 		t.Fatalf("unexpected checks: %v", checks)
+	}
+}
+
+func TestProbeMCPServersFromConfigProbesStreamableHTTPWithHeaders(t *testing.T) {
+	old := probeMCPHTTPFunc
+	var capturedURL string
+	var capturedHeaders map[string]string
+	probeMCPHTTPFunc = func(_ context.Context, rawURL string, headers map[string]string, _ time.Duration) MCPProbeResult {
+		capturedURL = rawURL
+		capturedHeaders = headers
+		return MCPProbeResult{Tools: []string{"list_deployments"}}
+	}
+	t.Cleanup(func() { probeMCPHTTPFunc = old })
+
+	servers := map[string]any{
+		"base-one2all": map[string]any{
+			"type": "streamable-http",
+			"url":  "https://one2all.example.test/mcp",
+			"headers": map[string]any{
+				"Authorization": "Bearer secret",
+			},
+		},
+	}
+	var checks []SelfTestCheck
+	probeMCPServersFromConfig(context.Background(), servers, func(name, status, detail string) {
+		checks = append(checks, SelfTestCheck{Name: name, Status: status, Detail: detail})
+	})
+	if capturedURL != "https://one2all.example.test/mcp" || capturedHeaders["Authorization"] != "Bearer secret" {
+		t.Fatalf("HTTP MCP probe did not receive configured auth: url=%q headers=%v", capturedURL, capturedHeaders)
+	}
+	if len(checks) != 1 || checks[0].Status != "PASS" || !strings.Contains(checks[0].Detail, "list_deployments") {
+		t.Fatalf("unexpected HTTP MCP checks: %#v", checks)
+	}
+}
+
+func TestProbeMCPServersFromConfigReportsHTTPAuthenticationFailure(t *testing.T) {
+	old := probeMCPHTTPFunc
+	probeMCPHTTPFunc = func(context.Context, string, map[string]string, time.Duration) MCPProbeResult {
+		return MCPProbeResult{Err: errors.New("initialize HTTP 401: api key required")}
+	}
+	t.Cleanup(func() { probeMCPHTTPFunc = old })
+
+	servers := map[string]any{
+		"base-one2all": map[string]any{"type": "streamable-http", "url": "https://one2all.example.test/mcp"},
+	}
+	var checks []SelfTestCheck
+	probeMCPServersFromConfig(context.Background(), servers, func(name, status, detail string) {
+		checks = append(checks, SelfTestCheck{Name: name, Status: status, Detail: detail})
+	})
+	if len(checks) != 1 || checks[0].Status != "FAIL" || !strings.Contains(checks[0].Detail, "鉴权或初始化失败") {
+		t.Fatalf("HTTP MCP auth failure must be explicit: %#v", checks)
 	}
 }
 
@@ -221,4 +320,58 @@ func envSliceToMap(items []string) map[string]string {
 		}
 	}
 	return out
+}
+
+func TestReadMCPHTTPResponseDoesNotWaitForSSEClose(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer func() { _ = reader.Close() }()
+	defer func() { _ = writer.Close() }()
+	go func() {
+		_, _ = io.WriteString(writer, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n")
+	}()
+	done := make(chan error, 1)
+	go func() { _, err := readMCPHTTPResponse(reader); done <- err }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("must consume the response without waiting for SSE EOF")
+	}
+}
+
+func TestDoProbeMCPHTTPServerRejectsRedirectAndRedactsRPCError(t *testing.T) {
+	for _, redirect := range []bool{true, false} {
+		targetCalled := false
+		target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { targetCalled = true; w.WriteHeader(http.StatusOK) }))
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if redirect {
+				http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+				return
+			}
+			_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"secret-token","data":"secret-token"}}`)
+		}))
+		result := doProbeMCPHTTPServer(context.Background(), server.URL, map[string]string{"Authorization": "Bearer secret-token"}, time.Second)
+		server.Close()
+		target.Close()
+		if result.Err == nil || strings.Contains(result.Err.Error(), "secret-token") || targetCalled {
+			t.Fatalf("unsafe probe result: %+v", result)
+		}
+	}
+}
+
+func TestReadMCPResponseSkipsNotificationsAndUnrelatedResults(t *testing.T) {
+	input := `{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}
+{"jsonrpc":"2.0","id":1,"result":{}}
+{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"find"}]}}
+`
+	result, err := readMCPResponse(context.Background(), bufio.NewReader(strings.NewReader(input)), 2)
+	if err != nil || !reflect.DeepEqual(mcpToolNames(result), []string{"find"}) {
+		t.Fatalf("result=%v err=%v", result, err)
+	}
+	_, err = readMCPResponse(context.Background(), bufio.NewReader(strings.NewReader(`{"jsonrpc":"2.0","id":1,"result":{}}`+"\n")), 2)
+	if err == nil {
+		t.Fatal("missing matching response must fail")
+	}
 }

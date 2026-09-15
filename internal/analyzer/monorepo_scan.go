@@ -1,7 +1,8 @@
 // monorepo_scan.go —— 自动识别 monorepo 子模块。
 //
-// 用户给一个仓库本地路径,本文件的 dispatcher 按优先级跑各 detect* 路径,
-// 命中即返回每个子模块的 {Name, SubPath, Stack, RoleHint};Wizard UI 据此给"一键拆成 N 行"按钮。
+// 用户给一个仓库本地路径,本文件的 dispatcher 按优先级跑各 detect* 路径。
+// Node workspace 会先区分“可部署应用”和普通源码包；其它路径命中即返回每个子模块的
+// {Name, SubPath, Stack, RoleHint};Wizard UI 据此展示同仓服务入口或独立子模块。
 //
 // 各探测路径已按域拆到子文件:
 //
@@ -47,7 +48,16 @@ func DetectSubmodules(repoPath string) []SubmoduleHint {
 		return nil
 	}
 
-	// 1. Git submodules(.gitmodules):umbrella repo 显式声明的子模块,可信度最高
+	// Node 仓库可能同时包含第三方 git submodule 和自己的 workspace 应用。
+	// `.gitmodules` 不能在这种场景抢先结束扫描：它描述的是源码依赖，不等于本仓的
+	// 运行服务。若根应用 + workspace 中至少有两个带 Dockerfile 的可启动应用，优先
+	// 返回这些真正的部署入口；普通 workspace 包 / SDK / lint config 不计入。
+	if hints := detectDeployableNodeApps(repoPath); len(hints) > 1 {
+		return hints
+	}
+
+	// 1. Git submodules(.gitmodules):umbrella repo 显式声明的子模块,可信度最高。
+	//    上面的多应用 Node 特例优先，是为避免第三方源码依赖掩盖本仓部署入口。
 	if hints := detectGitSubmodules(repoPath); len(hints) > 0 {
 		return hints
 	}

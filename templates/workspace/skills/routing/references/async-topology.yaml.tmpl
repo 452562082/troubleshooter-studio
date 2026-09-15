@@ -1,0 +1,17 @@
+# async-topology.yaml
+# Kafka/RabbitMQ 字面量静态扫描导航。必须用 message id、trace link 或同窗口生产/消费日志验证，不能单独证明运行时调用。
+schema_version: "1"
+evidence_kind: "static_navigation"
+repositories:
+{{range .Repos}}  - repo: {{.Name | printf "%q"}}
+    role: {{.EffectiveRole | printf "%q"}}
+    endpoints:{{with index $.MessagingByRepo .Name}}{{range .}}
+      - broker: {{.Broker | printf "%q"}}
+        direction: {{.Direction | printf "%q"}}
+        destination_kind: {{.DestinationKind | printf "%q"}}
+        destination: {{.Destination | printf "%q"}}
+{{if .RoutingKey}}        routing_key: {{.RoutingKey | printf "%q"}}
+{{end}}        location: {{printf "%s:%d" .Source .Line | printf "%q"}}
+        strength: {{.Strength | printf "%q"}}
+{{end}}{{else}} []
+{{end}}{{end}}

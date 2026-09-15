@@ -164,18 +164,18 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 		}
 	}
 
-	// ── mongodb:走 npx mcp-mongo-server,凭据用 MCP_MONGODB_URI env(v2+ 支持) ──
+	// ── mongodb:走 npx mongodb-mcp-server,凭据用 MDB_MCP_CONNECTION_STRING env ──
 	// 自动 normalize URI 补 authSource=admin + directConnection=true(单节点绕
 	// Node driver wire 27 SDAM 兼容 bug,详见 ensureDirectConnection 注释)。
 	mongoSpec := servers["bot-mongodb-dev"].(map[string]any)
 	if mongoSpec["command"] != "npx" {
 		t.Errorf("mongodb command 应为 npx,实际 %v", mongoSpec["command"])
 	}
-	if got := argString(mongoSpec); got != "[-y mcp-mongo-server --read-only]" {
+	if got := argString(mongoSpec); got != "[-y mongodb-mcp-server@2.1.1]" {
 		t.Errorf("mongodb args mismatch: %s", got)
 	}
-	if envOf(mongoSpec)["MCP_MONGODB_URI"] != "mongodb://u:p@m.local:27017/app?authSource=admin&directConnection=true" {
-		t.Errorf("mongodb MCP_MONGODB_URI env mismatch: %v", envOf(mongoSpec))
+	if envOf(mongoSpec)["MDB_MCP_CONNECTION_STRING"] != "mongodb://u:p@m.local:27017/app?authSource=admin&directConnection=true" {
+		t.Errorf("mongodb MDB_MCP_CONNECTION_STRING env mismatch: %v", envOf(mongoSpec))
 	}
 
 	// ── postgres:@henkey/postgres-mcp-server,env POSTGRES_CONNECTION_STRING(凭据不落 args)──
@@ -188,10 +188,12 @@ func TestBuildMCPServers_DataStores(t *testing.T) {
 		t.Errorf("postgres POSTGRES_CONNECTION_STRING env mismatch: %v", envOf(pgSpec))
 	}
 
-	// ── redis:钉死 1.0.0 + URL 位置参数(防 @latest 漂移)──
-	// 上游包不接 env,凭据落 args。
-	if got := argString(servers["bot-redis-dev"]); got != "[-y @gongrzhe/server-redis-mcp@1.0.0 redis://default:rpw@r.local:6379/0]" {
-		t.Errorf("redis args mismatch: %s", got)
+	redisSpec := servers["bot-redis-dev"].(map[string]any)
+	if envOf(redisSpec)["REDIS_URL"] != "redis://default:rpw@r.local:6379/0" || strings.Contains(argString(redisSpec), "rpw") {
+		t.Errorf("Redis URI must be preserved in environment only: %v", redisSpec)
+	}
+	if envOf(mongoSpec)["MDB_MCP_READ_ONLY"] != "true" {
+		t.Error("MongoDB must preserve existing read-only mode")
 	}
 
 	// ── elasticsearch:env 段 ES_URL/USERNAME/PASSWORD + 必须禁 OTel(否则 stdout 污染) ──
@@ -596,8 +598,8 @@ func TestBuildMCPServers_ELK(t *testing.T) {
 			t.Errorf("%s expected command=npx, got %v", k, spec["command"])
 		}
 		args := spec["args"].([]any)
-		if len(args) != 2 || args[0] != "-y" || args[1] != "@elastic/mcp-server-elasticsearch" {
-			t.Errorf("%s expected args=[-y @elastic/mcp-server-elasticsearch], got %v", k, args)
+		if len(args) != 2 || args[0] != "-y" || args[1] != "@elastic/mcp-server-elasticsearch@0.1.1" {
+			t.Errorf("%s expected ES 8 compatible package pin, got %v", k, args)
 		}
 		env := envOf(spec)
 		if env["ES_USERNAME"] != "elastic" || env["ES_PASSWORD"] != "espw" {
@@ -615,6 +617,47 @@ func TestBuildMCPServers_ELK(t *testing.T) {
 	servers2 := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(k string) string { return "" })
 	if _, ok := servers2["elk-dev"]; ok {
 		t.Errorf("expected elk-dev pruned when ELK_ES_URL_DEV missing under PruneEmpty=true")
+	}
+}
+
+func TestRenderCodexMCPSectionUsesCodexHTTPHeaders(t *testing.T) {
+	body := renderCodexMCPSection(map[string]any{
+		"base-one2all": map[string]any{
+			"type": "streamable-http",
+			"url":  "https://one2all.example.test/mcp",
+			"headers": map[string]string{
+				"Authorization": "Bearer secret",
+				"Accept":        "application/json, text/event-stream",
+			},
+		},
+	})
+	if !strings.Contains(body, "[mcp_servers.base-one2all.http_headers]") {
+		t.Fatalf("Codex HTTP MCP credentials must use http_headers: %s", body)
+	}
+	if strings.Contains(body, "[mcp_servers.base-one2all.headers]") {
+		t.Fatalf("generic headers table is ignored by Codex: %s", body)
+	}
+}
+
+func TestBuildMCPServersDataElasticsearchPinsES8CompatibleClient(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{DataStores: []config.DataStore{{
+			Type: "elasticsearch", Enabled: true,
+		}}},
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(key string) string {
+		if key == "ES_URL_TEST" {
+			return "https://es.test"
+		}
+		return ""
+	})
+	spec, ok := servers["elasticsearch-test"].(map[string]any)
+	if !ok {
+		t.Fatalf("elasticsearch-test not registered: %v", keysOf(servers))
+	}
+	if args := spec["args"].([]any); !reflect.DeepEqual(args, []any{"-y", "@elastic/mcp-server-elasticsearch@0.1.1"}) {
+		t.Fatalf("data Elasticsearch must use ES 8 compatible MCP client, got %v", args)
 	}
 }
 
@@ -783,6 +826,34 @@ func TestBuildMCPServers_DataStores_SingleURI_NoSourceSuffix(t *testing.T) {
 	}
 }
 
+func TestBuildMCPServers_DataStores_SameTypeInstancesUseStableIDs(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Environments: []config.Environment{{ID: "test"}},
+		Infrastructure: config.Infrastructure{DataStores: []config.DataStore{
+			{ID: "redis", Type: "redis", Enabled: true},
+			{ID: "redis-2", Type: "redis", Enabled: true},
+		}},
+	}
+	creds := map[string]string{
+		"REDIS_URL_REDIS_TEST":   "redis://cache-a:6379/0",
+		"REDIS_URL_REDIS_2_TEST": "redis://cache-b:6379/0",
+	}
+	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true}, func(k string) string { return creds[k] })
+
+	if got := envOf(servers["redis-test"])["OTEL_SDK_DISABLED"]; got != "true" {
+		t.Fatalf("first redis instance missing: %v", keysOf(servers))
+	}
+	if _, ok := servers["redis-redis-2-test"]; !ok {
+		t.Fatalf("second redis instance must use its stable ID, got: %v", keysOf(servers))
+	}
+	if got := envOf(servers["redis-test"])["REDIS_URL"]; got != "redis://cache-a:6379/0" {
+		t.Fatalf("first redis instance URL = %v, want cache-a", got)
+	}
+	if got := envOf(servers["redis-redis-2-test"])["REDIS_URL"]; got != "redis://cache-b:6379/0" {
+		t.Fatalf("second redis instance URL = %v, want cache-b", got)
+	}
+}
+
 // TestBuildMCPServers_DataStores_MultiURI_HostSourceID:
 // 多 cluster 场景 — 同 env 多条 endpoint 不同 URI,
 // 派生 sourceID = host 第一段,注册多个 MCP。
@@ -939,12 +1010,7 @@ func TestBuildMCPServers_DataStores_Kafka_MultiCluster(t *testing.T) {
 	}
 }
 
-// TestBuildMCPServers_DataStores_RabbitMQ_Disabled 2026-05-15 起 rabbitmq mcp 不注册(方案 B:HTTP Management API fallback)。
-// 两个 PyPI 候选 amq-mcp-server-rabbitmq / rabbitmq-mcp-server 实测都跑不起来:
-//   - amq 包源码引用 fastmcp 不存在的 BearerAuthProvider(任何版本都没有)
-//   - rabbitmq-mcp-server 依赖声明缺一堆(tabulate / tomli / requests)
-//
-// SKILL rabbitmq-runtime-query 主路径走 HTTP Management API。这条护栏防止有人改回 mcp 注册。
+// RabbitMQ retains HTTP bindings until a published MCP supports bound credentials and proxy paths.
 func TestBuildMCPServers_DataStores_RabbitMQ_NotRegistered(t *testing.T) {
 	cfg := &config.SystemConfig{
 		Environments: []config.Environment{{ID: "test"}, {ID: "prod"}},
@@ -962,7 +1028,7 @@ func TestBuildMCPServers_DataStores_RabbitMQ_NotRegistered(t *testing.T) {
 
 	for k := range servers {
 		if strings.Contains(k, "rabbitmq") {
-			t.Errorf("rabbitmq mcp 不应注册(方案 B,上游包 broken),got: %s", k)
+			t.Errorf("rabbitmq mcp 不应注册(HTTP 接入保留),got: %s", k)
 		}
 	}
 }
@@ -1037,9 +1103,9 @@ func TestBuildMCPServers_DataStores_CredsOverridesEndpoints(t *testing.T) {
 	creds := map[string]string{"MONGODB_URI_DEV": "mongodb://NEW@host/db"}
 	servers := BuildMCPServers(cfg, MCPBuildOptions{PruneEmpty: true},
 		func(k string) string { return creds[k] })
-	got := envOf(servers["mongodb-dev"])["MCP_MONGODB_URI"]
+	got := envOf(servers["mongodb-dev"])["MDB_MCP_CONNECTION_STRING"]
 	if !strings.Contains(got, "mongodb://NEW@host/db") || strings.Contains(got, "OLD") {
-		t.Errorf("expected creds override endpoints, got MCP_MONGODB_URI: %s", got)
+		t.Errorf("expected creds override endpoints, got MDB_MCP_CONNECTION_STRING: %s", got)
 	}
 }
 

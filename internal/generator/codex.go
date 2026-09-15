@@ -219,22 +219,7 @@ func codexNicknameFromAgentID(agentID string) string {
 //
 // 第二参数 _ 兼容旧签名(skillCount 之前用于"路由到 N 个子 skill",已挪到 root SKILL.md)。
 func buildCodexAgentDescription(ctx *Context, _ int, role AgentRole) string {
-	if role == AgentRoleValidator {
-		return fmt.Sprintf(
-			"%s 验证。触发词:验证/复现/回归/修复后复查/证据/截图/Network/console/API/trace/是否修好。",
-			ctx.System.Name,
-		)
-	}
-	if role == AgentRoleFixer {
-		return fmt.Sprintf(
-			"%s 修复。触发词:修复/改代码/打补丁/fix/提交/推送/修复分支/部署。",
-			ctx.System.Name,
-		)
-	}
-	return fmt.Sprintf(
-		"%s 排障(只读)。触发词:5xx/报错/超时/慢/不通/突增/失败/卡住/排查/故障/定位/为什么/查日志/查指标/查配置/查链路。",
-		ctx.System.Name,
-	)
+	return projectBoundAgentDescription(ctx, agentIDForRole(ctx, role), role)
 }
 
 // buildCodexDeveloperInstructions 写最小路由提示,而不是把 SOUL/IDENTITY/输出形态/
@@ -251,17 +236,10 @@ func buildCodexAgentDescription(ctx *Context, _ int, role AgentRole) string {
 // agentName 用来拼绝对路径,wsRoot/ctx 暂不用但保留签名以便后续按 ctx 动态调整(如不同
 // 系统给不同的入口 skill 名)。
 func buildCodexDeveloperInstructions(_ string, ctx *Context, agentName string, role AgentRole) string {
-	if role == AgentRoleValidator {
-		return fmt.Sprintf(`你是 **%s 验证机器人**,从 codex 主 chat spawn 出来做 **验证 / 主动复现 / 修复后复查**,只输出验证报告,不做原因定位。
+	gate := codexProjectOwnershipGate(ctx, agentName)
 
-第一步:Read `+"`~/.codex/skills/%s/bug-verifier/SKILL.md`"+` —— 那里有复现、回归、证据收集、状态枚举和验证报告结构。信息不足时列阻塞项,不要猜测。
-
-边界:不读取业务源码定位函数/文件行号/补丁点;只收集可复查证据和交接摘要,代码分析与原因判断交给排障 Agent。
-
-`, ctx.System.Name, agentName)
-	}
 	if role == AgentRoleFixer {
-		return fmt.Sprintf(`你是 **%s 修复机器人**,从 codex 主 chat spawn 出来做 Bug 修复落地。只有用户明确要求修复时才执行。
+		return gate + fmt.Sprintf(`你是 **%s 修复机器人**,从 codex 主 chat spawn 出来做 Bug 修复落地。只有用户明确要求修复时才执行。
 
 第一步:Read `+"`~/.codex/skills/%s/bug-fixer/SKILL.md`"+` —— 那里有分支确认、脏工作区保护、最小改动、测试、提交、推送和部署通知契约。
 
@@ -269,7 +247,7 @@ func buildCodexDeveloperInstructions(_ string, ctx *Context, agentName string, r
 
 `, ctx.System.Name, agentName)
 	}
-	return fmt.Sprintf(`你是 **%s 排障机器人**,从 codex 主 chat spawn 出来做 **只读** 排障(日志 / 指标 / trace / 配置 / 代码),**不**直接落地修改。
+	return gate + fmt.Sprintf(`你是 **%s 排障机器人**,从 codex 主 chat spawn 出来做 **只读** 排障(日志 / 指标 / trace / 配置 / 代码),**不**直接落地修改。
 
 第一步:Read `+"`~/.codex/skills/%s/SKILL.md`"+` —— 那里有完整的路由表 / 行为规则 / 输出模板,按形态指引你 Read 子 SKILL.md 走 7 步流程(含 Step 7 沉淀)。
 
@@ -294,16 +272,19 @@ func codexSubSkillsForRole(subSkills []string, role AgentRole) []string {
 // 真正在排障时再 read 这份 SKILL.md 把规则装进 thread context。
 //
 // 内容覆盖:运行环境 / 行为规则 / 排障入口路由 / 输出形态 / 子 skill 列表 / 故障快报模板。
-// 跟 OpenClaw AGENTS.md 同款信息但 codex 视角(无 OpenClaw 命令 / 进度条说法保留)。
 func buildCodexRootSkillMD(wsRoot string, ctx *Context, agentName string) (string, error) {
 	subSkills, err := listCodexSubSkills(wsRoot)
 	if err != nil {
 		return "", err
 	}
+	// The workspace template contains the union of all internal Agent skills.
+	// This root entry belongs to the troubleshooter only, so its index must match
+	// the role-scoped directory that install will expose. Otherwise Codex is told
+	// to read validator-only skills which do not exist in this Agent directory.
+	subSkills = codexSubSkillsForRole(subSkills, AgentRoleTroubleshooter)
 	desc := fmt.Sprintf(
-		"%s 排障机器人统一入口(只读)。任何 %s 系统的报错/慢/不通/突增/失败/卡住/为什么类问题"+
-			"先 Read 本文件,按形态路由到子能力。",
-		ctx.System.Name, ctx.System.Name,
+		"%s 系统专属排障入口。仅在 tshoot-router 已解析到本项目，或用户明确点名 %s / %s 时使用；不得按通用故障词跨项目触发。",
+		ctx.System.Name, ctx.System.ID, agentName,
 	)
 	var sb strings.Builder
 	sb.WriteString("---\n")

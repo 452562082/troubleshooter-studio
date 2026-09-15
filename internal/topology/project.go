@@ -99,7 +99,9 @@ func ProjectServiceGraph(snapshot Snapshot) ServiceGraph {
 				projected.Confidence = candidate.Confidence
 			}
 		}
-		projected.Routes = appendUniqueRouteReference(projected.Routes, routeReference(candidate))
+		if normalizedProtocol(candidate.Protocol) != "" {
+			projected.Routes = appendUniqueRouteReference(projected.Routes, routeReference(candidate))
+		}
 	}
 
 	graph.Edges = make([]ServiceEdge, 0, len(pairs))
@@ -179,10 +181,11 @@ func routeReference(candidate CandidateEdge) RouteRef {
 		Protocol:     protocol,
 		EndpointEdge: endpointEdgeReference(candidate),
 	}
-	if protocol == "http" {
+	switch protocol {
+	case "http":
 		reference.Method = NormalizeHTTPMethod(candidate.Method)
 		reference.Path = NormalizePath(candidate.Path)
-	} else if protocol == "grpc" {
+	case "grpc":
 		reference.RPCMethod = normalizeRPCMethod(candidate.RPCMethod)
 	}
 	return reference

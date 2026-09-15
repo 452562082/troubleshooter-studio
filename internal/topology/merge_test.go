@@ -57,6 +57,50 @@ func TestMergeConfirmAndAddRetainCurrentEndpointEvidence(t *testing.T) {
 	}
 }
 
+func TestMergeServiceScopeDecisionAppliesToEveryEndpointEvidence(t *testing.T) {
+	edges := []CandidateEdge{
+		edge("web", "bff", "GET", "/orders", .35, "candidate"),
+		edge("web", "bff", "POST", "/profile", .76, "candidate"),
+	}
+	got := Merge(edges, []Override{{
+		Action: "confirm", Scope: "service", FromService: "web", ToService: "bff",
+	}})
+	if len(got) != 2 {
+		t.Fatalf("service confirmation produced %#v", got)
+	}
+	for _, candidate := range got {
+		if candidate.Status != "confirmed" || !containsString(candidate.Reasons, "human_override_confirm") {
+			t.Fatalf("service confirmation did not cover every endpoint: %#v", got)
+		}
+	}
+}
+
+func TestMergeExactRouteDecisionOverridesServiceScopeDecision(t *testing.T) {
+	edges := []CandidateEdge{
+		edge("web", "bff", "GET", "/orders", .35, "candidate"),
+		edge("web", "bff", "POST", "/profile", .76, "candidate"),
+	}
+	got := Merge(edges, []Override{
+		{Action: "confirm", Scope: "service", FromService: "web", ToService: "bff"},
+		{Action: "reject", FromService: "web", ToService: "bff", Protocol: "http", Method: "GET", Path: "/orders"},
+	})
+	assertStatus(t, got, "web", "bff", "rejected")
+	assertStatus(t, got, "web", "bff", "confirmed")
+}
+
+func TestMergeServiceScopeManualRelationNeedsNoRoute(t *testing.T) {
+	got := Merge(nil, []Override{{
+		Action: "add", Scope: "service", FromService: "web", ToService: "bff",
+	}})
+	if len(got) != 1 || got[0].Status != "manual" || got[0].Protocol != "" || got[0].Path != "" {
+		t.Fatalf("manual service relation=%#v", got)
+	}
+	graph := ProjectServiceGraph(Snapshot{Edges: got})
+	if len(graph.Edges) != 1 || len(graph.Edges[0].Routes) != 0 {
+		t.Fatalf("manual service relation graph=%#v", graph)
+	}
+}
+
 func TestMergeSupportsGRPCOverrideSemanticKey(t *testing.T) {
 	auto := CandidateEdge{
 		FromService: "bff", ToService: "order", Protocol: "grpc",

@@ -153,6 +153,20 @@ prometheus:
 
 k8s_runtime:
   enabled: {{.Infrastructure.Observability.K8sRuntime.Enabled}}
+  {{- $nativeKuboard := false}}
+  {{- if and .Infrastructure.Observability.K8sRuntime.Enabled (ne .Infrastructure.Observability.K8sRuntime.Provider "one2all")}}
+    {{- range .Infrastructure.Observability.K8sRuntime.Endpoints}}
+      {{- if .MCPURL}}{{$nativeKuboard = true}}{{end}}
+    {{- end}}
+  {{- end}}
+  {{- if $nativeKuboard}}
+  mcp_server_by_env:
+    {{- range .Infrastructure.Observability.K8sRuntime.Endpoints}}
+      {{- if .MCPURL}}
+    {{.Env}}: {{printf "%s-k8s-kuboard-%s" $.System.ID .Env | printf "%q"}}
+      {{- end}}
+    {{- end}}
+  {{- end}}
   {{- if .Infrastructure.Observability.K8sRuntime.Provider}}
   provider: {{.Infrastructure.Observability.K8sRuntime.Provider | printf "%q"}}
   {{- end}}

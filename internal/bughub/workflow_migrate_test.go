@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -118,6 +119,82 @@ func TestImportLegacyRunsChangedFileAddsOnlyNewHistory(t *testing.T) {
 	second, err := ImportLegacyRuns(ctx, store, path)
 	if err != nil || second.Cases != 0 || second.Attempts != 1 {
 		t.Fatalf("second=%+v err=%v", second, err)
+	}
+}
+
+func TestImportLegacyRunsChangedExistingRunKeepsFirstArchivedSnapshot(t *testing.T) {
+	ctx := context.Background()
+	store := openTestCaseStore(t)
+	started := time.Date(2026, 7, 10, 9, 0, 0, 0, time.UTC)
+	path := writeLegacyRuns(t, []InvestigationRun{{
+		ID: "run-existing", BugID: "bug-1", Status: InvestigationRunning,
+		StartedAt: started, Events: []InvestigationEvent{{At: started, Type: "message", Message: "started"}},
+	}})
+	first, err := ImportLegacyRuns(ctx, store, path)
+	if err != nil || first.Cases != 1 || first.Attempts != 1 {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	before, err := store.GetAttempt(ctx, deterministicWorkflowID("legacy-attempt:run-existing"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	finished := started.Add(time.Minute)
+	data, err := json.Marshal([]InvestigationRun{
+		{
+			ID: "run-existing", BugID: "bug-1", Status: InvestigationSucceeded,
+			StartedAt: started, FinishedAt: &finished,
+			Events:       []InvestigationEvent{{At: started, Type: "message", Message: "started"}},
+			FinalMessage: "completed after the first import",
+		},
+		{ID: "run-new", BugID: "bug-1", Status: InvestigationFailed, StartedAt: finished.Add(time.Minute)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := ImportLegacyRuns(ctx, store, path)
+	if err != nil || second.Cases != 0 || second.Attempts != 1 {
+		t.Fatalf("second=%+v err=%v", second, err)
+	}
+	after, err := store.GetAttempt(ctx, before.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameImportedAttempt(before, after) {
+		t.Fatalf("existing archived snapshot changed:\nbefore=%+v\nafter=%+v", before, after)
+	}
+}
+
+func TestImportLegacyRunsStillRejectsLegacyAttemptIdentityCollision(t *testing.T) {
+	ctx := context.Background()
+	store := openTestCaseStore(t)
+	caseID := deterministicWorkflowID("legacy-case:bug-1")
+	attemptID := deterministicWorkflowID("legacy-attempt:run-existing")
+	_, err := store.importLegacyBatch(ctx, legacyImportBatch{
+		MigrationKey: "test-conflicting-legacy-attempt",
+		Cases: []IncidentCase{{
+			ID: caseID, BugID: "bug-1", Source: "legacy-runs-json",
+			Status: CaseLegacyArchived, CycleNumber: 1, Version: 1,
+		}},
+		Attempts: []PhaseAttempt{{
+			ID: attemptID, CaseID: caseID, CycleNumber: 1, Phase: PhaseLegacy,
+			Status: AttemptStatusSucceeded, InputJSON: json.RawMessage(`{}`),
+			OutputJSON: json.RawMessage(`{"original_run_id":"different-run"}`),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := writeLegacyRuns(t, []InvestigationRun{{
+		ID: "run-existing", BugID: "bug-1", Status: InvestigationSucceeded,
+	}})
+	if _, err := ImportLegacyRuns(ctx, store, path); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("expected identity conflict, got %v", err)
 	}
 }
 

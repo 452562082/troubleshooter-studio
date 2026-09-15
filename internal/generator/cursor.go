@@ -80,26 +80,12 @@ func buildCursorAgentMD(wsRoot string, ctx *Context, agentName string, role Agen
 	var sb strings.Builder
 	sb.WriteString("---\n")
 	fmt.Fprintf(&sb, "name: %s\n", agentName)
-	fmt.Fprintf(&sb, "description: %s\n", roleDisplayName(ctx, role))
+	fmt.Fprintf(&sb, "description: %s\n", projectBoundAgentDescription(ctx, agentName, role))
 	sb.WriteString("---\n\n")
 
 	fmt.Fprintf(&sb, "# %s\n\n", roleDisplayName(ctx, role))
+	sb.WriteString(cursorProjectOwnershipGate(ctx, agentName))
 
-	if role == AgentRoleValidator {
-		intro := "本 agent 在 Cursor IDE 内作为 Custom Agent 调用,负责 **验证 / 主动复现 / 修复后复查**,只输出验证报告,不做原因定位。\n\n" +
-			"运行环境:\n" +
-			"- chat 工具集默认无 Bash,工作区的 Python 脚本不能直接执行 —— 需要执行命令时**输出完整命令模板让用户粘贴执行**,等用户贴回结果再继续验证\n" +
-			"- MCP server 已写入 `~/.cursor/mcp.json`,但需用户在 Cursor Settings → MCP Servers 手动启用每个 server 才能调用\n" +
-			"- 给用户的命令模板用**绝对路径**(如 `python3 ~/.cursor/skills/" + agentName + "/<skill>/scripts/<file>.py ...`),Cursor 当前工作区不一定是本 agent 的 skills 目录\n" +
-			"- 不读取业务源码定位函数/文件行号/补丁点;代码分析和原因判断交给排障 Agent\n" +
-			"- 第一动作是 Read `~/.cursor/skills/" + agentName + "/bug-verifier/SKILL.md`,按其中流程复现、回归并输出验证报告"
-
-		writeIDEValidatorAgentBody(&sb, IDEPlatform{
-			Intro:                  intro,
-			SkillsScriptPathPrefix: "~/.cursor/skills/" + agentName,
-		})
-		return sb.String(), nil
-	}
 	if role == AgentRoleFixer {
 		fmt.Fprintf(&sb, "本 agent 在 Cursor IDE 内作为 Custom Agent 调用,负责 **修复 Bug / 创建修复分支 / 提交并推送**。只在用户明确触发修复后执行。\n\n")
 		sb.WriteString("第一动作是 Read `~/.cursor/skills/" + agentName + "/bug-fixer/SKILL.md`,按其中流程执行。\n\n")

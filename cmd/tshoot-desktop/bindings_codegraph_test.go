@@ -117,8 +117,13 @@ func TestReindexCodeGraph_ExpandsPathsInvalidatesCacheAndSerializesReport(t *tes
 		t.Fatalf("invalidated system = %q, want shop", invalidated)
 	}
 	wantPath := filepath.Join(home, "src", "order-service")
-	if len(gotOpts.Repos) != 1 || gotOpts.Repos[0].Path != wantPath {
-		t.Fatalf("repo targets = %#v, want path %q", gotOpts.Repos, wantPath)
+	if len(gotOpts.Repos) != 4 || gotOpts.Repos[0].Path != wantPath {
+		t.Fatalf("repo targets = %#v, want all repositories and first path %q", gotOpts.Repos, wantPath)
+	}
+	for _, target := range gotOpts.Repos[1:] {
+		if target.Path != "" {
+			t.Fatalf("repository without a configured local path was resolved: %+v", target)
+		}
 	}
 	if gotOpts.BinaryPath != "/fake/codegraph" || gotOpts.SystemID != "shop" {
 		t.Fatalf("index options = %#v", gotOpts)

@@ -328,10 +328,6 @@ func routeSourceExtMatches(stack, ext string) bool {
 	}
 }
 
-func methodFromJavaMapping(mapping string) string {
-	return methodFromSpringMapping(mapping, "")
-}
-
 func methodFromSpringMapping(mapping, annotation string) string {
 	switch mapping {
 	case "GetMapping":

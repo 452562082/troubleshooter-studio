@@ -9,7 +9,6 @@
 //     官方文档 https://developers.openai.com/codex/subagents
 //
 // 凭证 / MCP server 写入由 install_native_mcp.go + install_native_creds.go 负责,
-// 这里只管纯文件分发。openclaw 走 install_native_openclaw.go,模型不同不通用。
 package agent
 
 import (
@@ -28,7 +27,6 @@ import (
 )
 
 // InstallNative 把 stagingDir 里的产物分发到 ~/.<target>/{agents,skills,scripts}/。
-// target 必须是三家 IDETarget 之一(openclaw 走专门入口)。
 //
 // 落地位置:固定 $HOME/.<target>/。三家 IDE(claude-code/cursor/codex)各自的扩展目录
 // 都是 hardcoded —— Claude Code CLI 启动只读 ~/.claude/agents/,Cursor 只读 ~/.cursor/,
@@ -64,10 +62,16 @@ func InstallNative(stagingDir, target string) error {
 	if primaryAgentName == "" {
 		primaryAgentName = primaryAgentNameFromFiles(stagingDir, agentFiles)
 	}
+	if err := retireNativeValidators(root, stagingDir, primaryAgentName, t.UserAgentExt()); err != nil {
+		return err
+	}
 	for _, ag := range agentFiles {
 		if err := installOneNativeAgent(stagingDir, root, t, ag, primaryAgentName); err != nil {
 			return err
 		}
+	}
+	if err := installProjectRouter(root, t); err != nil {
+		return err
 	}
 
 	return nil
@@ -90,7 +94,17 @@ func installOneNativeAgent(stagingDir, root string, t IDETarget, ag stagingAgent
 	// codex 特殊:staging toml 里 [[skills.config]].path 用 generator.CodexPlaceholderSkillsRoot 占位,
 	// 装机时替换成 <root>/skills/<name>/ 的实际绝对路径(codex 不解析 ~ / $HOME)。
 	// MCP servers 段的 {{MCP_SERVERS}} 占位由 MergeMCPIntoIDESettingsAt 时填,这里保留原样。
-	if t == TargetCodex {
+	switch t {
+	case TargetOpenCode:
+		raw, err := os.ReadFile(ag.File)
+		if err != nil {
+			return err
+		}
+		patched := strings.ReplaceAll(string(raw), generator.OpenCodeSkillsRoot, filepath.ToSlash(filepath.Join(root, "skills")))
+		if err := os.WriteFile(dstAgent, []byte(patched), 0644); err != nil {
+			return err
+		}
+	case TargetCodex:
 		raw, rerr := os.ReadFile(ag.File)
 		if rerr != nil {
 			return fmt.Errorf("read staging codex toml: %w", rerr)
@@ -100,7 +114,7 @@ func installOneNativeAgent(stagingDir, root string, t IDETarget, ag stagingAgent
 		if err := os.WriteFile(dstAgent, []byte(patched), 0o644); err != nil {
 			return fmt.Errorf("install codex agent toml: %w", err)
 		}
-	} else {
+	default:
 		if err := copyFileSimple(ag.File, dstAgent); err != nil {
 			return fmt.Errorf("install agent file: %w", err)
 		}
@@ -133,7 +147,7 @@ func installOneNativeAgent(stagingDir, root string, t IDETarget, ag stagingAgent
 	if ag.Name == primaryAgentName {
 		stagingMeta := filepath.Join(stagingDir, discover.MetaFilename)
 		if _, err := os.Stat(stagingMeta); err == nil {
-			if err := copyFileSimple(stagingMeta, dstMeta); err != nil {
+			if err := copyActiveAgentMeta(stagingMeta, dstMeta); err != nil {
 				return fmt.Errorf("install tshoot.json anchor for %s: %w", ag.Name, err)
 			}
 		}
@@ -252,22 +266,6 @@ func explicitStagingAgentRole(stagingDir, agentName string) (generator.AgentRole
 	}
 }
 
-// findStagingAgentFile 找 staging/agents/<NAME>.<ext> —— 取第一个匹配后缀的非 .bak 文件,
-// 返回完整路径 + name(不含后缀)。
-//
-//	claude-code / cursor: <NAME>.md
-//	codex            : <NAME>.toml
-func findStagingAgentFile(stagingDir string, t IDETarget) (file, name string, err error) {
-	matches, err := findStagingAgentFiles(stagingDir, t)
-	if err != nil {
-		return "", "", err
-	}
-	if len(matches) > 1 {
-		return "", "", fmt.Errorf("found %d agent files in staging %s (expected 1): %v", len(matches), filepath.Join(stagingDir, "agents"), agentFileNames(matches))
-	}
-	return matches[0].File, matches[0].Name, nil
-}
-
 func findStagingAgentFiles(stagingDir string, t IDETarget) ([]stagingAgentFile, error) {
 	dir := filepath.Join(stagingDir, "agents")
 	entries, err := os.ReadDir(dir)
@@ -284,6 +282,9 @@ func findStagingAgentFiles(stagingDir string, t IDETarget) ([]stagingAgentFile, 
 		if strings.Contains(n, ".bak.") || !strings.HasSuffix(n, ext) {
 			continue
 		}
+		if stagingAgentRole(stagingDir, strings.TrimSuffix(n, ext)) == generator.AgentRoleValidator {
+			continue
+		}
 		matches = append(matches, stagingAgentFile{
 			File: filepath.Join(dir, n),
 			Name: strings.TrimSuffix(n, ext),
@@ -294,14 +295,6 @@ func findStagingAgentFiles(stagingDir string, t IDETarget) ([]stagingAgentFile, 
 		return nil, fmt.Errorf("no agents/*%s in staging %s", ext, dir)
 	}
 	return matches, nil
-}
-
-func agentFileNames(files []stagingAgentFile) []string {
-	names := make([]string, 0, len(files))
-	for _, f := range files {
-		names = append(names, filepath.Base(f.File))
-	}
-	return names
 }
 
 // replaceDir:src 不存在 → 跳过(scripts 可能没有);存在 → 清掉 dst 后整目录拷过去。

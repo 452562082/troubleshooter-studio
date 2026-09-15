@@ -3,7 +3,6 @@
 // 时 UI 表单可以预填,不用反复输入。
 //
 // 历史:本包过去还负责 shell-out 跑 `bash scripts/install.sh`,所以叫 deploy。
-// install.sh 已被原生 Go(internal/agent.InstallNativeOpenclaw)替换,本包瘦身
 // 到只剩 .env 读写;后续如还有跨 target 通用部署辅助再往里加。
 package deploy
 

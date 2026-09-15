@@ -14,6 +14,9 @@ var (
 	nodeFetchOptionsRE      = regexp.MustCompile(`(?is)^\s*,\s*\{([^{}]{0,1000})\}`)
 	nodeAxiosVerbRE         = regexp.MustCompile(`(?i)\baxios\.(get|post|put|patch|delete)\s*\(\s*["'\x60]([^"'\x60]+)["'\x60]`)
 	nodeAxiosConfigRE       = regexp.MustCompile(`(?is)\baxios(?:\.request)?\s*\(\s*\{([^{}]{0,1000})\}\s*\)`)
+	nodeClientVerbRE        = regexp.MustCompile(`(?i)\b(?:[A-Za-z_$][\w$]*\.)*(?:httpClient|apiClient|client)\.(get|post|put|patch|delete)\s*(?:<[^;\r\n()]*>)?\s*\(\s*["'\x60]([^"'\x60]+)["'\x60]`)
+	nodeObjectClientCallRE  = regexp.MustCompile(`(?i)\b((?:[A-Za-z_$][\w$]*\.)*(?:request|apiFetch|ugcFetch))\s*(?:<[^;\r\n()]*>)?\s*\(\s*\{`)
+	nodePathClientCallRE    = regexp.MustCompile(`(?i)\b((?:[A-Za-z_$][\w$]*\.)*(?:request|apiFetch|ugcFetch))\s*(?:<[^;\r\n()]*>)?\s*\(\s*["'\x60]([^"'\x60]+)["'\x60]`)
 	nodeExpressRE           = regexp.MustCompile(`(?i)\b(?:app|router)\.(get|post|put|patch|delete|all)\s*\(\s*["'\x60]([^"'\x60]+)["'\x60]`)
 	nodeControllerRE        = regexp.MustCompile(`(?is)@Controller\s*\(\s*(?:["'\x60]([^"'\x60]*)["'\x60])?\s*\)\s*(?:@[A-Za-z_$][\w$]*(?:\s*\([^\r\n]*\))?\s*)*(?:export\s+)?class\s+[A-Za-z_$][\w$]*[^\{]*\{`)
 	nodeNestRouteRE         = regexp.MustCompile(`(?i)@(Get|Post|Put|Patch|Delete|All)\s*\(\s*(?:["'\x60]([^"'\x60]*)["'\x60])?\s*\)`)
@@ -105,7 +108,76 @@ func extractNodeCallsContext(ctx context.Context, source endpointSource) ([]topo
 		}
 		endpoints = append(endpoints, httpEndpoint(topology.DirectionOutbound, method, path, hint, endpointLocation(source, loc[0]), "axios"))
 	}
+	for _, loc := range nodeClientVerbRE.FindAllStringSubmatchIndex(source.text, -1) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		method := source.text[loc[2]:loc[3]]
+		raw := source.text[loc[4]:loc[5]]
+		path, hint := splitHTTPURL(raw)
+		if path == "" {
+			continue
+		}
+		endpoints = append(endpoints, httpEndpoint(topology.DirectionOutbound, method, path, hint, endpointLocation(source, loc[0]), "http-client"))
+	}
+	for _, loc := range nodeObjectClientCallRE.FindAllStringSubmatchIndex(source.text, -1) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		openOffset := loc[1] - 1
+		closeOffset, ok := findMatchingDelimiter(source.text, openOffset, '{', '}', true, false)
+		if !ok {
+			continue
+		}
+		body := source.text[openOffset+1 : closeOffset]
+		raw := jsStringProperty(body, "url")
+		if raw == "" {
+			raw = jsStringProperty(body, "path")
+		}
+		path, hint := splitHTTPURL(raw)
+		if path == "" {
+			continue
+		}
+		method := jsStringProperty(body, "method")
+		if method == "" {
+			method = "GET"
+		}
+		callName := source.text[loc[2]:loc[3]]
+		endpoints = append(endpoints, httpEndpoint(topology.DirectionOutbound, method, path, hint, endpointLocation(source, loc[0]), nodeClientSource(callName)))
+	}
+	for _, loc := range nodePathClientCallRE.FindAllStringSubmatchIndex(source.text, -1) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		raw := source.text[loc[4]:loc[5]]
+		path, hint := splitHTTPURL(raw)
+		if path == "" {
+			continue
+		}
+		method := "GET"
+		if options := nodeFetchOptionsRE.FindStringSubmatch(source.text[loc[1]:]); len(options) == 2 {
+			if configured := jsStringProperty(options[1], "method"); configured != "" {
+				method = configured
+			}
+		}
+		callName := source.text[loc[2]:loc[3]]
+		endpoints = append(endpoints, httpEndpoint(topology.DirectionOutbound, method, path, hint, endpointLocation(source, loc[0]), nodeClientSource(callName)))
+	}
 	return endpoints, ctx.Err()
+}
+
+func nodeClientSource(callName string) string {
+	name := strings.ToLower(strings.TrimSpace(callName))
+	switch {
+	case strings.Contains(name, "apifetch"):
+		return "api-fetch"
+	case strings.Contains(name, "ugcfetch"):
+		return "ugc-fetch"
+	case strings.Contains(name, "httpclient"), strings.Contains(name, "apiclient"):
+		return "http-client"
+	default:
+		return "request-client"
+	}
 }
 
 func extractNodeRoutesContext(ctx context.Context, source endpointSource) ([]topology.Endpoint, error) {

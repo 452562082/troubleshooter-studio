@@ -1,0 +1,99 @@
+import { mount } from '@vue/test-utils'
+import { describe, expect, it } from 'vitest'
+import type { IncidentPhaseEvent, PhaseAttempt } from '../lib/bridge/bugWorkflow'
+import BugAgentProgress from './BugAgentProgress.vue'
+
+function attempt(phase: 'investigation' | 'fix' = 'investigation', status: PhaseAttempt['status'] = 'running'): PhaseAttempt {
+  return { id: `${phase}-1`, case_id: 'case-1', cycle_number: 1, phase, mode: '', status, agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }
+}
+
+describe('BugAgentProgress', () => {
+  it('keeps technical details collapsed while showing the latest analysis', async () => {
+    const events: IncidentPhaseEvent[] = [
+      { at: '2026-07-18T10:00:00Z', type: 'turn_started', message: '开始排障', meta: {} },
+      { at: '2026-07-18T10:00:01Z', type: 'command_execution', message: 'rg -n navigation web/src', meta: { state: 'started' } },
+      { at: '2026-07-18T10:00:02Z', type: 'command_execution', message: 'go test ./...', meta: { state: 'completed', exit_code: 0 } },
+      { at: '2026-07-18T10:00:03Z', type: 'mcp_tool_call', message: 'grafana/query', meta: { state: 'started' } },
+	  { at: '2026-07-18T10:00:03Z', type: 'code_intelligence', message: 'CodeGraph 2/2 个仓库已由 Studio 准备完成', meta: { state: 'ready' } },
+      { at: '2026-07-18T10:00:04Z', type: 'agent_message', message: '已定位到布局计算逻辑', raw: { password: 'hidden' }, meta: {} },
+    ]
+    const wrapper = mount(BugAgentProgress, { props: { attempt: attempt(), events } })
+
+    expect(wrapper.get('[data-agent-phase="investigation"]').text()).toContain('排障 Agent 正在执行')
+    expect(wrapper.text()).toContain('codex · 实时更新')
+    expect(wrapper.text()).toContain('已定位到布局计算逻辑')
+    expect(wrapper.find('.agent-progress-events').exists()).toBe(false)
+    const details = wrapper.get('details').element as HTMLDetailsElement
+    details.open = true
+    await wrapper.get('details').trigger('toggle')
+    expect(wrapper.text()).toContain('正在执行命令')
+    expect(wrapper.text()).toContain('命令执行完成 · exit 0')
+    expect(wrapper.text()).toContain('正在调用工具')
+	  expect(wrapper.text()).toContain('CodeGraph 代码智能')
+	  expect(wrapper.text()).toContain('CodeGraph 2/2 个仓库已由 Studio 准备完成')
+    expect(wrapper.text()).toContain('已定位到布局计算逻辑')
+    expect(wrapper.text()).not.toContain('hidden')
+  })
+
+  it('shows an explicit waiting state before the first event and hides after the phase stops', async () => {
+    const wrapper = mount(BugAgentProgress, { props: { attempt: attempt('fix'), events: [] } })
+
+    expect(wrapper.text()).toContain('修复 Agent 正在执行')
+    expect(wrapper.text()).toContain('等待第一条执行事件')
+
+    await wrapper.setProps({ attempt: attempt('fix', 'succeeded') })
+    expect(wrapper.find('.agent-progress').exists()).toBe(false)
+  })
+
+  it('does not duplicate browser progress inside the Agent panel', () => {
+    const wrapper = mount(BugAgentProgress, { props: {
+      attempt: attempt(),
+      events: [{ type: 'browser_progress', message: 'Cookie: secret', raw: { token: 'hidden' }, meta: { browser_code: 'browser_starting' } }],
+    } })
+
+    expect(wrapper.text()).toContain('等待第一条执行事件')
+    expect(wrapper.text()).not.toContain('Cookie')
+    expect(wrapper.text()).not.toContain('hidden')
+  })
+
+  it('shows the trusted seven-step investigation progress separately from command events', () => {
+    const events: IncidentPhaseEvent[] = [
+      { at: '2026-07-18T10:00:00Z', type: 'phase_step', message: 'untrusted label', meta: { phase: 'investigation', step_key: 'evidence_handoff', step_index: 1, step_total: 7, state: 'running' } },
+      { at: '2026-07-18T10:00:01Z', type: 'phase_step', message: 'untrusted label', meta: { phase: 'investigation', step_key: 'timeline', step_index: 2, step_total: 7, state: 'running' } },
+      { at: '2026-07-18T10:00:02Z', type: 'phase_step', message: 'untrusted label', meta: { phase: 'investigation', step_key: 'runtime_scope', step_index: 3, step_total: 7, state: 'running' } },
+      { at: '2026-07-18T10:00:03Z', type: 'command_execution', message: 'kubectl get pods', meta: { state: 'started' } },
+    ]
+    const wrapper = mount(BugAgentProgress, { props: { attempt: attempt(), events } })
+
+    expect(wrapper.get('.investigation-step-progress').text()).toContain('第 3/7 步 · 运行时')
+    expect(wrapper.get('.investigation-step-progress').text()).toContain('工单分析')
+    expect(wrapper.get('.investigation-step-progress').text()).not.toContain('验证证据')
+    expect(wrapper.get('[aria-current="step"]').text()).toContain('运行时')
+    expect(wrapper.findAll('.investigation-step-progress li.is-complete')).toHaveLength(2)
+    expect(wrapper.find('.agent-progress-events').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('untrusted label')
+  })
+
+  it('shows remediation reassessment without restarting seven-step investigation progress', () => {
+    const reassessment = attempt()
+    reassessment.input_json = {
+      remediation_reassessment: {
+        kind: 'user_remediation_proposal',
+        proposal: 'repair the backend mapping',
+        source_root_cause_attempt_id: 'root-1',
+      },
+    }
+    const wrapper = mount(BugAgentProgress, { props: {
+      attempt: reassessment,
+      events: [{ at: '2026-07-18T10:00:00Z', type: 'turn_started', message: '开始评估', meta: {} }],
+    } })
+
+    expect(wrapper.text()).toContain('修复方案评估 Agent 正在执行')
+    expect(wrapper.get('.remediation-reassessment-progress').text()).toContain('复用已确认根因')
+    expect(wrapper.get('.remediation-reassessment-progress').text()).toContain('只重新评估修复路径')
+    expect(wrapper.text()).toContain('修复方案评估任务已开始')
+    expect(wrapper.find('.investigation-step-progress').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('七步排障进度')
+    expect(wrapper.text()).not.toContain('第 1/7')
+  })
+})

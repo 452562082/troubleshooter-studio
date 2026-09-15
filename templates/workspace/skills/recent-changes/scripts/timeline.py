@@ -16,7 +16,7 @@ incident-investigator Step 2(时间轴对齐)的核心工具。一次拉:
                      [--incident-time "2025-04-29 14:23"]
 
 输出:JSON,字段 `events: [{ts, source, kind, summary}]`
-凭证读取:同 k8s_query.py(env vars / creds.json 自动检测 OpenClaw/Claude Code/Cursor 部署上下文)。
+凭证读取:同 k8s_query.py(env vars / creds.json 自动检测 AI 客户端/Claude Code/Cursor 部署上下文)。
 
 注意:
 - nacos/apollo history 走对应 config-executor scripts(nacos_config.py history / apollo_config.py history)
@@ -51,18 +51,11 @@ def parse_since(since: str) -> timedelta:
 
 
 def detect_workspace_root() -> Path:
-    """跟 k8s_query.py 同款检测:OpenClaw / Claude Code / Cursor / dev。"""
+    """检测 Claude Code / Cursor / Codex 或开发工作区。"""
     here = Path(__file__).resolve()
     parts = here.parts
-    # OpenClaw: ~/.openclaw/workspace/<ws>/skills/recent-changes/scripts/
-    if '.openclaw' in parts and 'workspace' in parts:
-        try:
-            ws_idx = parts.index('workspace')
-            return Path(*parts[: ws_idx + 2])
-        except (ValueError, IndexError):
-            pass
-    # Claude Code / Cursor: <root>/.claude|cursor/skills/<id>/recent-changes/scripts/
-    for marker in ('.claude', '.cursor'):
+    # IDE: <root>/.claude|cursor|codex/skills/<id>/recent-changes/scripts/
+    for marker in ('.claude', '.cursor', '.codex', 'opencode'):
         if marker in parts:
             try:
                 idx = parts.index(marker)

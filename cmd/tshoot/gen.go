@@ -59,22 +59,9 @@ func runGen(args []string) error {
 			return err
 		}
 	}
-	// 按 target 生成。多 target 时共享一次 workspace 渲染（staging）：
-	//   - 若 targets 含 openclaw，先跑 openclaw → 复用它的产物作为 staging
-	//   - 否则建临时 staging，跑一次 Generate()，用完删掉
-	// 这样 4 target 全开只渲染 1 次 workspace，而不是 4 次。
+	// 三平台共享一次临时 workspace 渲染，结束后清理 staging。
 	targets := cfg.Generation.ResolvedTargets()
-	hasOpenclaw := false
-	hasOther := false
-	for _, t := range targets {
-		switch t {
-		case "openclaw":
-			hasOpenclaw = true
-		case "claude-code", "cursor", "codex", "embedded":
-			hasOther = true
-		}
-	}
-	if hasOther && !hasOpenclaw {
+	{
 		stagingDir, err := os.MkdirTemp("", "tshoot-shared-*")
 		if err != nil {
 			return fmt.Errorf("create staging: %w", err)
@@ -90,30 +77,10 @@ func runGen(args []string) error {
 		g.SharedStaging = stagingDir
 	}
 	for _, target := range targets {
-		switch target {
-		case "openclaw":
-			if err := g.Generate(); err != nil {
-				return err
-			}
-			if hasOther {
-				g.SharedStaging = g.OutputDir
-			}
-		case "claude-code":
-			if err := g.GenerateClaudeCode(); err != nil {
-				return err
-			}
-			fmt.Printf("[ok] claude-code output → %s-claude-code\n", outDir)
-		case "cursor":
-			if err := g.GenerateCursor(); err != nil {
-				return err
-			}
-			fmt.Printf("[ok] cursor output → %s-cursor\n", outDir)
-		case "codex":
-			if err := g.GenerateCodex(); err != nil {
-				return err
-			}
-			fmt.Printf("[ok] codex output → %s-codex\n", outDir)
+		if err := g.GenerateTarget(target); err != nil {
+			return err
 		}
+		fmt.Printf("[ok] %s output → %s-%s\n", target, outDir, target)
 	}
 
 	if *format == "json" {
@@ -131,19 +98,8 @@ func runGen(args []string) error {
 	if g.Summary.PriorOverridesCount > 0 {
 		fmt.Printf("[ok] applied %d prior manual override(s)\n", g.Summary.PriorOverridesCount)
 	}
-	if hasOpenclaw {
-		fmt.Printf("[ok] generated to %s\n", outDir)
-		fmt.Printf("下一步：tshoot install --path '%s' --target openclaw [--env-file <.env>]\n", outDir)
-		fmt.Printf("     或：先看变化 tshoot diff -i <troubleshooter.yaml>\n")
-	} else {
-		// openclaw 未在 targets 中：outDir 本身不会被创建，只有 <outDir>-<target>/ 兄弟目录
-		fmt.Printf("[ok] generation complete (openclaw target not requested)\n")
-		for _, t := range targets {
-			if t == "openclaw" {
-				continue
-			}
-			fmt.Printf("下一步（%s）：tshoot install --path '%s-%s' --target %s\n", t, outDir, t, t)
-		}
+	for _, t := range targets {
+		fmt.Printf("下一步（%s）：tshoot install --path '%s-%s' --target %s\n", t, outDir, t, t)
 	}
 	return nil
 }

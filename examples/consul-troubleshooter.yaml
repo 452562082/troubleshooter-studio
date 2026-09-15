@@ -1,4 +1,4 @@
-# 示例：使用 Consul KV 作为配置中心的假想系统
+# 示例：Consul 官方 MCP（固定版本与校验摘要），HTTP KV API 兜底
 system:
   id: iot
   name: "IoT Platform"
@@ -35,12 +35,11 @@ infrastructure:
     type: consul
     endpoints:
       - env: dev
-        addr: "{{CONFIG_CENTER_ADDR_DEV}}"
+        host: "{{CONSUL_HOST_DEV}}"
+        token: "{{CONSUL_TOKEN_DEV}}"
       - env: prod
-        addr: "{{CONFIG_CENTER_ADDR_PROD}}"
-    auth:
-      username_placeholder: "{{CONFIG_CENTER_USERNAME}}"
-      password_placeholder: "{{CONFIG_CENTER_PASSWORD}}"
+        host: "{{CONSUL_HOST_PROD}}"
+        token: "{{CONSUL_TOKEN_PROD}}"
 
   observability:
     grafana:
@@ -62,7 +61,7 @@ infrastructure:
   project_tracking: []
 
 generation:
-  targets: [openclaw]
+  targets: [claude-code]
   skills_whitelist:
     - routing
     - config-executor

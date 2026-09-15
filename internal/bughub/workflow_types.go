@@ -11,6 +11,9 @@ import (
 type CaseStatus string
 
 const (
+	CasePendingInvestigation CaseStatus = "pending_investigation"
+	CaseSubmitted            CaseStatus = "submitted"
+	CaseRemediationRecorded  CaseStatus = "remediation_recorded"
 	CasePendingValidation    CaseStatus = "pending_validation"
 	CaseValidating           CaseStatus = "validating"
 	CaseWaitingEvidence      CaseStatus = "waiting_evidence"
@@ -19,6 +22,8 @@ const (
 	CaseInvestigating        CaseStatus = "investigating"
 	CaseRootCauseReady       CaseStatus = "root_cause_ready"
 	CaseWaitingFixApproval   CaseStatus = "waiting_fix_approval"
+	CaseWaitingRemediation   CaseStatus = "waiting_remediation"
+	CaseRemediationApplied   CaseStatus = "remediation_applied"
 	CaseFixing               CaseStatus = "fixing"
 	CaseFixFailed            CaseStatus = "fix_failed"
 	CaseFixPushed            CaseStatus = "fix_pushed"
@@ -37,7 +42,7 @@ const (
 
 func (s CaseStatus) valid() bool {
 	switch s {
-	case CasePendingValidation,
+	case CasePendingInvestigation, CaseSubmitted, CaseRemediationRecorded, CasePendingValidation,
 		CaseValidating,
 		CaseWaitingEvidence,
 		CaseReproduced,
@@ -45,6 +50,8 @@ func (s CaseStatus) valid() bool {
 		CaseInvestigating,
 		CaseRootCauseReady,
 		CaseWaitingFixApproval,
+		CaseWaitingRemediation,
+		CaseRemediationApplied,
 		CaseFixing,
 		CaseFixFailed,
 		CaseFixPushed,
@@ -66,7 +73,7 @@ func (s CaseStatus) valid() bool {
 }
 
 func IsTerminalCaseStatus(status CaseStatus) bool {
-	return status == CaseFixedVerified || status == CaseLegacyArchived || status == CaseResetArchived
+	return status == CaseSubmitted || status == CaseRemediationRecorded || status == CaseFixedVerified || status == CaseLegacyArchived || status == CaseResetArchived
 }
 
 type Phase string
@@ -127,27 +134,63 @@ func (s AttemptStatus) valid() bool {
 }
 
 type IncidentCase struct {
-	ID                 string     `json:"id"`
-	BugID              string     `json:"bug_id"`
-	Source             string     `json:"source"`
-	SystemID           string     `json:"system_id"`
-	Environment        string     `json:"environment"`
-	Status             CaseStatus `json:"status"`
-	CycleNumber        int        `json:"cycle_number"`
-	CurrentAttemptID   string     `json:"current_attempt_id"`
-	SelectedBotKey     string     `json:"selected_bot_key"`
-	ResetFromCaseID    string     `json:"reset_from_case_id,omitempty"`
-	SupersededByCaseID string     `json:"superseded_by_case_id,omitempty"`
-	Version            int64      `json:"version"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
-	ClosedAt           *time.Time `json:"closed_at"`
+	ID            string               `json:"id"`
+	BugID         string               `json:"bug_id"`
+	Source        string               `json:"source"`
+	SystemID      string               `json:"system_id"`
+	Environment   string               `json:"environment"`
+	FrontendEntry FrontendEntryBinding `json:"frontend_entry,omitempty"`
+	// FrontendEntries is the immutable multi-application verification scope.
+	// The first entry is the primary/start application. FrontendEntry mirrors
+	// that first value for backward compatibility with existing Cases.
+	FrontendEntries    *FrontendEntryBindings `json:"frontend_entries,omitempty"`
+	Status             CaseStatus             `json:"status"`
+	CycleNumber        int                    `json:"cycle_number"`
+	CurrentAttemptID   string                 `json:"current_attempt_id"`
+	SelectedBotKey     string                 `json:"selected_bot_key"`
+	ResetFromCaseID    string                 `json:"reset_from_case_id,omitempty"`
+	SupersededByCaseID string                 `json:"superseded_by_case_id,omitempty"`
+	Version            int64                  `json:"version"`
+	CreatedAt          time.Time              `json:"created_at"`
+	UpdatedAt          time.Time              `json:"updated_at"`
+	ClosedAt           *time.Time             `json:"closed_at"`
 }
 
 func (c IncidentCase) Clone() IncidentCase {
 	cloned := c
+	cloned.FrontendEntry = c.FrontendEntry.Clone()
 	cloned.ClosedAt = cloneTimePtr(c.ClosedAt)
 	return cloned
+}
+
+type FrontendEntryBindings []FrontendEntryBinding
+
+func cloneFrontendEntryBindings(entries []FrontendEntryBinding) []FrontendEntryBinding {
+	if len(entries) == 0 {
+		return nil
+	}
+	cloned := make([]FrontendEntryBinding, len(entries))
+	copy(cloned, entries)
+	return cloned
+}
+
+func newFrontendEntryBindings(entries []FrontendEntryBinding) *FrontendEntryBindings {
+	if len(entries) == 0 {
+		return nil
+	}
+	cloned := FrontendEntryBindings(cloneFrontendEntryBindings(entries))
+	return &cloned
+}
+
+// EffectiveFrontendEntries upgrades a legacy single-entry Case in memory.
+func (c IncidentCase) EffectiveFrontendEntries() []FrontendEntryBinding {
+	if c.FrontendEntries != nil && len(*c.FrontendEntries) != 0 {
+		return cloneFrontendEntryBindings([]FrontendEntryBinding(*c.FrontendEntries))
+	}
+	if !c.FrontendEntry.IsZero() {
+		return []FrontendEntryBinding{c.FrontendEntry.Clone()}
+	}
+	return nil
 }
 
 func (c IncidentCase) Validate() error {
@@ -162,6 +205,23 @@ func (c IncidentCase) Validate() error {
 	}
 	if !c.Status.valid() {
 		return fmt.Errorf("unsupported incident case status %q", c.Status)
+	}
+	if !c.FrontendEntry.IsZero() && (blank(c.FrontendEntry.ID) || blank(c.FrontendEntry.URL)) {
+		return fmt.Errorf("incident case frontend entry requires id and URL")
+	}
+	entries := c.EffectiveFrontendEntries()
+	seenFrontendEntries := make(map[string]struct{}, len(entries))
+	for index, entry := range entries {
+		if blank(entry.ID) || blank(entry.URL) {
+			return fmt.Errorf("incident case frontend entries[%d] requires id and URL", index)
+		}
+		if _, exists := seenFrontendEntries[entry.ID]; exists {
+			return fmt.Errorf("incident case frontend entry %q is duplicated", entry.ID)
+		}
+		seenFrontendEntries[entry.ID] = struct{}{}
+	}
+	if c.FrontendEntries != nil && len(*c.FrontendEntries) != 0 && (c.FrontendEntry.IsZero() || c.FrontendEntry.ID != (*c.FrontendEntries)[0].ID || c.FrontendEntry.URL != (*c.FrontendEntries)[0].URL) {
+		return fmt.Errorf("incident case primary frontend entry must match the first frontend entries item")
 	}
 	return nil
 }
@@ -235,10 +295,16 @@ func (a PhaseAttempt) ValidateWithOptions(options AttemptValidationOptions) erro
 	}
 	switch a.Phase {
 	case PhaseValidation:
+		if !options.AllowLegacyMigration {
+			return fmt.Errorf("validation phase has been retired")
+		}
 		if a.Mode != AttemptReproduce {
 			return fmt.Errorf("validation phase requires reproduce mode")
 		}
 	case PhaseRegression:
+		if !options.AllowLegacyMigration {
+			return fmt.Errorf("regression phase has been retired")
+		}
 		if a.Mode != AttemptRegression {
 			return fmt.Errorf("regression phase requires regression mode")
 		}
@@ -346,8 +412,23 @@ type ApprovalKind string
 
 const (
 	ApprovalStartFix               ApprovalKind = "start_fix"
+	ApprovalCompleteRemediation    ApprovalKind = "complete_remediation"
 	ApprovalMergeEnvironmentBranch ApprovalKind = "merge_environment_branch"
 )
+
+type RemediationApprovalScope struct {
+	RootCauseAttemptID string          `json:"root_cause_attempt_id"`
+	CycleNumber        int             `json:"cycle_number"`
+	RootCauseType      RootCauseType   `json:"root_cause_type"`
+	Mode               RemediationMode `json:"mode"`
+	Target             string          `json:"target"`
+	RecommendedAction  string          `json:"recommended_action"`
+	Rollback           string          `json:"rollback,omitempty"`
+	Verification       string          `json:"verification"`
+	Summary            string          `json:"summary"`
+	Evidence           string          `json:"evidence"`
+	BindingID          string          `json:"binding_id"`
+}
 
 type Approval struct {
 	ID             string            `json:"id"`
@@ -402,6 +483,17 @@ func (a Approval) Validate() error {
 		}
 		if blank(scope.RootCauseAttemptID) {
 			return fmt.Errorf("start-fix approval scope requires root_cause_attempt_id")
+		}
+	case ApprovalCompleteRemediation:
+		var scope RemediationApprovalScope
+		if err := json.Unmarshal(a.ScopeJSON, &scope); err != nil {
+			return fmt.Errorf("decode remediation approval scope: %w", err)
+		}
+		if blank(scope.RootCauseAttemptID) || scope.CycleNumber < 1 || blank(scope.Summary) || blank(scope.Evidence) || blank(scope.BindingID) {
+			return fmt.Errorf("remediation approval scope is incomplete")
+		}
+		if err := validateRemediationPlan(scope.RootCauseType, RemediationPlan{Mode: scope.Mode, Target: scope.Target, Summary: scope.RecommendedAction, Rollback: scope.Rollback, Verification: scope.Verification}); err != nil {
+			return fmt.Errorf("invalid remediation approval scope: %w", err)
 		}
 	case ApprovalMergeEnvironmentBranch:
 		if err := validateNonEmptyStringMap("approval fix commits", a.FixCommits); err != nil {
@@ -499,7 +591,11 @@ func (o DeploymentObservation) Validate() error {
 	if len(o.DiagnosticCode) > 64 || len(o.DiagnosticMessage) > 256 || strings.ContainsAny(o.DiagnosticCode+o.DiagnosticMessage, "\r\n") {
 		return fmt.Errorf("deployment observation diagnostics must be bounded single-line text")
 	}
-	if err := validateNonEmptyStringMap("deployment expected commits", o.ExpectedCommits); err != nil {
+	if len(o.ExpectedCommits) == 0 {
+		if o.VerificationSource != "manual-remediation" || o.DiagnosticCode != "remediation_completed" {
+			return fmt.Errorf("deployment expected commits are required")
+		}
+	} else if err := validateNonEmptyStringMap("deployment expected commits", o.ExpectedCommits); err != nil {
 		return err
 	}
 	if err := validateStringMapEntries("deployment observed images", o.ObservedImages); err != nil {

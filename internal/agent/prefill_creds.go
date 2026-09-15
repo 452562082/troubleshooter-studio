@@ -1,7 +1,6 @@
 // prefill_creds.go —— 从 troubleshooter.yaml 抽 install 阶段需要的凭证 / URL 默认值。
 //
 // 背景:GUI wizard 把用户在 Step 7 填的 URL / 账密 / token 直接写进 yaml 的 endpoints[]。
-// 但 install 阶段(InstallNativeOpenclaw / RunInstall)只认 .env 里的环境变量(KUBOARD_URL_DEV
 // 这种)。如果用户:
 //   - 走 BotsPage 的"导入 yaml 一键部署"  → 没经过 wizard Step 7 表单,creds 是空的
 //   - 走 Editor 的"修改 yaml 后部署"      → 同上
@@ -27,7 +26,8 @@ import (
 func PrefillCredsFromYAML(cfg *config.SystemConfig) map[string]string {
 	out := map[string]string{}
 	put := func(k, v string) {
-		if k == "" || v == "" {
+		trimmed := strings.TrimSpace(v)
+		if k == "" || trimmed == "" || (strings.HasPrefix(trimmed, "{{") && strings.HasSuffix(trimmed, "}}")) {
 			return
 		}
 		out[k] = v
@@ -36,6 +36,12 @@ func PrefillCredsFromYAML(cfg *config.SystemConfig) map[string]string {
 	// ── 配置中心:per source × env ──
 	for _, cc := range cfg.Infrastructure.ConfigCenters {
 		for _, ep := range cc.Endpoints {
+			// one2all 是系统级单一 MCP endpoint，按 schema 不带 env。
+			if cc.Type == "one2all" {
+				put("ONE2ALL_MCP_URL", ep.URL)
+				put("ONE2ALL_TOKEN", ep.Token)
+				continue
+			}
 			if ep.Env == "" {
 				continue
 			}
@@ -51,22 +57,28 @@ func PrefillCredsFromYAML(cfg *config.SystemConfig) map[string]string {
 				put(envVar("CONSUL_HOST", cc.ID, ep.Env), ep.Host)
 				put(envVar("CONSUL_TOKEN", cc.ID, ep.Env), ep.Token)
 			case "kuboard":
+				put(envVar("KUBOARD_MCP_URL", cc.ID, ep.Env), ep.MCPURL)
 				put(envVar("KUBOARD_URL", cc.ID, ep.Env), ep.URL)
 				put(envVar("KUBOARD_ACCESS_KEY", cc.ID, ep.Env), ep.AccessKey)
 				put(envVar("KUBOARD_USER", cc.ID, ep.Env), ep.User)
 				put(envVar("KUBOARD_PASS", cc.ID, ep.Env), ep.Pass)
-			case "one2all":
-				// one2all:单一 streamable-http MCP server,不按 env 分。
-				// ep.URL = MCP server 完整 URL(含路径 hash),ep.Token = Bearer token。
-				put("ONE2ALL_MCP_URL", ep.URL)
-				put("ONE2ALL_TOKEN", ep.Token)
 			}
 		}
 	}
 
 	obs := cfg.Infrastructure.Observability
-	if obs.K8sRuntime.Enabled && strings.EqualFold(strings.TrimSpace(obs.K8sRuntime.Provider), "one2all") {
+	if obs.K8sRuntime.Enabled {
+		one2all := strings.EqualFold(strings.TrimSpace(obs.K8sRuntime.Provider), "one2all")
 		for _, ep := range obs.K8sRuntime.Endpoints {
+			if !one2all {
+				up := strings.ToUpper(ep.Env)
+				put("KUBOARD_URL_"+up, ep.URL)
+				put("KUBOARD_MCP_URL_"+up, ep.MCPURL)
+				put("KUBOARD_ACCESS_KEY_"+up, ep.AccessKey)
+				put("KUBOARD_USER_"+up, ep.Username)
+				put("KUBOARD_PASS_"+up, ep.Password)
+				continue
+			}
 			put("ONE2ALL_MCP_URL", ep.URL)
 			put("ONE2ALL_TOKEN", ep.APIKey)
 		}
@@ -106,6 +118,21 @@ func PrefillCredsFromYAML(cfg *config.SystemConfig) map[string]string {
 		}
 	}
 
+	if obs.SkyWalking.Enabled {
+		for _, ep := range obs.SkyWalking.Endpoints {
+			up := strings.ToUpper(ep.Env)
+			put("SKYWALKING_URL_"+up, ep.URL)
+			put("SKYWALKING_USER_"+up, ep.User)
+			put("SKYWALKING_PASS_"+up, ep.Pass)
+		}
+		for env, u := range obs.SkyWalking.URLByEnv {
+			key := "SKYWALKING_URL_" + strings.ToUpper(env)
+			if out[key] == "" {
+				put(key, u)
+			}
+		}
+	}
+
 	// ── ELK ──
 	if obs.ELK.Enabled {
 		for _, ep := range obs.ELK.Endpoints {
@@ -140,9 +167,6 @@ func PrefillCredsFromYAML(cfg *config.SystemConfig) map[string]string {
 	}
 
 	// ── 模型 ──
-	if m := cfg.Agent.ModelForTarget("openclaw"); m != "" {
-		put("MODEL", m)
-	}
 
 	return out
 }
@@ -155,7 +179,6 @@ func PrefillCredsFromYAML(cfg *config.SystemConfig) map[string]string {
 //
 //	userCreds := <来自 UI 表单>
 //	final := agent.MergeCredsWithPrefill(userCreds, agent.PrefillCredsFromYAML(cfg))
-//	pass final to RunInstall / InstallNativeOpenclaw
 func MergeCredsWithPrefill(user, prefill map[string]string) map[string]string {
 	out := make(map[string]string, len(user)+len(prefill))
 	maps.Copy(out, prefill)

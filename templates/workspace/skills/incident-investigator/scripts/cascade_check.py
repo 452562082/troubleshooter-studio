@@ -60,13 +60,7 @@ def fail(error: str, hint: str = '') -> None:
 def detect_workspace_root() -> Path:
     here = Path(__file__).resolve()
     parts = here.parts
-    if '.openclaw' in parts and 'workspace' in parts:
-        try:
-            ws_idx = parts.index('workspace')
-            return Path(*parts[: ws_idx + 2])
-        except (ValueError, IndexError):
-            pass
-    for marker in ('.claude', '.cursor'):
+    for marker in ('.claude', '.cursor', '.codex', 'opencode'):
         if marker in parts:
             try:
                 idx = parts.index(marker)

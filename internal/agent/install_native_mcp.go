@@ -7,7 +7,8 @@
 //     但 `claude mcp list` 永远看不到装入的 server,只能用 ~/.claude.json。
 //     迁移期顺手清掉旧 settings.json 里残留的同名 keys(避免新旧并存)。
 //   - cursor      → ~/.cursor/mcp.json,顶层 "mcpServers" JSON 字段
-//   - codex       → ~/.codex/agents/<name>.toml 内联 [mcp_servers.<x>] 段(每个 subagent 自带 MCP)。
+//   - codex       → ~/.codex/agents/<name>.toml 内联 [mcp_servers.<x>] 段(交互式 subagent)，
+//     并同步 ~/.codex/tshoot-runtimes/<name>/config.toml(Studio 后台隔离 CODEX_HOME)。
 //     **不要**走 `codex mcp add` 写到 ~/.codex/config.toml —— 那会让主 chat 启动时
 //     也拉一遍这些 MCP,而排障 MCP 只对 truss-troubleshooter agent 有意义,主 chat
 //     不该被拖累(node 25 + npx 包并发 EPIPE 崩溃风险)。官方文档明确每个 agent 自带:
@@ -20,6 +21,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -34,10 +36,8 @@ import (
 // MergeMCPIntoIDESettings 把 cfg 派生的 mcpServers 写进对应 target 的 IDE 配置文件。
 //   - target=claude-code → ~/.claude.json(dotfile),顶层 mcpServers 字段
 //   - target=cursor      → ~/.cursor/mcp.json,顶层 mcpServers 字段
-//   - target=codex       → ~/.codex/agents/<name>.toml 内联 [mcp_servers.<x>] 段
+//   - target=codex       → ~/.codex/agents/<name>.toml + ~/.codex/tshoot-runtimes/<name>/config.toml
 //
-// creds 是 env-var-name → value 的 map(跟 InstallNativeOpenclaw 一样的 schema)。
-// 桌面端 wizard 通过 buildOpenclawCreds() 拼出来传过来;CLI 没 creds 时传 nil,
 // 注入的 env 字段值会变成 {{ENV_VAR}} 占位符让用户手填。
 //
 // onProgress(可空)用于 install 链路里"用户感知"的进度回调。当前 install 步骤本身
@@ -87,7 +87,7 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 		fmt.Fprintln(os.Stderr, line)
 	}
 
-	// 清老版本下载到 <root>/bin/ 的 mcp-grafana 孤儿二进制(本会话改 npx mcp-grafana-npx 后
+	// 清老版本下载到 <root>/bin/ 的 mcp-grafana 孤儿二进制(本会话改 uvx mcp-grafana 后
 	// 不再用)。re-install 顺手清,不用等 uninstall — 几十 MiB 留在那纯占盘。
 	removeLegacyGrafanaBin(root)
 
@@ -133,14 +133,42 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 
 	// 避免 server_key + tool_name 拼起来超过 IDE 60 字符的 tool 名限制。
 	// IDE 走 PruneEmpty=true 模式 —— 避免把 "" 当真值喂给后端进程触发无效连接。
+
+	officialPaths := map[string]string{}
+	for _, entry := range []struct {
+		name    string
+		release officialMCPRelease
+	}{{"consul", consulMCPRelease}, {"skywalking", skywalkingMCPRelease}} {
+		if !usesOfficialMCP(cfg, entry.name) {
+			continue
+		}
+		path, err := ensureOfficialMCP(entry.release, emit)
+		if err != nil {
+			emit(fmt.Sprintf("[warn] %s MCP 安装失败，继续使用 HTTP/API: %v", entry.name, err))
+			continue
+		}
+		officialPaths[entry.name] = path
+	}
 	servers := BuildMCPServers(cfg, MCPBuildOptions{
-		AgentID:             cfg.MCPKeyPrefix(),
-		PruneEmpty:          true,
-		KafkaMCPBinaryPath:  kafkaBinPath,
-		NacosMCPScriptPath:  nacosScriptPath,
-		CodeGraphBinaryPath: codeGraphBinPath,
+		OfficialMCPBinaryPaths: officialPaths,
+		AgentID:                cfg.MCPKeyPrefix(),
+		PruneEmpty:             true,
+		KafkaMCPBinaryPath:     kafkaBinPath,
+		NacosMCPScriptPath:     nacosScriptPath,
+		CodeGraphBinaryPath:    codeGraphBinPath,
 	}, get)
 
+	if t == TargetOpenCode {
+		converted, err := openCodeMCPServers(servers)
+		if err != nil {
+			return err
+		}
+		_, err = mergeOpenCodeMCP(t.MCPConfigPath(home), cfg.MCPKeyPrefix()+"-", converted, mergeOnlyNew)
+		if err != nil {
+			return err
+		}
+		return probeOpenCodeMCP(t.MCPConfigPath(home), cfg.MCPKeyPrefix()+"-", emit)
+	}
 	if t == TargetCodex {
 		// codex 全局 sandbox 默认禁网,workspace-write 也要显式 network_access=true 才放行 —
 		// 没配的话装好后所有 MCP 启动 ENOTFOUND。自动 patch ~/.codex/config.toml,
@@ -276,14 +304,14 @@ func writeMCPServersWithVerify(path string, servers map[string]any, maxRetries i
 }
 
 // removeLegacyGrafanaBin 清掉早期版本下载到 <root>/bin/mcp-grafana[.exe] 的孤儿二进制。
-// 改走 npx mcp-grafana-npx 后,这文件留着也没人用(每个 IDE root ~30 MiB)。
+// 改走 uvx mcp-grafana 后,这文件留着也没人用(每个 IDE root ~30 MiB)。
 // install / uninstall 都该跑一次确保收尸,文件不存在 / 没权限删 / 任何错误都吞掉(只是清理优化,不该阻断主流程)。
 func removeLegacyGrafanaBin(root string) {
 	for _, name := range []string{"mcp-grafana", "mcp-grafana.exe"} {
 		legacy := filepath.Join(root, "bin", name)
 		if _, err := os.Stat(legacy); err == nil {
 			if rmErr := os.Remove(legacy); rmErr == nil {
-				fmt.Fprintf(os.Stderr, "[info] 清掉老 %s 孤儿二进制(已改走 npx mcp-grafana-npx)\n", legacy)
+				fmt.Fprintf(os.Stderr, "[info] 清掉老 %s 孤儿二进制(已改走 uvx mcp-grafana)\n", legacy)
 			}
 		}
 	}
@@ -338,6 +366,7 @@ func pruneLegacyClaudeSettingsMCP(legacyPath string, servers map[string]any) err
 // 用户手改 toml 时只要保留两行 marker 就能继续重装;两行都丢了 install 报错而不是默默
 // 拼到末尾(避免无限堆叠出多个 [mcp_servers.*] 段、codex 加载时冲突)。
 func injectMCPIntoCodexAgentTOML(root string, cfg *config.SystemConfig, servers map[string]any) error {
+	body := renderCodexMCPSection(servers)
 	for _, agentName := range codexAgentNamesForConfig(cfg) {
 		tomlPath := filepath.Join(root, "agents", agentName+".toml")
 		raw, err := os.ReadFile(tomlPath)
@@ -348,7 +377,7 @@ func injectMCPIntoCodexAgentTOML(root string, cfg *config.SystemConfig, servers 
 			return fmt.Errorf("read codex agent toml %s: %w", tomlPath, err)
 		}
 
-		patched, err := replaceCodexMCPRegion(string(raw), renderCodexMCPSection(servers))
+		patched, err := replaceCodexMCPRegion(string(raw), body)
 		if err != nil {
 			return fmt.Errorf("patch codex agent toml %s: %w", tomlPath, err)
 		}
@@ -363,6 +392,68 @@ func injectMCPIntoCodexAgentTOML(root string, cfg *config.SystemConfig, servers 
 		if err := os.Chmod(tomlPath, 0o600); err != nil {
 			return fmt.Errorf("chmod codex agent toml %s: %w", tomlPath, err)
 		}
+		if err := writeCodexAgentRuntimeHome(root, agentName, body); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func codexAgentRuntimeHome(root, agentName string) string {
+	return filepath.Join(root, "tshoot-runtimes", strings.TrimSpace(agentName))
+}
+
+// writeCodexAgentRuntimeHome writes the standard config.toml that a Studio
+// background process loads through its isolated CODEX_HOME. Codex profile
+// layers intentionally do not support mcp_servers, so a *.config.toml profile
+// would look valid on disk while exposing zero robot MCP tools at runtime.
+func writeCodexAgentRuntimeHome(root, agentName, body string) error {
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return errors.New("codex runtime home requires an agent name")
+	}
+	runtimeHome := codexAgentRuntimeHome(root, agentName)
+	if info, err := os.Lstat(runtimeHome); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("refuse non-directory codex runtime home %s", runtimeHome)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect codex runtime home %s: %w", runtimeHome, err)
+	} else if err := os.MkdirAll(runtimeHome, 0o700); err != nil {
+		return fmt.Errorf("create codex runtime home %s: %w", runtimeHome, err)
+	}
+	if err := os.Chmod(runtimeHome, 0o700); err != nil {
+		return fmt.Errorf("chmod codex runtime home %s: %w", runtimeHome, err)
+	}
+	path := filepath.Join(runtimeHome, "config.toml")
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refuse to replace symlinked codex runtime config %s", path)
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("inspect codex runtime config %s: %w", path, err)
+	}
+	content := "# Managed by tshoot. Used by Studio background codex exec.\n" + body
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		return fmt.Errorf("write codex runtime config %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("chmod codex runtime config %s: %w", path, err)
+	}
+	// Remove the old profile-shaped file after the working runtime config is
+	// durable. It may contain the same plaintext MCP credentials but Codex never
+	// loaded its mcp_servers section.
+	legacyProfile := filepath.Join(root, "tshoot-"+agentName+".config.toml")
+	if info, err := os.Lstat(legacyProfile); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("refuse to remove unmanaged legacy Codex profile %s", legacyProfile)
+		}
+		if err := os.Remove(legacyProfile); err != nil {
+			return fmt.Errorf("remove legacy Codex profile %s: %w", legacyProfile, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect legacy Codex profile %s: %w", legacyProfile, err)
 	}
 	return nil
 }
@@ -373,10 +464,9 @@ func codexAgentNamesForConfig(cfg *config.SystemConfig) []string {
 	if base == "" {
 		base = strings.TrimSuffix(troubleshooter, "-troubleshooter")
 	}
-	validator := base + "-validator"
 	fixer := base + "-fixer"
 	names := []string{troubleshooter}
-	for _, candidate := range []string{validator, fixer} {
+	for _, candidate := range []string{fixer} {
 		if strings.TrimSpace(candidate) == "" || candidate == troubleshooter {
 			continue
 		}
@@ -479,7 +569,11 @@ func renderCodexMCPSection(servers map[string]any) string {
 					hdrKeys = append(hdrKeys, k)
 				}
 				sort.Strings(hdrKeys)
-				fmt.Fprintf(&sb, "[%s.headers]\n", header)
+				// Codex names the Streamable HTTP header table http_headers.
+				// Writing the shared builder key literally as `.headers` parses as
+				// valid TOML but Codex ignores it, so authenticated MCPs initialize
+				// without Authorization and disappear from the tool surface after 401.
+				fmt.Fprintf(&sb, "[%s.http_headers]\n", header)
 				for _, k := range hdrKeys {
 					sb.WriteString(k)
 					sb.WriteString(" = ")

@@ -74,26 +74,41 @@ describe('inferAuthMode', () => {
 })
 
 describe('parseEnvironment', () => {
+  it('restores named frontend applications and their resolver hints', () => {
+    expect(parseEnvironment({
+      id: 'test',
+      frontend_entries: [{ id: 'admin', name: '管理端', url: 'https://admin.test/app', repo: 'admin-web', device_profile: 'desktop', aliases: ['后台', 'CMS'], product_hints: ['运营'], module_hints: ['用户管理'], path_prefixes: ['/users'] }],
+    }).frontend_entries).toEqual([{
+      id: 'admin', name: '管理端', url: 'https://admin.test/app', repo: 'admin-web', device_profile: 'desktop',
+      aliases: '后台, CMS', product_hints: '运营', module_hints: '用户管理', path_prefixes: '/users',
+    }])
+  })
   it('extracts all fields with sensible fallbacks', () => {
     expect(parseEnvironment({ id: 'dev', api_domain: 'a', web_domain: 'w', is_prod: true }))
-      .toEqual({ id: 'dev', api_domain: 'a', web_domain: 'w', is_prod: true })
+      .toEqual({ id: 'dev', api_domain: 'a', web_domain: 'w', frontend_entries: [], is_prod: true })
   })
   it('handles missing fields', () => {
-    expect(parseEnvironment({})).toEqual({ id: '', api_domain: '', web_domain: '', is_prod: false })
+    expect(parseEnvironment({})).toEqual({ id: '', api_domain: '', web_domain: '', frontend_entries: [], is_prod: false })
   })
   it('coerces is_prod with Boolean', () => {
     expect(parseEnvironment({ is_prod: 'truthy' }).is_prod).toBe(true)
     expect(parseEnvironment({ is_prod: 0 }).is_prod).toBe(false)
   })
   it('handles null/undefined input', () => {
-    expect(parseEnvironment(null)).toEqual({ id: '', api_domain: '', web_domain: '', is_prod: false })
-    expect(parseEnvironment(undefined)).toEqual({ id: '', api_domain: '', web_domain: '', is_prod: false })
+    expect(parseEnvironment(null)).toEqual({ id: '', api_domain: '', web_domain: '', frontend_entries: [], is_prod: false })
+    expect(parseEnvironment(undefined)).toEqual({ id: '', api_domain: '', web_domain: '', frontend_entries: [], is_prod: false })
   })
   it('imports HTTP and K8s deployment verification provider blocks', () => {
     expect(parseEnvironment({ deployment_verification: { provider: 'http', http: { url: 'https://x/version', json_pointer: '/git/commit', allow_private: true } } }).deployment_verification)
       .toEqual({ provider: 'http', http: { url: 'https://x/version', json_pointer: '/git/commit', allow_private: true }, k8s: { cluster: '', namespace: '', deployments_by_repo: {}, commit_annotation: '', image_label: '' } })
     expect(parseEnvironment({ deployment_verification: { provider: 'k8s', k8s: { cluster: 'c', namespace: 'n', deployments_by_repo: { repo: 'deploy' }, image_label: 'commit' } } }).deployment_verification)
       .toEqual({ provider: 'k8s', http: { url: '', json_pointer: '', allow_private: false }, k8s: { cluster: 'c', namespace: 'n', deployments_by_repo: { repo: 'deploy' }, commit_annotation: '', image_label: 'commit' } })
+  })
+  it('drops an incomplete legacy HTTP deployment verification that the wizard can no longer edit', () => {
+    expect(parseEnvironment({
+      id: 'dev',
+      deployment_verification: { provider: 'http', http: { url: '', json_pointer: '/git/commit' } },
+    })).toEqual({ id: 'dev', api_domain: '', web_domain: '', frontend_entries: [], is_prod: false })
   })
 })
 
@@ -150,8 +165,11 @@ describe('applyParsedYAMLToWizardState observability import', () => {
       repos: [],
       enabledSourceTypes: {},
       enabledSourceOrder: [],
+      sourceInstances: [],
       sourceCreds: {},
+      sourceEnvNamespaces: {},
       serviceSourceMap: {},
+      serviceSourceByEnv: {},
       ccCredInputs: {},
       envNamespaces: {},
       serviceConfigSel: {},
@@ -164,6 +182,7 @@ describe('applyParsedYAMLToWizardState observability import', () => {
       k8sRuntimeEnvLoc: {},
       k8sRuntimeSvcMap: {},
       scannedDS: {},
+      dataStoreTypes: {},
       enabledDataStores: {},
       dsAutoFilled: {},
       dsScanState: {},
@@ -205,11 +224,32 @@ describe('applyParsedYAMLToWizardState observability import', () => {
     expect(ctx.codeIntelligence).toEqual({ enabled: false, provider: 'codegraph' })
   })
 
+  it('preserves explicit and explicitly empty frontend runtime identities', async () => {
+    const ctx = makeImportCtx()
+    await applyParsedYAMLToWizardState({
+      repos: [
+        {
+          name: 'base-frontend', role: 'frontend', stack: 'node',
+          service_names: ['funhub-web'], env_branches: { test: 'test' },
+        },
+        {
+          name: 'admin-frontend', role: 'frontend', stack: 'node',
+          env_branches: { test: 'test' },
+        },
+      ],
+    }, ctx)
+
+    expect(ctx.repos[0].service_names).toBe('funhub-web')
+    expect(ctx.repos[0].role).toBe('frontend')
+    expect(ctx.repos[1].service_names).toBe('')
+  })
+
   it('imports all topology override actions and ignores scan data', async () => {
     const ctx = makeImportCtx()
     await applyParsedYAMLToWizardState({
       service_topology: {
         overrides: [
+          { action: 'add', scope: 'service', from_service: 'web', to_service: 'catalog' },
           { action: 'confirm', from_service: 'web', to_service: 'bff', protocol: 'http', method: 'GET', path: '/api/orders' },
           { action: 'reject', from_service: 'bff', to_service: 'legacy', protocol: 'grpc', rpc_method: 'legacy.Order/Get' },
           { action: 'add', from_service: 'bff', to_service: 'order', protocol: 'http', method: 'POST', path: '/internal/orders' },
@@ -221,6 +261,7 @@ describe('applyParsedYAMLToWizardState observability import', () => {
 
     expect(ctx.serviceTopology).toEqual({
       overrides: [
+        { action: 'add', scope: 'service', fromService: 'web', toService: 'catalog' },
         { action: 'confirm', fromService: 'web', toService: 'bff', protocol: 'http', method: 'GET', path: '/api/orders' },
         { action: 'reject', fromService: 'bff', toService: 'legacy', protocol: 'grpc', rpcMethod: 'legacy.Order/Get' },
         { action: 'add', fromService: 'bff', toService: 'order', protocol: 'http', method: 'POST', path: '/internal/orders' },
@@ -306,6 +347,59 @@ describe('applyParsedYAMLToWizardState observability import', () => {
       namespace: 'default',
       configmap: 'order-config',
     })
+  })
+
+  it('restores environment-specific catalog bindings over legacy repo bindings', async () => {
+    const ctx = makeImportCtx({
+      ALL_SOURCE_TYPES: ['nacos', 'kuboard'],
+      CC_FIELDS_BY_TYPE: { nacos: [], kuboard: [] },
+    })
+    await applyParsedYAMLToWizardState({
+      environments: [{ id: 'dev' }, { id: 'prod' }],
+      repos: [{ name: 'order', service_names: ['order-service'], config_source: 'nacos' }],
+      resource_catalog: {
+        services: [{
+          id: 'order-service', repository: 'order',
+          config_sources: { dev: 'dev-nacos', prod: 'prod-kuboard' },
+        }],
+      },
+      infrastructure: {
+        config_centers: [
+          { id: 'dev-nacos', type: 'nacos' },
+          { id: 'prod-kuboard', type: 'kuboard' },
+        ],
+      },
+    }, ctx)
+
+    expect(ctx.serviceSourceMap['order-service']).toBe('nacos')
+    expect(ctx.serviceSourceByEnv['dev::order-service']).toBe('dev-nacos')
+    expect(ctx.serviceSourceByEnv['prod::order-service']).toBe('prod-kuboard')
+  })
+
+  it('restores preload state independently for same-type source instances', async () => {
+    const ctx = makeImportCtx({
+      allServiceNames: ['user', 'order'],
+      ALL_SOURCE_TYPES: ['nacos'],
+      CC_FIELDS_BY_TYPE: { nacos: [] },
+    })
+    await applyParsedYAMLToWizardState({
+      environments: [{ id: 'dev' }],
+      repos: [{ name: 'mono', service_names: ['user', 'order'] }],
+      resource_catalog: { services: [
+        { id: 'user', repository: 'mono', config_sources: { dev: 'nacos' } },
+        { id: 'order', repository: 'mono', config_sources: { dev: 'nacos-2' } },
+      ] },
+      infrastructure: { config_centers: [
+        { id: 'nacos', type: 'nacos', service_map: { dev: { user: { namespace: 'ns-a', data_id: 'user.yaml' } } } },
+        { id: 'nacos-2', type: 'nacos', service_map: { dev: { order: { namespace: 'ns-b', data_id: 'order.yaml' } } } },
+      ] },
+    }, ctx)
+
+    expect(ctx.sourceInstances).toEqual([{ id: 'nacos', type: 'nacos' }, { id: 'nacos-2', type: 'nacos' }])
+    expect(ctx.sourceEnvNamespaces).toMatchObject({ 'nacos::dev': 'ns-a', 'nacos-2::dev': 'ns-b' })
+    expect(ctx.ccHubStateByEnv.dev.status).toBe('ok')
+    expect(ctx.ccHubStateByEnv['nacos-2::dev'].status).toBe('ok')
+    expect(ctx.serviceConfigSel).toMatchObject({ 'dev::user': 'user.yaml', 'dev::order': 'order.yaml' })
   })
 
   it('restores k8s_runtime one2all cluster_id', async () => {

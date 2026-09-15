@@ -41,6 +41,12 @@ code_intelligence:
 infrastructure:
   config_center:
     type: kuboard   # ← 通过 Kuboard 读取 K8s ConfigMap/Secret
+    endpoints:
+      - env: staging
+        url: https://kuboard-stg.example.com
+        mcp_url: https://kuboard-stg.example.com/mcp # 已启用官方 MCP 的 Kuboard；部署时填 API 访问凭证
+      - env: prod
+        url: https://kuboard.example.com # 旧版省略 mcp_url，继续使用 HTTP
 
   observability:
     grafana:
@@ -78,7 +84,7 @@ infrastructure:
   project_tracking: []
 
 generation:
-  targets: [openclaw]
+  targets: [claude-code]
   skills_whitelist:
     - routing
     - config-executor

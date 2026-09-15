@@ -51,13 +51,13 @@ func StartFixApprovalKey(caseID, rootCauseAttemptID string, caseVersion int64) s
 	return fmt.Sprintf("start-fix:%s:%s:%d", strings.TrimSpace(caseID), strings.TrimSpace(rootCauseAttemptID), caseVersion)
 }
 
-func validateFixApprovalRootCause(ctx context.Context, store *CaseStore, incident IncidentCase, attemptID string) error {
+func validatedRootCauseResult(ctx context.Context, store *CaseStore, incident IncidentCase, attemptID string) (InvestigationResult, error) {
 	if store == nil || strings.TrimSpace(attemptID) == "" || attemptID != incident.CurrentAttemptID {
-		return ErrApprovalScope
+		return InvestigationResult{}, ErrApprovalScope
 	}
 	attempts, err := store.ListAttempts(ctx, AttemptFilter{CaseID: incident.ID})
 	if err != nil {
-		return err
+		return InvestigationResult{}, err
 	}
 	var latest *PhaseAttempt
 	for index := range attempts {
@@ -68,13 +68,13 @@ func validateFixApprovalRootCause(ctx context.Context, store *CaseStore, inciden
 		}
 	}
 	if latest == nil || latest.ID != attemptID || latest.Status != AttemptStatusSucceeded {
-		return ErrApprovalScope
+		return InvestigationResult{}, ErrApprovalScope
 	}
 	result, err := ParseInvestigationResult(latest.OutputJSON)
 	if err != nil || result.InvestigationStatus != "root_cause_ready" || result.Confidence != "high" || len(result.Gaps) != 0 || result.Environment != incident.Environment {
-		return ErrApprovalScope
+		return InvestigationResult{}, ErrApprovalScope
 	}
-	return nil
+	return result, nil
 }
 
 func ParseFixResult(data []byte) (FixResult, error) {
@@ -148,11 +148,8 @@ func validateFixedPushedResult(result FixResult) error {
 		if _, exists := branches[branch.Repo]; exists {
 			return fmt.Errorf("fixed_pushed contains duplicate repository %q", branch.Repo)
 		}
-		if branch.BaseBranch != branch.TargetEnvironmentBranch {
-			return fmt.Errorf("fixed_pushed base branch for %s must equal target environment branch", branch.Repo)
-		}
 		if branch.FixBranch == branch.BaseBranch || branch.FixBranch == branch.TargetEnvironmentBranch {
-			return fmt.Errorf("fixed_pushed fix branch for %s must differ from the environment branch", branch.Repo)
+			return fmt.Errorf("fixed_pushed fix branch for %s must differ from the source baseline and environment branches", branch.Repo)
 		}
 		branches[branch.Repo] = branch
 	}
@@ -248,9 +245,16 @@ func validateFixCompletionPayload(command CompleteAttemptCommand) error {
 	return nil
 }
 
-func validateCompletionAttemptPhase(phase Phase, command CompleteAttemptCommand) error {
-	if command.Outcome == PhaseOutcomeFixPushed && phase != PhaseFix {
-		return errors.New("fix-pushed completion requires a fix phase attempt")
+func validateFixReworkCompletion(attempt PhaseAttempt, command CompleteAttemptCommand) error {
+	if attempt.Phase != PhaseFix || command.Outcome != PhaseOutcomeFixPushed {
+		return nil
+	}
+	result, err := ParseFixResult(command.OutputJSON)
+	if err != nil {
+		return fmt.Errorf("validate reworked fix output: %w", err)
+	}
+	if err := validateFixReworkResult(attempt.InputJSON, result); err != nil {
+		return fmt.Errorf("validate reworked fix branch scope: %w", err)
 	}
 	return nil
 }
@@ -267,4 +271,14 @@ func decodeFixTestEvidence(raw json.RawMessage) ([]FixTestResult, error) {
 		return nil, errors.New("fix test evidence must contain one JSON array")
 	}
 	return tests, nil
+}
+
+func validateCompletionAttemptPhase(phase Phase, command CompleteAttemptCommand) error {
+	if phase == PhaseInvestigation && (command.Outcome == PhaseOutcomeNeedsEvidence || command.Outcome == PhaseOutcomeSystemFailed || command.Outcome == PhaseOutcomeRootCauseReady) {
+		return nil
+	}
+	if phase == PhaseFix && (command.Outcome == PhaseOutcomeFixFailed || command.Outcome == PhaseOutcomeFixPushed) {
+		return nil
+	}
+	return errors.New("completion outcome does not match an executable phase")
 }

@@ -4,6 +4,8 @@ import { useRouter } from 'vue-router'
 import yaml from 'js-yaml'
 import brandLogo from '../assets/logo.svg'
 import { confirmDialog } from '../lib/confirm'
+import { JOURNEY, journeyPhase } from '../lib/wizardJourney'
+import { migrateSavedStep } from '../lib/wizardStep'
 
 const router = useRouter()
 
@@ -32,7 +34,7 @@ function loadLastYaml() {
       lastYamlSignature.value = {
         ok: Boolean(parsed.system?.id),
         name: parsed.system?.name || parsed.system?.id || '未命名',
-        targets: parsed.generation?.targets || ['openclaw'],
+        targets: parsed.generation?.targets || ['claude-code'],
       }
     }
   } catch { /* 解析失败不显示 */ }
@@ -99,7 +101,7 @@ const primaryCards = [
   { path: '/init', icon: '🧙', label: '创建向导', desc: '一步步带你创建一个新的排障机器人', tag: '推荐新用户' },
   { path: '/bots', icon: '🤖', label: '已装机器人', desc: '管理已部署的机器人,新建 / 重部 / 卸载' },
   { path: '/bugs', icon: '🐞', label: 'Bug 工单', desc: '同步工单平台，查看完整 Bug 详情' },
-  { path: '/incidents', icon: '🔁', label: '故障闭环', desc: '选择 Bug，完成验证、排障、修复和回归' },
+  { path: '/incidents', icon: '🔁', label: '故障闭环', desc: '选择 Bug，排障、修复和提交' },
 ]
 // 诊断工具:YAML 沙盒 + 代码扫描。两者职责对齐(2026-04-30):
 //   YAML 沙盒  → 操作 yaml 文件(验证/生成预览/产物预览)
@@ -110,20 +112,12 @@ const advancedCards = [
   { path: '/analyze', icon: '🔍', label: '代码扫描', desc: '扫仓库反推服务 / 配置,可应用回 yaml' },
 ]
 
-// InitPage 的步骤布局(2026-04-30 版,共 10 步):
-//   1=欢迎  2=系统  3=机器人  4=环境  5=仓库  6=配置源  7=数据层  8=可观测  9=预览生成  10=一键部署
-// 跟 InitPage.vue::totalSteps 同步。改 totalSteps 时这里要一起改。
-const WIZARD_TOTAL_STEPS = 10
-const WIZARD_PREVIEW_STEP = 9
-const WIZARD_DEPLOY_STEP = 10
-
-// draftStep 兼容老 saved:老版本(8/9 步制)的 saved.currentStep 没经过 wizardSchema=2 标记
-// 时 InitPage 加载会 +1 一次性迁移。本页只读不写,所以用 saved.wizardSchema 判断 → 老 saved
-// 显示的步号也跟着 +1,跟 InitPage 渲染保持一致。
+// Share the four-phase navigation mapping with the wizard, including old drafts.
+const WIZARD_TOTAL_STEPS = JOURNEY.length
+const WIZARD_PREVIEW_STEP = JOURNEY.length
 const draftStepNormalized = computed<number | null>(() => {
   if (!wizardDraft.value || draftStep.value == null) return null
-  const schema = (wizardDraft.value.wizardSchema ?? 1) as number
-  return schema >= 2 ? draftStep.value : Math.min(draftStep.value + 1, WIZARD_TOTAL_STEPS)
+  return journeyPhase(migrateSavedStep(draftStep.value, wizardDraft.value.wizardSchema, 10)) + 1
 })
 
 // 推荐下一步逻辑
@@ -147,10 +141,7 @@ const nextStep = computed(() => {
     return { text: `向导进行到第 ${step} / ${WIZARD_TOTAL_STEPS} 步(${draftSystemName.value || '未命名'}),回去继续?`, path: '/init', cta: '继续向导 →' }
   }
   if (wizardDraft.value && step === WIZARD_PREVIEW_STEP) {
-    return { text: '向导已到预览步,确认 yaml 后即可一键部署', path: '/init', cta: '查看预览 →' }
-  }
-  if (wizardDraft.value && step === WIZARD_DEPLOY_STEP) {
-    return { text: '向导已到一键部署步,可直接装机', path: '/init', cta: '继续部署 →' }
+    return { text: '配置摘要已就绪，确认后即可创建机器人', path: '/init', cta: '确认并创建 →' }
   }
   if (lastYamlSignature.value?.ok) {
     return { text: `最近编辑过 ${lastYamlSignature.value.name}(targets: ${lastYamlSignature.value.targets.join(', ')}),可去 YAML 沙盒验证 / 部署`, path: '/editor', cta: '继续编辑 →' }
@@ -163,7 +154,7 @@ const nextStep = computed(() => {
   <div class="home-page">
     <div class="hero">
       <img :src="brandLogo" class="hero-logo" alt="Troubleshooter Studio" />
-      <p class="tagline">为你的业务系统快速生成并部署 AI 排障机器人 —— 跑在 OpenClaw / Claude Code / Cursor / Codex CLI</p>
+      <p class="tagline">为你的业务系统快速生成并部署 AI 排障机器人 —— 支持 Claude Code / Cursor / Codex CLI / OpenCode</p>
     </div>
 
     <!-- 推荐下一步面板 -->
@@ -224,11 +215,6 @@ const nextStep = computed(() => {
         <div class="info-head">部署形态(支持 4 个 AI 平台)</div>
         <ul>
           <li>
-            <code>openclaw</code> —
-            产物 <code>~/.openclaw/workspace/&lt;name&gt;/</code> + 注册到
-            <code>openclaw.json</code>,在 <strong>OpenClaw 客户端</strong>里直接选 agent 对话
-          </li>
-          <li>
             <code>claude-code</code> —
             agent.md <code>~/.claude/agents/&lt;name&gt;.md</code> +
             skills/scripts <code>~/.claude/{skills,scripts}/&lt;name&gt;/</code>,任意项目里
@@ -248,10 +234,11 @@ const nextStep = computed(() => {
           </li>
         </ul>
         <div class="info-foot">
+          OpenCode 使用全局 <code>~/.config/opencode/agents/</code>，支持 XDG_CONFIG_HOME，
+          可在终端运行 <code>opencode run --agent &lt;name&gt;</code> 或在故障闭环中选用。<br>
           MCP 服务器:claude-code 写 <code>~/.claude.json</code>(user-scope dotfile,Claude Code CLI 强绑死从这里读);
           cursor 写 <code>~/.cursor/mcp.json</code>;codex 嵌入 agent toml 内联
-          <code>[mcp_servers.*]</code> 段(每个 subagent 自带,不污染主 chat);openclaw 走
-          <code>openclaw.json</code> 自家注册流程。
+          <code>[mcp_servers.*]</code> 段(每个 subagent 自带,不污染主 chat)。
         </div>
       </div>
       <div class="info-card">

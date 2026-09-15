@@ -12,16 +12,15 @@ import (
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
 
 const (
-	incidentCaseEvent             = "incident-case:event"
-	incidentWorkflowReminderEvent = "incident-workflow:reminder"
+	incidentCaseEvent              = "incident-case:event"
+	bugTicketResolutionEventPrefix = "bug-ticket-resolution:"
 )
-
-var incidentWorkflowReminderPollInterval = time.Minute
 
 type incidentWorkflowRuntime struct {
 	orchestrator *bughub.CaseOrchestrator
@@ -32,18 +31,32 @@ type incidentWorkflowRuntime struct {
 type IncidentCaseDetail struct {
 	Case                   bughub.IncidentCase            `json:"case"`
 	Attempts               []IncidentPhaseAttempt         `json:"attempts"`
-	Artifacts              []bughub.EvidenceArtifact      `json:"artifacts"`
+	PhaseEvents            []bughub.InvestigationEvent    `json:"phase_events"`
+	Artifacts              []IncidentArtifact             `json:"artifacts"`
 	Approvals              []IncidentApproval             `json:"approvals"`
 	CodeChanges            []IncidentCodeChange           `json:"code_changes"`
 	DeploymentObservations []bughub.DeploymentObservation `json:"deployment_observations"`
 	Events                 []IncidentTransitionEvent      `json:"events"`
-	DeploymentVerification IncidentDeploymentVerification `json:"deployment_verification"`
+	BugTicketResolution    IncidentBugTicketResolution    `json:"bug_ticket_resolution"`
 }
 
-type IncidentDeploymentVerification struct {
-	Provider  string `json:"provider"`
-	Available bool   `json:"available"`
-	Hint      string `json:"hint"`
+type IncidentBugTicketResolution struct {
+	State        string `json:"state"`
+	SourceStatus string `json:"source_status,omitempty"`
+}
+
+type IncidentArtifact struct {
+	ID          string    `json:"id"`
+	CaseID      string    `json:"case_id"`
+	AttemptID   string    `json:"attempt_id"`
+	Kind        string    `json:"kind"`
+	SHA256      string    `json:"sha256"`
+	Size        int64     `json:"size"`
+	CapturedAt  time.Time `json:"captured_at"`
+	Environment string    `json:"environment"`
+	Version     string    `json:"version"`
+	RequestID   string    `json:"request_id"`
+	TraceID     string    `json:"trace_id"`
 }
 
 type IncidentPhaseAttempt struct {
@@ -126,6 +139,7 @@ type StartIncidentCaseInput struct {
 	CaseID          string         `json:"case_id"`
 	BugID           string         `json:"bug_id,omitempty"`
 	BotKey          string         `json:"bot_key,omitempty"`
+	BotEnvironment  string         `json:"bot_environment,omitempty"`
 	ExpectedVersion int64          `json:"expected_version"`
 	IdempotencyKey  string         `json:"idempotency_key"`
 	ActorID         string         `json:"actor_id"`
@@ -136,10 +150,16 @@ type ResetIncidentCaseInput struct {
 	CaseID          string         `json:"case_id"`
 	NewCaseID       string         `json:"new_case_id"`
 	BotKey          string         `json:"bot_key"`
+	BotEnvironment  string         `json:"bot_environment,omitempty"`
 	ExpectedVersion int64          `json:"expected_version"`
 	IdempotencyKey  string         `json:"idempotency_key"`
 	ActorID         string         `json:"actor_id"`
 	InputJSON       map[string]any `json:"input_json,omitempty"`
+}
+
+type DeleteIncidentHistoryInput struct {
+	CaseID string `json:"case_id"`
+	BugID  string `json:"bug_id"`
 }
 
 type ContinueIncidentCaseInput struct {
@@ -160,6 +180,35 @@ type ApproveIncidentFixInput struct {
 	InputJSON          map[string]any `json:"input_json,omitempty"`
 }
 
+type ReconsiderIncidentRemediationInput struct {
+	CaseID             string `json:"case_id"`
+	ExpectedVersion    int64  `json:"expected_version"`
+	IdempotencyKey     string `json:"idempotency_key"`
+	ActorID            string `json:"actor_id"`
+	RootCauseAttemptID string `json:"root_cause_attempt_id"`
+	Proposal           string `json:"proposal"`
+}
+
+type DisputeIncidentRootCauseInput struct {
+	CaseID              string   `json:"case_id"`
+	ExpectedVersion     int64    `json:"expected_version"`
+	IdempotencyKey      string   `json:"idempotency_key"`
+	ActorID             string   `json:"actor_id"`
+	RootCauseAttemptID  string   `json:"root_cause_attempt_id"`
+	Reason              string   `json:"reason"`
+	EvidenceArtifactIDs []string `json:"evidence_artifact_ids,omitempty"`
+}
+
+type CompleteIncidentRemediationInput struct {
+	CaseID             string `json:"case_id"`
+	ExpectedVersion    int64  `json:"expected_version"`
+	IdempotencyKey     string `json:"idempotency_key"`
+	ActorID            string `json:"actor_id"`
+	RootCauseAttemptID string `json:"root_cause_attempt_id"`
+	Summary            string `json:"summary"`
+	Evidence           string `json:"evidence"`
+}
+
 type ApproveIncidentMergeInput struct {
 	CaseID          string            `json:"case_id"`
 	ExpectedVersion int64             `json:"expected_version"`
@@ -168,18 +217,6 @@ type ApproveIncidentMergeInput struct {
 	FixCommits      map[string]string `json:"fix_commits"`
 	TargetBranches  map[string]string `json:"target_branches"`
 	TargetHeads     map[string]string `json:"target_heads"`
-}
-
-type NotifyIncidentDeployedInput struct {
-	CaseID           string            `json:"case_id"`
-	ExpectedVersion  int64             `json:"expected_version"`
-	IdempotencyKey   string            `json:"idempotency_key"`
-	ActorID          string            `json:"actor_id"`
-	ObservedVersion  string            `json:"observed_version"`
-	ObservedCommits  map[string]string `json:"observed_commits,omitempty"`
-	VersionSource    string            `json:"version_source,omitempty"`
-	NotificationText string            `json:"notification_text,omitempty"`
-	InputJSON        map[string]any    `json:"input_json,omitempty"`
 }
 
 type CancelIncidentAttemptInput struct {
@@ -205,14 +242,16 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 	a.workflowMu.Lock()
 	defer a.workflowMu.Unlock()
 	if a.workflowStore != nil && a.workflowOrchestrator != nil {
-		if a.workflowInitErr == nil {
+		if a.workflowInitErr == nil && !a.workflowRecoveryPending {
 			return nil
 		}
+
 		if recoverErr := a.workflowOrchestrator.RecoverInterrupted(workflowContext(ctx)); recoverErr != nil {
 			a.workflowInitErr = recoverErr
 			return recoverErr
 		}
 		a.workflowInitErr = nil
+		a.workflowRecoveryPending = false
 		return nil
 	}
 	// Initialization errors are observable but not sticky: a later command can
@@ -222,6 +261,7 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 	if root == "" {
 		root = bughub.DefaultRoot()
 	}
+	a.workflowRoot = root
 	store, err := bughub.OpenCaseStore(filepath.Join(root, "workflows.db"))
 	if err != nil {
 		a.workflowInitErr = err
@@ -245,7 +285,7 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 	} else {
 		investigator := bughub.NewCodexInvestigator(legacy, "codex")
 		runner := bughub.NewAgentPhaseRunner(store, investigator, legacy, filepath.Join(root, "artifacts"), nil)
-		gitService := bughub.NewGitIntegrationService(filepath.Join(root, "git-worktrees"), func(ctx context.Context, caseID, repo string) (string, error) {
+		resolveRepositoryPath := func(ctx context.Context, caseID, repo string) (string, error) {
 			incident, loadErr := store.GetCase(ctx, caseID)
 			if loadErr != nil {
 				return "", loadErr
@@ -255,14 +295,26 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 				return "", fmt.Errorf("repository %s has no configured local path for system %s", repo, incident.SystemID)
 			}
 			return filepath.Clean(path), nil
-		})
-		deploymentVerifier := &caseConfiguredDeploymentVerifier{app: a, store: store}
-		orchestrator := bughub.NewCaseOrchestrator(store, runner, gitService, deploymentVerifier)
+		}
+		gitService := bughub.NewGitIntegrationService(filepath.Join(root, "git-worktrees"), resolveRepositoryPath)
+		runner.SetFixWorkspaceManager(bughub.NewFixWorkspaceManager(filepath.Join(root, "fix-worktrees"), resolveRepositoryPath))
+		runner.SetRepositoryAccessResolver(bughub.RepositoryAccessResolverFunc(func(_ context.Context, incident bughub.IncidentCase) (map[string]string, error) {
+			paths := userconfig.GetRepoPathsForSystem(incident.SystemID)
+			result := make(map[string]string, len(paths))
+			for repo, path := range paths {
+				if path = strings.TrimSpace(path); path != "" {
+					result[repo] = filepath.Clean(path)
+				}
+			}
+			return result, nil
+		}))
+		orchestrator := bughub.NewCaseOrchestrator(store, runner, gitService)
 		runner.SetCompletionCallback(func(callbackCtx context.Context, command bughub.CompleteAttemptCommand) error {
 			incident, completeErr := orchestrator.CompleteAttempt(workflowContext(callbackCtx), command)
 			if incident.ID != "" {
 				a.emitIncidentCase(incident.ID)
 			}
+
 			if errors.Is(completeErr, bughub.ErrFixInspectionUnavailable) {
 				// Make the next workflow command run the same bounded durable recovery
 				// pass. This retries remote inspection without rerunning the fixer and
@@ -285,6 +337,10 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 		_ = store.Close()
 		return runtimeErr
 	}
+	if runtime.runner != nil {
+		runtime.runner.SetFrontendRuntimeResolver(caseFrontendRuntimeResolver{app: a})
+		runtime.runner.SetCodeIntelligenceResolver(caseCodeIntelligenceResolver{app: a})
+	}
 	runtime.orchestrator.SetRecoveryContextResolver(bughub.RecoveryContextResolverFunc(a.resolveIncidentRecoveryContext))
 	a.workflowStore = store
 	a.workflowOrchestrator = runtime.orchestrator
@@ -294,20 +350,19 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 		a.bugInvestigator = runtime.investigator
 		a.bugInvestigationMu.Unlock()
 	}
+
 	if recoverErr := runtime.orchestrator.RecoverInterrupted(workflowContext(ctx)); recoverErr != nil {
 		a.workflowInitErr = recoverErr
 		return recoverErr
 	}
 	a.workflowInitErr = nil
+	a.workflowRecoveryPending = false
 	return nil
 }
 
 func (a *App) startIncidentWorkflow(ctx context.Context) error {
 	err := a.initializeIncidentWorkflow(workflowContext(ctx))
 	if err == nil {
-		if runtimeCtx := a.getRuntimeContext(); runtimeCtx != nil {
-			a.startWorkflowReminderPoller(runtimeCtx)
-		}
 		return nil
 	}
 	fmt.Fprintf(os.Stderr, "[warn] incident workflow startup failed: %v\n", err)
@@ -315,8 +370,22 @@ func (a *App) startIncidentWorkflow(ctx context.Context) error {
 	return err
 }
 
+func zentaoTicketResolutionComplete(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "resolved", "closed":
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *App) resolveIncidentRecoveryContext(_ context.Context, incident bughub.IncidentCase, attempt bughub.PhaseAttempt) (bughub.Bug, bughub.BotRef, error) {
-	return a.loadBugAndBot(incident.BugID, attempt.BotKey)
+	bug, bot, err := a.loadBugAndBot(incident.BugID, attempt.BotKey)
+	if err != nil {
+		return bughub.Bug{}, bughub.BotRef{}, err
+	}
+	bot.Env = strings.TrimSpace(incident.Environment)
+	return bug, bot, nil
 }
 
 func (a *App) closeIncidentWorkflow() error {
@@ -354,120 +423,58 @@ func (a *App) ListIncidentCases() ([]bughub.IncidentCase, error) {
 	return items, err
 }
 
+// DeleteIncidentHistory removes all terminal Case history for one Bug while
+// preserving the archived Bug snapshot. Supplying both identities makes a
+// repeated request idempotent without allowing a stale Case ID to delete a
+// different Bug's history.
+func (a *App) DeleteIncidentHistory(input DeleteIncidentHistoryInput) (bughub.CaseHistoryDeleteResult, error) {
+	caseID := strings.TrimSpace(input.CaseID)
+	bugID := strings.TrimSpace(input.BugID)
+	if caseID == "" || bugID == "" {
+		return bughub.CaseHistoryDeleteResult{}, errors.New("case_id and bug_id are required")
+	}
+	store, _, err := a.workflowComponents()
+	if err != nil {
+		return bughub.CaseHistoryDeleteResult{}, err
+	}
+	incident, err := store.GetCase(a.workflowCommandContext(), caseID)
+	if err == nil {
+		if incident.BugID != bugID {
+			return bughub.CaseHistoryDeleteResult{}, errors.New("case does not belong to the requested Bug")
+		}
+		if !bughub.IsTerminalCaseStatus(incident.Status) {
+			return bughub.CaseHistoryDeleteResult{}, bughub.ErrActiveCaseHistory
+		}
+	} else if !errors.Is(err, bughub.ErrCaseNotFound) {
+		return bughub.CaseHistoryDeleteResult{}, err
+	} else {
+		// A replay after a successful deletion is a no-op because no Cases for
+		// this Bug remain. If other Cases still exist, the stale/unknown Case ID
+		// must not authorize deleting their history.
+		cases, listErr := store.ListCases(a.workflowCommandContext())
+		if listErr != nil {
+			return bughub.CaseHistoryDeleteResult{}, listErr
+		}
+		for _, current := range cases {
+			if current.BugID == bugID {
+				return bughub.CaseHistoryDeleteResult{}, errors.New("case was not found for the requested Bug")
+			}
+		}
+	}
+	return bughub.DeleteTerminalCaseHistoryForBug(
+		a.workflowCommandContext(),
+		store,
+		filepath.Join(a.workflowRoot, "artifacts"),
+		bugID,
+	)
+}
+
 func (a *App) GetIncidentWorkflowMetrics() (bughub.WorkflowMetrics, error) {
 	store, _, err := a.workflowComponents()
 	if err != nil {
 		return bughub.WorkflowMetrics{}, err
 	}
 	return store.WorkflowMetrics(a.workflowCommandContext(), time.Now().UTC())
-}
-
-type SnoozeIncidentWorkflowReminderInput struct {
-	CaseID         string    `json:"case_id"`
-	Until          time.Time `json:"until"`
-	ActorID        string    `json:"actor_id"`
-	IdempotencyKey string    `json:"idempotency_key"`
-}
-
-func (a *App) SnoozeIncidentWorkflowReminder(input SnoozeIncidentWorkflowReminderInput) error {
-	store, _, err := a.workflowComponents()
-	if err != nil {
-		return err
-	}
-	service := bughub.NewWorkflowReminderService(store, nil, bughub.DefaultWorkflowReminderAfter, nil)
-	return service.Snooze(a.workflowCommandContext(), input.CaseID, input.Until, input.ActorID, input.IdempotencyKey)
-}
-
-type AckIncidentWorkflowReminderInput struct {
-	CaseID          string `json:"case_id"`
-	ReservationKey  string `json:"reservation_key"`
-	DeliveryAttempt int    `json:"delivery_attempt"`
-	ActorID         string `json:"actor_id"`
-}
-
-func (a *App) ListPendingIncidentWorkflowReminders() ([]bughub.WorkflowReminder, error) {
-	store, _, err := a.workflowComponents()
-	if err != nil {
-		return nil, err
-	}
-	items, err := bughub.NewWorkflowReminderService(store, nil, bughub.DefaultWorkflowReminderAfter, nil, a.resolveIncidentProductionEnvironment).Pending(a.workflowCommandContext())
-	if items == nil {
-		items = []bughub.WorkflowReminder{}
-	}
-	return items, err
-}
-
-func (a *App) AckIncidentWorkflowReminder(input AckIncidentWorkflowReminderInput) error {
-	store, _, err := a.workflowComponents()
-	if err != nil {
-		return err
-	}
-	service := bughub.NewWorkflowReminderService(store, nil, bughub.DefaultWorkflowReminderAfter, nil)
-	return service.Ack(a.workflowCommandContext(), input.CaseID, input.ReservationKey, input.DeliveryAttempt, input.ActorID)
-}
-
-func (a *App) startWorkflowReminderPoller(ctx context.Context) {
-	if ctx == nil {
-		return
-	}
-	a.workflowReminderOnce.Do(func() {
-		go func() {
-			ticker := time.NewTicker(incidentWorkflowReminderPollInterval)
-			defer ticker.Stop()
-			a.pollWorkflowReminders(ctx)
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					a.pollWorkflowReminders(ctx)
-				}
-			}
-		}()
-	})
-}
-
-func (a *App) pollWorkflowReminders(ctx context.Context) {
-	a.workflowMu.Lock()
-	store := a.workflowStore
-	a.workflowMu.Unlock()
-	if store == nil {
-		return
-	}
-	service := bughub.NewWorkflowReminderService(store, nil, bughub.DefaultWorkflowReminderAfter, func(_ context.Context, reminder bughub.WorkflowReminder) error {
-		if a.workflowEmit != nil {
-			a.workflowEmit(incidentWorkflowReminderEvent, reminder)
-			return nil
-		}
-		if runtimeCtx := a.getRuntimeContext(); runtimeCtx != nil {
-			wailsruntime.EventsEmit(runtimeCtx, incidentWorkflowReminderEvent, reminder)
-			return nil
-		}
-		return errors.New("incident workflow reminder has no desktop runtime receiver")
-	}, a.resolveIncidentProductionEnvironment)
-	if err := service.Poll(workflowContext(ctx)); err != nil && !errors.Is(err, context.Canceled) {
-		fmt.Fprintf(os.Stderr, "[warn] incident workflow reminder poll failed: %v\n", err)
-	}
-}
-
-func (a *App) resolveIncidentProductionEnvironment(ctx context.Context, incident bughub.IncidentCase) (bool, error) {
-	loader := a.workflowLoadDeploymentConfig
-	if loader == nil {
-		loader = a.loadInstalledIncidentConfig
-	}
-	cfg, err := loader(ctx, incident)
-	if err != nil || cfg == nil {
-		return false, errors.New("incident environment configuration unavailable")
-	}
-	if strings.TrimSpace(incident.SystemID) == "" || cfg.System.ID != incident.SystemID {
-		return false, errors.New("incident environment system does not match configuration")
-	}
-	for _, environment := range cfg.Environments {
-		if environment.ID == incident.Environment {
-			return environment.IsProd, nil
-		}
-	}
-	return false, errors.New("incident environment is absent from configuration")
 }
 
 func (a *App) GetIncidentCase(caseID string) (IncidentCaseDetail, error) {
@@ -485,16 +492,23 @@ func (a *App) GetIncidentCase(caseID string) (IncidentCaseDetail, error) {
 		return IncidentCaseDetail{}, err
 	}
 	detail := IncidentCaseDetail{Case: incident}
+	detail.BugTicketResolution = a.incidentBugTicketResolution(incident)
 	attempts, err := store.ListAttempts(ctx, bughub.AttemptFilter{CaseID: caseID})
 	if err != nil {
 		return IncidentCaseDetail{}, err
 	}
-	if detail.Attempts, err = incidentPhaseAttempts(attempts); err != nil {
+	if detail.Attempts, err = incidentPhaseAttempts(attempts, bughub.NewInvestigationStore(a.workflowRoot)); err != nil {
 		return IncidentCaseDetail{}, err
 	}
-	if detail.Artifacts, err = store.ListEvidenceArtifacts(ctx, caseID); err != nil {
+	detail.PhaseEvents = incidentPhaseEventsForDetail(a.workflowRoot, incident)
+	artifacts, err := store.ListEvidenceArtifacts(ctx, caseID)
+	if err != nil {
 		return IncidentCaseDetail{}, err
 	}
+	if detail.Artifacts, err = incidentArtifacts(ctx, store, filepath.Join(a.workflowRoot, "artifacts"), caseID, artifacts); err != nil {
+		return IncidentCaseDetail{}, err
+	}
+
 	approvals, err := store.ListApprovals(ctx, caseID)
 	if err != nil {
 		return IncidentCaseDetail{}, err
@@ -512,7 +526,6 @@ func (a *App) GetIncidentCase(caseID string) (IncidentCaseDetail, error) {
 	if detail.DeploymentObservations, err = store.ListDeploymentObservations(ctx, caseID); err != nil {
 		return IncidentCaseDetail{}, err
 	}
-	detail.DeploymentVerification = a.deploymentVerificationPreview(ctx, caseID)
 	events, err := store.ListEvents(ctx, caseID)
 	if err != nil {
 		return IncidentCaseDetail{}, err
@@ -524,12 +537,40 @@ func (a *App) GetIncidentCase(caseID string) (IncidentCaseDetail, error) {
 	return detail, nil
 }
 
+func (a *App) incidentBugTicketResolution(incident bughub.IncidentCase) IncidentBugTicketResolution {
+	if incident.Status != bughub.CaseFixedVerified {
+		return IncidentBugTicketResolution{State: "not_ready"}
+	}
+	var bug bughub.Bug
+	if a.workflowLoadBug != nil {
+		loaded, err := a.workflowLoadBug(incident.BugID)
+		if err != nil {
+			return IncidentBugTicketResolution{State: "unknown"}
+		}
+		bug = loaded
+	} else {
+		loaded, found, err := bugStore().Get(incident.BugID)
+		if err != nil || !found {
+			return IncidentBugTicketResolution{State: "unknown"}
+		}
+		bug = loaded
+	}
+	state := "pending"
+	if zentaoTicketResolutionComplete(bug.Status) {
+		state = "resolved"
+	}
+	return IncidentBugTicketResolution{State: state, SourceStatus: strings.TrimSpace(bug.Status)}
+}
+
 func normalizeIncidentCaseDetail(detail *IncidentCaseDetail) {
 	if detail.Attempts == nil {
 		detail.Attempts = []IncidentPhaseAttempt{}
 	}
+	if detail.PhaseEvents == nil {
+		detail.PhaseEvents = []bughub.InvestigationEvent{}
+	}
 	if detail.Artifacts == nil {
-		detail.Artifacts = []bughub.EvidenceArtifact{}
+		detail.Artifacts = []IncidentArtifact{}
 	}
 	if detail.Approvals == nil {
 		detail.Approvals = []IncidentApproval{}
@@ -561,20 +602,84 @@ func incidentJSONValue(raw json.RawMessage) (any, error) {
 	return value, nil
 }
 
-func incidentPhaseAttempts(items []bughub.PhaseAttempt) ([]IncidentPhaseAttempt, error) {
+func incidentArtifacts(ctx context.Context, store *bughub.CaseStore, artifactsRoot, caseID string, items []bughub.EvidenceArtifact) ([]IncidentArtifact, error) {
+	out := make([]IncidentArtifact, 0, len(items))
+	for _, item := range items {
+		verified, err := bughub.ReadEvidenceArtifactFromRoot(ctx, store, artifactsRoot, caseID, item.ID)
+		if err != nil {
+			return nil, err
+		}
+		artifact := verified.Artifact
+		out = append(out, IncidentArtifact{
+			ID: artifact.ID, CaseID: artifact.CaseID, AttemptID: artifact.AttemptID,
+			Kind: artifact.Kind, SHA256: artifact.SHA256, Size: int64(len(verified.Content)),
+			CapturedAt: artifact.CapturedAt, Environment: artifact.Environment, Version: artifact.Version,
+			RequestID: artifact.RequestID, TraceID: artifact.TraceID,
+		})
+	}
+	return out, nil
+}
+
+func incidentPublicJSONValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, nested := range typed {
+			if key == "application_url" || key == "path_or_reference" {
+				continue
+			}
+			out[key] = incidentPublicJSONValue(nested)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for index, nested := range typed {
+			out[index] = incidentPublicJSONValue(nested)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func incidentPublicJSONObject(value map[string]any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	return incidentPublicJSONValue(value).(map[string]any)
+}
+
+func incidentPhaseAttempts(items []bughub.PhaseAttempt, legacy *bughub.InvestigationStore) ([]IncidentPhaseAttempt, error) {
 	out := make([]IncidentPhaseAttempt, 0, len(items))
 	for _, item := range items {
 		input, err := incidentJSONObject(item.InputJSON)
 		if err != nil {
 			return nil, err
 		}
-		output, err := incidentJSONObject(item.OutputJSON)
+		outputJSON := incidentLegacyInvestigationOutput(item, legacy)
+		output, err := incidentJSONObject(outputJSON)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, IncidentPhaseAttempt{ID: item.ID, CaseID: item.CaseID, CycleNumber: item.CycleNumber, Phase: item.Phase, Mode: item.Mode, Status: item.Status, AgentTarget: item.AgentTarget, BotKey: item.BotKey, InputJSON: input, OutputJSON: output, ParentAttemptID: item.ParentAttemptID, StartedAt: item.StartedAt, FinishedAt: item.FinishedAt, ErrorCode: item.ErrorCode, ErrorMessage: item.ErrorMessage, Usage: item.Usage})
+		out = append(out, IncidentPhaseAttempt{ID: item.ID, CaseID: item.CaseID, CycleNumber: item.CycleNumber, Phase: item.Phase, Mode: item.Mode, Status: item.Status, AgentTarget: item.AgentTarget, BotKey: item.BotKey, InputJSON: input, OutputJSON: incidentPublicJSONObject(output), ParentAttemptID: item.ParentAttemptID, StartedAt: item.StartedAt, FinishedAt: item.FinishedAt, ErrorCode: item.ErrorCode, ErrorMessage: item.ErrorMessage, Usage: item.Usage})
 	}
 	return out, nil
+}
+
+func incidentLegacyInvestigationOutput(item bughub.PhaseAttempt, legacy *bughub.InvestigationStore) json.RawMessage {
+	if legacy == nil || item.Phase != bughub.PhaseInvestigation || item.Status != bughub.AttemptStatusFailed ||
+		strings.TrimSpace(item.ErrorCode) != "invalid_phase_result" {
+		return item.OutputJSON
+	}
+	run, err := legacy.Get(item.ID)
+	if err != nil {
+		return item.OutputJSON
+	}
+	projection, ok := bughub.SafeLegacyInvestigationProjection([]byte(run.FinalMessage))
+	if !ok {
+		return item.OutputJSON
+	}
+	return projection
 }
 
 func incidentApprovals(items []bughub.Approval) ([]IncidentApproval, error) {
@@ -608,7 +713,7 @@ func incidentTransitionEvents(items []bughub.TransitionEvent) ([]IncidentTransit
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, IncidentTransitionEvent{ID: item.ID, CaseID: item.CaseID, FromStatus: item.FromStatus, ToStatus: item.ToStatus, EventType: item.EventType, ActorType: item.ActorType, ActorID: item.ActorID, IdempotencyKey: item.IdempotencyKey, PayloadJSON: payload, CreatedAt: item.CreatedAt})
+		out = append(out, IncidentTransitionEvent{ID: item.ID, CaseID: item.CaseID, FromStatus: item.FromStatus, ToStatus: item.ToStatus, EventType: item.EventType, ActorType: item.ActorType, ActorID: item.ActorID, IdempotencyKey: item.IdempotencyKey, PayloadJSON: incidentPublicJSONObject(payload), CreatedAt: item.CreatedAt})
 	}
 	return out, nil
 }
@@ -625,7 +730,7 @@ func (a *App) StartIncidentCase(input StartIncidentCaseInput) (bughub.IncidentCa
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	inputJSON, err := normalizeWorkflowJSON(input.InputJSON)
+	inputJSON, err := normalizeWorkflowInputEnvironment(input.InputJSON, bot.Env, strings.TrimSpace(input.BotEnvironment) != "")
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
@@ -637,7 +742,7 @@ func (a *App) StartIncidentCase(input StartIncidentCaseInput) (bughub.IncidentCa
 func (a *App) ResetIncidentCase(input ResetIncidentCaseInput) (bughub.IncidentCase, error) {
 	result, err := a.resetIncidentCaseWithWarnings(input)
 	if err == nil && workflowWarningCodePresent(result.Warnings, "reset_replacement_start_failed") {
-		err = errors.New("replacement Case phase start failed; retry validation from the preserved Case")
+		err = errors.New("replacement Case phase start failed; retry investigation from the preserved Case")
 	}
 	return result.Case, err
 }
@@ -678,14 +783,11 @@ func (a *App) resetIncidentCaseWithWarnings(input ResetIncidentCaseInput) (bughu
 	if err != nil {
 		return bughub.ResetCaseOutcome{}, err
 	}
-	if strings.TrimSpace(input.BotKey) != original.SelectedBotKey {
-		return bughub.ResetCaseOutcome{}, errors.New("bot_key does not match existing Case")
-	}
-	bug, bot, err := a.loadBugAndBot(original.BugID, original.SelectedBotKey)
+	bug, bot, err := a.loadFreshBugAndBot(original.BugID, strings.TrimSpace(input.BotKey), input.BotEnvironment)
 	if err != nil {
 		return bughub.ResetCaseOutcome{}, err
 	}
-	inputJSON, err := normalizeWorkflowJSON(input.InputJSON)
+	inputJSON, err := normalizeWorkflowInputEnvironment(input.InputJSON, bot.Env, strings.TrimSpace(input.BotEnvironment) != "")
 	if err != nil {
 		return bughub.ResetCaseOutcome{}, err
 	}
@@ -718,6 +820,7 @@ func (a *App) ContinueIncidentCase(input ContinueIncidentCaseInput) (bughub.Inci
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
+
 	inputJSON, err := normalizeWorkflowJSON(input.InputJSON)
 	if err != nil {
 		return bughub.IncidentCase{}, err
@@ -755,22 +858,129 @@ func (a *App) ApproveIncidentFix(input ApproveIncidentFixInput) (bughub.Incident
 	return incident, err
 }
 
-func (a *App) ApproveIncidentMerge(input ApproveIncidentMergeInput) (bughub.IncidentCase, error) {
+// ListIncidentFixBranches returns only branch names for the repositories in
+// the approved remediation scope. Repository paths stay host-private.
+func (a *App) ListIncidentFixBranches(caseID, rootCauseAttemptID string) (map[string][]string, error) {
+	caseID, rootCauseAttemptID = strings.TrimSpace(caseID), strings.TrimSpace(rootCauseAttemptID)
+	if caseID == "" || rootCauseAttemptID == "" {
+		return nil, errors.New("case_id and root_cause_attempt_id are required")
+	}
+	store, _, err := a.workflowComponents()
+	if err != nil {
+		return nil, err
+	}
+	ctx := a.workflowCommandContext()
+	incident, err := store.GetCase(ctx, caseID)
+	if err != nil {
+		return nil, err
+	}
+	if incident.Status != bughub.CaseWaitingFixApproval || incident.CurrentAttemptID != rootCauseAttemptID {
+		return nil, bughub.ErrApprovalScope
+	}
+	attempt, err := store.GetAttempt(ctx, rootCauseAttemptID)
+	if err != nil || attempt.CaseID != caseID || attempt.Phase != bughub.PhaseInvestigation || attempt.Status != bughub.AttemptStatusSucceeded {
+		return nil, bughub.ErrApprovalScope
+	}
+	result, err := bughub.ParseInvestigationResult(attempt.OutputJSON)
+	if err != nil || result.InvestigationStatus != "root_cause_ready" || !result.UsesCodeFixWorkflow() {
+		return nil, bughub.ErrApprovalScope
+	}
+	repositories := bughub.RemediationFixRepositories(result)
+	paths := userconfig.GetRepoPathsForSystem(incident.SystemID)
+	branches := make(map[string][]string, len(repositories))
+	for _, repo := range repositories {
+		path := strings.TrimSpace(paths[repo])
+		if path == "" {
+			return nil, fmt.Errorf("修复建议中的仓库 %q 未绑定本地代码仓库；请提出其他修复方案，让 Agent 从已配置仓库中重新选择", repo)
+		}
+		items := analyzer.ListBranches(filepath.Clean(path))
+		if len(items) == 0 {
+			return nil, fmt.Errorf("无法从修复建议仓库 %q 的本地代码仓库读取 Git 分支；请检查仓库路径和 Git 状态后重试", repo)
+		}
+		branches[repo] = items
+	}
+	return branches, nil
+}
+
+func (a *App) ReconsiderIncidentRemediation(input ReconsiderIncidentRemediationInput) (bughub.IncidentCase, error) {
 	if err := validateWorkflowCommandScalars(input.CaseID, input.ExpectedVersion, input.IdempotencyKey, input.ActorID); err != nil {
 		return bughub.IncidentCase{}, err
+	}
+	caseID := strings.TrimSpace(input.CaseID)
+	actorID := strings.TrimSpace(input.ActorID)
+	rootCauseAttemptID := strings.TrimSpace(input.RootCauseAttemptID)
+	proposal := strings.TrimSpace(input.Proposal)
+	if rootCauseAttemptID == "" {
+		return bughub.IncidentCase{}, errors.New("root_cause_attempt_id is required")
+	}
+	if proposal == "" {
+		return bughub.IncidentCase{}, errors.New("proposal is required")
+	}
+	expectedKey := bughub.ReconsiderRemediationKey(caseID, rootCauseAttemptID, input.ExpectedVersion)
+	if strings.TrimSpace(input.IdempotencyKey) != expectedKey {
+		return bughub.IncidentCase{}, errors.New("remediation reassessment key does not match the dialog snapshot scope")
 	}
 	_, orchestrator, err := a.workflowComponents()
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	incident, err := orchestrator.ApproveMerge(a.workflowCommandContext(), bughub.ApproveMergeCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), FixCommits: input.FixCommits, TargetBranches: input.TargetBranches, TargetHeads: input.TargetHeads})
+	bug, bot, err := a.loadIncidentContext(caseID)
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	incident, err := orchestrator.ReconsiderRemediation(a.workflowCommandContext(), bughub.ReconsiderRemediationCommand{
+		CaseID: caseID, ExpectedVersion: input.ExpectedVersion, IdempotencyKey: expectedKey, ActorID: actorID,
+		RootCauseAttemptID: rootCauseAttemptID, Proposal: proposal, Bug: bug, Bot: bot,
+	})
 	a.emitIncidentResult(incident, err)
 	return incident, err
 }
 
-func (a *App) NotifyIncidentDeployed(input NotifyIncidentDeployedInput) (bughub.IncidentCase, error) {
+func (a *App) DisputeIncidentRootCause(input DisputeIncidentRootCauseInput) (bughub.IncidentCase, error) {
 	if err := validateWorkflowCommandScalars(input.CaseID, input.ExpectedVersion, input.IdempotencyKey, input.ActorID); err != nil {
 		return bughub.IncidentCase{}, err
+	}
+	caseID := strings.TrimSpace(input.CaseID)
+	actorID := strings.TrimSpace(input.ActorID)
+	rootCauseAttemptID := strings.TrimSpace(input.RootCauseAttemptID)
+	reason := strings.TrimSpace(input.Reason)
+	if rootCauseAttemptID == "" {
+		return bughub.IncidentCase{}, errors.New("root_cause_attempt_id is required")
+	}
+	if reason == "" {
+		return bughub.IncidentCase{}, errors.New("reason is required")
+	}
+	expectedKey := bughub.DisputeRootCauseKey(caseID, rootCauseAttemptID, input.ExpectedVersion)
+	if strings.TrimSpace(input.IdempotencyKey) != expectedKey {
+		return bughub.IncidentCase{}, errors.New("root cause dispute key does not match the dialog snapshot scope")
+	}
+	_, orchestrator, err := a.workflowComponents()
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	bug, bot, err := a.loadIncidentContext(caseID)
+	if err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	incident, err := orchestrator.DisputeRootCause(a.workflowCommandContext(), bughub.DisputeRootCauseCommand{
+		CaseID: caseID, ExpectedVersion: input.ExpectedVersion, IdempotencyKey: expectedKey, ActorID: actorID,
+		RootCauseAttemptID: rootCauseAttemptID, Reason: reason,
+		EvidenceArtifactIDs: append([]string(nil), input.EvidenceArtifactIDs...), Bug: bug, Bot: bot,
+	})
+	a.emitIncidentResult(incident, err)
+	return incident, err
+}
+
+func (a *App) CompleteIncidentRemediation(input CompleteIncidentRemediationInput) (bughub.IncidentCase, error) {
+	if err := validateWorkflowCommandScalars(input.CaseID, input.ExpectedVersion, input.IdempotencyKey, input.ActorID); err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	if strings.TrimSpace(input.RootCauseAttemptID) == "" {
+		return bughub.IncidentCase{}, errors.New("root_cause_attempt_id is required")
+	}
+	expectedKey := bughub.CompleteRemediationKey(strings.TrimSpace(input.CaseID), strings.TrimSpace(input.RootCauseAttemptID), input.ExpectedVersion)
+	if strings.TrimSpace(input.IdempotencyKey) != expectedKey {
+		return bughub.IncidentCase{}, errors.New("remediation confirmation key does not match the dialog snapshot scope")
 	}
 	_, orchestrator, err := a.workflowComponents()
 	if err != nil {
@@ -780,18 +990,24 @@ func (a *App) NotifyIncidentDeployed(input NotifyIncidentDeployedInput) (bughub.
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	inputJSON, err := normalizeWorkflowJSON(input.InputJSON)
+
+	incident, err := orchestrator.CompleteRemediation(a.workflowCommandContext(), bughub.CompleteRemediationCommand{
+		CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID),
+		RootCauseAttemptID: strings.TrimSpace(input.RootCauseAttemptID), Summary: strings.TrimSpace(input.Summary), Evidence: strings.TrimSpace(input.Evidence), Bug: bug, Bot: bot,
+	})
+	a.emitIncidentResult(incident, err)
+	return incident, err
+}
+
+func (a *App) ApproveIncidentMerge(input ApproveIncidentMergeInput) (bughub.IncidentCase, error) {
+	if err := validateWorkflowCommandScalars(input.CaseID, input.ExpectedVersion, input.IdempotencyKey, input.ActorID); err != nil {
+		return bughub.IncidentCase{}, err
+	}
+	_, orchestrator, err := a.workflowComponents()
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	serverBinding := a.configuredDeploymentBinding(a.workflowCommandContext(), input.CaseID)
-	command := bughub.NotifyDeployedCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), ObservedVersion: strings.TrimSpace(input.ObservedVersion), ObservedCommits: input.ObservedCommits, Source: serverBinding.Provider, VerifierConfigFingerprint: serverBinding.Fingerprint, VerifierConfigSnapshot: serverBinding.Snapshot, Bug: bug, Bot: bot, InputJSON: inputJSON}
-	var incident bughub.IncidentCase
-	if strings.TrimSpace(input.NotificationText) != "" {
-		incident, err = orchestrator.NotifyDeployedFromText(a.workflowCommandContext(), input.NotificationText, command)
-	} else {
-		incident, err = orchestrator.NotifyDeployed(a.workflowCommandContext(), command)
-	}
+	incident, err := orchestrator.ApproveMerge(a.workflowCommandContext(), bughub.ApproveMergeCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), FixCommits: input.FixCommits, TargetBranches: input.TargetBranches, TargetHeads: input.TargetHeads})
 	a.emitIncidentResult(incident, err)
 	return incident, err
 }
@@ -849,6 +1065,27 @@ func normalizeWorkflowJSON(value map[string]any) (json.RawMessage, error) {
 	return encoded, nil
 }
 
+func normalizeWorkflowInputEnvironment(value map[string]any, environment string, snapshotProvided bool) (json.RawMessage, error) {
+	environment = strings.TrimSpace(environment)
+	cloned := make(map[string]any, len(value)+1)
+	for key, item := range value {
+		cloned[key] = item
+	}
+	if target, ok := cloned["target_environment"]; ok {
+		text, textOK := target.(string)
+		if !textOK {
+			return nil, errors.New("input_json target_environment must be a string")
+		}
+		if targetEnvironment := strings.TrimSpace(text); targetEnvironment != "" && targetEnvironment != environment {
+			return nil, errors.New("input_json target_environment does not match bot_environment")
+		}
+	}
+	if snapshotProvided && environment != "" {
+		cloned["target_environment"] = environment
+	}
+	return normalizeWorkflowJSON(cloned)
+}
+
 func (a *App) loadIncidentContext(caseID string) (bughub.Bug, bughub.BotRef, error) {
 	store, _, err := a.workflowComponents()
 	if err != nil {
@@ -858,7 +1095,12 @@ func (a *App) loadIncidentContext(caseID string) (bughub.Bug, bughub.BotRef, err
 	if err != nil {
 		return bughub.Bug{}, bughub.BotRef{}, err
 	}
-	return a.loadBugAndBot(incident.BugID, incident.SelectedBotKey)
+	bug, bot, err := a.loadBugAndBot(incident.BugID, incident.SelectedBotKey)
+	if err != nil {
+		return bughub.Bug{}, bughub.BotRef{}, err
+	}
+	bot.Env = strings.TrimSpace(incident.Environment)
+	return bug, bot, nil
 }
 
 func (a *App) loadIncidentStartContext(input StartIncidentCaseInput) (bughub.Bug, bughub.BotRef, error) {
@@ -868,6 +1110,8 @@ func (a *App) loadIncidentStartContext(input StartIncidentCaseInput) (bughub.Bug
 	}
 	bugID := strings.TrimSpace(input.BugID)
 	botKey := strings.TrimSpace(input.BotKey)
+	persistedEnvironment := ""
+	usePersistedEnvironment := false
 	incident, getErr := store.GetCase(a.workflowCommandContext(), strings.TrimSpace(input.CaseID))
 	if getErr == nil {
 		if bugID != "" && bugID != incident.BugID {
@@ -880,17 +1124,30 @@ func (a *App) loadIncidentStartContext(input StartIncidentCaseInput) (bughub.Bug
 			}
 			botKey = incident.SelectedBotKey
 		}
+		if incident.Status != bughub.CaseLegacyArchived {
+			persistedEnvironment = strings.TrimSpace(incident.Environment)
+			usePersistedEnvironment = true
+		}
 	} else if !errors.Is(getErr, bughub.ErrCaseNotFound) {
 		return bughub.Bug{}, bughub.BotRef{}, getErr
 	}
 	if bugID == "" || botKey == "" {
 		return bughub.Bug{}, bughub.BotRef{}, errors.New("bug_id and bot_key are required when creating or continuing a Case")
 	}
-	return a.loadBugAndBot(bugID, botKey)
+	bug, bot, err := a.loadBugAndBot(bugID, botKey)
+	if err != nil {
+		return bughub.Bug{}, bughub.BotRef{}, err
+	}
+	if usePersistedEnvironment {
+		bot.Env = persistedEnvironment
+		return bug, bot, nil
+	}
+	return a.applyFreshIncidentBotEnvironment(bug, bot, input.BotEnvironment)
 }
 
 func (a *App) loadBugAndBot(bugID, botKey string) (bughub.Bug, bughub.BotRef, error) {
 	loadBug := a.workflowLoadBug
+	materializeAttachments := loadBug == nil
 	if loadBug == nil {
 		loadBug = func(id string) (bughub.Bug, error) {
 			bug, found, getErr := bugStore().Get(id)
@@ -906,6 +1163,13 @@ func (a *App) loadBugAndBot(bugID, botKey string) (bughub.Bug, bughub.BotRef, er
 	bug, err := loadBug(bugID)
 	if err != nil {
 		return bughub.Bug{}, bughub.BotRef{}, fmt.Errorf("load incident bug: %w", err)
+	}
+	if materializeAttachments {
+		materialized := materializeBugAttachmentsForAgent(bug)
+		if bugAttachmentLocalPathsChanged(bug.Attachments, materialized.Attachments) {
+			bug = materialized
+			_ = bugStore().Upsert(bug)
+		}
 	}
 	loadBot := a.workflowLoadBot
 	if loadBot == nil {
@@ -927,6 +1191,57 @@ func (a *App) loadBugAndBot(bugID, botKey string) (bughub.Bug, bughub.BotRef, er
 		return bughub.Bug{}, bughub.BotRef{}, fmt.Errorf("load incident bot: %w", err)
 	}
 	return bug, bot, nil
+}
+
+func bugAttachmentLocalPathsChanged(before, after []bughub.Attachment) bool {
+	if len(before) != len(after) {
+		return true
+	}
+	for index := range before {
+		if before[index].LocalPath != after[index].LocalPath || before[index].Type != after[index].Type {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) loadFreshBugAndBot(bugID, botKey, environment string) (bughub.Bug, bughub.BotRef, error) {
+	bug, bot, err := a.loadBugAndBot(bugID, botKey)
+	if err != nil {
+		return bughub.Bug{}, bughub.BotRef{}, err
+	}
+	return a.applyFreshIncidentBotEnvironment(bug, bot, environment)
+}
+
+func (a *App) applyFreshIncidentBotEnvironment(bug bughub.Bug, bot bughub.BotRef, environment string) (bughub.Bug, bughub.BotRef, error) {
+	environment = strings.TrimSpace(environment)
+	if environment != "" {
+		if err := validateIncidentBotEnvironment(bot, environment); err != nil {
+			return bughub.Bug{}, bughub.BotRef{}, err
+		}
+		bot.Env = environment
+	} else if strings.TrimSpace(bot.Env) != "" {
+		bot.Env = strings.TrimSpace(bot.Env)
+	} else {
+		resolved, err := a.applyStoredBugBotEnvironments(bug, []bughub.BotRef{bot})
+		if err != nil {
+			return bughub.Bug{}, bughub.BotRef{}, err
+		}
+		bot = resolved[0]
+	}
+	return bug, bot, nil
+}
+
+func validateIncidentBotEnvironment(bot bughub.BotRef, environment string) error {
+	if len(bot.Envs) == 0 {
+		return nil
+	}
+	for _, candidate := range bot.Envs {
+		if strings.TrimSpace(candidate) == environment {
+			return nil
+		}
+	}
+	return fmt.Errorf("bot environment %q is not allowed by Bot %q", environment, bot.Key)
 }
 
 func (a *App) emitIncidentResult(incident bughub.IncidentCase, _ error) {
@@ -954,9 +1269,96 @@ func (a *App) emitIncidentPhaseEvent(caseID string, event bughub.InvestigationEv
 	if err != nil {
 		return
 	}
-	cloned := event
+	cloned, ok := incidentPublicPhaseEvent(event)
+	if !ok {
+		return
+	}
 	incident := detail.Case
 	a.emitWorkflowEvent(IncidentCaseEventPayload{Kind: "snapshot", Case: &incident, Snapshot: &detail, PhaseEvent: &cloned})
+}
+
+var incidentPublicPhaseEventTypes = map[string]bool{
+	"thread_started": true, "turn_started": true,
+	"turn_completed": true, "command_execution": true, "mcp_tool_call": true,
+	"agent_message": true, "phase_step": true, "code_intelligence": true, "retry": true, "error": true,
+	"turn_failed": true, "result": true,
+}
+
+func incidentPublicPhaseEvent(event bughub.InvestigationEvent) (bughub.InvestigationEvent, bool) {
+	if !incidentPublicPhaseEventTypes[event.Type] {
+		return bughub.InvestigationEvent{}, false
+	}
+	cloned := event
+	// Raw Agent protocol payloads may contain command output, tool arguments, or
+	// environment details. The workbench only needs the stable progress fields.
+	cloned.Raw = nil
+	cloned.Message = strings.TrimSpace(cloned.Message)
+	if runes := []rune(cloned.Message); len(runes) > 4000 {
+		cloned.Message = string(runes[:4000]) + "…"
+	}
+	cloned.Meta = incidentPublicPhaseEventMeta(event.Meta)
+	return cloned, true
+}
+
+func incidentPhaseEventsForDetail(root string, incident bughub.IncidentCase) []bughub.InvestigationEvent {
+	attemptID := strings.TrimSpace(incident.CurrentAttemptID)
+	if attemptID == "" || strings.TrimSpace(root) == "" {
+		return nil
+	}
+	run, err := bughub.NewInvestigationStore(root).Get(attemptID)
+	if err != nil {
+		// runs.json is a compatibility/progress projection. A missing or damaged
+		// projection must not make the durable Case detail unavailable.
+		return nil
+	}
+	const maxEvents = 100
+	out := make([]bughub.InvestigationEvent, 0, min(len(run.Events), maxEvents))
+	for _, event := range run.Events {
+		if safe, ok := incidentPublicPhaseEvent(event); ok {
+			out = append(out, safe)
+		}
+	}
+	return capIncidentPhaseEvents(out, maxEvents)
+}
+
+func capIncidentPhaseEvents(events []bughub.InvestigationEvent, limit int) []bughub.InvestigationEvent {
+	if limit <= 0 || len(events) <= limit {
+		return events
+	}
+	recentStart := len(events) - limit
+	latestStep := -1
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].Type == "phase_step" {
+			latestStep = index
+			break
+		}
+	}
+	if latestStep < 0 || latestStep >= recentStart {
+		return events[recentStart:]
+	}
+	out := make([]bughub.InvestigationEvent, 0, limit)
+	out = append(out, events[latestStep])
+	out = append(out, events[len(events)-(limit-1):]...)
+	return out
+}
+
+func incidentPublicPhaseEventMeta(meta map[string]any) map[string]any {
+	if meta == nil {
+		return nil
+	}
+	allowed := map[string]struct{}{
+		"case_id": {}, "attempt_id": {}, "cycle_number": {}, "phase": {},
+
+		"state": {}, "status": {}, "exit_code": {}, "ready": {},
+		"step_key": {}, "step_index": {}, "step_total": {},
+	}
+	out := make(map[string]any, len(allowed))
+	for key := range allowed {
+		if value, ok := meta[key]; ok {
+			out[key] = value
+		}
+	}
+	return out
 }
 
 func (a *App) emitWorkflowEvent(payload any) {

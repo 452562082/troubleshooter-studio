@@ -1,10 +1,14 @@
 package bughub
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestNormalizeZentaoBug(t *testing.T) {
@@ -49,6 +53,27 @@ func TestNormalizeZentaoBugPrefersNamesForObjectFields(t *testing.T) {
 
 	if got.Product != "S基建项目" || got.Module != "frontend" {
 		t.Fatalf("object fields = product %q module %q", got.Product, got.Module)
+	}
+}
+
+func TestNormalizeZentaoBugUsesLatestLifecycleTimestamp(t *testing.T) {
+	var raw ZentaoBug
+	if err := json.Unmarshal([]byte(`{
+		"id": 718,
+		"title": "重新激活的缺陷",
+		"status": "active",
+		"openedDate": "2026-07-18T06:58:00Z",
+		"editedDate": "2026-07-20T01:00:00Z",
+		"resolvedDate": "2026-07-23T05:04:59Z",
+		"activatedDate": "2026-07-23T06:58:09Z"
+	}`), &raw); err != nil {
+		t.Fatal(err)
+	}
+
+	got := NormalizeZentaoBug(raw)
+	want := "2026-07-23T06:58:09Z"
+	if got.UpdatedAt.UTC().Format(time.RFC3339) != want {
+		t.Fatalf("UpdatedAt = %s, want latest lifecycle timestamp %s", got.UpdatedAt, want)
 	}
 }
 
@@ -132,6 +157,23 @@ func TestZentaoClientFetchAssigned(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != "zentao-1842" {
 		t.Fatalf("bugs = %+v", got)
+	}
+}
+
+func TestZentaoClientFetchAssignedRejectsEmptyAccount(t *testing.T) {
+	requested := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested = true
+		t.Fatalf("empty-account fetch reached Zentao: %s", r.URL)
+	}))
+	defer srv.Close()
+
+	client := ZentaoClient{BaseURL: srv.URL, Token: "secret", HTTPClient: srv.Client()}
+	if _, err := client.FetchAssigned(" "); err == nil || !strings.Contains(err.Error(), "account is required") {
+		t.Fatalf("FetchAssigned error = %v, want required account", err)
+	}
+	if requested {
+		t.Fatal("empty-account fetch made a network request")
 	}
 }
 
@@ -464,6 +506,76 @@ func TestZentaoClientFetchByIDSupportsTopLevelBugResponse(t *testing.T) {
 	}
 }
 
+func TestZentaoClientResolveByIDOnlyResolvesActiveBug(t *testing.T) {
+	status := "active"
+	postCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Token") != "secret" {
+			t.Fatalf("Token header = %q", r.Header.Get("Token"))
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api.php/v1/bugs/840":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"bug":{"id":"840","title":"搜索结果不完整","status":%q}}`, status)
+		case r.Method == http.MethodPost && r.URL.Path == "/api.php/v1/bugs/840/resolve":
+			postCount++
+			var input map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Fatalf("decode resolve request: %v", err)
+			}
+			if input["resolution"] != "fixed" || input["resolvedBuild"] != "trunk" {
+				t.Fatalf("resolve request = %#v", input)
+			}
+			if !strings.Contains(fmt.Sprint(input["comment"]), "case-840") {
+				t.Fatalf("resolve comment = %q", input["comment"])
+			}
+			status = "resolved"
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"result":"success"}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	client := ZentaoClient{BaseURL: srv.URL, Token: "secret", HTTPClient: srv.Client()}
+	resolved, err := client.ResolveByID("840", "Studio case-840 第 2 轮回归通过")
+	if err != nil {
+		t.Fatalf("ResolveByID: %v", err)
+	}
+	if resolved.Status != "resolved" || postCount != 1 {
+		t.Fatalf("resolved=%+v postCount=%d", resolved, postCount)
+	}
+	resolved, err = client.ResolveByID("840", "duplicate callback")
+	if err != nil || resolved.Status != "resolved" || postCount != 1 {
+		t.Fatalf("idempotent resolve=%+v postCount=%d err=%v", resolved, postCount, err)
+	}
+}
+
+func TestZentaoClientResolveByIDAcceptsCommittedResolveAfterUncertainResponse(t *testing.T) {
+	status := "active"
+	postCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"bug":{"id":"840","title":"搜索结果不完整","status":%q}}`, status)
+		case http.MethodPost:
+			postCount++
+			status = "resolved"
+			http.Error(w, "gateway lost response", http.StatusBadGateway)
+		default:
+			t.Fatalf("unexpected request %s", r.Method)
+		}
+	}))
+	defer srv.Close()
+
+	resolved, err := (ZentaoClient{BaseURL: srv.URL, Token: "secret", HTTPClient: srv.Client()}).ResolveByID("840", "verified")
+	if err != nil || resolved.Status != "resolved" || postCount != 1 {
+		t.Fatalf("resolved=%+v postCount=%d err=%v", resolved, postCount, err)
+	}
+}
+
 func TestZentaoClientFetchAttachmentUsesAuthAndFallbackURLs(t *testing.T) {
 	var seen []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -490,6 +602,58 @@ func TestZentaoClientFetchAttachmentUsesAuthAndFallbackURLs(t *testing.T) {
 	}
 	if len(seen) != 3 || seen[0] != "/api.php/v1/files/101/download" || seen[2] != "/file-read-101.html" {
 		t.Fatalf("paths = %#v", seen)
+	}
+}
+
+func TestZentaoClientFetchAttachmentRejectsHTMLMasqueradingAsImage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<!DOCTYPE html><html><body>zentao shell</body></html>"))
+	}))
+	defer srv.Close()
+
+	client := ZentaoClient{BaseURL: srv.URL, Token: "secret", HTTPClient: srv.Client()}
+	if _, _, err := client.FetchAttachment(Attachment{
+		Name:      "screen.jpg",
+		Type:      "image/jpeg",
+		RemoteURL: srv.URL + "/file-read-101.html",
+	}); err == nil || !strings.Contains(err.Error(), "returned text/html") {
+		t.Fatalf("FetchAttachment error = %v, want rejected HTML image response", err)
+	}
+}
+
+func TestZentaoClientFetchAttachmentUsesDetectedImageTypeForBinaryAPI(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		switch r.URL.Path {
+		case "/api.php/v1/files/101/download":
+			http.NotFound(w, r)
+		case "/api.php/v1/files/101":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write([]byte("\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01"))
+		default:
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte("<!DOCTYPE html><html></html>"))
+		}
+	}))
+	defer srv.Close()
+
+	client := ZentaoClient{BaseURL: srv.URL, Token: "secret", HTTPClient: srv.Client()}
+	data, contentType, err := client.FetchAttachment(Attachment{
+		ID:        "101",
+		Name:      "screen.jpg",
+		Type:      "image/jpeg",
+		RemoteURL: srv.URL + "/file-read-101.html",
+	})
+	if err != nil {
+		t.Fatalf("FetchAttachment: %v", err)
+	}
+	if contentType != "image/jpeg" || !bytes.HasPrefix(data, []byte("\xff\xd8\xff")) {
+		t.Fatalf("attachment = %q %x", contentType, data)
+	}
+	if len(paths) < 2 || paths[0] != "/api.php/v1/files/101/download" || paths[1] != "/api.php/v1/files/101" {
+		t.Fatalf("paths = %#v, want API candidates before legacy HTML URL", paths)
 	}
 }
 
@@ -582,23 +746,15 @@ func TestSyncZentaoAssignedUsesCurrentUserWhenPlatformAccountBlank(t *testing.T)
 	}
 }
 
-func TestSyncZentaoAssignedContinuesWhenCurrentUserLookupFails(t *testing.T) {
+func TestSyncZentaoAssignedStopsWhenCurrentUserLookupFails(t *testing.T) {
+	bugListRequested := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api.php/v1/user":
 			panic(http.ErrAbortHandler)
 		case "/api.php/v1/bugs":
-			if got := r.Header.Get("Cookie"); got != "zentaosid=sso-session" {
-				t.Fatalf("bugs Cookie header = %q", got)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"bugs":[{"id":"1842","title":"支付页提交后 500","assignedTo":"kevin"},{"id":"1843","title":"搜索页异常","assignedTo":"xiaolong"}]}`))
-		case "/api.php/v1/bugs/1842":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"bug":{"id":"1842","title":"支付页提交后 500","assignedTo":"kevin"}}`))
-		case "/api.php/v1/bugs/1843":
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"bug":{"id":"1843","title":"搜索页异常","assignedTo":"xiaolong"}}`))
+			bugListRequested = true
+			t.Fatal("Bug list must not be fetched without a confirmed current account")
 		default:
 			t.Fatalf("path = %s", r.URL.Path)
 		}
@@ -606,22 +762,29 @@ func TestSyncZentaoAssignedContinuesWhenCurrentUserLookupFails(t *testing.T) {
 	defer srv.Close()
 
 	store := NewStore(t.TempDir())
+	existing := Bug{ID: "zentao-existing", Source: "zentao", PlatformID: "zentao-main", Title: "已有工单", Assignee: "xiaolong", Status: "active"}
+	if err := store.Upsert(existing); err != nil {
+		t.Fatal(err)
+	}
 	result, err := SyncZentaoAssigned(PlatformConfig{
 		ID: "zentao-main", Name: "禅道", Type: "zentao", BaseURL: srv.URL,
 		AuthMode: "feishu_sso", SessionHeader: "Cookie: zentaosid=sso-session", Enabled: true,
 	}, store, srv.Client())
-	if err != nil {
-		t.Fatalf("SyncZentaoAssigned: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "determine current user account") {
+		t.Fatalf("SyncZentaoAssigned error = %v, want current-account failure", err)
 	}
-	if result.Account != "" || result.Fetched != 2 || result.Stored != 2 {
+	if result.Account != "" || result.Fetched != 0 || result.Stored != 0 {
 		t.Fatalf("result = %+v", result)
+	}
+	if bugListRequested {
+		t.Fatal("sync fetched the unfiltered Bug list")
 	}
 	items, err := store.List()
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(items) != 2 {
-		t.Fatalf("items = %+v", items)
+	if len(items) != 1 || items[0].ID != existing.ID || items[0].InboxState != BugInboxActive {
+		t.Fatalf("existing inbox was mutated: %+v", items)
 	}
 }
 

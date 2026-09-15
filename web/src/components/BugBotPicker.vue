@@ -5,7 +5,7 @@ let bugBotPickerSequence = 0
 <script setup lang="ts">
 import type { BotMatch } from '../lib/bridge/bugs'
 
-defineProps<{ matches: BotMatch[]; selectedKey: string; loading?: boolean }>()
+defineProps<{ matches: BotMatch[]; selectedKey: string; loading?: boolean; emptyText?: string }>()
 const emit = defineEmits<{ select: [key: string] }>()
 
 const pickerInstanceID = `bug-bot-picker-${++bugBotPickerSequence}`
@@ -16,7 +16,7 @@ const groupName = `${pickerInstanceID}-group`
   <fieldset class="bot-picker" :disabled="loading" :aria-labelledby="`${pickerInstanceID}-title`">
     <legend :id="`${pickerInstanceID}-title`">选择排障机器人</legend>
     <p v-if="loading" class="empty-state" role="status" aria-live="polite">匹配中...</p>
-    <p v-else-if="matches.length === 0" class="empty-state" role="status">暂无匹配的排障机器人</p>
+    <p v-else-if="matches.length === 0" class="empty-state" role="status">{{ emptyText || '暂无匹配的排障机器人' }}</p>
     <div v-if="matches.length" class="bot-options">
       <label
         v-for="match in matches"

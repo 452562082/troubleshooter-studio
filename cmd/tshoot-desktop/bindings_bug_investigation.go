@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
+	"github.com/xiaolong/troubleshooter-studio/internal/aitools"
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
@@ -148,6 +149,10 @@ func (a *App) StartBugInvestigation(input BugInvestigationInput) (bughub.Investi
 	bug = materializeBugAttachmentsForAgent(bug)
 	target := strings.TrimSpace(input.Bot.Target)
 	switch target {
+	case "opencode":
+		if _, err := aitools.FindOpenCodeCLI(); err != nil {
+			return bughub.InvestigationRun{}, err
+		}
 	case "codex":
 		if _, err := exec.LookPath("codex"); err != nil {
 			return bughub.InvestigationRun{}, errors.New("未检测到 codex CLI")
@@ -156,12 +161,10 @@ func (a *App) StartBugInvestigation(input BugInvestigationInput) (bughub.Investi
 		if _, err := exec.LookPath("claude"); err != nil {
 			return bughub.InvestigationRun{}, errors.New("未检测到 claude CLI")
 		}
-	case "openclaw":
-		if _, err := exec.LookPath("openclaw"); err != nil {
-			return bughub.InvestigationRun{}, errors.New("未检测到 openclaw CLI")
-		}
 	case "cursor":
-		return bughub.InvestigationRun{}, errors.New("暂不支持 Cursor 后台直启，请复制上下文后在 Cursor Custom Agent 中发起")
+		if _, err := bughub.FindCursorCLI(); err != nil {
+			return bughub.InvestigationRun{}, err
+		}
 	default:
 		return bughub.InvestigationRun{}, errors.New("暂不支持该机器人后台直启")
 	}
@@ -225,6 +228,13 @@ func platformForBugAttachments(bug bughub.Bug) (bughub.PlatformConfig, bool) {
 	platforms, err := bugPlatformStore().List()
 	if err != nil {
 		return bughub.PlatformConfig{}, false
+	}
+	if platformID := strings.TrimSpace(bug.PlatformID); platformID != "" {
+		for _, platform := range platforms {
+			if platform.Enabled && platform.ID == platformID {
+				return platform, true
+			}
+		}
 	}
 	source := strings.TrimSpace(strings.ToLower(bug.Source))
 	for _, platform := range platforms {
@@ -308,6 +318,10 @@ func (a *App) ContinueBugInvestigation(input BugInvestigationContinueInput) (bug
 	bug = materializeBugAttachmentsForAgent(bug)
 	target := strings.TrimSpace(input.Bot.Target)
 	switch target {
+	case "opencode":
+		if _, err := aitools.FindOpenCodeCLI(); err != nil {
+			return bughub.InvestigationRun{}, err
+		}
 	case "codex":
 		if _, err := exec.LookPath("codex"); err != nil {
 			return bughub.InvestigationRun{}, errors.New("未检测到 codex CLI")
@@ -316,12 +330,10 @@ func (a *App) ContinueBugInvestigation(input BugInvestigationContinueInput) (bug
 		if _, err := exec.LookPath("claude"); err != nil {
 			return bughub.InvestigationRun{}, errors.New("未检测到 claude CLI")
 		}
-	case "openclaw":
-		if _, err := exec.LookPath("openclaw"); err != nil {
-			return bughub.InvestigationRun{}, errors.New("未检测到 openclaw CLI")
-		}
 	case "cursor":
-		return bughub.InvestigationRun{}, errors.New("暂不支持 Cursor 后台直启，请复制上下文后在 Cursor Custom Agent 中发起")
+		if _, err := bughub.FindCursorCLI(); err != nil {
+			return bughub.InvestigationRun{}, err
+		}
 	default:
 		return bughub.InvestigationRun{}, errors.New("暂不支持该机器人后台直启")
 	}
@@ -360,6 +372,10 @@ func (a *App) StartBugFix(input BugFixInput) (bughub.InvestigationRun, error) {
 	bug = materializeBugAttachmentsForAgent(bug)
 	target := strings.TrimSpace(input.Bot.Target)
 	switch target {
+	case "opencode":
+		if _, err := aitools.FindOpenCodeCLI(); err != nil {
+			return bughub.InvestigationRun{}, err
+		}
 	case "codex":
 		if _, err := exec.LookPath("codex"); err != nil {
 			return bughub.InvestigationRun{}, errors.New("未检测到 codex CLI")
@@ -368,12 +384,10 @@ func (a *App) StartBugFix(input BugFixInput) (bughub.InvestigationRun, error) {
 		if _, err := exec.LookPath("claude"); err != nil {
 			return bughub.InvestigationRun{}, errors.New("未检测到 claude CLI")
 		}
-	case "openclaw":
-		if _, err := exec.LookPath("openclaw"); err != nil {
-			return bughub.InvestigationRun{}, errors.New("未检测到 openclaw CLI")
-		}
 	case "cursor":
-		return bughub.InvestigationRun{}, errors.New("暂不支持 Cursor 后台直启，请复制上下文后在 Cursor Custom Agent 中发起")
+		if _, err := bughub.FindCursorCLI(); err != nil {
+			return bughub.InvestigationRun{}, err
+		}
 	default:
 		return bughub.InvestigationRun{}, errors.New("暂不支持该机器人后台直启")
 	}

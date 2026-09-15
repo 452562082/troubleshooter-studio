@@ -279,7 +279,7 @@ func extractCodeGraphTarGz(archivePath, extractRoot string, artifact codeGraphAr
 	if err != nil {
 		return fmt.Errorf("open CodeGraph gzip stream: %w", err)
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 
 	reader := tar.NewReader(gz)
 	for {
@@ -299,7 +299,7 @@ func extractCodeGraphTarGz(archivePath, extractRoot string, artifact codeGraphAr
 			if err := os.MkdirAll(destination, 0o755); err != nil {
 				return fmt.Errorf("create CodeGraph archive directory: %w", err)
 			}
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg: // archive/tar normalizes legacy TypeRegA headers.
 			mode := os.FileMode(header.Mode).Perm()
 			if mode == 0 {
 				mode = 0o644
@@ -320,7 +320,7 @@ func extractCodeGraphZip(archivePath, extractRoot string, artifact codeGraphArti
 	if err != nil {
 		return fmt.Errorf("open CodeGraph zip archive: %w", err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	for _, entry := range reader.File {
 		destination, err := codeGraphArchiveDestination(extractRoot, artifact, entry.Name)
 		if err != nil {

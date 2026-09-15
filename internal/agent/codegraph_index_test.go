@@ -616,7 +616,7 @@ func TestPrepareCodeGraphIndexes_UsesPinnedSourceExtensionAndSkipSets(t *testing
 	}
 }
 
-func TestBuildCodeGraphRepoTargets_AnalysisEnabledOnlyAndAbsolutePaths(t *testing.T) {
+func TestBuildCodeGraphRepoTargets_AnalysisDefaultsEnabledAndUsesAbsolutePaths(t *testing.T) {
 	repoRoot := t.TempDir()
 	nonGitRoot := t.TempDir()
 	if err := os.WriteFile(filepath.Join(repoRoot, "main.go"), []byte("package main\n"), 0o644); err != nil {
@@ -626,6 +626,7 @@ func TestBuildCodeGraphRepoTargets_AnalysisEnabledOnlyAndAbsolutePaths(t *testin
 	runGitForCodeGraphTest(t, "-C", repoRoot, "add", "main.go")
 	runGitForCodeGraphTest(t, "-C", repoRoot, "-c", "user.name=CodeGraph Test", "-c", "user.email=codegraph@example.invalid", "commit", "-qm", "initial")
 	head := strings.TrimSpace(runGitForCodeGraphTest(t, "-C", repoRoot, "rev-parse", "HEAD"))
+	branch := strings.TrimSpace(runGitForCodeGraphTest(t, "-C", repoRoot, "branch", "--show-current"))
 	workingDir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -636,27 +637,33 @@ func TestBuildCodeGraphRepoTargets_AnalysisEnabledOnlyAndAbsolutePaths(t *testin
 	}
 
 	cfg := &config.SystemConfig{Repos: []config.Repo{
-		{Name: "disabled", Analysis: config.RepoAnalysis{Enabled: false}},
-		{Name: "monorepo-first", SubPath: "services/orders", Analysis: config.RepoAnalysis{Enabled: true}},
-		{Name: "monorepo-duplicate", SubPath: "services/users", Analysis: config.RepoAnalysis{Enabled: true}},
-		{Name: "not-a-checkout", Analysis: config.RepoAnalysis{Enabled: true}},
-		{Name: "missing-visible", Analysis: config.RepoAnalysis{Enabled: true}},
+		{Name: "disabled", Analysis: config.RepoAnalysis{Enabled: boolPointer(false)}},
+		{Name: "default-enabled"},
+		{Name: "monorepo-first", SubPath: "services/orders", Analysis: config.RepoAnalysis{Enabled: boolPointer(true)}},
+		{Name: "monorepo-duplicate", SubPath: "services/users", Analysis: config.RepoAnalysis{Enabled: boolPointer(true)}},
+		{Name: "not-a-checkout", Analysis: config.RepoAnalysis{Enabled: boolPointer(true)}},
+		{Name: "missing-visible", Analysis: config.RepoAnalysis{Enabled: boolPointer(true)}},
 	}}
 	targets := BuildCodeGraphRepoTargets(cfg, map[string]string{
 		"disabled":           repoRoot,
+		"default-enabled":    repoRoot,
 		"monorepo-first":     "  " + relRoot + "  ",
 		"monorepo-duplicate": repoRoot,
 		"not-a-checkout":     nonGitRoot,
 	})
 
 	want := []CodeGraphRepoTarget{
-		{Name: "monorepo-first", Path: repoRoot, Head: head},
+		{Name: "default-enabled", Path: repoRoot, Branch: branch, Head: head},
 		{Name: "not-a-checkout", Path: nonGitRoot, Head: ""},
 		{Name: "missing-visible", Path: ""},
 	}
 	if !reflect.DeepEqual(targets, want) {
 		t.Fatalf("targets = %#v, want %#v", targets, want)
 	}
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }
 
 func setCodeGraphRunnerForTest(t *testing.T, runner codeGraphCommandRunner) {

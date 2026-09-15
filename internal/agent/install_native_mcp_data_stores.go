@@ -7,10 +7,10 @@
 //
 // 涉及包(2026-05-15 runtime probe 最新事实):
 //
-//	mongodb        npx mcp-mongo-server --read-only       8 tools(--read-only 运行时拦截写)
+//	mongodb        npx mongodb-mcp-server (readOnly，工具以 runtime probe 为准)
 //	postgresql     npx @henkey/postgres-mcp-server        19 tools(2 写 + 1 任意 SQL 软约束禁)
-//	elasticsearch  npx @elastic/mcp-server-elasticsearch  4 tools(README 写的 esql 上游 v0.3.1 未注册)
-//	redis          npx @gongrzhe/server-redis-mcp@1.0.0   4 tools(无 scan/TTL,需 redis-cli fallback)
+//	elasticsearch  npx @elastic/mcp-server-elasticsearch@0.1.1  4 tools(ES 8 client)
+//	redis          uvx redis-mcp-server (官方，支持 scan_keys；TTL 走 CLI fallback)
 //	mysql          npx @benborla29/mcp-server-mysql       1 tool(单 mysql_query 入口,内部 env 限制写)
 //	doris          npx @benborla29/mcp-server-mysql       1 tool(走 Doris FE MySQL 协议)
 //	clickhouse     uvx mcp-clickhouse                     3 tools(run_query 主用,内置 destructive protection)
@@ -29,16 +29,25 @@ import (
 
 // buildDataStores 数据层 MCP per (data_store_type, env)。wizard 用 DS_TOOL_SPECS 收集每家 +
 // 每环境的连接串 env vars(如 MONGODB_URI_DEV / POSTGRES_DSN_DEV / DORIS_DSN_DEV / ES_URL_DEV ...),
-// useDeployFlow.buildOpenclawCreds 把这些 env vars 写到 install creds map。
 // 这里读对应 env var,注册成预启动 mcp server,让 AI 能直接 tool_use 调而不用读 SKILL.md
 // 跑 mongosh / psql 这种"AI 不一定会主动跑"的 CLI。
 //
 // PruneEmpty=true 模式下空 env 段会被剔,如果用户没填 endpoint(env-vars 模式没填 /
 // 走 from_config_center 模式),mcp server 启动时拿不到 URI 直接退出 — 不会污染 IDE。
 func (b *mcpBuilder) buildDataStores(servers map[string]any) {
+	typeCounts := map[string]int{}
+	for _, ds := range b.cfg.Infrastructure.DataStores {
+		if ds.Enabled {
+			typeCounts[ds.Type]++
+		}
+	}
 	for _, ds := range b.cfg.Infrastructure.DataStores {
 		if !ds.Enabled {
 			continue
+		}
+		instanceSourceID := ""
+		if typeCounts[ds.Type] > 1 || (ds.ID != "" && ds.ID != ds.Type) {
+			instanceSourceID = ds.ID
 		}
 		for _, e := range b.cfg.Environments {
 			// 按连接串 dedupe:同一 (env, type) 下,同 URI 视为同 cluster,共享一个 MCP;
@@ -47,9 +56,13 @@ func (b *mcpBuilder) buildDataStores(servers map[string]any) {
 			unique := dsEndpointsUnique(ds, e.ID)
 			single := len(unique) <= 1
 			for _, ep := range unique {
-				sourceID := ""
+				sourceID := instanceSourceID
 				if !single {
-					sourceID = ep.sourceID
+					if sourceID == "" {
+						sourceID = ep.sourceID
+					} else {
+						sourceID += "-" + ep.sourceID
+					}
 				}
 				switch ds.Type {
 				case "mongodb":
@@ -77,23 +90,23 @@ func (b *mcpBuilder) buildDataStores(servers map[string]any) {
 			if len(unique) == 0 {
 				switch ds.Type {
 				case "mongodb":
-					b.buildMongoDB(servers, nil, "", e.ID)
+					b.buildMongoDB(servers, nil, instanceSourceID, e.ID)
 				case "postgresql":
-					b.buildPostgreSQL(servers, nil, "", e.ID)
+					b.buildPostgreSQL(servers, nil, instanceSourceID, e.ID)
 				case "elasticsearch":
-					b.buildDataES(servers, nil, "", e.ID)
+					b.buildDataES(servers, nil, instanceSourceID, e.ID)
 				case "redis":
-					b.buildRedis(servers, nil, "", e.ID)
+					b.buildRedis(servers, nil, instanceSourceID, e.ID)
 				case "kafka":
-					b.buildKafka(servers, nil, "", e.ID)
+					b.buildKafka(servers, nil, instanceSourceID, e.ID)
 				case "rabbitmq":
-					b.buildRabbitMQ(servers, nil, "", e.ID)
+					b.buildRabbitMQ(servers, nil, instanceSourceID, e.ID)
 				case "mysql":
-					b.buildMySQL(servers, nil, "", e.ID)
+					b.buildMySQL(servers, nil, instanceSourceID, e.ID)
 				case "doris":
-					b.buildDoris(servers, nil, "", e.ID)
+					b.buildDoris(servers, nil, instanceSourceID, e.ID)
 				case "clickhouse":
-					b.buildClickHouse(servers, nil, "", e.ID)
+					b.buildClickHouse(servers, nil, instanceSourceID, e.ID)
 				}
 			}
 		}
@@ -113,13 +126,15 @@ func (b *mcpBuilder) buildMongoDB(servers map[string]any, ep *config.DataStoreEn
 	// 解析,密码含 < ] ^ % @ : / ? # [ ] 等字面字符 → connection string parse error。
 	uri = normalizeMongoURI(uri)
 	uri = ensureDirectConnection(uri)
-	// mcp-mongo-server v2+ 支持 MCP_MONGODB_URI env(2.x 起);凭据走 env IDE
-	// config args 字段不残留。
+	// Keep the existing read-only policy and pass credentials through the
+	// official server's environment contract, never its command line.
 	servers[b.keyFor("mongodb", sourceID, envID)] = map[string]any{
 		"command": "npx",
-		"args":    []any{"-y", "mcp-mongo-server", "--read-only"},
+		"args":    []any{"-y", mongodbMCPPackage},
 		"env": b.envBlock(map[string]any{
-			"MCP_MONGODB_URI": uri,
+			"MDB_MCP_CONNECTION_STRING": uri,
+			"MDB_MCP_READ_ONLY":         "true",
+			"MDB_MCP_TELEMETRY":         "disabled",
 		}),
 	}
 }
@@ -166,7 +181,7 @@ func (b *mcpBuilder) buildDataES(servers map[string]any, ep *config.DataStoreEnd
 	}
 	servers[b.keyFor("elasticsearch", sourceID, envID)] = map[string]any{
 		"command": "npx",
-		"args":    []any{"-y", "@elastic/mcp-server-elasticsearch"},
+		"args":    []any{"-y", elasticsearchMCPPackage},
 		"env": b.envBlock(map[string]any{
 			"ES_URL":      esURL,
 			"ES_USERNAME": firstNonEmpty(b.get(envVar("ES_USER", sourceID, envID)), epUser),
@@ -180,9 +195,7 @@ func (b *mcpBuilder) buildDataES(servers map[string]any, ep *config.DataStoreEnd
 	}
 }
 
-// buildRedis:@gongrzhe/server-redis-mcp 接 URL 位置参数,不用拆字段。
-// 钉死 1.0.0:这个包目前只发过 1.0.0 一个版本(2024-12);如果作者将来发
-// 不兼容版本(arg 顺序变 / 改 env-only),@latest 会无声 break,钉版本更稳。
+// buildRedis uses the pinned Redis-maintained MCP implementation.
 func (b *mcpBuilder) buildRedis(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
 	var epURL string
 	if ep != nil {
@@ -192,11 +205,12 @@ func (b *mcpBuilder) buildRedis(servers map[string]any, ep *config.DataStoreEndp
 	if redisURL == "" && b.opts.PruneEmpty {
 		return
 	}
-	// 同 pg:上游 v1.0.0 只接位置参数,凭据落 args。
+	// Use the official CLI, preserving the complete URI without exposing it
+	// in process arguments. The package runs in its own uv tool environment.
 	servers[b.keyFor("redis", sourceID, envID)] = map[string]any{
-		"command": "npx",
-		"args":    []any{"-y", "@gongrzhe/server-redis-mcp@1.0.0", redisURL},
-		"env":     b.envBlock(map[string]any{}),
+		"command": "uvx",
+		"args":    []any{"--from", redisMCPPackage, "python", "-c", redisMCPLauncher},
+		"env":     b.envBlock(map[string]any{"REDIS_URL": redisURL}),
 	}
 }
 
@@ -354,46 +368,10 @@ func (b *mcpBuilder) buildKafka(servers map[string]any, ep *config.DataStoreEndp
 	}
 }
 
-// buildRabbitMQ 2026-05-15 真实 probe 后**禁用 mcp 注册**(yaml schema / wizard / .env 凭据
-// 都不动,等社区出能用的包再翻开)。理由:
-//
-// 跑 stdio probe 实测两个 PyPI 候选都 broken,**不是版本不兼容,是源码 import 路径根本不存在**:
-//
-//  1. `amq-mcp-server-rabbitmq@latest`(AWS amazon-mq 维护,曾经的首选):
-//     源码 line 9 写死 `from fastmcp.server.auth import BearerAuthProvider`,但 fastmcp 任何
-//     版本(2.7 / 2.14.7 / 3.3 都验过)的 `fastmcp.server.auth` 都没有 `BearerAuthProvider`
-//     这个 export — 大概率是 fastmcp 早期改名为 `JWTVerifier` 等,amazon-mq 没跟。
-//     `uvx --with "fastmcp==2.14.7"` 硬钉 2.x 最新也撞同款 ImportError → 死局。
-//     GitHub main 分支同款代码、0 issue 反馈,上游没人修。
-//  2. `rabbitmq-mcp-server`(guercheLE 社区):
-//     依赖声明缺一堆 — 撞 tabulate、tomli、requests 全 ModuleNotFoundError,补丁堆补丁。
-//
-// 修法走方案 B(**同 nacos / apollo / consul,不同 feishu_project**):
-// rabbitmq 主路径走 SKILL 内 HTTP Management API(端口 15672 自带 REST API,极其稳定,
-// RabbitMQ 团队官方维护)。**能力完整可用**,只是 mcp 这一层禁了。
-//
-// 跟 feishu_project 区别:feishu_project 是 3b 真禁用 — mcp 禁 + 凭据停收 + 无替代;
-// rabbitmq 是 3a 方案 B — mcp 禁 + **凭据仍收** + HTTP API 完整替代。详见 AGENTS.md
-// "不注册 mcp 的两种情况"。
-//
-// rabbitmq 在排障里调用频次低(看队列长度、consumer lag、alarm),不像 grafana 那种高频,
-// 失去 mcp 原生 tool-call 体验代价可接受。SKILL 早就把 HTTP API 当 fallback 写了,这次直接升主路径。
-//
-// 等条件:社区出**能跑通**的 rabbitmq mcp 包,且工具集对得上排障需求,再翻开下面 if 分支。
-// 当前 install 时打 warn 告知用户 mcp 没注册,SKILL 会走 HTTP API。
-func (b *mcpBuilder) buildRabbitMQ(servers map[string]any, ep *config.DataStoreEndpoint, sourceID, envID string) {
-	for _, ds := range b.cfg.Infrastructure.DataStores {
-		if ds.Type != "rabbitmq" || !ds.Enabled {
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "[warn] rabbitmq mcp 暂未启用注册(%s)\n", envID)
-		fmt.Fprintf(os.Stderr, "        理由:amq-mcp-server-rabbitmq 源码引用 fastmcp 不存在的 BearerAuthProvider(任何版本都没有),\n")
-		fmt.Fprintf(os.Stderr, "             rabbitmq-mcp-server 缺一堆 dep — 两个 PyPI 候选都跑不起来\n")
-		fmt.Fprintf(os.Stderr, "        现状:yaml 仍合法,凭据仍收集;主路径走 SKILL HTTP Management API(端口 15672)\n")
-		fmt.Fprintf(os.Stderr, "        等条件:社区出能跑通的 mcp 包 — 详见 install_native_mcp_data_stores.go::buildRabbitMQ 注释\n")
-		_ = servers // 占位:重启用时改回 servers[b.keyFor("rabbitmq", sourceID, envID)] = ...
-		_ = ep
-		_ = sourceID
-		return
-	}
+// buildRabbitMQ keeps the Management HTTP API with pre-bound credentials and
+// reverse-proxy paths. Published amq-mcp-server-rabbitmq 4.0.0 now starts, but
+// requires credentials in connect tool arguments and reconstructs the API URL
+// from hostname/port, so it cannot transparently replace the existing binding.
+func (b *mcpBuilder) buildRabbitMQ(_ map[string]any, _ *config.DataStoreEndpoint, _ string, envID string) {
+	fmt.Fprintf(os.Stderr, "[info] RabbitMQ (%s) 使用 HTTP Management API，凭据与连接配置继续生效\n", envID)
 }

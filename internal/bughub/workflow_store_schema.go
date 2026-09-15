@@ -90,7 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_events_case_created ON transition_events(case_id,
 `
 
 const (
-	workflowStoreSchemaVersion   = 7
+	workflowStoreSchemaVersion   = 13
 	workflowStoreSchemaV1Key     = "workflow-schema-v1"
 	workflowStoreSchemaV1Upgrade = `
 ALTER TABLE transition_events ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT '';
@@ -141,10 +141,107 @@ CREATE TABLE reset_cancellation_operations (
 );
 CREATE INDEX idx_reset_cancellations_status_updated ON reset_cancellation_operations(status, updated_at);
 `
+	workflowStoreSchemaV8Upgrade = `
+CREATE TABLE browser_recovery_operations (
+  idempotency_key TEXT PRIMARY KEY,
+  operation TEXT NOT NULL CHECK (operation IN ('login','repair')),
+  case_id TEXT NOT NULL REFERENCES incident_cases(id),
+  attempt_id TEXT NOT NULL REFERENCES phase_attempts(id),
+  expected_error_code TEXT NOT NULL CHECK (expected_error_code LIKE 'browser_%'),
+  cycle_number INTEGER NOT NULL CHECK (cycle_number >= 1),
+  expected_version INTEGER NOT NULL CHECK (expected_version >= 1),
+  actor_id TEXT NOT NULL CHECK (actor_id <> ''),
+  request_fingerprint TEXT NOT NULL CHECK (length(request_fingerprint) = 64 AND request_fingerprint NOT GLOB '*[^0-9a-f]*'),
+  status TEXT NOT NULL CHECK (status IN ('claimed','effect_succeeded','outcome_uncertain','continued')),
+  claim_token TEXT NOT NULL CHECK (claim_token <> ''),
+  outcome_code TEXT NOT NULL DEFAULT '',
+  result_case_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(operation, case_id, attempt_id),
+  CHECK ((status = 'claimed' AND outcome_code = '' AND result_case_json = '{}') OR
+         (status = 'effect_succeeded' AND outcome_code = 'succeeded' AND result_case_json = '{}') OR
+         (status = 'outcome_uncertain' AND outcome_code = 'unknown' AND result_case_json = '{}') OR
+         (status = 'continued' AND outcome_code = 'continued' AND result_case_json <> '{}'))
+);
+CREATE INDEX idx_browser_recovery_status_updated ON browser_recovery_operations(status, updated_at);
+`
+	workflowStoreSchemaV9Upgrade = `
+DROP INDEX idx_browser_recovery_status_updated;
+ALTER TABLE browser_recovery_operations RENAME TO browser_recovery_operations_v8;
+CREATE TABLE browser_recovery_operations (
+  idempotency_key TEXT PRIMARY KEY,
+  operation TEXT NOT NULL CHECK (operation IN ('login','repair')),
+  case_id TEXT NOT NULL REFERENCES incident_cases(id),
+  attempt_id TEXT NOT NULL REFERENCES phase_attempts(id),
+  expected_error_code TEXT NOT NULL CHECK (expected_error_code LIKE 'browser_%'),
+  cycle_number INTEGER NOT NULL CHECK (cycle_number >= 1),
+  expected_version INTEGER NOT NULL CHECK (expected_version >= 1),
+  actor_id TEXT NOT NULL CHECK (actor_id <> ''),
+  request_fingerprint TEXT NOT NULL CHECK (length(request_fingerprint) = 64 AND request_fingerprint NOT GLOB '*[^0-9a-f]*'),
+  status TEXT NOT NULL CHECK (status IN ('claimed','effect_succeeded','effect_failed','outcome_uncertain','continued')),
+  claim_token TEXT NOT NULL CHECK (claim_token <> ''),
+  outcome_code TEXT NOT NULL DEFAULT '',
+  result_case_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(operation, case_id, attempt_id),
+  CHECK ((status = 'claimed' AND outcome_code = '' AND result_case_json = '{}') OR
+         (status = 'effect_succeeded' AND outcome_code = 'succeeded' AND result_case_json = '{}') OR
+         (status = 'effect_failed' AND outcome_code = 'failed' AND result_case_json = '{}') OR
+         (status = 'outcome_uncertain' AND outcome_code = 'unknown' AND result_case_json = '{}') OR
+         (status = 'continued' AND outcome_code = 'continued' AND result_case_json <> '{}'))
+);
+INSERT INTO browser_recovery_operations (
+  idempotency_key,operation,case_id,attempt_id,expected_error_code,cycle_number,expected_version,
+  actor_id,request_fingerprint,status,claim_token,outcome_code,result_case_json,created_at,updated_at
+) SELECT
+  idempotency_key,operation,case_id,attempt_id,expected_error_code,cycle_number,expected_version,
+  actor_id,request_fingerprint,status,claim_token,outcome_code,result_case_json,created_at,updated_at
+FROM browser_recovery_operations_v8;
+DROP TABLE browser_recovery_operations_v8;
+CREATE INDEX idx_browser_recovery_status_updated ON browser_recovery_operations(status, updated_at);
+`
+	workflowStoreSchemaV10Upgrade = `
+CREATE TABLE validation_recipes (
+  case_id TEXT PRIMARY KEY REFERENCES incident_cases(id) ON DELETE CASCADE,
+  scenario_sha256 TEXT NOT NULL CHECK (length(scenario_sha256) = 64 AND scenario_sha256 NOT GLOB '*[^0-9a-f]*'),
+  plan_sha256 TEXT NOT NULL CHECK (length(plan_sha256) = 64 AND plan_sha256 NOT GLOB '*[^0-9a-f]*'),
+  plan_json TEXT NOT NULL,
+  source_attempt_id TEXT NOT NULL REFERENCES phase_attempts(id),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_validation_recipes_scenario ON validation_recipes(scenario_sha256);
+`
+	workflowStoreSchemaV11Upgrade = `
+ALTER TABLE incident_cases ADD COLUMN frontend_entry_json TEXT NOT NULL DEFAULT '{}';
+`
+	workflowStoreSchemaV12Upgrade = `
+CREATE TABLE browser_decision_steps (
+  attempt_id TEXT NOT NULL REFERENCES phase_attempts(id) ON DELETE CASCADE,
+  step_no INTEGER NOT NULL CHECK (step_no >= 1),
+  scene_sha256 TEXT NOT NULL CHECK (length(scene_sha256) = 64 AND scene_sha256 NOT GLOB '*[^0-9a-f]*'),
+  decision_sha256 TEXT NOT NULL CHECK (length(decision_sha256) = 64 AND decision_sha256 NOT GLOB '*[^0-9a-f]*'),
+  action_fingerprint TEXT NOT NULL CHECK (length(action_fingerprint) = 64 AND action_fingerprint NOT GLOB '*[^0-9a-f]*'),
+  status TEXT NOT NULL CHECK (status IN ('prepared','executing','confirmed','no_effect','blocked','ambiguous','uncertain')),
+  effect_code TEXT NOT NULL DEFAULT '',
+  before_scene_ref TEXT NOT NULL,
+  after_scene_ref TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(attempt_id, step_no),
+  UNIQUE(attempt_id, action_fingerprint),
+  CHECK ((status IN ('prepared','executing') AND effect_code = '' AND after_scene_ref = '') OR
+         (status IN ('confirmed','no_effect','blocked','ambiguous') AND effect_code <> '' AND after_scene_ref <> '') OR
+         (status = 'uncertain' AND effect_code = 'browser_step_effect_uncertain'))
+);
+CREATE INDEX idx_browser_decision_steps_status_updated ON browser_decision_steps(status, updated_at);
+`
 )
 
 var legacyWorkflowTableColumns = map[string][]string{
-	"incident_cases":                {"id", "bug_id", "source", "system_id", "environment", "status", "cycle_number", "current_attempt_id", "selected_bot_key", "version", "created_at", "updated_at", "closed_at", "reset_from_case_id", "superseded_by_case_id"},
+	"incident_cases":                {"id", "bug_id", "source", "system_id", "environment", "status", "cycle_number", "current_attempt_id", "selected_bot_key", "version", "created_at", "updated_at", "closed_at", "reset_from_case_id", "superseded_by_case_id", "frontend_entry_json"},
 	"phase_attempts":                {"id", "case_id", "cycle_number", "phase", "mode", "status", "agent_target", "bot_key", "input_json", "output_json", "parent_attempt_id", "started_at", "finished_at", "error_code", "error_message", "input_tokens", "output_tokens", "duration_nanos"},
 	"transition_events":             {"id", "case_id", "from_status", "to_status", "event_type", "actor_type", "actor_id", "idempotency_key", "payload_json", "created_at"},
 	"evidence_artifacts":            {"id", "case_id", "attempt_id", "kind", "path_or_reference", "sha256", "captured_at", "environment", "version", "request_id", "trace_id", "redaction_status"},
@@ -153,12 +250,18 @@ var legacyWorkflowTableColumns = map[string][]string{
 	"deployment_observations":       {"id", "case_id", "environment", "expected_commits_json", "user_notified_at", "verification_source", "observed_version", "observed_images_json", "observed_commits_json", "verified_at", "result", "idempotency_key"},
 	"schema_migrations":             {"key", "applied_at", "detail_json"},
 	"reset_cancellation_operations": {"reset_key", "case_id", "attempt_id", "request_fingerprint", "status", "claim_token", "outcome_code", "created_at", "updated_at"},
+	"browser_recovery_operations":   {"idempotency_key", "operation", "case_id", "attempt_id", "expected_error_code", "cycle_number", "expected_version", "actor_id", "request_fingerprint", "status", "claim_token", "outcome_code", "result_case_json", "created_at", "updated_at"},
+	"validation_recipes":            {"case_id", "scenario_sha256", "plan_sha256", "plan_json", "source_attempt_id", "created_at", "updated_at", "autonomous_recipe_sha256", "autonomous_recipe_json"},
+	"browser_decision_steps":        {"attempt_id", "step_no", "scene_sha256", "decision_sha256", "action_fingerprint", "status", "effect_code", "before_scene_ref", "after_scene_ref", "created_at", "updated_at"},
 }
 
 var requiredWorkflowIndexes = map[string]string{
-	"idx_cases_status_updated":               "incident_cases",
-	"idx_cases_bug_updated":                  "incident_cases",
-	"idx_attempts_case_started":              "phase_attempts",
-	"idx_events_case_created":                "transition_events",
-	"idx_reset_cancellations_status_updated": "reset_cancellation_operations",
+	"idx_cases_status_updated":                  "incident_cases",
+	"idx_cases_bug_updated":                     "incident_cases",
+	"idx_attempts_case_started":                 "phase_attempts",
+	"idx_events_case_created":                   "transition_events",
+	"idx_reset_cancellations_status_updated":    "reset_cancellation_operations",
+	"idx_browser_recovery_status_updated":       "browser_recovery_operations",
+	"idx_validation_recipes_scenario":           "validation_recipes",
+	"idx_browser_decision_steps_status_updated": "browser_decision_steps",
 }

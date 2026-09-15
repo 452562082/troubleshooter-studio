@@ -61,14 +61,14 @@ def test_only_four_config_tools_shipped():
 
 def test_get_config_requires_group_and_dataId():
     tool = next(t for t in TOOLS if t.name == "get_config")
-    assert set(tool.inputSchema["required"]) == {"group", "dataId"}
+    assert set(tool.model_dump(by_alias=True)["inputSchema"]["required"]) == {"group", "dataId"}
 
 
 def test_tools_expose_namespaceId_not_tenant():
     """config-map.yaml hands the LLM `namespaceId`; the tool schema must use that exact name
     so there's no rename step for the LLM to get wrong (it'd crash with a TypeError)."""
     for t in TOOLS:
-        props = set(t.inputSchema.get("properties", {}))
+        props = set(t.model_dump(by_alias=True)["inputSchema"].get("properties", {}))
         assert "tenant" not in props, f"{t.name} schema should not expose `tenant`: {props}"
         assert "namespaceId" in props, f"{t.name} schema should expose `namespaceId`: {props}"
 

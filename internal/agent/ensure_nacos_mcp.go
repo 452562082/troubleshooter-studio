@@ -2,7 +2,6 @@
 // 落到一个稳定共享路径 ~/.tshoot/scripts/nacos_mcp.py,供四家 AI 平台的 MCP 配置统一引用。
 //
 // 为什么走共享路径而不是各 target 工作区里的相对路径:每个 IDE 装出来的工作区布局不同
-// (~/.claude/ vs ~/.cursor/ vs ~/.codex/ vs openclaw),MCP 配置里要写绝对路径。复制一份
 // 到 ~/.tshoot/scripts/ 让所有 target 指同一个路径 —— 跟 kafka-mcp-server binary 落
 // ~/.tshoot/bin/ 同款思路(EnsureKafkaMCPInstalled)。
 //

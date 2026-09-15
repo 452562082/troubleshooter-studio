@@ -16,7 +16,7 @@ func minimalValid() SystemConfig {
 		Environments: []Environment{
 			{ID: "dev", APIDomain: "api-dev.example.com", IsProd: false},
 		},
-		Generation: Generation{TargetHost: "openclaw"},
+		Generation: Generation{TargetHost: "claude-code"},
 		Meta:       Meta{SchemaVersion: "0.1"},
 	}
 }
@@ -25,6 +25,33 @@ func TestValidate_Minimal(t *testing.T) {
 	c := minimalValid()
 	if err := Validate(&c); err != nil {
 		t.Fatalf("expected minimal config to be valid, got: %v", err)
+	}
+}
+
+func TestLoadRepoServiceEntries(t *testing.T) {
+	yaml := `
+system: {id: shop, name: Shop}
+agent: {name: a, workspace_name: a, model: m}
+environments: [{id: dev, api_domain: x}]
+generation: {target_host: claude-code}
+meta: {schema_version: "0.1"}
+repos:
+  - name: base-frontend
+    url: git@example.test:base-frontend.git
+    stack: node
+    role: frontend
+    service_names: [base-frontend, base-frontend-document]
+    service_entries:
+      base-frontend: .
+      base-frontend-document: packages/document
+`
+	cfg, err := LoadFromBytes([]byte(yaml))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	want := "packages/document"
+	if got := cfg.Repos[0].ServiceEntries["base-frontend-document"]; got != want {
+		t.Fatalf("service entry=%q, want %q", got, want)
 	}
 }
 
@@ -43,7 +70,6 @@ func TestValidate_MissingRequired(t *testing.T) {
 			c.Agent.ID = ""
 			c.System.ID = ""
 		}, "system.id required"},
-		{"no_agent_model", func(c *SystemConfig) { c.Agent.Model = "" }, "agent.model required"},
 		{"empty_environments", func(c *SystemConfig) { c.Environments = nil }, "environments must have"},
 		{"invalid_target", func(c *SystemConfig) { c.Generation.Targets = []string{"invalid"} }, "not supported"},
 		{"no_schema_version", func(c *SystemConfig) { c.Meta.SchemaVersion = "" }, "meta.schema_version required"},
@@ -82,6 +108,64 @@ func TestValidate_DuplicateEnvID(t *testing.T) {
 	err := Validate(&c)
 	if err == nil || !strings.Contains(err.Error(), "duplicate environment id") {
 		t.Fatalf("expected duplicate-env error, got: %v", err)
+	}
+}
+
+func TestValidateBrowserAuthOrigins(t *testing.T) {
+	for _, origin := range []string{
+		"https://login.example.com",
+		"http://localhost:8080",
+	} {
+		t.Run("valid_"+origin, func(t *testing.T) {
+			cfg := minimalValid()
+			cfg.Environments[0].BrowserAuthOrigins = []string{origin}
+			if err := Validate(&cfg); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	invalid := []string{
+		"login.example.com",
+		"ftp://login.example.com",
+		"https://user:pass@login.example.com/path",
+		"https://login.example.com/",
+		"https://login.example.com/path",
+		"https://login.example.com?next=/users",
+		"https://login.example.com#form",
+	}
+	for _, origin := range invalid {
+		t.Run("invalid_"+origin, func(t *testing.T) {
+			cfg := minimalValid()
+			cfg.Environments[0].BrowserAuthOrigins = []string{origin}
+			err := Validate(&cfg)
+			if err == nil || !strings.Contains(err.Error(), "browser_auth_origins") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateBrowserAuthOriginsRejectsUserinfoWithoutPath(t *testing.T) {
+	cfg := minimalValid()
+	cfg.Environments[0].BrowserAuthOrigins = []string{"https://user:pass@login.example.com"}
+	err := Validate(&cfg)
+	if err == nil || !strings.Contains(err.Error(), "browser_auth_origins") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestValidateBrowserAllowedOrigins(t *testing.T) {
+	cfg := minimalValid()
+	cfg.Environments[0].BrowserAllowedOrigins = []string{"https://static.example.com"}
+	if err := Validate(&cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.Environments[0].BrowserAllowedOrigins = []string{"https://static.example.com/assets"}
+	err := Validate(&cfg)
+	if err == nil || !strings.Contains(err.Error(), "browser_allowed_origins") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -131,7 +215,7 @@ environments:
   - id: dev
     api_domain: x
     is_prod: false
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 repos:
   - name: r
@@ -163,7 +247,7 @@ system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments:
   - {id: dev, api_domain: x, is_prod: false}
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 repos:
   - {name: r, url: g, role: backend, stack: go, env_branches: {dev: main}}
@@ -201,7 +285,7 @@ system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments:
   - {id: dev, api_domain: x, is_prod: false}
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 infrastructure:
   config_centers:
@@ -226,6 +310,118 @@ repos:
 	}
 }
 
+func TestResourceCatalog_EnvironmentSpecificSourceAndStableDataStoreIDs(t *testing.T) {
+	yaml := `
+system: {id: shop, name: Shop}
+agent: {name: a, workspace_name: a, model: m}
+environments:
+  - {id: dev, api_domain: x, is_prod: false}
+  - {id: prod, api_domain: y, is_prod: true}
+generation: {target_host: claude-code}
+meta: {schema_version: "0.2"}
+repos:
+  - {name: monorepo, url: g, role: backend, stack: go, service_names: [order], env_branches: {dev: main, prod: main}}
+resource_catalog:
+  services:
+    - id: order
+      repository: monorepo
+      config_sources: {dev: nacos-dev, prod: nacos-prod}
+      data_stores: {dev: [redis], prod: [redis-2]}
+      workloads: {dev: order-web}
+  workloads:
+    - id: order-web
+      repository: monorepo
+      service: order
+      names: {dev: order-v2}
+infrastructure:
+  config_centers:
+    - {id: nacos-dev, type: nacos, endpoints: [{env: dev, addr: a:8848}]}
+    - {id: nacos-prod, type: nacos, endpoints: [{env: prod, addr: b:8848}]}
+  data_stores:
+    - {type: redis, enabled: true, readonly_enforced: true}
+    - {type: redis, enabled: true, readonly_enforced: true}
+`
+	cfg, err := LoadFromBytes([]byte(yaml))
+	if err != nil {
+		t.Fatalf("load resource catalog: %v", err)
+	}
+	if got := cfg.ConfigSourceFor("dev", "order"); got != "nacos-dev" {
+		t.Fatalf("dev source = %q, want nacos-dev", got)
+	}
+	if got := cfg.ConfigSourceFor("prod", "order"); got != "nacos-prod" {
+		t.Fatalf("prod source = %q, want nacos-prod", got)
+	}
+	if got := []string{cfg.Infrastructure.DataStores[0].ID, cfg.Infrastructure.DataStores[1].ID}; got[0] != "redis" || got[1] != "redis-2" {
+		t.Fatalf("derived datastore ids = %v, want [redis redis-2]", got)
+	}
+}
+
+func TestResourceCatalog_RejectsUnknownReferences(t *testing.T) {
+	yaml := `
+system: {id: shop, name: Shop}
+agent: {name: a, workspace_name: a, model: m}
+environments: [{id: dev, api_domain: x, is_prod: false}]
+generation: {target_host: claude-code}
+meta: {schema_version: "0.2"}
+repos: [{name: repo, url: g, role: backend, stack: go, service_names: [order], env_branches: {dev: main}}]
+resource_catalog:
+  services:
+    - {id: order, repository: repo, config_sources: {dev: missing}}
+infrastructure:
+  config_centers: [{id: real, type: nacos, endpoints: [{env: dev, addr: a:8848}]}]
+`
+	_, err := LoadFromBytes([]byte(yaml))
+	if err == nil || !strings.Contains(err.Error(), "unknown config_centers") {
+		t.Fatalf("unknown catalog reference should fail, got %v", err)
+	}
+}
+
+func TestResourceCatalog_RejectsConflictingRuntimeMappings(t *testing.T) {
+	base := minimalValid()
+	base.Repos = []Repo{{Name: "web", URL: "g", Stack: "node", Role: RoleFrontend}}
+	base.ResourceCatalog = ResourceCatalog{
+		Workloads: []WorkloadResource{{ID: "web", Repository: "web", Names: map[string]string{"dev": "web-v2"}}},
+	}
+	base.Infrastructure.Observability.K8sRuntime.ServiceMap = []K8sRuntimeServiceMapEntry{{
+		Env: "dev", Service: "web", Cluster: "c", Namespace: "n", Workload: "web-v1",
+	}}
+	if err := Validate(&base); err == nil || !strings.Contains(err.Error(), "runtime workload mismatch") {
+		t.Fatalf("conflicting runtime names should fail, got %v", err)
+	}
+}
+
+func TestResourceCatalog_RejectsUnknownLokiServiceIdentity(t *testing.T) {
+	base := minimalValid()
+	base.Repos = []Repo{{Name: "api", URL: "g", Stack: "go", Role: RoleBackend, ServiceNames: []string{"api"}}}
+	base.ResourceCatalog = ResourceCatalog{
+		Services: []ServiceResource{{ID: "api", Repository: "api"}},
+	}
+	base.Infrastructure.Observability.Loki.LabelMappingByEnv = map[string]LokiLabelMappingPerEnv{
+		"dev": {ServiceMap: map[string]map[string]string{"ghost": {"app": "ghost"}}},
+	}
+	if err := Validate(&base); err == nil || !strings.Contains(err.Error(), "unknown service/workload identity") {
+		t.Fatalf("unknown Loki service identity should fail, got %v", err)
+	}
+}
+
+func TestResourceCatalog_AcceptsConsistentRuntimeMappings(t *testing.T) {
+	base := minimalValid()
+	base.Repos = []Repo{{Name: "api", URL: "g", Stack: "go", Role: RoleBackend, ServiceNames: []string{"api"}}}
+	base.ResourceCatalog = ResourceCatalog{
+		Services:  []ServiceResource{{ID: "api", Repository: "api", Workloads: map[string]string{"dev": "api-workload"}}},
+		Workloads: []WorkloadResource{{ID: "api-workload", Repository: "api", Service: "api", Names: map[string]string{"dev": "api-v2"}}},
+	}
+	base.Infrastructure.Observability.K8sRuntime.ServiceMap = []K8sRuntimeServiceMapEntry{{
+		Env: "dev", Service: "api", Cluster: "c", Namespace: "n", Workload: "api-v2",
+	}}
+	base.Infrastructure.Observability.Loki.LabelMappingByEnv = map[string]LokiLabelMappingPerEnv{
+		"dev": {ServiceMap: map[string]map[string]string{"api": {"app": "api-v2"}}},
+	}
+	if err := Validate(&base); err != nil {
+		t.Fatalf("consistent resource mappings should pass: %v", err)
+	}
+}
+
 // one2all 是合法配置源:通过 streamable-http MCP 读 ConfigMap/Secret。
 func TestMigrate_One2AllConfigCenterSupported(t *testing.T) {
 	yaml := `
@@ -233,7 +429,7 @@ system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments:
   - {id: dev, api_domain: x, is_prod: false}
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 infrastructure:
   config_centers:
@@ -267,7 +463,7 @@ system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments:
   - {id: dev, api_domain: x, is_prod: false}
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 infrastructure:
   config_centers:
@@ -292,7 +488,7 @@ system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments:
   - {id: dev, api_domain: x, is_prod: false}
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 infrastructure:
   config_centers:
@@ -313,7 +509,7 @@ system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments:
   - {id: dev, api_domain: x, is_prod: false}
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 infrastructure:
   config_centers:
@@ -333,7 +529,7 @@ system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments:
   - {id: dev, api_domain: x, is_prod: false}
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 infrastructure:
   config_centers:
@@ -354,7 +550,7 @@ system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments:
   - {id: dev, api_domain: x, is_prod: false}
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 infrastructure:
   config_centers:
@@ -376,5 +572,24 @@ func TestPrimaryConfigCenter(t *testing.T) {
 	c.Infrastructure.ConfigCenters = []ConfigCenter{{ID: "x", Type: "nacos"}}
 	if got := c.Infrastructure.PrimaryConfigCenter().Type; got != "nacos" {
 		t.Errorf("有源时应返回首个,got %q", got)
+	}
+}
+
+func TestGenerationTargetsRetireOpenClaw(t *testing.T) {
+	for _, target := range []string{"claude-code", "cursor", "codex"} {
+		cfg := minimalValid()
+		cfg.Generation.Targets = []string{target}
+		cfg.Agent.Model = ""
+		if err := Validate(&cfg); err != nil {
+			t.Fatalf("%s: %v", target, err)
+		}
+	}
+	cfg := minimalValid()
+	cfg.Generation.Targets = []string{"openclaw"}
+	if err := Validate(&cfg); err == nil {
+		t.Fatal("retired target accepted")
+	}
+	if got := (Generation{}).ResolvedTargets(); len(got) != 1 || got[0] != "claude-code" {
+		t.Fatalf("default: %v", got)
 	}
 }

@@ -1,14 +1,12 @@
 <script setup lang="ts">
 // TargetInstallBadge —— Step 2 部署目标卡上的"已装/未装"小徽章。
 // 把 4 家 target 各自的 v-if 块(claude-code / cursor / codex 走 aitoolsResult,
-// openclaw 走 openclawDetectStatus)统一成一个组件,父端把 detect 结果归一成
 // detected/versionText/title 三个 prop 传进来。
 //
 // detected:
 //   true   → 显示 "✓ vX" / "✓ 已装"
 //   false  → 显示 "⚠ 未检测到"
 //   null   → 显示 "扫描中…"(loading 态);父端没拿到结果时也传 null
-//   undef  → 完全不渲染(对应原来"openclawDetectStatus === 'idle'" 不出 badge)
 
 defineProps<{
   detected: boolean | null | undefined

@@ -6,7 +6,7 @@
 //   - KuboardSvcLocator 同样形状跨 yamlGenerator + yamlValidator 各写一遍
 
 /** 强制走 Grafana 代理的 obs 工具(loki/prometheus/tempo)— 这三家在本系统**只**通过
- *  mcp-grafana-npx 内置工具(query_loki_logs / query_prometheus / 等)访问,无独立 MCP 包。
+ *  mcp-grafana 内置工具(query_loki_logs / query_prometheus / 等)访问,无独立 MCP 包。
  *  wizard 不出"直连"选项,锁死 via_grafana。yaml 里 via_grafana 字段对它们事实上无效,
  *  填啥都跑 grafana 代理路径。 */
 export const VIA_GRAFANA_ONLY = ['loki', 'prometheus', 'tempo'] as const

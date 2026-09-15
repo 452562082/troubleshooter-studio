@@ -66,20 +66,24 @@ tasks:
     ])
     mocks.probeDataStore.mockResolvedValue({ ok: true, latency: '1ms', detail: 'ok' })
 
-    const scannedDS = reactive<Record<string, any>>({})
+    const scannedDS = reactive<Record<string, any>>({dev:{'base-backend-base':{'mysql-2':{dsn:'manual-only'}}}})
     const dsScanState = reactive<Record<string, any>>({})
     const dsProbeResults = reactive<Record<string, any>>({})
     const enabledDataStores = reactive<Record<string, boolean>>({})
+    const dataStoreTypes = reactive<Record<string, string>>({})
     const dsAutoFilled = reactive<Record<string, boolean>>({})
 
     const scan = useDataStoreScan({
       scannedDS,
+      manualEntries: {'dev::base-backend-base::mysql-2':true},
       dsScanState,
       dsProbeResults,
       dsImportStatus: ref('idle') as any,
       dsImportStats: { scanned: 0, matched: 0 },
       dsAutoFilled,
       enabledDataStores,
+      dataStoreTypes,
+      dataStoreType: id => dataStoreTypes[id] || id,
       scanStateKey: (envID, svc) => `${envID}::${svc}`,
       environments: [{ id: 'dev' }],
       allServiceNames: ref(['base-backend-base']),
@@ -87,10 +91,12 @@ tasks:
       svcKey: (envID, svc) => `${envID}::${svc}`,
       buildPreloadPayload: () => ({ type: 'none', addr: '', username: '', password: '', token: '', namespace: '', app_id: '', valid: false, missing: [] }),
       envNamespaces: {},
+      sourceEnvNamespaces: {},
       serviceConfigSel: {},
       serviceConfigGroup: {},
       enabledSourceTypes: { one2all: true, kuboard: false },
       activeSourceTypes: computed(() => ['one2all']),
+      sourceInstances: computed(() => [{ id: 'one2all', type: 'one2all' }]),
       ccCredInputs: {
         'cc:one2all:_shared_:mcp_url': 'http://one2all/mcp',
         'cc:one2all:_shared_:token': 'token',
@@ -112,7 +118,17 @@ tasks:
     expect(dsScanState['dev::base-backend-base']).toEqual({ status: 'ok' })
     expect(scannedDS.dev['base-backend-base'].redis.url).toBe('redis://cache:6379/0')
     expect(scannedDS.dev['base-backend-base'].mongodb.uri).toBe('mongodb://mongo:27017/app')
+    expect(scannedDS.dev['base-backend-base']['mysql-2']).toEqual({dsn:'manual-only'})
     expect(enabledDataStores.redis).toBe(true)
     expect(enabledDataStores.mongodb).toBe(true)
+    let resolveProbe!: (value: {ok:boolean}) => void
+    mocks.probeDataStore.mockImplementationOnce(() => new Promise(resolve => { resolveProbe = resolve }))
+    const pending = scan.probeOneDS('dev', 'base-backend-base', 'redis')
+    scannedDS.dev['base-backend-base'].redis.url = 'redis://updated:6379'
+    delete dsProbeResults['dev::base-backend-base::redis']
+    resolveProbe({ok:true})
+    await pending
+    expect(dsProbeResults['dev::base-backend-base::redis']).toBeUndefined()
+
   })
 })

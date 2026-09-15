@@ -13,14 +13,14 @@ import importlib.util
 import sys
 
 missing = [
-    name for name in ("pytest", "yaml")
+    name for name in ("pytest", "yaml", "requests")
     if importlib.util.find_spec(name) is None
 ]
 if missing:
     print(
         "missing Python test dependencies: "
         + ", ".join(missing)
-        + "; install with: python3 -m pip install pytest PyYAML",
+        + "; install with: python3 -m pip install -r scripts/requirements-test.txt",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -30,7 +30,6 @@ stdlib_tests=(
   templates/workspace/skills/frontend-repro-investigator/scripts/test_har_analyzer.py
   templates/workspace/skills/frontend-repro-investigator/scripts/test_console_analyzer.py
   templates/workspace/skills/frontend-repro-investigator/scripts/test_sentry_fetch.py
-  templates/workspace/skills/frontend-repro-investigator/scripts/test_browser_collect.py
   templates/workspace/skills/frontend-repro-investigator/scripts/test_evidence_merge.py
   templates/workspace/skills/config-executor/scripts/test_kuboard_config.py
 )
@@ -42,11 +41,13 @@ done
 
 echo "▶ python3 -m pytest incident/recent script tests"
 python3 -m pytest \
+  templates/workspace/skills/config-executor/scripts/test_studio_credentials.py \
   templates/workspace/skills/incident-investigator/scripts/test_cascade_check.py \
   templates/workspace/skills/recent-changes/scripts/test_timeline.py \
   -q
 
 echo "▶ scripts/test-nacos-mcp.sh"
 scripts/test-nacos-mcp.sh
+
 
 echo "✓ workspace skill script tests passed"

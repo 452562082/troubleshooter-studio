@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   cancelBugInvestigation,
   clearBugPlatformLogin,
+  deleteBugHistory,
   deleteBugPlatform,
   fetchBugByID,
   listBugInvestigationRuns,
@@ -113,6 +114,16 @@ describe('bug bridge', () => {
     await deleteBugPlatform({ platform_id: 'zentao-main' })
 
     expect(spy).toHaveBeenCalledWith({ platform_id: 'zentao-main' })
+  })
+
+  it('forwards deleteBugHistory to Wails in desktop mode', async () => {
+    const spy = vi.fn().mockResolvedValue({ bug_id: 'zentao-1842', deleted: true, deleted_cases: 2 })
+    ;(window as any).go = { main: { App: { DeleteBugHistory: spy } } }
+
+    const result = await deleteBugHistory({ bug_id: 'zentao-1842' })
+
+    expect(spy).toHaveBeenCalledWith({ bug_id: 'zentao-1842' })
+    expect(result.deleted_cases).toBe(2)
   })
 
   it('normalizes null bot match reasons from Wails', async () => {

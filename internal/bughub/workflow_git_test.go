@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -36,6 +37,47 @@ func newGitFixture(t *testing.T) gitFixture {
 	runGitTest(t, repo, "remote", "set-url", "origin", "git@example.test:repo.git")
 	runGitTest(t, repo, "config", "url.file://"+remote+".insteadOf", "git@example.test:repo.git")
 	return gitFixture{remote: remote, repo: repo, worktrees: filepath.Join(root, "worktrees")}
+}
+
+func TestResolveGitIdentitySkipsLegacyStudioIdentity(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	runGitTest(t, root, "init", repo)
+	runGitTest(t, repo, "config", "--local", "user.name", legacyStudioGitUserName)
+	runGitTest(t, repo, "config", "--local", "user.email", legacyStudioGitUserEmail)
+	globalConfig := filepath.Join(root, "global.gitconfig")
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	runGitTest(t, root, "config", "--file", globalConfig, "user.name", "Personal User")
+	runGitTest(t, root, "config", "--file", globalConfig, "user.email", "personal@example.test")
+
+	identity, err := resolveGitIdentity(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Name != "Personal User" || identity.Email != "personal@example.test" {
+		t.Fatalf("identity = %+v, want personal global identity", identity)
+	}
+}
+
+func TestResolveGitIdentityRejectsMissingPersonalIdentity(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	runGitTest(t, root, "init", repo)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(root, "missing-global.gitconfig"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	for _, key := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"} {
+		t.Setenv(key, "")
+	}
+
+	identity, err := resolveGitIdentity(context.Background(), repo)
+	if err == nil {
+		t.Fatalf("identity = %+v, want missing identity error", identity)
+	}
+	if !strings.Contains(err.Error(), "git config --global user.name") ||
+		!strings.Contains(err.Error(), "git config --global user.email") {
+		t.Fatalf("error does not explain how to configure personal identity: %v", err)
+	}
 }
 
 func (f gitFixture) makeFix(t *testing.T, content string) string {
@@ -152,6 +194,16 @@ func TestGitIntegrationCreatesMergeCommit(t *testing.T) {
 	if err != nil || !result.Repositories["api"].Pushed || result.Repositories["api"].MergeCommit == commit {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
+	mergeCommit := result.Repositories["api"].MergeCommit
+	if got := strings.TrimSpace(runGitTest(t, f.repo, "show", "-s", "--format=%an|%ae|%cn|%ce", mergeCommit)); got != "Studio Test|studio@example.test|Studio Test|studio@example.test" {
+		t.Fatalf("merge commit identity = %q, want source repository identity", got)
+	}
+	if got := strings.TrimSpace(runGitTest(t, f.repo, "config", "--local", "--get", "user.name")); got != "Studio Test" {
+		t.Fatalf("source repository user.name changed to %q", got)
+	}
+	if got := strings.TrimSpace(runGitTest(t, f.repo, "config", "--local", "--get", "user.email")); got != "studio@example.test" {
+		t.Fatalf("source repository user.email changed to %q", got)
+	}
 }
 
 func TestGitIntegrationRejectsTargetHeadChangedAfterApproval(t *testing.T) {
@@ -177,16 +229,50 @@ func TestGitIntegrationRejectsTargetHeadChangedAfterApproval(t *testing.T) {
 	}
 }
 
-func TestGitIntegrationRejectsDirtyDetachedAndConflict(t *testing.T) {
-	t.Run("dirty", func(t *testing.T) {
-		f := newGitFixture(t)
-		commit := f.makeFix(t, "fix\n")
-		if err := os.WriteFile(filepath.Join(f.repo, "dirty"), []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		_, err := f.service(t).Inspect(context.Background(), f.request(commit))
-		if !errors.Is(err, ErrGitWorktreeDirty) {
-			t.Fatalf("err=%v", err)
+func TestGitIntegrationAllowsDirtySourceAndRejectsDetachedAndConflict(t *testing.T) {
+	t.Run("dirty source repository", func(t *testing.T) {
+		for _, tc := range []struct {
+			name  string
+			dirty func(*testing.T, gitFixture)
+		}{
+			{
+				name: "untracked files",
+				dirty: func(t *testing.T, f gitFixture) {
+					if err := os.WriteFile(filepath.Join(f.repo, "untracked.txt"), []byte("leave me alone\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+			{
+				name: "tracked modifications",
+				dirty: func(t *testing.T, f gitFixture) {
+					if err := os.WriteFile(filepath.Join(f.repo, "app.txt"), []byte("local edit\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newGitFixture(t)
+				commit := f.makeFix(t, "fix\n")
+				tc.dirty(t, f)
+				before := runGitTest(t, f.repo, "status", "--porcelain")
+
+				service := f.service(t)
+				req := f.request(commit)
+				inspection, err := service.Inspect(context.Background(), req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.TargetHeads = map[string]string{"api": inspection.Repositories["api"].TargetHead}
+				result, err := service.MergeAndPush(context.Background(), req)
+				if err != nil || !result.Repositories["api"].Pushed {
+					t.Fatalf("result=%+v err=%v", result, err)
+				}
+				if after := runGitTest(t, f.repo, "status", "--porcelain"); after != before {
+					t.Fatalf("source repository changed:\nbefore:\n%s\nafter:\n%s", before, after)
+				}
+			})
 		}
 	})
 	t.Run("detached", func(t *testing.T) {
@@ -227,6 +313,28 @@ func TestGitIntegrationRequiresSSHRemote(t *testing.T) {
 	_, err := f.service(t).Inspect(context.Background(), f.request(commit))
 	if !errors.Is(err, ErrGitRemoteNotSSH) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestGitInspectionDistinguishesCommandFailureFromMergeConflict(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a POSIX git wrapper")
+	}
+	f := newGitFixture(t)
+	commit := f.makeFix(t, "fix\n")
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	script := "#!/bin/sh\nif [ \"$1\" = merge-tree ]; then echo 'merge-tree unavailable' >&2; exit 2; fi\nexec '" + strings.ReplaceAll(realGit, "'", "'\"'\"'") + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	inspection, err := f.service(t).Inspect(context.Background(), f.request(commit))
+	if err == nil || inspection.Conflict {
+		t.Fatalf("command failure must fail inspection without claiming a conflict: result=%+v err=%v", inspection, err)
 	}
 }
 
@@ -458,7 +566,7 @@ func TestGitIntegrationOrchestratorRejectsMissingInspectionScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	git := &recordingGitIntegration{inspection: MergeInspection{Repositories: map[string]MergeRepositoryResult{"api": {}}}}
-	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git, &recordingDeploymentVerifier{})
+	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git)
 	if _, err := orchestrator.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: 1, IdempotencyKey: "missing", ActorID: "alice"}); !errors.Is(err, ErrApprovalScope) {
 		t.Fatalf("err=%v", err)
 	}
@@ -511,7 +619,7 @@ func TestGitIntegrationTwoRepoConflictPersistsEveryRepositoryResult(t *testing.T
 		t.Fatal(err)
 	}
 	heads := map[string]string{"a": inspection.Repositories["a"].TargetHead, "b": inspection.Repositories["b"].TargetHead}
-	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, service, &recordingDeploymentVerifier{})
+	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, service)
 	got, err := orchestrator.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: 1, IdempotencyKey: "conflict-two", ActorID: "alice", TargetHeads: heads})
 	if err == nil || got.Status != CaseMergeConflict {
 		t.Fatalf("case=%+v err=%v", got, err)
@@ -572,7 +680,7 @@ func TestGitIntegrationOrchestratorRefreshesStaleApprovalScope(t *testing.T) {
 	if err := store.RecordCodeChange(ctx, change); err != nil {
 		t.Fatal(err)
 	}
-	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, f.service(t), &recordingDeploymentVerifier{})
+	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, f.service(t))
 
 	stale, err := orchestrator.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "approve-stale", ActorID: "alice", TargetHeads: map[string]string{"api": "old"}})
 	if !errors.Is(err, ErrMergeApprovalStale) || stale.Status != CaseWaitingMergeApproval || stale.Version <= incident.Version {
@@ -587,7 +695,7 @@ func TestGitIntegrationOrchestratorRefreshesStaleApprovalScope(t *testing.T) {
 	}
 
 	merged, err := orchestrator.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: stale.Version, IdempotencyKey: "approve-current", ActorID: "alice", TargetHeads: map[string]string{"api": changes[0].MergeBaseHead}})
-	if err != nil || merged.Status != CaseWaitingDeployment {
+	if err != nil || merged.Status != CaseSubmitted {
 		t.Fatalf("merged=%+v err=%v", merged, err)
 	}
 	approvals, err := store.ListApprovals(ctx, incident.ID)
@@ -618,9 +726,9 @@ func TestGitIntegrationFreshApprovalRetainsPreviouslyBlockedRepository(t *testin
 		}
 	}
 	git := &recordingGitIntegration{result: MergeResult{Repositories: map[string]MergeRepositoryResult{"a": {MergeCommit: "merge-a", Pushed: true}, "b": {MergeCommit: "merge-b", Pushed: true}}}}
-	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git, &recordingDeploymentVerifier{})
+	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git)
 	merged, err := orchestrator.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: 1, IdempotencyKey: "fresh-partial", ActorID: "alice", TargetHeads: map[string]string{"a": "head-a", "b": "head-b"}})
-	if err != nil || merged.Status != CaseWaitingDeployment || len(git.merges) != 1 || len(git.merges[0].FixCommits) != 2 {
+	if err != nil || merged.Status != CaseSubmitted || len(git.merges) != 1 || len(git.merges[0].FixCommits) != 2 {
 		t.Fatalf("merged=%+v request=%+v err=%v", merged, git.merges, err)
 	}
 }
@@ -638,7 +746,7 @@ func TestGitIntegrationUnavailableRejectsApprovalWithoutMutationAndReplay(t *tes
 	if err := store.RecordCodeChange(ctx, CodeChange{ID: "change", CaseID: incident.ID, AttemptID: "fix", Repo: "api", BaseBranch: "test", FixBranch: "fix", FixCommit: "abc", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushStatus: "pushed"}); err != nil {
 		t.Fatal(err)
 	}
-	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, &recordingDeploymentVerifier{})
+	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil)
 	cmd := ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: 1, IdempotencyKey: "no-git", ActorID: "alice", TargetHeads: map[string]string{"api": "head"}}
 	for attempt := 0; attempt < 2; attempt++ {
 		if _, err := o.ApproveMerge(ctx, cmd); err == nil {

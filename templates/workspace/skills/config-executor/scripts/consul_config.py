@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """通过 Consul KV HTTP API 读取配置（不依赖 MCP）
 
-凭证来源：~/.openclaw/<agent-id>-creds.json
+凭证来源：~/.tshoot/<agent-id>-creds.json
 {
   "consul": {
     "<env>": {"host": "http://consul-dev:8500", "token": "xxx"}
@@ -23,21 +23,24 @@ import urllib.request
 
 
 def _find_creds_file(agent_id: str) -> str:
-    """凭证文件双路径回退:OpenClaw 优先 + ~/.tshoot 兜底(Claude Code/Cursor/Codex 用)。"""
-    for p in (f"~/.openclaw/{agent_id}-creds.json", f"~/.tshoot/{agent_id}-creds.json"):
-        ap = os.path.expanduser(p)
-        if os.path.isfile(ap):
-            return ap
+    """读取 Studio 的机器人凭证文件。"""
+    path = os.path.expanduser(f"~/.tshoot/{agent_id}-creds.json")
+    if os.path.isfile(path):
+        return path
     raise FileNotFoundError(
-        f"creds file not found in any of: ~/.openclaw/{agent_id}-creds.json, ~/.tshoot/{agent_id}-creds.json;请先跑 install.sh 或在 wizard 里补齐凭证再部署"
+        f"creds file not found in any of: ~/.tshoot/{agent_id}-creds.json;请先在 Studio 向导里补齐凭证并部署"
     )
 
 
-def load_creds(agent_id: str, backend: str, env: str) -> dict:
+def load_creds(agent_id: str, backend: str, env: str, source: str = "") -> dict:
     path = _find_creds_file(agent_id)
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    env_data = data.get(backend, {}).get(env)
+    section = data.get(backend, {})
+    # A named source must never silently fall back to another source's token.
+    if source and source != "default":
+        section = section.get(source, {})
+    env_data = section.get(env)
     if not env_data:
         raise ValueError(f"creds missing {backend}.{env} (in {path})")
     return env_data
@@ -57,7 +60,7 @@ def http_get(url: str, token: str | None, timeout: int = 10) -> bytes:
 
 
 def _base_url(args: argparse.Namespace) -> tuple[str, str | None]:
-    creds = load_creds(args.agent_id, "consul", args.env)
+    creds = load_creds(args.agent_id, "consul", args.env, args.source)
     host = (args.host or creds.get("host", "")).rstrip("/")
     if host and not host.startswith("http"):
         host = "http://" + host
@@ -97,6 +100,7 @@ def main() -> int:
     p = argparse.ArgumentParser(description="Consul KV HTTP API 客户端")
     p.add_argument("--agent-id", required=True)
     p.add_argument("--env", required=True)
+    p.add_argument("--source", default="", help="routing 的配置源 ID；多源时必填")
     p.add_argument("--host", help="覆盖 creds 的 host")
     p.add_argument("--token", help="覆盖 creds 的 token")
     sub = p.add_subparsers(dest="cmd", required=True)

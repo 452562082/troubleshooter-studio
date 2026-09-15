@@ -32,7 +32,7 @@ func prepareFixApprovalCase(t *testing.T, output string) (*CaseStore, IncidentCa
 		t.Fatal(err)
 	}
 	runner := &recordingPhaseRunner{}
-	return store, incident, attempt, runner, NewCaseOrchestrator(store, runner, nil, nil)
+	return store, incident, attempt, runner, NewCaseOrchestrator(store, runner, nil)
 }
 
 func validRootCauseOutput() string {
@@ -41,7 +41,7 @@ func validRootCauseOutput() string {
 
 func TestApproveFixRequiresExactSnapshotBoundKey(t *testing.T) {
 	_, incident, root, runner, orchestrator := prepareFixApprovalCase(t, validRootCauseOutput())
-	base := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)}
+	base := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"source_baselines":{"api":"feature/work"}}`)}
 
 	base.IdempotencyKey = "approve-fix"
 	if _, err := orchestrator.ApproveFix(context.Background(), base); !errors.Is(err, ErrApprovalScope) {
@@ -59,6 +59,26 @@ func TestApproveFixRequiresExactSnapshotBoundKey(t *testing.T) {
 	}
 	if runner.startCount() != 0 {
 		t.Fatalf("stale dialog scheduled %d fix attempts", runner.startCount())
+	}
+}
+
+func TestApproveFixDefaultsMissingSourceBaselineToEnvironmentBranch(t *testing.T) {
+	store, incident, root, runner, orchestrator := prepareFixApprovalCase(t, validRootCauseOutput())
+	botPath := writeFixWorkspaceBranchMap(t, "test", "api", "test")
+	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex", Path: botPath}, InputJSON: []byte(`{}`)}
+	updated, err := orchestrator.ApproveFix(context.Background(), command)
+	if err != nil || updated.Status != CaseFixing || runner.startCount() != 1 {
+		t.Fatalf("case=%+v starts=%d err=%v", updated, runner.startCount(), err)
+	}
+	var input struct {
+		SourceBaselines map[string]string `json:"source_baselines"`
+	}
+	if err := json.Unmarshal(runner.starts[0].InputJSON, &input); err != nil || !reflect.DeepEqual(input.SourceBaselines, map[string]string{"api": "test"}) {
+		t.Fatalf("attempt input=%s parsed=%+v err=%v", runner.starts[0].InputJSON, input, err)
+	}
+	approvals, err := store.ListApprovals(context.Background(), incident.ID)
+	if err != nil || len(approvals) != 1 || !strings.Contains(string(approvals[0].ScopeJSON), `"source_baselines":{"api":"test"}`) {
+		t.Fatalf("approvals=%+v err=%v", approvals, err)
 	}
 }
 
@@ -81,7 +101,7 @@ func TestApproveFixRejectsStaleOrUnsafeRootCause(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			cmd := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)}
+			cmd := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"source_baselines":{"api":"feature/work"}}`)}
 			if _, err := orchestrator.ApproveFix(context.Background(), cmd); !errors.Is(err, ErrApprovalScope) {
 				t.Fatalf("ApproveFix err=%v", err)
 			}
@@ -95,7 +115,7 @@ func TestApproveFixRejectsStaleOrUnsafeRootCause(t *testing.T) {
 func TestApproveFixPersistsRootCauseAndSnapshotScope(t *testing.T) {
 	store, incident, root, runner, orchestrator := prepareFixApprovalCase(t, validRootCauseOutput())
 	key := StartFixApprovalKey(incident.ID, root.ID, incident.Version)
-	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)}
+	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"source_baselines":{"api":"feature/work"}}`)}
 	updated, err := orchestrator.ApproveFix(context.Background(), command)
 	if err != nil || updated.Status != CaseFixing || runner.startCount() != 1 {
 		t.Fatalf("case=%+v starts=%d err=%v", updated, runner.startCount(), err)
@@ -104,7 +124,7 @@ func TestApproveFixPersistsRootCauseAndSnapshotScope(t *testing.T) {
 	if err != nil || len(approvals) != 1 {
 		t.Fatalf("approvals=%+v err=%v", approvals, err)
 	}
-	if approvals[0].CaseVersion != incident.Version || string(approvals[0].ScopeJSON) != `{"root_cause_attempt_id":"investigation-root"}` {
+	if approvals[0].CaseVersion != incident.Version || string(approvals[0].ScopeJSON) != `{"root_cause_attempt_id":"investigation-root","source_baselines":{"api":"feature/work"}}` {
 		t.Fatalf("approval=%+v", approvals[0])
 	}
 	replayed, err := orchestrator.ApproveFix(context.Background(), command)
@@ -115,7 +135,7 @@ func TestApproveFixPersistsRootCauseAndSnapshotScope(t *testing.T) {
 
 func TestApproveFixReplaySurvivesLaterCycleAndRejectsDivergentPayload(t *testing.T) {
 	store, incident, root, runner, orchestrator := prepareFixApprovalCase(t, validRootCauseOutput())
-	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"root_cause":"race"}`)}
+	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"root_cause":"race","source_baselines":{"api":"feature/work"}}`)}
 	committed, err := orchestrator.ApproveFix(context.Background(), command)
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +155,7 @@ func TestApproveFixReplaySurvivesLaterCycleAndRejectsDivergentPayload(t *testing
 		t.Fatalf("replay=%+v committed=%+v starts=%d err=%v", replayed, committed, runner.startCount(), err)
 	}
 	divergent := command
-	divergent.InputJSON = []byte(`{"root_cause":"different"}`)
+	divergent.InputJSON = []byte(`{"root_cause":"different","source_baselines":{"api":"feature/work"}}`)
 	if _, err := orchestrator.ApproveFix(context.Background(), divergent); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("divergent replay err=%v", err)
 	}
@@ -143,8 +163,8 @@ func TestApproveFixReplaySurvivesLaterCycleAndRejectsDivergentPayload(t *testing
 
 func TestApproveFixConcurrentExactCommandSchedulesOnce(t *testing.T) {
 	store, incident, root, runner, _ := prepareFixApprovalCase(t, validRootCauseOutput())
-	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)}
-	orchestrators := []*CaseOrchestrator{NewCaseOrchestrator(store, runner, nil, nil), NewCaseOrchestrator(store, runner, nil, nil)}
+	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"source_baselines":{"api":"feature/work"}}`)}
+	orchestrators := []*CaseOrchestrator{NewCaseOrchestrator(store, runner, nil), NewCaseOrchestrator(store, runner, nil)}
 	results := make([]IncidentCase, len(orchestrators))
 	errs := make([]error, len(orchestrators))
 	var wait sync.WaitGroup
@@ -257,10 +277,13 @@ evidence: []
 	if branch.Repo != "api" || branch.BaseBranch != "test" || branch.FixBranch != "fix/api" || branch.Commit != "aaa111" || branch.TargetEnvironmentBranch != "test" || branch.PushRemote != "origin" || parsed.Changes[0].Repo != "api" || parsed.Tests[0].Repo != "api" || parsed.Tests[0].Commit != "aaa111" {
 		t.Fatalf("result was not normalized: %+v", parsed)
 	}
+	differentBaseline := strings.Replace(base, `base_branch: " test "`, `base_branch: " feature/new-ui "`, 1)
+	if parsed, err := ParseFixResult([]byte(differentBaseline)); err != nil || parsed.Branches[0].BaseBranch != "feature/new-ui" || parsed.Branches[0].TargetEnvironmentBranch != "test" {
+		t.Fatalf("independent source baseline rejected: %+v, %v", parsed, err)
+	}
 	for name, document := range map[string]string{
-		"base differs from target": strings.Replace(base, `base_branch: " test "`, `base_branch: " main "`, 1),
-		"fix equals base":          strings.Replace(base, `fix_branch: " fix/api "`, `fix_branch: " test "`, 1),
-		"fix equals target":        strings.Replace(base, `fix_branch: " fix/api "`, `fix_branch: "test"`, 1),
+		"fix equals base":   strings.Replace(base, `fix_branch: " fix/api "`, `fix_branch: " test "`, 1),
+		"fix equals target": strings.Replace(base, `fix_branch: " fix/api "`, `fix_branch: "test"`, 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := ParseFixResult([]byte(document)); err == nil {
@@ -307,7 +330,7 @@ func TestParseFixResultCompletionPersistsChangesBeforeMergeApprovalWait(t *testi
 	approved, err := orchestrator.ApproveFix(context.Background(), ApproveFixCommand{
 		CaseID: incident.ID, ExpectedVersion: incident.Version,
 		IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version),
-		ActorID:        "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`),
+		ActorID:        "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"source_baselines":{"api":"feature/work"}}`),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -399,7 +422,7 @@ func TestCompleteAttemptRejectsDivergentFixPayloadAndCodeChanges(t *testing.T) {
 			incident, attempt := createRunningPhase(t, store, "completion-"+strings.ReplaceAll(test.name, " ", "-"), CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
 			command := validFixCompletion(t, incident, attempt)
 			test.mutate(&command)
-			orchestrator := NewCaseOrchestrator(store, nil, nil, nil)
+			orchestrator := NewCaseOrchestrator(store, nil, nil)
 			if _, err := orchestrator.CompleteAttempt(context.Background(), command); err == nil {
 				t.Fatal("divergent fix completion accepted")
 			}
@@ -409,9 +432,9 @@ func TestCompleteAttemptRejectsDivergentFixPayloadAndCodeChanges(t *testing.T) {
 
 func TestCompleteAttemptRejectsFixChangesOnWrongPhaseOrOutcome(t *testing.T) {
 	store := newOrchestratorStore(t)
-	incident, attempt := createRunningPhase(t, store, "completion-wrong-phase", CaseReproduced, CaseInvestigating, PhaseInvestigation, "", []byte(`{}`))
+	incident, attempt := createRunningPhase(t, store, "completion-wrong-phase", CasePendingInvestigation, CaseInvestigating, PhaseInvestigation, "", []byte(`{}`))
 	command := validFixCompletion(t, incident, PhaseAttempt{ID: attempt.ID, CaseID: attempt.CaseID, CycleNumber: attempt.CycleNumber, Phase: PhaseFix})
-	if _, err := NewCaseOrchestrator(store, nil, nil, nil).CompleteAttempt(context.Background(), command); err == nil {
+	if _, err := NewCaseOrchestrator(store, nil, nil).CompleteAttempt(context.Background(), command); err == nil {
 		t.Fatal("FixPushed accepted for investigation attempt")
 	}
 
@@ -419,7 +442,7 @@ func TestCompleteAttemptRejectsFixChangesOnWrongPhaseOrOutcome(t *testing.T) {
 	incident, attempt = createRunningPhase(t, store, "completion-failed-changes", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
 	command = validFixCompletion(t, incident, attempt)
 	command.Outcome = PhaseOutcomeFixFailed
-	if _, err := NewCaseOrchestrator(store, nil, nil, nil).CompleteAttempt(context.Background(), command); err == nil {
+	if _, err := NewCaseOrchestrator(store, nil, nil).CompleteAttempt(context.Background(), command); err == nil {
 		t.Fatal("FixFailed accepted CodeChanges")
 	}
 }
@@ -441,7 +464,7 @@ func TestCompletionIntentUsesStrictFixBoundaryOnSaveAndReplay(t *testing.T) {
 	if err := store.SaveCompletionIntentIfRunning(context.Background(), command); err != nil {
 		t.Fatalf("exact intent replay: %v", err)
 	}
-	finished, err := NewCaseOrchestrator(store, nil, &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: command.CodeChanges}}, nil).CompleteAttempt(context.Background(), command)
+	finished, err := NewCaseOrchestrator(store, nil, &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: command.CodeChanges}}).CompleteAttempt(context.Background(), command)
 	if err != nil || finished.Status != CaseWaitingMergeApproval {
 		t.Fatalf("case=%+v err=%v", finished, err)
 	}
@@ -451,7 +474,7 @@ func TestFixCompletionRemoteMismatchFailsAttemptWithoutWaitingForRestart(t *test
 	store := newOrchestratorStore(t)
 	incident, attempt := createRunningPhase(t, store, "fix-remote-mismatch", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
 	command := validFixCompletion(t, incident, attempt)
-	failed, err := NewCaseOrchestrator(store, nil, &recordingGitIntegration{err: ErrFixRemoteMismatch}, nil).CompleteAttempt(context.Background(), command)
+	failed, err := NewCaseOrchestrator(store, nil, &recordingGitIntegration{err: ErrFixRemoteMismatch}).CompleteAttempt(context.Background(), command)
 	if !errors.Is(err, ErrFixRemoteMismatch) || failed.Status != CaseFixFailed {
 		t.Fatalf("case=%+v err=%v", failed, err)
 	}
@@ -466,7 +489,7 @@ func completeFixForReplayTest(t *testing.T) (*CaseStore, CompleteAttemptCommand,
 	fixture := newGitFixture(t)
 	commit := fixture.makeFix(t, "replay\n")
 	store, incident, root, _, orchestrator := prepareFixApprovalCase(t, validRootCauseOutput())
-	approved, err := orchestrator.ApproveFix(context.Background(), ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)})
+	approved, err := orchestrator.ApproveFix(context.Background(), ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"source_baselines":{"api":"feature/work"}}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,7 +526,7 @@ func TestCompleteAttemptExactFixReplayUsesImmutableIdentityBeforeGit(t *testing.
 	store, command, completed, fixture := completeFixForReplayTest(t)
 	runGitTest(t, fixture.repo, "push", "origin", "--delete", "fix/bug")
 	git := &recordingGitIntegration{err: errors.New("Git must not run during exact replay")}
-	replayed, err := NewCaseOrchestrator(store, nil, git, nil).CompleteAttempt(context.Background(), command)
+	replayed, err := NewCaseOrchestrator(store, nil, git).CompleteAttempt(context.Background(), command)
 	if err != nil || !reflect.DeepEqual(replayed, completed) {
 		t.Fatalf("replayed=%+v want=%+v err=%v", replayed, completed, err)
 	}
@@ -535,7 +558,7 @@ func TestCompleteAttemptFixReplayRejectsEveryIdentityDifferenceBeforeGit(t *test
 			changed.CodeChanges = []CodeChange{command.CodeChanges[0].Clone()}
 			test.mutate(&changed)
 			git := &recordingGitIntegration{err: errors.New("Git must not run for divergent replay")}
-			if _, err := NewCaseOrchestrator(store, nil, git, nil).CompleteAttempt(context.Background(), changed); !errors.Is(err, ErrIdempotencyConflict) {
+			if _, err := NewCaseOrchestrator(store, nil, git).CompleteAttempt(context.Background(), changed); !errors.Is(err, ErrIdempotencyConflict) {
 				t.Fatalf("err=%v", err)
 			}
 			git.mu.Lock()
@@ -560,7 +583,7 @@ func TestCompleteAttemptExactFixReplayIsConcurrentAndSurvivesLaterWorkflowMutati
 	errs := make(chan error, workers)
 	for range workers {
 		go func() {
-			got, err := NewCaseOrchestrator(store, nil, git, nil).CompleteAttempt(context.Background(), command)
+			got, err := NewCaseOrchestrator(store, nil, git).CompleteAttempt(context.Background(), command)
 			if err == nil && !reflect.DeepEqual(got, completed) {
 				err = fmt.Errorf("replay result changed: %+v", got)
 			}
@@ -582,7 +605,7 @@ func TestCompleteAttemptExactFixReplayIsConcurrentAndSurvivesLaterWorkflowMutati
 
 func TestCompletionIntentRejectsFixPushedForNonFixAttempt(t *testing.T) {
 	store := newOrchestratorStore(t)
-	incident, attempt := createRunningPhase(t, store, "completion-intent-wrong-phase", CaseReproduced, CaseInvestigating, PhaseInvestigation, "", []byte(`{}`))
+	incident, attempt := createRunningPhase(t, store, "completion-intent-wrong-phase", CasePendingInvestigation, CaseInvestigating, PhaseInvestigation, "", []byte(`{}`))
 	command := validFixCompletion(t, incident, PhaseAttempt{ID: attempt.ID, CaseID: attempt.CaseID, CycleNumber: attempt.CycleNumber, Phase: PhaseFix})
 	if err := store.SaveCompletionIntentIfRunning(context.Background(), command); err == nil {
 		t.Fatal("fix-pushed intent was saved for investigation attempt")

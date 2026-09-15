@@ -16,10 +16,12 @@ vi.mock('./lib/bridge', () => ({
   approveIncidentMerge: vi.fn(),
   ackIncidentWorkflowReminder: vi.fn(),
   cancelIncidentAttempt: vi.fn(),
+  completeIncidentRemediation: vi.fn(),
   continueIncidentCase: vi.fn(),
   fetchBugByID: vi.fn(),
   getIncidentCase: vi.fn(),
   listBugs: vi.fn(),
+  listIncidentFixBranches: vi.fn().mockResolvedValue({}),
   listIncidentCases: vi.fn(),
   listPendingIncidentWorkflowReminders: vi.fn().mockResolvedValue([]),
   matchBugBots: vi.fn().mockResolvedValue([]),
@@ -33,6 +35,7 @@ vi.mock('./lib/toast', () => ({
   toastError: vi.fn(),
 }))
 vi.mock('./lib/logStore', () => ({
+  hasWailsEventRuntime: () => true,
   setupGlobalLogBridges: vi.fn(),
   useLogStore: () => ({ count: { value: 0 } }),
   pushLog: vi.fn(),
@@ -91,8 +94,9 @@ describe('App keep-alive incident route synchronization', () => {
     await flushRouteWork()
 
     expect(wrapper.get('[data-ticket-id="bug-b"]').attributes('aria-pressed')).toBe('true')
-    expect(wrapper.get('.ticket-detail h2').text()).toBe('缓存命中下降')
-    expect(wrapper.get('.case-heading').text()).toContain('case-b')
+    expect(wrapper.get('.incident-bug-summary h2').text()).toBe('缓存命中下降')
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe('case-b')
+    expect(wrapper.get('.case-heading').text()).toContain('缓存命中下降')
     expect(router.currentRoute.value.query.bug_id).toBe('bug-b')
     wrapper.unmount()
   })
@@ -128,7 +132,8 @@ describe('App keep-alive incident route synchronization', () => {
     await flushRouteWork()
 
     expect(wrapper.get('[data-ticket-id="bug-a"]').attributes('aria-pressed')).toBe('true')
-    expect(wrapper.get('.case-heading').text()).toContain('case-a')
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe('case-a')
+    expect(wrapper.get('.case-heading').text()).toContain('支付页超时')
 
     await router.push('/bugs')
     await flushRouteWork()
@@ -139,9 +144,37 @@ describe('App keep-alive incident route synchronization', () => {
 
     expect(wrapper.get('[data-ticket-id="bug-b"]').attributes('aria-pressed')).toBe('true')
     expect(wrapper.get('[data-ticket-id="bug-a"]').attributes('aria-pressed')).toBe('false')
-    expect(wrapper.get('.ticket-detail h2').text()).toBe('缓存命中下降')
-    expect(wrapper.get('.case-heading').text()).toContain('case-b')
+    expect(wrapper.get('.incident-bug-summary h2').text()).toBe('缓存命中下降')
+    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe('case-b')
+    expect(wrapper.get('.case-heading').text()).toContain('缓存命中下降')
     expect(router.currentRoute.value.query.bug_id).toBe('bug-b')
+    wrapper.unmount()
+  })
+
+  it('reloads the cached Bug list and moves archived Bugs out of the current view', async () => {
+    vi.mocked(listBugs)
+      .mockResolvedValueOnce([bugA, bugB] as any)
+      .mockResolvedValue([{ ...bugA, inbox_state: 'active' }, { ...bugB, inbox_state: 'history', status: 'resolved' }] as any)
+    vi.mocked(listIncidentCases).mockResolvedValue([caseA, caseB] as any)
+    vi.mocked(getIncidentCase).mockImplementation(async id => detail(id === 'case-b' ? caseB : caseA) as any)
+    const router = testRouter()
+    await router.push('/incidents?bug_id=bug-a')
+    const wrapper = mountTestApp(router)
+    await router.isReady()
+    await flushRouteWork()
+
+    expect(wrapper.find('[data-ticket-id="bug-b"]').exists()).toBe(true)
+
+    await router.push('/bugs')
+    await flushRouteWork()
+    await router.push('/incidents?bug_id=bug-a')
+    await flushRouteWork()
+
+    expect(listBugs).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[data-ticket-view="active"]').text()).toContain('1')
+    expect(wrapper.get('[data-ticket-view="history"]').text()).toContain('1')
+    expect(wrapper.find('[data-ticket-id="bug-b"]').exists()).toBe(false)
+    expect(wrapper.get('[data-ticket-id="bug-a"]').attributes('aria-pressed')).toBe('true')
     wrapper.unmount()
   })
 
@@ -161,7 +194,7 @@ describe('App keep-alive incident route synchronization', () => {
 
     expect(wrapper.get('.invalid-bug-state').text()).toContain('URL 中的 Bug 不存在')
     expect(wrapper.findAll('[data-ticket-id][aria-pressed="true"]')).toHaveLength(0)
-    expect(wrapper.get('.ticket-summary-panel').text()).toContain('选择一条 Bug 查看详情')
+    expect(wrapper.get('.ticket-summary-panel').text()).toContain('选择一条 Bug 开始故障闭环')
     expect(router.currentRoute.value.query.bug_id).toBe('missing-bug')
     wrapper.unmount()
   })

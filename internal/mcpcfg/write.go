@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 )
 
-// Server 一条 MCP server 的统一结构。跟 claude-code / cursor / openclaw 4 个平台
 // 共享的字段对齐;不同平台里的其它字段(如 cursor 的 "type":"http" / "url")暂不支持,
 // 生成器本来就只输出这几个基础字段。
 type Server struct {
@@ -28,7 +27,6 @@ type Server struct {
 // 这里保守:只加/改,不主动删(避免误伤用户手配条目)。
 //
 // 同平台 schema 差异由 resolved.NestedUnderMCP 体现:
-//   - openclaw(nested)    : 顶层 {"mcp":{"servers":{...}}}
 //   - claude-code/cursor  : 顶层 {"mcpServers":{...}}
 func MergeWrite(resolved *Resolved, servers map[string]Server) error {
 	if resolved == nil {
@@ -56,7 +54,7 @@ func MergeWrite(resolved *Resolved, servers map[string]Server) error {
 	}
 
 	// 定位目标子树(mcp.servers 或 mcpServers)
-	target := locateServersMap(root, resolved.NestedUnderMCP, true)
+	target := locateServersMap(root, true)
 
 	// 合并:servers map 的 key 覆盖同名条目;原有的其它 key 不动。
 	// 注意 target 可能是从文件里读出来的 map[string]any,里面的值是 interface{},
@@ -68,14 +66,11 @@ func MergeWrite(resolved *Resolved, servers map[string]Server) error {
 		}
 		target[name] = encoded
 	}
-
-	// 写回(2-space indent,保持跟 openclaw / cursor 常见风格一致)
 	out, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
 	// 0o600:MCP server 条目的 env / headers 段会带 plaintext creds(token / password 等),
-	// 跟 install_native_mcp.go / install_native_openclaw.go 的写入口径对齐,避免 world-readable leak。
 	tmp := resolved.Path + ".tmp"
 	if err := os.WriteFile(tmp, out, 0o600); err != nil {
 		return fmt.Errorf("write tmp: %w", err)
@@ -94,26 +89,8 @@ func MergeWrite(resolved *Resolved, servers map[string]Server) error {
 // 如果已存在的节点类型不对(比如用户把 mcpServers 设成了 string),返一个新 map
 // 让调用方继续,原来的非法值会在下一次 marshal 时被替换(保守是保留,但保留就没法合并,
 // 这里优先"能工作"而不是"绝对不改用户手改")。
-func locateServersMap(root map[string]any, nested, create bool) map[string]any {
-	if nested {
-		mcpNode, ok := root["mcp"].(map[string]any)
-		if !ok {
-			if !create {
-				return map[string]any{}
-			}
-			mcpNode = map[string]any{}
-			root["mcp"] = mcpNode
-		}
-		servers, ok := mcpNode["servers"].(map[string]any)
-		if !ok {
-			if !create {
-				return map[string]any{}
-			}
-			servers = map[string]any{}
-			mcpNode["servers"] = servers
-		}
-		return servers
-	}
+func locateServersMap(root map[string]any, create bool) map[string]any {
+
 	servers, ok := root["mcpServers"].(map[string]any)
 	if !ok {
 		if !create {

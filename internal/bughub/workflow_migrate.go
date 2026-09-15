@@ -154,7 +154,7 @@ func redactLegacyRun(run InvestigationRun) InvestigationRun {
 		run.Events[index].Message = redactSensitiveText(run.Events[index].Message)
 		run.Events[index].Raw = redactSensitiveAny(run.Events[index].Raw)
 		if run.Events[index].Meta != nil {
-			redacted := redactSensitiveAny(map[string]any(run.Events[index].Meta))
+			redacted := redactSensitiveAny(run.Events[index].Meta)
 			run.Events[index].Meta = redacted.(map[string]any)
 		}
 	}

@@ -3,7 +3,7 @@
 //   - direct:     直连(填本工具自己的 URL+auth)
 //
 // 锁死规则(2026-05 后):每个工具在本系统**只有一条路径**,wizard 不再让用户选:
-//   - VIA_GRAFANA_ONLY(loki/prometheus/tempo):mcp-grafana-npx 内置 query_loki_logs /
+//   - VIA_GRAFANA_ONLY(loki/prometheus/tempo):mcp-grafana 内置 query_loki_logs /
 //     query_prometheus 等工具,无独立 MCP 包 → 永远 via_grafana
 //   - DIRECT_ONLY(jaeger/elk):独立 MCP 包(opentelemetry-mcp / @elastic/mcp-server-elasticsearch)
 //     直连 → 永远 direct

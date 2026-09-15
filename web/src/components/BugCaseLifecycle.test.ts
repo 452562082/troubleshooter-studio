@@ -1,225 +1,106 @@
-import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
-import type { CaseStatus, IncidentCase, IncidentCaseDetail } from '../lib/bridge/bugWorkflow'
+import { flushPromises, mount } from '@vue/test-utils'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { CaseStatus, IncidentCaseDetail } from '../lib/bridge/bugWorkflow'
 import BugCaseLifecycle, { primaryActionFor } from './BugCaseLifecycle.vue'
-
-function incident(status: CaseStatus, id = 'case-1'): IncidentCase {
-  return { id, bug_id: `bug-${id}`, source: 'zentao', system_id: 'base', environment: 'test', status, cycle_number: 1, current_attempt_id: '', selected_bot_key: 'base|codex', version: 2, created_at: '2026-07-11T10:00:00Z', updated_at: '2026-07-11T11:00:00Z' }
+const pickEvidence = vi.hoisted(() => vi.fn())
+vi.mock('../lib/bridge/bugWorkflow', async original => ({ ...(await original<object>()), selectIncidentEvidence: pickEvidence }))
+afterEach(() => { delete (window as any).go; pickEvidence.mockReset() })
+function detail(status: CaseStatus = 'waiting_fix_approval'): IncidentCaseDetail {
+ return { case:{id:'case-1',bug_id:'bug-1',source:'zentao',system_id:'base',environment:'test',status,cycle_number:1,current_attempt_id:'root-1',selected_bot_key:'base|codex',version:4,created_at:'',updated_at:''},
+ attempts:[{id:'root-1',case_id:'case-1',cycle_number:1,phase:'investigation',mode:'',status:'succeeded',agent_target:'codex',bot_key:'base|codex',input_json:{},output_json:{investigation_status:'root_cause_ready',remediation:{repositories:['api'],mode:'code_change'}},parent_attempt_id:'',started_at:'',error_code:'',error_message:'',usage:{}}],artifacts:[],approvals:[],code_changes:[],deployment_observations:[],events:[] }
 }
+const mountCase=(snapshot:IncidentCaseDetail,extra={})=>mount(BugCaseLifecycle,{props:{detail:snapshot,...extra},global:{stubs:{BugCaseArtifacts:true,BugAgentProgress:true}}})
+describe('investigation, fix and submission lifecycle',()=>{
+ it.each([['pending_investigation','start_investigation'],['investigating','cancel_attempt'],['waiting_evidence','supply_evidence'],['waiting_fix_approval','approve_fix'],['waiting_remediation','complete_remediation'],['fix_failed','continue_fix'],['waiting_merge_approval','approve_merge'],['merge_conflict','supply_merge_decision']] as const)('maps %s to %s',(status,kind)=>expect(primaryActionFor(detail(status))?.kind).toBe(kind))
+ it.each(['submitted','remediation_recorded','fixed_verified','validating','regression_validating'] as CaseStatus[])('does not execute terminal or retired phase %s',status=>expect(primaryActionFor(detail(status))).toBeUndefined())
+ it('shows submission awaiting human verification',()=>{const w=mountCase(detail('submitted'));expect(w.text()).toContain('已提交，待人工验证');expect(w.text()).toContain('请由人工验收并更新工单状态');expect(w.find('[data-primary-action]').exists()).toBe(false)})
+ it('binds fix approval to the visible root cause, version and baseline',async()=>{
+ const load=vi.fn().mockResolvedValue({api:['feature/work']});const w=mountCase(detail(),{loadFixBranches:load});await w.get('[data-primary-action]').trigger('click');await flushPromises();expect(load).toHaveBeenCalledWith('case-1','root-1');expect(w.emitted('primary')).toBeUndefined();await w.get('.source-baseline-row input').setValue('feature/work');await w.get('[data-dialog-confirm]').trigger('click');expect(w.emitted('primary')?.[0][0]).toMatchObject({kind:'approve_fix',rootCauseAttemptID:'root-1',caseVersion:4,sourceBaselines:{api:'feature/work'}})
+ })
+ it('rejects fix approval without repository scope',async()=>{const d=detail();d.attempts[0].output_json={};const w=mountCase(d);await w.get('[data-primary-action]').trigger('click');expect(w.get('[data-dialog-confirm]').attributes('disabled')).toBeDefined()})
+ it('closes stale approval when version changes',async()=>{const d=detail();const w=mountCase(d);await w.get('[data-primary-action]').trigger('click');await w.setProps({detail:{...d,case:{...d.case,version:5}}});expect(w.find('[role="dialog"]').exists()).toBe(false);expect(w.emitted('primary')).toBeUndefined()})
+ it('ignores a branch response after switching case',async()=>{let resolve!:(v:Record<string,string[]>)=>void;const w=mountCase(detail(),{loadFixBranches:()=>new Promise<Record<string,string[]>>(r=>resolve=r)});await w.get('[data-primary-action]').trigger('click');const d=detail();d.case.id='case-2';await w.setProps({detail:d});resolve({api:['stale']});await flushPromises();expect(w.find('[role="dialog"]').exists()).toBe(false);expect(w.emitted('primary')).toBeUndefined()})
+ it('shows exact commit and target before separate merge approval',async()=>{const d=detail('waiting_merge_approval');d.case.current_attempt_id='fix-1';d.code_changes=[{id:'change',case_id:'case-1',attempt_id:'fix-1',repo:'api',base_branch:'main',fix_branch:'fix/bug',fix_commit:'fix-sha',test_evidence:[],target_environment_branch:'test',merge_base_head:'target-sha',merge_commit:'',push_remote:'origin',push_status:'pushed'}];const w=mountCase(d);await w.get('[data-primary-action]').trigger('click');expect(w.get('[role="dialog"]').text()).toContain('fix-sha');expect(w.get('[role="dialog"]').text()).toContain('target-sha');expect(w.emitted('primary')).toBeUndefined();await w.get('[data-dialog-confirm]').trigger('click');expect(w.emitted('primary')?.[0][0]).toMatchObject({kind:'approve_merge',caseVersion:4})})
+ it('requires evidence before resuming',async()=>{const w=mountCase(detail('waiting_evidence'));await w.get('[data-primary-action]').trigger('click');expect(w.get('[data-dialog-confirm]').attributes('disabled')).toBeDefined();await w.get('textarea').setValue('request id req-42');await w.get('[data-dialog-confirm]').trigger('click');expect(w.emitted('primary')?.[0][0]).toMatchObject({kind:'supply_evidence',input:'request id req-42'})})
+ it('records human remediation with supporting evidence',async()=>{const w=mountCase(detail('waiting_remediation'));await w.get('[data-primary-action]').trigger('click');await w.findAll('textarea')[0].setValue('恢复配置');expect(w.get('[data-dialog-confirm]').attributes('disabled')).toBeDefined();await w.findAll('textarea')[1].setValue('OPS-1');await w.get('[data-dialog-confirm]').trigger('click');expect(w.emitted('primary')?.[0][0]).toMatchObject({kind:'complete_remediation',input:'恢复配置',evidence:'OPS-1'})})
+ it('blocks duplicate pending commands',async()=>{const w=mountCase(detail(),{pending:true});expect(w.get('[data-primary-action]').attributes('disabled')).toBeDefined();await w.get('[data-primary-action]').trigger('click');expect(w.find('[role="dialog"]').exists()).toBe(false)})
+})
 
-function detail(status: CaseStatus): IncidentCaseDetail {
-  return {
-    case: incident(status), attempts: [], artifacts: [], approvals: [], code_changes: [], deployment_observations: [],
-    events: [{ id: 'event-1', case_id: 'case-1', from_status: 'root_cause_ready', to_status: status, event_type: 'transition', actor_type: 'studio', actor_id: 'studio', idempotency_key: 'event-1', payload_json: {}, created_at: '2026-07-11T11:00:00Z' }],
-  }
-}
+describe('task-focused layout', () => {
+ it.each([['investigating', '排障'], ['waiting_fix_approval', '修复'], ['waiting_merge_approval', '提交']] as const)('highlights the current stage for %s', (status, label) => {
+   const wrapper = mountCase(detail(status))
+   expect(wrapper.get('.stages [aria-current="step"]').text()).toContain(label)
+   expect(wrapper.findAll('.stages li')).toHaveLength(3)
+ })
+ it('does not mark archived workflows as active investigation', () => {
+   const wrapper = mountCase(detail('legacy_archived'))
+   expect(wrapper.find('.stages [aria-current]').exists()).toBe(false)
+ })
+ it('removes empty operation history and completes the submission stepper', () => {
+   const wrapper = mountCase(detail('submitted'))
+   expect(wrapper.find('.timeline').exists()).toBe(false)
+   expect(wrapper.findAll('.stages .done')).toHaveLength(3)
+   expect(wrapper.find('.stages [aria-current]').exists()).toBe(false)
+ })
+})
 
-describe('BugCaseLifecycle', () => {
-  it.each([
-    ['waiting_fix_approval', '允许修复'],
-    ['waiting_merge_approval', '允许合并环境分支'],
-    ['waiting_deployment', '已部署，开始验证'],
-    ['waiting_evidence', '补充证据并继续'],
-    ['legacy_archived', '从新一轮验证继续'],
-  ] as Array<[CaseStatus, string]>)('maps %s to its one primary action', (status, label) => {
-    expect(primaryActionFor(incident(status))?.label).toBe(label)
-  })
-
-  it('does not offer a primary action after regression succeeds', () => {
-    expect(primaryActionFor(incident('fixed_verified'))).toBeUndefined()
-  })
-
-  it('explains that a failed regression carried fresh evidence into the next cycle', () => {
-    const snapshot = detail('investigating')
-    snapshot.case.cycle_number = 2
-    snapshot.events.push({ id: 'regression-failed', case_id: 'case-1', from_status: 'regression_validating', to_status: 'still_reproduces', event_type: 'regression_failed', actor_type: 'agent', actor_id: 'validator', idempotency_key: 'regression-failed', payload_json: {}, created_at: '2026-07-11T12:00:00Z' })
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
-
-    expect(wrapper.find('.current-action-card').text()).toContain('回归仍复现')
-    expect(wrapper.find('.current-action-card').text()).toContain('新证据和差分')
-    expect(wrapper.find('.current-action-card').text()).toContain('第 2 轮')
-  })
-
-  it.each([
-    ['pending_validation', 'start_validation'], ['validating', 'cancel_attempt'],
-    ['not_reproduced', 'supply_evidence'], ['investigating', 'cancel_attempt'],
-    ['fixing', 'cancel_attempt'], ['fix_failed', 'continue_fix'],
-    ['merge_conflict', 'supply_merge_decision'], ['deployment_unverified', 'supply_deployment_proof'],
-    ['regression_validating', 'cancel_attempt'],
-  ] as Array<[CaseStatus, string]>)('keeps exactly one action for actionable state %s', (status, kind) => {
-    expect(primaryActionFor(incident(status))?.kind).toBe(kind)
-  })
-
-  it('renders three semantic columns, six stages, timeline and one primary button', () => {
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('waiting_fix_approval')], detail: detail('waiting_fix_approval') } })
-
-    expect(wrapper.findAll('.case-column')).toHaveLength(3)
-    expect(wrapper.findAll('.lifecycle-stage')).toHaveLength(6)
-    expect(wrapper.find('[aria-label="故障处理阶段"]').exists()).toBe(true)
-    expect(wrapper.find('[aria-label="Case 时间线"]').text()).toContain('transition')
-    expect(wrapper.findAll('.current-action-card .primary-action')).toHaveLength(1)
-  })
-
-  it('offers reset as a separate dangerous secondary action without changing the one-primary-action rule', async () => {
-    const snapshot = detail('waiting_fix_approval')
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
-
-    expect(wrapper.findAll('.current-action-card .primary-action')).toHaveLength(1)
-    const reset = wrapper.get('.reset-action')
-    expect(reset.classes()).toContain('danger-secondary')
-    expect(reset.classes()).not.toContain('primary')
-    await reset.trigger('click')
-
-    expect(wrapper.emitted('reset')?.[0]).toEqual([snapshot.case])
-    expect(wrapper.emitted('primary')).toBeUndefined()
-  })
-
-  it.each(['fixed_verified', 'legacy_archived', 'reset_archived'] as CaseStatus[])('does not offer reset for terminal state %s', status => {
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident(status)], detail: detail(status) } })
-    expect(wrapper.find('.reset-action').exists()).toBe(false)
-  })
-
-  it('disables reset while another Case operation is pending', () => {
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('waiting_evidence')], detail: detail('waiting_evidence'), pending: true } })
-    expect(wrapper.get<HTMLButtonElement>('.reset-action').element.disabled).toBe(true)
-  })
-
-  it('opens an accessible approval dialog before emitting approval', async () => {
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('waiting_merge_approval')], detail: detail('waiting_merge_approval') } })
-
-    await wrapper.find('.primary-action').trigger('click')
-    const dialog = wrapper.find('[role="dialog"]')
-    expect(dialog.attributes('aria-modal')).toBe('true')
-    expect(dialog.attributes('aria-labelledby')).toBeTruthy()
-    await dialog.find('[data-confirm]').trigger('click')
-
-    expect(wrapper.emitted('primary')?.[0]).toEqual([{ kind: 'approve_merge' }])
-  })
-
-  it('emits the root-cause attempt and Case version captured when the fix dialog opens', async () => {
-    const snapshot = detail('waiting_fix_approval')
-    snapshot.case.version = 7
-    snapshot.case.current_attempt_id = 'investigation-7'
-    snapshot.attempts = [{ id: 'investigation-7', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', confidence: 'high', gaps: [] }, parent_attempt_id: '', started_at: '2026-07-11T10:00:00Z', error_code: '', error_message: '', usage: {} }]
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
-
-    await wrapper.find('.primary-action').trigger('click')
-    await wrapper.setProps({ detail: { ...snapshot, case: { ...snapshot.case, version: 8 } } })
-    await wrapper.find('[data-confirm]').trigger('click')
-
-    expect(wrapper.emitted('primary')?.[0]).toEqual([{ kind: 'approve_fix', rootCauseAttemptID: 'investigation-7', caseVersion: 7 }])
-  })
-
-  it('previews target environment, expected commits, and verifier before deployment validation', async () => {
-    const snapshot = detail('waiting_deployment')
-    snapshot.case.current_attempt_id = 'fix-1'
-    snapshot.code_changes = [{ id: 'change-1', case_id: 'case-1', attempt_id: 'fix-1', repo: 'api', base_branch: 'main', fix_branch: 'fix/1', fix_commit: 'fix-abc', test_evidence: [], target_environment_branch: 'test', merge_base_head: 'base', merge_commit: 'merge-def', push_remote: 'origin', push_status: 'pushed' }]
-    snapshot.deployment_observations = [{ id: 'observation-1', case_id: 'case-1', environment: 'test', expected_commits: { api: 'merge-def' }, observed_version: '', observed_images: {}, observed_commits: {}, verification_source: 'version endpoint', result: 'unavailable' }]
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
-
-    await wrapper.find('.primary-action').trigger('click')
-
-    expect(wrapper.find('[role="dialog"]').text()).toContain('test')
-    expect(wrapper.find('[role="dialog"]').text()).toContain('api: merge-def')
-    expect(wrapper.find('[role="dialog"]').text()).toContain('version endpoint')
-    expect(wrapper.find('[role="dialog"]').text()).not.toContain('部署已确认')
-  })
-
-  it('submits manual proof without a caller-controlled version source', async () => {
-    const snapshot = detail('waiting_deployment')
-    snapshot.case.current_attempt_id = 'fix-1'
-    snapshot.code_changes = [
-      { id: 'api', case_id: 'case-1', attempt_id: 'fix-1', repo: 'api', base_branch: 'main', fix_branch: 'fix/1', fix_commit: 'fix-api', test_evidence: [], target_environment_branch: 'test', merge_base_head: 'base', merge_commit: 'merge-api', push_remote: 'origin', push_status: 'pushed' },
-      { id: 'worker', case_id: 'case-1', attempt_id: 'fix-1', repo: 'worker', base_branch: 'main', fix_branch: 'fix/1', fix_commit: 'fix-worker', test_evidence: [], target_environment_branch: 'test', merge_base_head: 'base', merge_commit: 'merge-worker', push_remote: 'origin', push_status: 'pushed' },
-    ]
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
-
-    await wrapper.find('.primary-action').trigger('click')
-    await wrapper.find('#observed-version').setValue('build-42')
-    await wrapper.find('#observed-commit-api').setValue('merge-api')
-    await wrapper.find('[data-confirm]').trigger('click')
-
-    expect(wrapper.emitted('primary')?.[0]).toEqual([{
-      kind: 'notify_deployed', observedVersion: 'build-42', observedCommits: { api: 'merge-api' },
-    }])
-  })
-
-  it('starts automatic HTTP verification without manual proof fields', async () => {
-    const snapshot = detail('waiting_deployment')
-    snapshot.deployment_verification = { provider: 'http', available: true, hint: 'HTTP 版本接口自动验证 · /git/commit' }
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
-    await wrapper.find('.primary-action').trigger('click')
-    expect(wrapper.find('#observed-version').exists()).toBe(false)
-    expect(wrapper.find('[role="dialog"]').text()).toContain('HTTP 版本接口自动验证')
-    expect(wrapper.find<HTMLButtonElement>('[data-confirm]').element.disabled).toBe(false)
-    await wrapper.find('[data-confirm]').trigger('click')
-    expect(wrapper.emitted('primary')?.[0]).toEqual([{ kind: 'notify_deployed' }])
-  })
-
-  it('previews only the current fix attempt deployment scope in a later cycle', async () => {
-    const snapshot = detail('waiting_deployment')
-    snapshot.case.current_attempt_id = 'fix-2'
-    snapshot.case.cycle_number = 2
-    snapshot.code_changes = [
-      { id: 'old', case_id: 'case-1', attempt_id: 'fix-1', repo: 'api', base_branch: 'main', fix_branch: 'fix/old', fix_commit: 'fix-old', test_evidence: [], target_environment_branch: 'test', merge_base_head: 'base-1', merge_commit: 'merge-old', push_remote: 'origin', push_status: 'pushed' },
-      { id: 'new', case_id: 'case-1', attempt_id: 'fix-2', repo: 'api', base_branch: 'main', fix_branch: 'fix/new', fix_commit: 'fix-new', test_evidence: [], target_environment_branch: 'test', merge_base_head: 'base-2', merge_commit: 'merge-new', push_remote: 'origin', push_status: 'pushed' },
-    ]
-    snapshot.deployment_observations = [{ id: 'old-observation', case_id: 'case-1', environment: 'test', expected_commits: { api: 'merge-old' }, observed_version: 'old', observed_images: {}, observed_commits: { api: 'merge-old' }, verification_source: 'old source', result: 'matched' }]
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [snapshot.case], detail: snapshot } })
-
-    await wrapper.find('.primary-action').trigger('click')
-
-    expect(wrapper.find('[role="dialog"]').text()).toContain('api: merge-new')
-    expect(wrapper.find('[role="dialog"]').text()).not.toContain('merge-old')
-    expect(wrapper.find('[role="dialog"]').text()).toContain('manual')
-  })
-
-  it('restores focus to the primary action when an approval dialog closes', async () => {
-    const snapshot = detail('waiting_fix_approval')
-    snapshot.case.current_attempt_id = 'investigation-focus'
-    snapshot.attempts = [{ id: 'investigation-focus', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { investigation_status: 'root_cause_ready', confidence: 'high', gaps: [] }, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }]
-    const wrapper = mount(BugCaseLifecycle, { attachTo: document.body, props: { cases: [snapshot.case], detail: snapshot } })
-    const trigger = wrapper.find<HTMLButtonElement>('.primary-action')
-    await trigger.trigger('click')
-    expect(document.activeElement).toBe(wrapper.find('[data-confirm]').element)
-
-    await wrapper.find('[role="dialog"] footer .btn').trigger('click')
-    await wrapper.vm.$nextTick()
-
-    expect(document.activeElement).toBe(trigger.element)
-    wrapper.unmount()
-  })
-
-  it('shows archived Cases as read-only and continues through a new Case action', () => {
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('legacy_archived')], detail: detail('legacy_archived') } })
-
-    expect(wrapper.text()).toContain('历史记录只读')
-    expect(wrapper.find('.primary-action').text()).toBe('从新一轮验证继续')
-  })
-
-  it('shows reset archives as terminal read-only history', () => {
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('reset_archived')], detail: detail('reset_archived') } })
-
-    expect(wrapper.text()).toContain('已重置归档')
-    expect(wrapper.text()).toContain('历史记录只读')
-    expect(wrapper.find('.primary-action').exists()).toBe(false)
-    expect(wrapper.findAll('.lifecycle-stage').every(stage => stage.attributes('data-state') === 'archived')).toBe(true)
-    expect(wrapper.find('.terminal-copy').text()).toBe('已归档，由新 Case 接替')
-    expect(wrapper.text()).not.toContain('当前阶段自动推进')
-  })
-
-  it('contains responsive no-overflow contracts for all supported viewport fixtures', () => {
-    const css = (BugCaseLifecycle as any).__cssModules ? '' : String((BugCaseLifecycle as any).__scopeId || '')
-    expect(css).not.toContain('emoji')
-    const wrapper = mount(BugCaseLifecycle, { props: { cases: [incident('validating')], detail: detail('validating') } })
-    expect(wrapper.find('.case-lifecycle').attributes('data-responsive-viewports')).toBe('375,768,1024,1440')
-    expect(wrapper.find('.case-lifecycle').attributes('data-overflow-safe')).toBe('true')
-    const source = readFileSync('src/components/BugCaseLifecycle.vue', 'utf8')
-    expect(source).toContain('@media (max-width: 899px)')
-    expect(source).toMatch(/@media \(max-width: 899px\)[\s\S]*?\.case-lifecycle \{ grid-template-columns: minmax\(0, 1fr\); \}/)
-    expect(source).toContain('@media (max-width: 560px)')
-    expect(source).toMatch(/\.case-lifecycle \{[^}]*min-width: 0;/)
-    expect(source).toMatch(/\.case-column \{[^}]*min-width: 0;/)
-  })
+describe('native evidence picker', () => {
+ const image = { name: '截图.png', mime_type: 'image/png', base64_data: 'cG5n' }
+ async function openPicker() {
+   ;(window as any).go = {}
+   const wrapper = mountCase(detail('waiting_evidence'))
+   await wrapper.get('[data-primary-action]').trigger('click')
+   return wrapper
+ }
+ it('uses the desktop picker and enables attachment-only continuation', async () => {
+   pickEvidence.mockResolvedValue({ images: [image], files: [] })
+   const wrapper = await openPicker()
+   expect(wrapper.get('input[type=file]').attributes('hidden')).toBeDefined()
+   await wrapper.get('[data-select-evidence]').trigger('click'); await flushPromises()
+   expect(pickEvidence).toHaveBeenCalledOnce()
+   expect(wrapper.get('.attachment-count').text()).toContain('1 张截图')
+   expect(wrapper.get('.attachment-list').text()).toContain('截图.png')
+   expect(wrapper.get('[data-dialog-confirm]').attributes('disabled')).toBeUndefined()
+   await wrapper.get('[data-dialog-confirm]').trigger('click')
+   expect(wrapper.emitted('primary')?.[0][0]).toMatchObject({ kind: 'supply_evidence', images: [image] })
+ })
+ it('keeps earlier attachments when the next picker is cancelled', async () => {
+   pickEvidence.mockResolvedValueOnce({ images: [image], files: [] }).mockResolvedValueOnce({ images: [], files: [] })
+   const wrapper = await openPicker()
+   await wrapper.get('[data-select-evidence]').trigger('click'); await flushPromises()
+   await wrapper.get('[data-select-evidence]').trigger('click'); await flushPromises()
+   expect(wrapper.findAll('.attachment-list li')).toHaveLength(1)
+   await wrapper.get('.attachment-list button').trigger('click')
+   expect(wrapper.get('[data-dialog-confirm]').attributes('disabled')).toBeDefined()
+ })
+ it('blocks concurrent selection and ignores results after switching case', async () => {
+   let resolve!: (value: unknown) => void
+   pickEvidence.mockImplementation(() => new Promise(r => { resolve = r }))
+   const wrapper = await openPicker()
+   await wrapper.get('[data-select-evidence]').trigger('click')
+   expect(wrapper.get('[data-select-evidence]').attributes('disabled')).toBeDefined()
+   expect(wrapper.get('[data-dialog-confirm]').attributes('disabled')).toBeDefined()
+   const next = detail('waiting_evidence'); next.case.id = 'case-2'
+   await wrapper.setProps({ detail: next })
+   resolve({ images: [image], files: [] }); await flushPromises()
+   await wrapper.get('[data-primary-action]').trigger('click')
+   expect(wrapper.find('.attachment-list').exists()).toBe(false)
+ })
+ it('reports picker failure in the dialog and permits retry', async () => {
+   pickEvidence.mockRejectedValueOnce(new Error('无法打开文件选择窗口')).mockResolvedValueOnce({ images: [image], files: [] })
+   const wrapper = await openPicker()
+   await wrapper.get('[data-select-evidence]').trigger('click'); await flushPromises()
+   expect(wrapper.get('[role=alert]').text()).toContain('无法打开文件选择窗口')
+   await wrapper.get('[data-select-evidence]').trigger('click'); await flushPromises()
+   expect(wrapper.find('[role=alert]').exists()).toBe(false)
+   expect(wrapper.findAll('.attachment-list li')).toHaveLength(1)
+ })
+ it('enforces per-kind limits across selections without adding a partial batch', async () => {
+   pickEvidence.mockResolvedValueOnce({ images: Array(4).fill(image), files: [] }).mockResolvedValueOnce({ images: [image], files: [{ name:'log.txt', mime_type:'text/plain', base64_data:'bG9n' }] })
+   const wrapper = await openPicker()
+   await wrapper.get('[data-select-evidence]').trigger('click'); await flushPromises()
+   await wrapper.get('[data-select-evidence]').trigger('click'); await flushPromises()
+   expect(wrapper.get('[role=alert]').text()).toContain('各最多添加 4 个')
+   expect(wrapper.findAll('.attachment-list li')).toHaveLength(4)
+ })
 })

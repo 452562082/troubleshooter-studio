@@ -1,0 +1,315 @@
+package bughub
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func TestFixWorkspaceManagerLocksExplicitSourceBaselineAndKeepsEnvironmentTarget(t *testing.T) {
+	fixture := newGitFixture(t)
+	runGitTest(t, fixture.repo, "switch", "-c", "feature/wrong-base")
+	if err := os.WriteFile(filepath.Join(fixture.repo, "feature.txt"), []byte("unrelated\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, fixture.repo, "add", "feature.txt")
+	runGitTest(t, fixture.repo, "commit", "-m", "unrelated feature")
+	featureCommit := strings.TrimSpace(runGitTest(t, fixture.repo, "rev-parse", "HEAD"))
+	runGitTest(t, fixture.repo, "push", "origin", "feature/wrong-base")
+	advanceTestBranchAfterFeatureFork(t, fixture)
+
+	botPath := writeFixWorkspaceBranchMap(t, "test", "api", "test")
+	manager := NewFixWorkspaceManager(filepath.Join(t.TempDir(), "fix-worktrees"), func(_ context.Context, caseID, repo string) (string, error) {
+		if caseID != "case-1" || repo != "api" {
+			return "", errors.New("unexpected repository request")
+		}
+		return fixture.repo, nil
+	})
+	lease, err := manager.Prepare(context.Background(), "case-1", "attempt-1", "test", BotRef{Path: botPath}, []byte(`{"source_baselines":{"api":"feature/wrong-base"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lease.bindings) != 1 {
+		t.Fatalf("bindings = %+v", lease.bindings)
+	}
+	binding := lease.bindings[0]
+	if binding.BaseBranch != "feature/wrong-base" || binding.BaseCommit != featureCommit || binding.TargetEnvironmentBranch != "test" {
+		t.Fatalf("binding = %+v, want feature/wrong-base@%s -> test", binding, featureCommit)
+	}
+	if got := strings.TrimSpace(runGitTest(t, binding.Worktree, "rev-parse", "HEAD")); got != featureCommit {
+		t.Fatalf("worktree HEAD = %s, want %s", got, featureCommit)
+	}
+	gitMetadata, err := os.Stat(filepath.Join(binding.Worktree, ".git"))
+	if err != nil || !gitMetadata.IsDir() {
+		t.Fatalf("fix workspace must own a standalone .git directory: info=%v err=%v", gitMetadata, err)
+	}
+	commonDir := strings.TrimSpace(runGitTest(t, binding.Worktree, "rev-parse", "--git-common-dir"))
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(binding.Worktree, commonDir)
+	}
+	relativeCommonDir, err := filepath.Rel(binding.Worktree, filepath.Clean(commonDir))
+	if err != nil || relativeCommonDir == ".." || strings.HasPrefix(relativeCommonDir, ".."+string(filepath.Separator)) {
+		t.Fatalf("fix workspace Git metadata escaped the approved root: %q", commonDir)
+	}
+	if _, err := os.Stat(filepath.Join(binding.Worktree, ".git", "objects", "info", "alternates")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fix workspace must not borrow objects outside its approved root: %v", err)
+	}
+	wantRemote := strings.TrimSpace(runGitTest(t, fixture.repo, "remote", "get-url", "origin"))
+	if remote := strings.TrimSpace(runGitTest(t, binding.Worktree, "remote", "get-url", "origin")); remote != wantRemote {
+		t.Fatalf("fix workspace remote = %q, want %q", remote, wantRemote)
+	}
+	if got := strings.TrimSpace(runGitTest(t, binding.Worktree, "config", "--local", "--get", "user.name")); got != "Studio Test" {
+		t.Fatalf("fix workspace user.name = %q, want source repository identity", got)
+	}
+	if got := strings.TrimSpace(runGitTest(t, binding.Worktree, "config", "--local", "--get", "user.email")); got != "studio@example.test" {
+		t.Fatalf("fix workspace user.email = %q, want source repository identity", got)
+	}
+	if got := strings.TrimSpace(runGitTest(t, fixture.repo, "branch", "--show-current")); got != "feature/wrong-base" {
+		t.Fatalf("source checkout branch changed to %q", got)
+	}
+
+	wrong := PhaseResult{Outcome: PhaseOutcomeFixPushed, CodeChanges: []CodeChange{{Repo: "api", BaseBranch: "test", FixCommit: featureCommit, TargetEnvironmentBranch: "test", PushRemote: "origin"}}}
+	if err := lease.ValidateResult(context.Background(), wrong); err == nil || !strings.Contains(err.Error(), "locked source baseline") {
+		t.Fatalf("wrong reported baseline accepted: %v", err)
+	}
+
+	runGitTest(t, binding.Worktree, "switch", "-c", "fix/bug-1")
+	if err := os.WriteFile(filepath.Join(binding.Worktree, "fix.txt"), []byte("fix\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, binding.Worktree, "add", "fix.txt")
+	runGitTest(t, binding.Worktree, "commit", "-m", "fix")
+	fixCommit := strings.TrimSpace(runGitTest(t, binding.Worktree, "rev-parse", "HEAD"))
+	if got := strings.TrimSpace(runGitTest(t, binding.Worktree, "show", "-s", "--format=%an|%ae|%cn|%ce", fixCommit)); got != "Studio Test|studio@example.test|Studio Test|studio@example.test" {
+		t.Fatalf("fix commit identity = %q, want source repository identity", got)
+	}
+	valid := PhaseResult{Outcome: PhaseOutcomeFixPushed, CodeChanges: []CodeChange{{Repo: "api", BaseBranch: "feature/wrong-base", FixCommit: fixCommit, TargetEnvironmentBranch: "test", PushRemote: "origin"}}}
+	if err := lease.ValidateResult(context.Background(), valid); err != nil {
+		t.Fatalf("valid locked-base fix rejected: %v", err)
+	}
+	if !strings.Contains(lease.Prompt(), binding.Worktree) || !strings.Contains(lease.Prompt(), featureCommit) {
+		t.Fatalf("prompt does not carry locked binding: %s", lease.Prompt())
+	}
+	if err := lease.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(binding.Worktree); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("dedicated worktree retained: %v", err)
+	}
+}
+
+func TestFixWorkspaceManagerReplacesLegacyStudioIdentityWithPersonalIdentity(t *testing.T) {
+	fixture := newGitFixture(t)
+	runGitTest(t, fixture.repo, "config", "--local", "user.name", legacyStudioGitUserName)
+	runGitTest(t, fixture.repo, "config", "--local", "user.email", legacyStudioGitUserEmail)
+	globalConfig := filepath.Join(t.TempDir(), "global.gitconfig")
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	runGitTest(t, fixture.repo, "config", "--file", globalConfig, "user.name", "Personal User")
+	runGitTest(t, fixture.repo, "config", "--file", globalConfig, "user.email", "personal@example.test")
+
+	botPath := writeFixWorkspaceBranchMap(t, "test", "api", "test")
+	manager := NewFixWorkspaceManager(filepath.Join(t.TempDir(), "fix-worktrees"), func(_ context.Context, _, _ string) (string, error) {
+		return fixture.repo, nil
+	})
+	lease, err := manager.Prepare(context.Background(), "case-personal", "attempt-1", "test", BotRef{Path: botPath}, []byte(`{"source_baselines":{"api":"test"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lease.Close(context.Background()) }()
+
+	binding := lease.bindings[0]
+	if got := strings.TrimSpace(runGitTest(t, binding.Worktree, "config", "--local", "--get", "user.name")); got != "Personal User" {
+		t.Fatalf("fix workspace user.name = %q, want personal identity", got)
+	}
+	if got := strings.TrimSpace(runGitTest(t, binding.Worktree, "config", "--local", "--get", "user.email")); got != "personal@example.test" {
+		t.Fatalf("fix workspace user.email = %q, want personal identity", got)
+	}
+}
+
+func TestFixWorkspaceManagerRefusesToStartWithoutPersonalGitIdentity(t *testing.T) {
+	fixture := newGitFixture(t)
+	runGitTest(t, fixture.repo, "config", "--local", "user.name", legacyStudioGitUserName)
+	runGitTest(t, fixture.repo, "config", "--local", "user.email", legacyStudioGitUserEmail)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "missing-global.gitconfig"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	for _, key := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"} {
+		t.Setenv(key, "")
+	}
+
+	botPath := writeFixWorkspaceBranchMap(t, "test", "api", "test")
+	manager := NewFixWorkspaceManager(filepath.Join(t.TempDir(), "fix-worktrees"), func(_ context.Context, _, _ string) (string, error) {
+		return fixture.repo, nil
+	})
+	lease, err := manager.Prepare(context.Background(), "case-missing-identity", "attempt-1", "test", BotRef{Path: botPath}, []byte(`{"source_baselines":{"api":"test"}}`))
+	if lease != nil {
+		t.Fatalf("lease = %+v, want no fix workspace lease", lease)
+	}
+	if err == nil || !strings.Contains(err.Error(), "git config --global user.name") {
+		t.Fatalf("error = %v, want actionable personal Git identity error", err)
+	}
+}
+
+func TestRemoveStandaloneFixWorkspaceRefusesPathsOutsideOwnedRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	for name, path := range map[string]string{
+		"root itself": root,
+		"outside":     outside,
+		"nested":      filepath.Join(root, "repo", "nested"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := removeStandaloneFixWorkspace(root, path); err == nil {
+				t.Fatalf("unsafe cleanup path %q was accepted", path)
+			}
+		})
+	}
+}
+
+func TestFixWorkspaceLeaseRejectsSelfReportedWrongBranchAndMergeHistory(t *testing.T) {
+	fixture := newGitFixture(t)
+	runGitTest(t, fixture.repo, "switch", "-c", "feature/wrong-base")
+	if err := os.WriteFile(filepath.Join(fixture.repo, "feature.txt"), []byte("unrelated\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, fixture.repo, "add", "feature.txt")
+	runGitTest(t, fixture.repo, "commit", "-m", "unrelated feature")
+	advanceTestBranchAfterFeatureFork(t, fixture)
+	botPath := writeFixWorkspaceBranchMap(t, "test", "api", "test")
+	manager := NewFixWorkspaceManager(filepath.Join(t.TempDir(), "fix-worktrees"), func(context.Context, string, string) (string, error) {
+		return fixture.repo, nil
+	})
+	runGitTest(t, fixture.repo, "push", "origin", "feature/wrong-base")
+	lease, err := manager.Prepare(context.Background(), "case-2", "attempt-2", "test", BotRef{Path: botPath}, []byte(`{"source_baselines":{"api":"feature/wrong-base"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lease.Close(context.Background()) }()
+	binding := lease.bindings[0]
+
+	branchMismatch := PhaseResult{Outcome: PhaseOutcomeFixPushed, CodeChanges: []CodeChange{{Repo: "api", BaseBranch: "feature/wrong", FixCommit: binding.BaseCommit, TargetEnvironmentBranch: "test", PushRemote: "origin"}}}
+	if err := lease.ValidateResult(context.Background(), branchMismatch); err == nil || !strings.Contains(err.Error(), "locked source baseline") {
+		t.Fatalf("self-reported wrong branch accepted: %v", err)
+	}
+
+	runGitTest(t, binding.Worktree, "switch", "-c", "fix/with-merge")
+	runGitTest(t, binding.Worktree, "merge", "--no-ff", "origin/test", "-m", "merge unrelated environment history")
+	mergeCommit := strings.TrimSpace(runGitTest(t, binding.Worktree, "rev-parse", "HEAD"))
+	merged := PhaseResult{Outcome: PhaseOutcomeFixPushed, CodeChanges: []CodeChange{{Repo: "api", BaseBranch: "feature/wrong-base", FixCommit: mergeCommit, TargetEnvironmentBranch: "test", PushRemote: "origin"}}}
+	if err := lease.ValidateResult(context.Background(), merged); err == nil || !strings.Contains(err.Error(), "merge or disconnected commit") {
+		t.Fatalf("merge history accepted: %v", err)
+	}
+}
+
+func TestFixWorkspaceManagerDefaultsMissingSourceBaselineToEnvironmentBranch(t *testing.T) {
+	fixture := newGitFixture(t)
+	botPath := writeFixWorkspaceBranchMap(t, "test", "api", "test")
+	manager := NewFixWorkspaceManager(filepath.Join(t.TempDir(), "fix-worktrees"), func(context.Context, string, string) (string, error) {
+		return fixture.repo, nil
+	})
+	lease, err := manager.Prepare(context.Background(), "case-3", "attempt-3", "test", BotRef{Path: botPath}, []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lease.Close(context.Background()) }()
+	if len(lease.bindings) != 1 || lease.bindings[0].Repo != "api" || lease.bindings[0].BaseBranch != "test" || lease.bindings[0].TargetEnvironmentBranch != "test" {
+		t.Fatalf("bindings=%+v, want api test -> test", lease.bindings)
+	}
+}
+
+func TestFixWorkspaceManagerDefaultsBlankApprovedBaselineToEnvironmentBranch(t *testing.T) {
+	fixture := newGitFixture(t)
+	botPath := writeFixWorkspaceBranchMap(t, "test", "api", "test")
+	manager := NewFixWorkspaceManager(filepath.Join(t.TempDir(), "fix-worktrees"), func(context.Context, string, string) (string, error) {
+		return fixture.repo, nil
+	})
+	lease, err := manager.Prepare(context.Background(), "case-blank", "attempt-blank", "test", BotRef{Path: botPath}, []byte(`{"source_baselines":{"api":""}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lease.Close(context.Background()) }()
+	if len(lease.bindings) != 1 || lease.bindings[0].BaseBranch != "test" {
+		t.Fatalf("bindings=%+v, want blank approval resolved to test", lease.bindings)
+	}
+}
+
+func TestRemediationFixRepositoriesUsesStructuredFixScope(t *testing.T) {
+	result := InvestigationResult{
+		Remediation: RemediationPlan{Repositories: []string{"base-backend"}, Target: "backend adapter"},
+		CallChain:   []CallChainHop{{Repo: "base-frontend"}, {Repo: "base-backend"}},
+	}
+	if got := remediationFixRepositories(result); !reflect.DeepEqual(got, []string{"base-backend"}) {
+		t.Fatalf("repositories=%v, want only base-backend", got)
+	}
+}
+
+func TestRemediationFixRepositoriesMatchesLegacyTargetInsteadOfWholeCallChain(t *testing.T) {
+	result := InvestigationResult{
+		Remediation: RemediationPlan{Target: "base-backend/base/internal/application/user/service/s2s_logic.go"},
+		CallChain:   []CallChainHop{{Repo: "base-frontend"}, {Repo: "base-backend"}},
+	}
+	if got := remediationFixRepositories(result); !reflect.DeepEqual(got, []string{"base-backend"}) {
+		t.Fatalf("repositories=%v, want target-matched base-backend", got)
+	}
+}
+
+func TestResolveRemediationFixSourceBaselinesRejectsRepositoryOutsidePlan(t *testing.T) {
+	result := InvestigationResult{Remediation: RemediationPlan{Repositories: []string{"base-backend"}}}
+	_, err := resolveRemediationFixSourceBaselines("", "test", []byte(`{"source_baselines":{"base-frontend":"test"}}`), result)
+	if err == nil || !strings.Contains(err.Error(), "outside the approved remediation scope") {
+		t.Fatalf("err=%v, want remediation-scope rejection", err)
+	}
+}
+
+func TestResolveRemediationFixSourceBaselinesRejectsUnconfiguredRemediationRepository(t *testing.T) {
+	botPath := writeFixWorkspaceBranchMap(t, "test", "base-backend", "base-test")
+	result := InvestigationResult{Remediation: RemediationPlan{Repositories: []string{"truss-base"}}}
+
+	_, err := resolveRemediationFixSourceBaselines(
+		botPath,
+		"test",
+		[]byte(`{"source_baselines":{"truss-base":"feature/fix"}}`),
+		result,
+	)
+	if err == nil || !strings.Contains(err.Error(), `remediation repository "truss-base" is not configured`) {
+		t.Fatalf("err=%v, want configured-repository rejection", err)
+	}
+}
+
+func TestFixWorkspaceLeaseRequiresEveryApprovedRepository(t *testing.T) {
+	lease := &FixWorkspaceLease{bindings: []fixWorkspaceBinding{{Repo: "api"}, {Repo: "web"}}}
+	err := lease.ValidateResult(context.Background(), PhaseResult{Outcome: PhaseOutcomeFixPushed, CodeChanges: []CodeChange{{Repo: "api"}}})
+	if err == nil || !strings.Contains(err.Error(), "approval locked 2") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func writeFixWorkspaceBranchMap(t *testing.T, environment, repo, branch string) string {
+	t.Helper()
+	root := t.TempDir()
+	references := filepath.Join(root, "skills", "routing", "references")
+	if err := os.MkdirAll(references, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := "environments:\n  " + environment + ":\n    repos:\n      " + repo + ": \"" + branch + "\"\n"
+	if err := os.WriteFile(filepath.Join(references, "env-branch-map.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func advanceTestBranchAfterFeatureFork(t *testing.T, fixture gitFixture) {
+	t.Helper()
+	runGitTest(t, fixture.repo, "switch", "test")
+	if err := os.WriteFile(filepath.Join(fixture.repo, "target.txt"), []byte("target branch advanced\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, fixture.repo, "add", "target.txt")
+	runGitTest(t, fixture.repo, "commit", "-m", "advance target environment")
+	runGitTest(t, fixture.repo, "push", "origin", "test")
+	runGitTest(t, fixture.repo, "switch", "feature/wrong-base")
+}

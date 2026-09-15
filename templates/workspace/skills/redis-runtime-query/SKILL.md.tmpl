@@ -40,13 +40,14 @@ description: 通过环境动态查询 Redis 数据。先通过 routing 获取环
 **主路径:mcp tool**(已预注册,首选)
 
 ```text
-查 mcp tools 列表 → 找名字含 `redis-<env>` 的工具。@gongrzhe/server-redis-mcp@1.0.0 只暴露 4 个:
-  get      — 按 key 取值
-  list     — 列匹配 pattern 的 keys(替代危险的 KEYS *,只看不读 value)
-  set      — **排障禁调**(写操作,只查时不该用)
-  delete   — **排障禁调**(写操作)
-连接串已 bake,不要再传 host/port/password,只传 key / pattern。
-注:scan / TTL 这类高级操作上游 v1.0.0 没暴露(redis-plus 分支才有但 npm 装不到),需要时 fallback redis-cli。
+先发现对应服务器的工具和参数。当前使用 Redis 官方 redis-mcp-server 0.5.1：
+  get / hget / hgetall / lrange / smembers / zrange / xrange — 按数据类型只读查询
+  scan_keys — 分页扫描，限制 count 并处理 cursor；禁止无界扫描
+  type / dbsize / info — 类型、容量与运行信息
+不要使用旧实现的 list 工具。TTL 查询未在当前工具集中提供，使用下方只读 CLI。
+连接串已配置，只传业务查询参数。排障不调用 set/delete/expire、发布订阅、
+消费组创建或确认等有副作用的工具；不使用 scan_all_keys 拉完整数据库。
+
 ```
 
 **fallback 1:redis-cli(只读)**
@@ -73,6 +74,12 @@ r = redis.Redis(host=os.environ["REDIS_HOST"], port=int(os.environ["REDIS_PORT"]
 print(r.get("user:12345"), "TTL=", r.ttl("user:12345"))
 '
 ```
+
+## 结果判定
+
+官方服务可能把认证或查询失败作为 `Error ...` 文本返回，即使 `isError=false`。
+必须同时检查响应正文；错误文本不能当作缓存值、空结果或成功证据。
+认证失败应报告凭据问题，不改用其他账号绕过。
 
 ## 输出要求
 

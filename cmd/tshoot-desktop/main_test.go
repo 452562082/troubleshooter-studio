@@ -52,7 +52,10 @@ func TestStartupStartsTrayAfterContextIsSet(t *testing.T) {
 		startDesktopBugPoller = prevPoller
 	})
 
-	appState := &App{workflowRoot: t.TempDir()}
+	appState := &App{
+		workflowRoot: t.TempDir(),
+		workflowEmit: func(string, any) {},
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); _ = appState.closeIncidentWorkflow() })
 	appState.startup(ctx)
@@ -66,4 +69,5 @@ func TestStartupStartsTrayAfterContextIsSet(t *testing.T) {
 	if !pollerCalled {
 		t.Fatal("startup did not start bug poller")
 	}
+
 }

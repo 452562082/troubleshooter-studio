@@ -33,7 +33,7 @@ func checkObservability(c *SystemConfig) []HealthIssue {
 	}
 
 	// 矛盾:via_grafana=true 但 grafana.enabled=false
-	// Loki / Prometheus / Tempo 当前**只**支持 via Grafana 代理 — mcp-grafana-npx 内置
+	// Loki / Prometheus / Tempo 当前**只**支持 via Grafana 代理 — mcp-grafana 内置
 	// query_loki_logs / query_prometheus / 等工具,社区没有成熟的"独立 Loki/Prom MCP"
 	// npm 包,自己写不划算。yaml 里 via_grafana 字段保留(向后兼容),但只接受 true。
 	// 启 Loki/Prom/Tempo 但 Grafana 未启 ⇒ 强制报错(老逻辑只在 via_grafana=true 时报,

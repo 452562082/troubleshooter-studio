@@ -32,29 +32,12 @@ func (g *Generator) writeReadme() error {
 	sb.WriteString(readmeCredentialsSection(ctx))
 	sb.WriteString("\n")
 
-	sb.WriteString("## 快速开始\n\n")
-	sb.WriteString("Studio 桌面端打开本目录:点 **部署** 即可(原生 Go,跑完会装 workspace + 注入 MCP + 重启 gateway,无 bash 依赖)。\n")
-	sb.WriteString("CLI 用户可走同一份逻辑(由 `tshoot` 桌面端的 `RunInstall` binding 调 `agent.InstallNativeOpenclaw`)。\n\n")
-	sb.WriteString("凭证持久化在 `scripts/.env`,删它即等同重置(下次部署不再预填)。\n\n")
-
+	sb.WriteString("## 快速开始\n\n在 Studio 创建向导中选择 Claude Code、Cursor 或 Codex CLI，填写配置并部署。也可以使用 tshoot install --path <产物目录> --target <平台>。\n\n")
 	sb.WriteString("## 常见问题\n\n")
 	sb.WriteString(readmeFAQSection(ctx))
 	sb.WriteString("\n")
 
-	sb.WriteString("## 升级与卸载\n\n")
-	sb.WriteString("- **升级**（tshoot 或 troubleshooter.yaml 改过后）：在 tshoot 仓库里跑 `tshoot upgrade -i troubleshooter.yaml`，会自动备份旧产物到 `<output_dir>.bak.<ts>/` 再重 gen，最后打印 diff。\n")
-	sb.WriteString("- **卸载**:Studio 桌面端 BotsPage 上点对应卡的卸载按钮(走 `agent.UninstallNativeOpenclaw`,移走 workspace + 从 openclaw.json 摘 agent)。\n")
-	sb.WriteString("- **回滚**：`mv <output_dir>.bak.<ts> <output_dir>` 然后再点一次部署。\n\n")
-
-	sb.WriteString("## 安装位置\n\n")
-	fmt.Fprintf(&sb, "- Agent 工作区：`~/.openclaw/workspace/%s`\n", ctx.Agent.WorkspaceName)
-	sb.WriteString("- OpenClaw 全局配置：`~/.openclaw/openclaw.json`\n")
-	sb.WriteString("- 本次凭证（0600）：`scripts/.env`\n")
-	if ctx.Infrastructure.PrimaryConfigCenter().Type == "apollo" || ctx.Infrastructure.PrimaryConfigCenter().Type == "consul" ||
-		ctx.Infrastructure.PrimaryConfigCenter().Type == "env-vars" || ctx.Infrastructure.PrimaryConfigCenter().Type == "kuboard" {
-		fmt.Fprintf(&sb, "- 运行时凭证（0600）：`~/.openclaw/%s-troubleshooter-creds.json`\n", ctx.System.ID)
-	}
-
+	sb.WriteString("## 升级与卸载\n\n在已装机器人页面重新部署或卸载对应机器人。运行时凭据保存在 ~/.tshoot/，请勿提交到仓库。\n\n")
 	return os.WriteFile(filepath.Join(g.OutputDir, "README.md"), []byte(sb.String()), 0o644)
 }
 
@@ -158,7 +141,7 @@ func readmeCredentialsSection(ctx *Context) string {
 			sb.WriteString("- **Feishu Project**：MCP User Token\n")
 		}
 	}
-	sb.WriteString("\n> 凭证会被写入 `scripts/.env`（权限 0600），以及配置中心的 `~/.openclaw/<agent-id>-creds.json`（若使用 Apollo/Consul/env-vars/K8s）。**两个文件都是本机私有，不要提交到 git**。\n")
+	sb.WriteString("\n> 凭证会被写入 `scripts/.env`（权限 0600），以及配置中心的 `~/.tshoot/<agent-id>-creds.json`（若使用 Apollo/Consul/env-vars/K8s）。**两个文件都是本机私有，不要提交到 git**。\n")
 	return sb.String()
 }
 
@@ -166,10 +149,10 @@ func readmeCredentialsSection(ctx *Context) string {
 func readmeFAQSection(ctx *Context) string {
 	var sb strings.Builder
 	sb.WriteString("**Q: 机器人回答里说 MCP 连不上 / timeout？**\n")
-	sb.WriteString("A: 凭证过期或网络不通。改 `scripts/.env` 里对应 env 的变量,或回 BotsPage 重新填表 → 再点部署(走 InstallNativeOpenclaw,已设的不重问)。\n\n")
+	sb.WriteString("A: 凭证过期或网络不通。改 `scripts/.env` 里对应 env 的变量,或回 BotsPage 重新填表 → 再点部署(走 InstallNative,已设的不重问)。\n\n")
 
 	sb.WriteString("**Q: 装完后没看到 agent？**\n")
-	sb.WriteString("A: 检查 `~/.openclaw/openclaw.json` 里有没有 `agents.list[...]` 包含 `" + ctx.AgentID + "`；没有就回 BotsPage 重新部署。OpenClaw 客户端可能也需要重启 gateway：`openclaw gateway restart`。\n\n")
+	sb.WriteString("A: 检查已装机器人列表及客户端是否已加载机器人，必要时重新部署并新建对话。\n\n")
 
 	if ctx.Infrastructure.PrimaryConfigCenter().Type != "" && ctx.Infrastructure.PrimaryConfigCenter().Type != "none" {
 		sb.WriteString("**Q: 某个 env 的配置查不到？**\n")
@@ -182,7 +165,7 @@ func readmeFAQSection(ctx *Context) string {
 	}
 
 	sb.WriteString("**Q: 改了 troubleshooter.yaml，怎么更新部署？**\n")
-	sb.WriteString("A: 在 tshoot 仓库里跑 `tshoot upgrade -i troubleshooter.yaml` —— 自动备份 + 重 gen + 打印 diff。然后回 BotsPage 重新部署(走 InstallNativeOpenclaw)应用到 OpenClaw。\n\n")
+	sb.WriteString("A: 在 tshoot 仓库里跑 `tshoot upgrade -i troubleshooter.yaml` —— 自动备份 + 重 gen + 打印 diff。然后回 BotsPage 重新部署(走 InstallNative)应用到所选平台。\n\n")
 
 	sb.WriteString("**Q: 想把机器人部署到别的平台（Claude Code / Cursor / Embedded 内嵌对话）？**\n")
 	sb.WriteString("A: 在 `troubleshooter.yaml` 的 `generation.targets` 里加上对应名字再 `tshoot gen`，会生成 `<output_dir>-claude-code/` / `-cursor/` 兄弟目录；Studio 部署 → 自动装到 `~/.claude/agents/` 或 `~/.cursor/agents/`(走 agent.InstallNative,无 bash)。\n")

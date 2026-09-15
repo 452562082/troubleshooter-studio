@@ -1,0 +1,493 @@
+package bughub
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+	"net"
+	"net/netip"
+	"net/url"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/config"
+)
+
+const (
+	FrontendResolutionSelected    = "selected"
+	FrontendResolutionAmbiguous   = "ambiguous"
+	FrontendResolutionUnavailable = "unavailable"
+)
+
+// FrontendEntryBinding is the immutable frontend selection stored with a
+// Case. URL is the actual start URL (and may therefore be deeper than the
+// configured entry URL); ConfigURL identifies the configured application.
+type FrontendEntryBinding struct {
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	URL              string `json:"url"`
+	ConfigURL        string `json:"config_url,omitempty"`
+	Repo             string `json:"repo,omitempty"`
+	DeviceProfile    string `json:"device_profile,omitempty"`
+	ResolutionSource string `json:"resolution_source"`
+	Score            int    `json:"score,omitempty"`
+	Reason           string `json:"reason,omitempty"`
+	ConfigSHA256     string `json:"config_sha256,omitempty"`
+}
+
+func (b FrontendEntryBinding) Clone() FrontendEntryBinding {
+	return b
+}
+
+func (b FrontendEntryBinding) IsZero() bool {
+	return strings.TrimSpace(b.ID) == "" && strings.TrimSpace(b.URL) == ""
+}
+
+type FrontendEntryCandidate struct {
+	Binding FrontendEntryBinding `json:"binding"`
+	Score   int                  `json:"score"`
+	Reasons []string             `json:"reasons"`
+}
+
+type FrontendEntryResolution struct {
+	Status            string                   `json:"status"`
+	Required          bool                     `json:"required"`
+	Selected          *FrontendEntryBinding    `json:"selected,omitempty"`
+	SelectedEntries   []FrontendEntryBinding   `json:"selected_entries,omitempty"`
+	SuggestedEntryIDs []string                 `json:"suggested_entry_ids,omitempty"`
+	Candidates        []FrontendEntryCandidate `json:"candidates,omitempty"`
+	Message           string                   `json:"message,omitempty"`
+}
+
+// ResolveFrontendEntries validates an explicit multi-application selection
+// against the configured environment. The primary entry is stored first; Bug
+// text and URLs remain ranking evidence and never create an unmanaged entry.
+func ResolveFrontendEntries(entries []config.FrontendEntry, bug Bug, selectedIDs []string, primaryID string) (FrontendEntryResolution, error) {
+	selectedIDs = uniqueNonBlankStrings(selectedIDs)
+	primaryID = strings.TrimSpace(primaryID)
+	if len(selectedIDs) == 0 {
+		resolution, err := ResolveFrontendEntry(entries, bug, "")
+		if err != nil {
+			return FrontendEntryResolution{}, err
+		}
+		if resolution.Status == FrontendResolutionAmbiguous {
+			for _, candidate := range resolution.Candidates {
+				if candidate.Score >= 20 {
+					resolution.SuggestedEntryIDs = append(resolution.SuggestedEntryIDs, candidate.Binding.ID)
+				}
+			}
+		}
+		return resolution, nil
+	}
+	if primaryID == "" {
+		primaryID = selectedIDs[0]
+	}
+	selectedSet := make(map[string]struct{}, len(selectedIDs))
+	for _, id := range selectedIDs {
+		selectedSet[id] = struct{}{}
+	}
+	if _, ok := selectedSet[primaryID]; !ok {
+		return FrontendEntryResolution{}, errors.New("primary frontend entry must be included in selected frontend entries")
+	}
+	orderedIDs := append([]string{primaryID}, selectedIDs...)
+	orderedIDs = uniqueNonBlankStrings(orderedIDs)
+	bindings := make([]FrontendEntryBinding, 0, len(orderedIDs))
+	var candidates []FrontendEntryCandidate
+	for _, id := range orderedIDs {
+		resolution, err := ResolveFrontendEntry(entries, bug, id)
+		if err != nil {
+			return FrontendEntryResolution{}, err
+		}
+		if resolution.Selected == nil {
+			return FrontendEntryResolution{}, errors.New("selected frontend entry is not available in the current environment")
+		}
+		binding := resolution.Selected.Clone()
+		bindings = append(bindings, binding)
+		if candidates == nil {
+			candidates = resolution.Candidates
+		}
+	}
+	primary := bindings[0].Clone()
+	return FrontendEntryResolution{
+		Status:          FrontendResolutionSelected,
+		Required:        true,
+		Selected:        &primary,
+		SelectedEntries: bindings,
+		Candidates:      candidates,
+		Message:         "已绑定配置中的前端应用",
+	}, nil
+}
+
+func uniqueNonBlankStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+// ResolveFrontendEntry uses only durable ticket/configuration evidence. It is
+// intentionally deterministic: an Agent may inspect the selected page later,
+// but it cannot silently choose a different frontend application.
+func ResolveFrontendEntry(entries []config.FrontendEntry, bug Bug, selectedID string) (FrontendEntryResolution, error) {
+	prepared := make([]FrontendEntryCandidate, 0, len(entries))
+	for _, entry := range entries {
+		binding, err := frontendBinding(entry)
+		if err != nil {
+			return FrontendEntryResolution{}, err
+		}
+		prepared = append(prepared, scoreFrontendEntry(binding, entry, bug))
+	}
+	if len(prepared) == 0 {
+		return FrontendEntryResolution{
+			Status:   FrontendResolutionUnavailable,
+			Required: false,
+			Message:  "当前环境未配置前端入口",
+		}, nil
+	}
+	sort.SliceStable(prepared, func(i, j int) bool {
+		if prepared[i].Score != prepared[j].Score {
+			return prepared[i].Score > prepared[j].Score
+		}
+		return prepared[i].Binding.ID < prepared[j].Binding.ID
+	})
+	selectedID = strings.TrimSpace(selectedID)
+	if selectedID != "" {
+		for _, candidate := range prepared {
+			if candidate.Binding.ID == selectedID {
+				binding := candidate.Binding.Clone()
+				binding.ResolutionSource = "user"
+				binding.Score = candidate.Score
+				binding.Reason = strings.Join(append([]string{"用户明确选择"}, candidate.Reasons...), "；")
+				return selectedFrontendResolution(binding, prepared), nil
+			}
+		}
+		return FrontendEntryResolution{}, errors.New("selected frontend entry is not available in the current environment")
+	}
+	if explicit := strings.TrimSpace(bug.FrontendURL); explicit != "" {
+		canonicalExplicit, err := canonicalFrontendTicketURL(explicit)
+		if err != nil {
+			return FrontendEntryResolution{}, err
+		}
+		explicit = canonicalExplicit
+		matching := make([]FrontendEntryCandidate, 0, len(prepared))
+		for _, candidate := range prepared {
+			if frontendURLBelongsToEntry(explicit, candidate.Binding.ConfigURL) {
+				matching = append(matching, candidate)
+			}
+		}
+		if len(matching) == 1 {
+			return ticketURLFrontendResolution(matching[0], explicit, prepared), nil
+		}
+		if len(matching) == 0 {
+			return FrontendEntryResolution{
+				Status:     FrontendResolutionAmbiguous,
+				Required:   true,
+				Candidates: prepared,
+				Message:    "工单页面 URL 未命中当前环境配置的前端入口，请确认本次验证对应的应用",
+			}, nil
+		}
+		// Multiple applications may share an origin while being mounted at
+		// different stable paths. Prefer the longest configured path only when
+		// it is unique; otherwise keep evaluating the declared path prefixes and
+		// ticket metadata below instead of guessing.
+		if specific, ok := mostSpecificFrontendURLMatch(matching); ok {
+			return ticketURLFrontendResolution(specific, explicit, prepared), nil
+		}
+	}
+	if len(prepared) == 1 {
+		binding := prepared[0].Binding.Clone()
+		binding.ResolutionSource = "only_candidate"
+		binding.Score = prepared[0].Score
+		binding.Reason = strings.Join(prepared[0].Reasons, "；")
+		return selectedFrontendResolution(binding, prepared), nil
+	}
+	top := prepared[0]
+	runnerUp := prepared[1]
+	if top.Score >= 30 && top.Score-runnerUp.Score >= 15 {
+		binding := top.Binding.Clone()
+		binding.ResolutionSource = "ticket_signals"
+		binding.Score = top.Score
+		binding.Reason = strings.Join(top.Reasons, "；")
+		return selectedFrontendResolution(binding, prepared), nil
+	}
+	return FrontendEntryResolution{
+		Status: FrontendResolutionAmbiguous, Required: true, Candidates: prepared,
+		Message: "工单证据无法唯一确定前端入口，请选择本次验证对应的应用",
+	}, nil
+}
+
+func ticketURLFrontendResolution(candidate FrontendEntryCandidate, explicit string, all []FrontendEntryCandidate) FrontendEntryResolution {
+	binding := candidate.Binding.Clone()
+	binding.URL = explicit
+	binding.ResolutionSource = "ticket_url"
+	binding.Score = candidate.Score
+	binding.Reason = strings.Join(append([]string{"工单页面 URL 命中该入口"}, candidate.Reasons...), "；")
+	return selectedFrontendResolution(binding, all)
+}
+
+func mostSpecificFrontendURLMatch(candidates []FrontendEntryCandidate) (FrontendEntryCandidate, bool) {
+	bestLength := -1
+	bestIndex := -1
+	tied := false
+	for i, candidate := range candidates {
+		parsed, err := url.Parse(candidate.Binding.ConfigURL)
+		if err != nil {
+			continue
+		}
+		length := len(strings.TrimSuffix(parsed.EscapedPath(), "/"))
+		switch {
+		case length > bestLength:
+			bestLength, bestIndex, tied = length, i, false
+		case length == bestLength:
+			tied = true
+		}
+	}
+	if bestIndex < 0 || tied {
+		return FrontendEntryCandidate{}, false
+	}
+	return candidates[bestIndex], true
+}
+
+func selectedFrontendResolution(binding FrontendEntryBinding, candidates []FrontendEntryCandidate) FrontendEntryResolution {
+	cloned := binding.Clone()
+	return FrontendEntryResolution{Status: FrontendResolutionSelected, Required: true, Selected: &cloned, SelectedEntries: []FrontendEntryBinding{cloned}, Candidates: candidates}
+}
+
+func frontendBinding(entry config.FrontendEntry) (FrontendEntryBinding, error) {
+	canonical, err := canonicalFrontendEntryURL(entry.URL)
+	if err != nil {
+		return FrontendEntryBinding{}, err
+	}
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		return FrontendEntryBinding{}, err
+	}
+	digest := sha256.Sum256(raw)
+	return FrontendEntryBinding{
+		ID: strings.TrimSpace(entry.ID), Name: strings.TrimSpace(entry.Name), URL: canonical, ConfigURL: canonical,
+		Repo: strings.TrimSpace(entry.Repo), DeviceProfile: strings.TrimSpace(entry.DeviceProfile), ConfigSHA256: hex.EncodeToString(digest[:]),
+	}, nil
+}
+
+func canonicalFrontendTicketURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	canonical, _, err := canonicalFrontendURL(raw)
+	return canonical, err
+}
+
+func canonicalFrontendEntryURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("frontend entry URL must be an absolute HTTP(S) URL without credentials, query, or fragment")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	if parsed.Path == "" {
+		parsed.Path = "/"
+	}
+	return parsed.String(), nil
+}
+
+func frontendURLBelongsToEntry(rawURL, rawEntry string) bool {
+	actual, err := url.Parse(rawURL)
+	if err != nil || actual.Hostname() == "" {
+		return false
+	}
+	entry, err := url.Parse(rawEntry)
+	if err != nil || entry.Hostname() == "" || !strings.EqualFold(actual.Scheme, entry.Scheme) || !strings.EqualFold(actual.Host, entry.Host) {
+		return false
+	}
+	prefix := strings.TrimSuffix(entry.EscapedPath(), "/")
+	return prefix == "" || actual.EscapedPath() == prefix || strings.HasPrefix(actual.EscapedPath(), prefix+"/")
+}
+
+func scoreFrontendEntry(binding FrontendEntryBinding, entry config.FrontendEntry, bug Bug) FrontendEntryCandidate {
+	score := 0
+	reasons := make([]string, 0, 4)
+	if repo := strings.TrimSpace(bug.FrontendRepo); repo != "" && strings.EqualFold(repo, strings.TrimSpace(entry.Repo)) {
+		score += 50
+		reasons = append(reasons, "前端仓库匹配")
+	}
+	if signalMatches(bug.Product, entry.ProductHints) {
+		score += 40
+		reasons = append(reasons, "产品匹配")
+	}
+	if signalMatches(bug.Module, entry.ModuleHints) {
+		score += 40
+		reasons = append(reasons, "模块匹配")
+	}
+	if frontendPathMatchesHints(bug.FrontendURL, entry.PathPrefixes) {
+		score += 60
+		reasons = append(reasons, "工单页面路径匹配")
+	}
+	text := frontendBugSearchText(bug)
+	aliasHits := 0
+	for _, alias := range append(append([]string(nil), entry.Aliases...), entry.Name) {
+		alias = strings.ToLower(strings.TrimSpace(alias))
+		if alias != "" && strings.Contains(text, alias) {
+			aliasHits++
+		}
+	}
+	if aliasHits > 0 {
+		if aliasHits > 2 {
+			aliasHits = 2
+		}
+		score += aliasHits * 20
+		reasons = append(reasons, "工单文本命中入口名称/别名")
+	}
+	if device := ticketAttachmentDeviceProfile(bug.Attachments); device != "" && device == strings.TrimSpace(entry.DeviceProfile) {
+		score += 12
+		reasons = append(reasons, "截图尺寸与设备类型匹配")
+	}
+	return FrontendEntryCandidate{Binding: binding, Score: score, Reasons: reasons}
+}
+
+func frontendPathMatchesHints(rawURL string, prefixes []string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Hostname() == "" {
+		return false
+	}
+	actual := strings.TrimSuffix(parsed.EscapedPath(), "/")
+	for _, rawPrefix := range prefixes {
+		prefix := strings.TrimSuffix(strings.TrimSpace(rawPrefix), "/")
+		if prefix == "" {
+			continue
+		}
+		if !strings.HasPrefix(prefix, "/") {
+			prefix = "/" + prefix
+		}
+		if actual == prefix || strings.HasPrefix(actual, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func signalMatches(value string, hints []string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	for _, hint := range hints {
+		hint = strings.ToLower(strings.TrimSpace(hint))
+		if hint != "" && (value == hint || strings.Contains(value, hint) || strings.Contains(hint, value)) {
+			return true
+		}
+	}
+	return false
+}
+
+func frontendBugSearchText(bug Bug) string {
+	parts := []string{bug.Title, bug.Description, bug.Steps, bug.Expected, bug.Actual, bug.Product, bug.Module, bug.Keywords}
+	for _, attachment := range bug.Attachments {
+		parts = append(parts, attachment.Name, attachment.RemoteURL)
+	}
+	return strings.ToLower(strings.Join(parts, "\n"))
+}
+
+func ticketAttachmentDeviceProfile(attachments []Attachment) string {
+	portrait, landscape := 0, 0
+	for _, attachment := range attachments {
+		path := strings.TrimSpace(attachment.LocalPath)
+		if path == "" {
+			continue
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		cfg, _, decodeErr := image.DecodeConfig(file)
+		_ = file.Close()
+		if decodeErr != nil || cfg.Width == 0 || cfg.Height == 0 {
+			continue
+		}
+		if cfg.Height > cfg.Width*6/5 {
+			portrait++
+		} else if cfg.Width > cfg.Height*6/5 {
+			landscape++
+		}
+	}
+	if portrait > landscape {
+		return "mobile"
+	}
+	if landscape > portrait {
+		return "desktop"
+	}
+	return ""
+}
+
+func canonicalFrontendURL(raw string) (string, string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !parsed.IsAbs() || parsed.User != nil || parsed.Fragment != "" || parsed.RawFragment != "" {
+		return "", "", errors.New("browser start URL is invalid")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", "", errors.New("browser start URL is invalid")
+	}
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return "", "", errors.New("browser start URL query is invalid")
+	}
+	for key, values := range query {
+		if containsSensitiveData([]byte(key)) || strings.EqualFold(key, "code") || strings.EqualFold(key, "session") {
+			return "", "", errors.New("browser start URL contains credential material")
+		}
+		for _, value := range values {
+			if containsSensitiveData([]byte(value)) {
+				return "", "", errors.New("browser start URL contains credential material")
+			}
+		}
+	}
+	hostname := strings.ToLower(strings.TrimRight(parsed.Hostname(), "."))
+	if hostname == "" || strings.Contains(hostname, "%") || strings.HasSuffix(parsed.Host, ":") {
+		return "", "", errors.New("browser start URL host is invalid")
+	}
+	if address, addressErr := netip.ParseAddr(hostname); addressErr == nil {
+		if address.Zone() != "" {
+			return "", "", errors.New("browser start URL host is invalid")
+		}
+		hostname = address.String()
+	}
+	port := parsed.Port()
+	if port != "" {
+		numericPort, portErr := strconv.ParseUint(port, 10, 16)
+		if portErr != nil || numericPort == 0 {
+			return "", "", errors.New("browser start URL port is invalid")
+		}
+		port = strconv.FormatUint(numericPort, 10)
+	}
+	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		parsed.Host = net.JoinHostPort(hostname, port)
+	} else if strings.Contains(hostname, ":") {
+		parsed.Host = "[" + hostname + "]"
+	} else {
+		parsed.Host = hostname
+	}
+	origin := parsed.Scheme + "://" + parsed.Host
+	return parsed.String(), origin, nil
+}

@@ -137,7 +137,6 @@ func (a *App) ChatDeleteProviderKey(providerID string) error {
 // 部署前把 keychain 的值 export 成对应 env var,install.sh 就跳过交互直接用。
 //
 // 跟 ChatSave*/ProviderKey 分开 service,避免 LLM key 和 infra cred 混在一起;
-// 语义上也两码事(LLM 凭 → Studio 自己直连;infra 凭 → 喂给 openclaw install.sh)。
 const infraService = "tshoot-studio-infra"
 
 // SaveInfraCred 存一条凭证。value 为空等同 Delete(方便 UI"置空保存"= 清除)。

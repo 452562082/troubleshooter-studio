@@ -5,6 +5,15 @@ description: 通过 Kuboard v4 API 或 one2all MCP 查 K8s pod / service / deplo
 
 # K8s 运行时查询（Kuboard v4 API / one2all MCP）
 
+## Kuboard 官方 MCP
+
+`routing/references/observability-map.yaml` 的 `k8s_runtime.mcp_server_by_env.<env>`
+非空时，优先发现该服务器的实际工具和参数；配置源也可注册独立的
+`{{.System.ID}}-kuboard-<source>-<env>`，只能选 routing 指定的源。按 service_map
+中的集群、命名空间和工作负载查询资源、事件及日志，不猜工具名或集群 ID。
+快照和历史能力不齐时可用下文 HTTP 脚本补充，但不能把空结果当作查询成功。
+401/403 应报告认证或权限问题，不换身份绕过。旧版未配置 MCP 时直接走 HTTP。
+
 ## 何时使用
 
 - 接口 503 / 502 / 504:**先确认后端 pod 是不是健康**(在 Running、Ready、最近没重启)
@@ -73,7 +82,7 @@ agent 通过 `scripts/k8s_query.py` 跑(同包内,Python 实现 Kuboard v4 HTTP 
 
 | 平台 | 脚本绝对路径 |
 |--|--|
-| OpenClaw | `~/.openclaw/workspace/<workspace>/skills/k8s-runtime-query/scripts/k8s_query.py` |
+| AI 客户端 | `~/.tshoot/workspace/<workspace>/skills/k8s-runtime-query/scripts/k8s_query.py` |
 | Claude Code | `~/.claude/skills/<agent-name>/k8s-runtime-query/scripts/k8s_query.py` |
 | Cursor | `~/.cursor/skills/<agent-name>/k8s-runtime-query/scripts/k8s_query.py` |
 
@@ -83,7 +92,7 @@ agent 通过 `scripts/k8s_query.py` 跑(同包内,Python 实现 Kuboard v4 HTTP 
 
 ```bash
 python3 -m pip install --user -r ~/.claude/skills/<agent-name>/requirements.txt
-# 或 OpenClaw / Cursor 走对应路径
+# 或 AI 客户端 / Cursor 走对应路径
 ```
 
 脚本若 `import requests` 失败会直接输出 `{"error":"requests-not-installed","hint":"pip3 install requests"}`,

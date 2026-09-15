@@ -16,12 +16,29 @@ description: routing 识别仓库后，用于函数级源码、调用关系与�
 - `skills/routing/references/repo-path-map.yaml`
 - `skills/routing/references/env-branch-map.yaml`
 - `skills/routing/references/repo-stack-map.yaml`
+- Studio Case 排障时额外读取 `STUDIO_EVIDENCE_STAGING_DIR/code-intelligence-manifest.json`
 
 从 `repo-path-map.yaml` 取目标仓库的 `local_path`，把它原样设为 CodeGraph 的 `projectPath`。`projectPath` 永远是仓库/索引根目录，不能改成服务子目录。
 
 若仓库带 `sub_path`，另行计算 `servicePath = local_path/sub_path`。只用 `servicePath` 缩小问题描述以及后续 `rg` / Read fallback 的范围；调用 CodeGraph 时仍传 `projectPath=local_path`。
 
-### 2. 校验当前代码和目标分支
+### 2. 校验实际部署版本、当前代码和目标分支
+
+Studio Case 排障如果提供 `STUDIO_EVIDENCE_STAGING_DIR/runtime-code-manifest.json`，先读取目标 repo 的 `revision`。该 revision 比环境分支名和本地 HEAD 更接近真实运行代码，必须先做只读存在性校验：
+
+```bash
+git -C "$projectPath" cat-file -e "$deployedRevision^{commit}"
+git -C "$projectPath" show -s --format='%H %cI' "$deployedRevision"
+```
+
+定位锚点和读取文件时不切分支、不改工作区：
+
+```bash
+git -C "$projectPath" grep -n -e '<anchor>' "$deployedRevision" -- "<sub_path>"
+git -C "$projectPath" show "$deployedRevision:<repo-relative-path>"
+```
+
+revision 在本地对象库不存在时，不允许 fetch 或 checkout；降级到 image/repository candidate，并报告 `deployed revision unavailable locally`。
 
 ```bash
 git -C "$projectPath" branch --show-current
@@ -30,23 +47,18 @@ git -C "$projectPath" rev-parse HEAD
 
 把当前分支与 `env-branch-map.yaml` 的 `environments.${env}.repos.${repo}` 比较。全程只读：**禁止 checkout、pull、reset、修改文件或以任何方式切换仓库状态**。
 
-记录仓库名、当前分支、目标分支和 HEAD。当前分支与目标分支不一致时，CodeGraph 证据必须标为 `low confidence`，只可作为候选，不能作为结论。
+记录仓库名、deployed revision、当前分支、目标分支和 HEAD。只在 `HEAD == deployed revision` 时，当前 CodeGraph 索引才能证明部署版本；否则 CodeGraph 只能帮助找候选符号，最终 `file:line` 必须来自上述 `git grep/show` 的部署 revision。没有 runtime manifest 时，当前分支与目标分支不一致也必须标为 `low confidence`，只可作为候选。
 
-### 3. 检查索引状态
+### 3. 使用 Studio 已准备的索引
 
-稳定 CLI 路径为 `$HOME/.tshoot/bin/codegraph`，Windows 使用 `%USERPROFILE%\.tshoot\bin\codegraph.cmd`。读取该路径并执行：
+Studio Case 排障由宿主进程在 Agent 启动前安装、初始化并同步 CodeGraph，结果写入 `code-intelligence-manifest.json`。Agent **不得执行 CodeGraph CLI，也不得自行 init/status/sync**，避免受限沙箱把宿主能力误判为不可用。
 
-```bash
-"$HOME/.tshoot/bin/codegraph" status "$projectPath" --json
-```
+- `enabled=false`：本次未启用 CodeGraph，按 manifest 的 limitation 回退。
+- 仓库 `status=ready`：调用 MCP 工具 `codegraph_explore`，`projectPath` 必须使用该仓库的 `project_path`，固定 `maxFiles=4`。
+- 仓库非 `ready`：记录 `detail` 后立即回退 `rg` / Read。
+- `current_branch/head` 与目标环境分支或 deployed revision 不一致：仍允许 CodeGraph 帮助定位候选符号和影响面，但只能标记为 `static candidate`；决定性源码必须用部署 revision 的 `git grep/show` 复核。
 
-只在 `initialized=true`、`state=complete`，且当前分支、status 返回的索引分支与环境目标分支一致时尝试同步。同步必须使用 Python 的 30 秒 portable timeout wrapper，不依赖 GNU `timeout`：
-
-```bash
-python3 -c 'import subprocess, sys; subprocess.run([sys.argv[1], "sync", sys.argv[2]], check=True, timeout=30)' "$HOME/.tshoot/bin/codegraph" "$projectPath"
-```
-
-同步成功后调用 MCP 工具 `codegraph_explore`，固定传 `projectPath` 和 `maxFiles=4`。
+只有真实完成的 `codegraph_explore` MCP 调用才算使用了 CodeGraph；读取 manifest、检查文件或普通源码搜索都不能冒充图查询。
 
 ### 4. 提问范围
 
@@ -60,9 +72,10 @@ python3 -c 'import subprocess, sys; subprocess.run([sys.argv[1], "sync", sys.arg
 
 ### 5. 失败与陈旧索引处理
 
-- 当前分支不匹配目标分支：结果标 `low confidence`，只作候选；关键点必须用目标环境运行时证据交叉验证。
-- 同步失败但现有索引仍为 `complete`：允许查询旧索引，但 freshness 标 `stale`；每个关键文件和行号都必须用 `rg` 加 Read 文件正文复核。
-- status 不存在/不完整、MCP 首次失败，或 `projectPath` 缺失：本 session **停止重试 CodeGraph**，立即回退到 `git diff + rg + Read`。
+- HEAD 不匹配 deployed revision：CodeGraph 结果标 `static candidate`；关键源码必须用 deployed revision 的 `git grep/show` 复核。
+- 当前分支不匹配目标分支且没有 deployed revision：结果标 `low confidence`，只作候选；关键点必须用目标环境运行时证据交叉验证。
+- manifest 记录非 `ready`：使用其中的 `detail` 作为降级原因，立即回退。
+- MCP 首次失败或 `project_path` 缺失：本 session **停止重试 CodeGraph**，立即回退到 `git diff + rg + Read`。
 - 回退扫描 monorepo 时优先使用 `servicePath`；仍需按需扩大到 `projectPath` 查公共库和跨模块调用。
 
 CodeGraph 返回的源码行可以当作代码事实；调用关系、动态分派和 blast radius 都只是启发式静态分析结论，必须明确标成 graph inference。
@@ -71,7 +84,7 @@ CodeGraph 返回的源码行可以当作代码事实；调用关系、动态分�
 
 每次输出都必须包含：
 
-- repository、当前 branch、目标 branch、HEAD；
+- repository、deployed revision、当前 branch、目标 branch、HEAD；
 - freshness：`fresh` / `stale` / `branch-mismatch` / `fallback`；
 - `file:line` 与关键 snippet；
 - graph inference：调用、动态分派或影响面推断，并标注启发式性质；

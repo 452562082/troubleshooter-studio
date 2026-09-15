@@ -1,8 +1,6 @@
 package api
 
 import (
-	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -83,16 +81,4 @@ func subtleStringEqual(a, b string) bool {
 		out |= a[i] ^ b[i]
 	}
 	return out == 0
-}
-
-func decodeJSONBody(r *http.Request, out any) error {
-	data, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
-		return err
-	}
-	defer r.Body.Close()
-	if len(strings.TrimSpace(string(data))) == 0 {
-		return errors.New("empty body")
-	}
-	return json.Unmarshal(data, out)
 }

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -9,10 +11,71 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 )
+
+func TestDeleteBugHistoryCascadesLocalIncidentHistoryAndAttachmentCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workflowRoot := bughub.DefaultRoot()
+	app, workflowStore, _ := newWorkflowBindingApp(t, filepath.Join(workflowRoot, "workflows.db"))
+	app.workflowRoot = workflowRoot
+
+	if err := bugStore().Upsert(bughub.Bug{
+		ID:         "zentao-1842",
+		Source:     "zentao",
+		Title:      "支付页提交后 500",
+		Status:     "resolved",
+		InboxState: bughub.BugInboxHistory,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	closedAt := time.Now().UTC()
+	if err := workflowStore.CreateCase(context.Background(), bughub.IncidentCase{
+		ID:          "case-delete-history",
+		BugID:       "zentao-1842",
+		Source:      "zentao",
+		SystemID:    "base",
+		Environment: "test",
+		Status:      bughub.CaseFixedVerified,
+		CycleNumber: 1,
+		ClosedAt:    &closedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := filepath.Join(workflowRoot, "attachments", "zentao-1842")
+	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "screen.png"), []byte("cached"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := app.DeleteBugHistory(BugHistoryDeleteInput{BugID: "zentao-1842"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Deleted || result.DeletedCases != 1 {
+		t.Fatalf("result = %+v", result)
+	}
+	if _, found, err := bugStore().Get("zentao-1842"); err != nil || found {
+		t.Fatalf("deleted Bug found=%v err=%v", found, err)
+	}
+	if cases, err := workflowStore.ListCases(context.Background()); err != nil || len(cases) != 0 {
+		t.Fatalf("remaining Cases=%+v err=%v", cases, err)
+	}
+	if _, err := os.Stat(cacheDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("attachment cache still exists: %v", err)
+	}
+
+	replay, err := app.DeleteBugHistory(BugHistoryDeleteInput{BugID: "zentao-1842"})
+	if err != nil || replay.Deleted || replay.DeletedCases != 0 {
+		t.Fatalf("idempotent delete result=%+v err=%v", replay, err)
+	}
+}
 
 func TestSyncBugPlatformStoresAssignedBugs(t *testing.T) {
 	root := t.TempDir()
@@ -56,7 +119,7 @@ func TestSyncBugPlatformStoresAssignedBugs(t *testing.T) {
 	}
 }
 
-func TestSyncBugPlatformRemovesPrunedBugAttachmentCache(t *testing.T) {
+func TestSyncBugPlatformArchivesStaleBugAndPreservesAttachmentCache(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -97,11 +160,12 @@ func TestSyncBugPlatformRemovesPrunedBugAttachmentCache(t *testing.T) {
 	if got.Pruned != 1 || len(got.PrunedIDs) != 1 || got.PrunedIDs[0] != "zentao-old" {
 		t.Fatalf("result = %+v", got)
 	}
-	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
-		t.Fatalf("cache dir still exists or stat failed unexpectedly: %v", err)
+	if _, err := os.Stat(cacheDir); err != nil {
+		t.Fatalf("historical attachment cache was not preserved: %v", err)
 	}
-	if _, ok, err := bugStore().Get("zentao-old"); err != nil || ok {
-		t.Fatalf("stale bug ok=%v err=%v", ok, err)
+	archived, ok, err := bugStore().Get("zentao-old")
+	if err != nil || !ok || archived.InboxState != bughub.BugInboxHistory {
+		t.Fatalf("archived bug=%+v ok=%v err=%v", archived, ok, err)
 	}
 }
 
@@ -520,6 +584,63 @@ func TestPreviewBugAttachmentCachesRemoteImage(t *testing.T) {
 	}
 }
 
+func TestPreviewBugAttachmentReplacesPoisonedImageCache(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	poisonedPath := filepath.Join(root, "screen.jpg")
+	if err := os.WriteFile(poisonedPath, []byte("<!DOCTYPE html><html>zentao shell</html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api.php/v1/files/101" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write([]byte("\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01cached"))
+	}))
+	defer srv.Close()
+	_, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
+		ID: "zentao-main", Name: "禅道", Type: "zentao", BaseURL: srv.URL,
+		AuthMode: "api_token", Token: "secret", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bugStore().Upsert(bughub.Bug{
+		ID: "zentao-718", Source: "zentao", SourceID: "718", PlatformID: "zentao-main", Title: "截图",
+		Attachments: []bughub.Attachment{{
+			ID: "101", Name: "screen.jpg", Type: "image/jpeg", LocalPath: poisonedPath,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := (&App{}).PreviewBugAttachment(BugAttachmentPreviewInput{
+		PlatformID: "zentao-main", BugID: "zentao-718", AttachmentIndex: 0,
+	})
+	if err != nil {
+		t.Fatalf("PreviewBugAttachment: %v", err)
+	}
+	if got.ContentType != "image/jpeg" || !strings.HasPrefix(got.DataURL, "data:image/jpeg;base64,") {
+		t.Fatalf("preview = %+v", got)
+	}
+	stored, found, err := bugStore().Get("zentao-718")
+	if err != nil || !found {
+		t.Fatalf("Get bug found=%v err=%v", found, err)
+	}
+	if stored.Attachments[0].LocalPath == "" || stored.Attachments[0].LocalPath == poisonedPath {
+		t.Fatalf("poisoned cache locator was not replaced: %+v", stored.Attachments[0])
+	}
+	cached, err := os.ReadFile(stored.Attachments[0].LocalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(cached, []byte("\xff\xd8\xff")) {
+		t.Fatalf("replacement cache is not JPEG: %x", cached[:min(len(cached), 16)])
+	}
+}
+
 func TestMatchBugBotsUsesConfiguredBotEnvWithoutExpandingBots(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("HOME", root)
@@ -565,6 +686,136 @@ generation:
 	if matches[0].Score < 70 {
 		t.Fatalf("score = %d, reasons=%+v", matches[0].Score, matches[0].Reasons)
 	}
+}
+
+func TestMatchBugBotsUsesPerBotPlatformEnvironments(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	codexKey := writeDiscoveredBugBot(t, root, "codex")
+	claudeKey := writeDiscoveredBugBot(t, root, "claude-code")
+	platform, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
+		ID: "zentao-main", Name: "Zentao", Type: "zentao", Enabled: true,
+		BotEnv: "legacy-test",
+		BotMappings: []bughub.PlatformBotMapping{
+			{BotKey: codexKey, Env: "test"},
+			{BotKey: claudeKey, Env: "prod"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bugStore().Upsert(bughub.Bug{
+		ID: "zentao-1842", PlatformID: platform.ID, Title: "支付页 500", Env: "stage",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	matches, err := (&App{}).MatchBugBots("zentao-1842")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, match := range matches {
+		got[match.Bot.Key] = match.Bot.Env
+	}
+	if got[codexKey] != "test" || got[claudeKey] != "prod" {
+		t.Fatalf("mapped environments = %+v", got)
+	}
+}
+
+func TestMatchBugBotsEnvironmentFallbacks(t *testing.T) {
+	tests := []struct {
+		name            string
+		platformPresent bool
+		mappingEnv      *string
+		botEnv          string
+		bugEnv          string
+		want            string
+	}{
+		{
+			name: "empty mapping uses Bug.BotEnv", platformPresent: true,
+			mappingEnv: stringPointer("  "), botEnv: " legacy-test ", bugEnv: "stage", want: "legacy-test",
+		},
+		{
+			name: "missing mapping uses Bug.Env", platformPresent: true,
+			botEnv: "  ", bugEnv: " stage ", want: "stage",
+		},
+		{
+			name: "missing platform uses bug fallback", platformPresent: false,
+			botEnv: " test ", bugEnv: "stage", want: "test",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("HOME", root)
+			botKey := writeDiscoveredBugBot(t, root, "codex")
+			platformID := "zentao-main"
+			if tt.platformPresent {
+				platform := bughub.PlatformConfig{
+					ID: platformID, Name: "Zentao", Type: "zentao", Enabled: true,
+				}
+				if tt.mappingEnv != nil {
+					platform.BotMappings = []bughub.PlatformBotMapping{{BotKey: botKey, Env: *tt.mappingEnv}}
+				}
+				if _, err := bugPlatformStore().Upsert(platform); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := bugStore().Upsert(bughub.Bug{
+				ID: "zentao-1842", PlatformID: platformID, Title: "支付页 500", BotEnv: tt.botEnv, Env: tt.bugEnv,
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			matches, err := (&App{}).MatchBugBots("zentao-1842")
+			if err != nil {
+				t.Fatalf("MatchBugBots: %v", err)
+			}
+			if len(matches) != 1 || matches[0].Bot.Env != tt.want {
+				t.Fatalf("matches = %+v, want env %q", matches, tt.want)
+			}
+		})
+	}
+}
+
+func writeDiscoveredBugBot(t *testing.T, root, target string) string {
+	t.Helper()
+	platformDir := "." + target
+	if target == "claude-code" {
+		platformDir = ".claude"
+	}
+	botDir := filepath.Join(root, platformDir, "skills", "base")
+	if err := os.MkdirAll(botDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := discover.Meta{
+		SchemaVersion: 1,
+		SystemID:      "base",
+		SystemName:    "Base",
+		Target:        target,
+		TroubleshooterYAML: `system:
+  id: base
+environments:
+  - id: test
+  - id: stage
+  - id: prod
+generation:
+  targets: [` + target + `]
+`,
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(botDir, discover.MetaFilename), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return botDir + "|" + target
+}
+
+func stringPointer(value string) *string {
+	return &value
 }
 
 func TestSaveBugSelectedBotPersistsChoice(t *testing.T) {

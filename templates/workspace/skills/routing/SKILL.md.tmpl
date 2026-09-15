@@ -14,17 +14,18 @@ config-map.yaml 里每条服务定位都带**两类指针之一**:
 | `mcp_server: <name>` | 该服务通过 MCP server 访问(grafana / jaeger / elk / 数据层 / lark / feishu_project 用) | **原样调用 mcp**(不要拆 agent-id 前缀 / 不要改格式 / 不要推断)。查不到先 self-test,不要自己改名试。 |
 | `runtime: <type>-(mcp\|http)` | 该服务配置走配置中心,统一交给 `config-executor` SKILL 处理 | 走 `config-executor` SKILL,由它按 runtime 值决定调 MCP 还是 HTTP 脚本 |
 
-**配置中心访问方式(2026 plan D 起)**:
+**配置中心访问方式**:
+- **consul → 官方 MCP 优先**（`runtime: consul-mcp`），HTTP 脚本兜底，配置源与环境均由 routing 确定。
 - **nacos → MCP 主路径**(`runtime: nacos-mcp`):config-executor 调 `{{.System.ID}}-nacos[-source]-<env>` 这个 MCP 的 `get_config` / `list_configs` / `get_config_history` / `list_config_history` 工具。MCP 进程自己拿 username/password 跑 login + 后台 refresh,token 短 TTL 无所谓 —— 这是 plan D 相比当年 bake-token 方案的本质区别。MCP 不可用时 config-executor 回落 `scripts/nacos_config.py` HTTP 脚本。
-- apollo / consul:生态暂无稳定 MCP,走 HTTP 脚本(`apollo-http` / `consul-http`)
+- apollo：走 HTTP 脚本（`apollo-http`）。
 - kuboard:`runtime: kuboard-http` 仅表示配置坐标来自 Kuboard service_map；不要找 MCP server 或 kubectl 脚本。
 - one2all:走 one2all-remote MCP(`platform_get_configmap / platform_get_secret`,单一 streamable-http 实例,键 `one2all-mcp`)
 
-五个 runtime 值:`nacos-mcp` / `apollo-http` / `consul-http` / `kuboard-http` / `one2all-mcp`。**LLM 看到 runtime 字段就交给 config-executor SKILL,不要因为是 nacos-mcp 或 one2all-mcp 就跳过 config-executor 直接乱猜工具名**。
+五个 runtime 值:`nacos-mcp` / `apollo-http` / `consul-mcp` / `kuboard-http` / `one2all-mcp`。**LLM 看到 runtime 字段就交给 config-executor SKILL,不要因为是 nacos-mcp 或 one2all-mcp 就跳过 config-executor 直接乱猜工具名**。
 
 凭据位置:
 - nacos:install 阶段写进 MCP env(`NACOS_HOST/PORT/USERNAME/PASSWORD`),MCP 工具调用不碰凭据。HTTP fallback 才读 `<workspace>/scripts/.env`(`CC_ADDR_<ENV>` 等,需先 `source scripts/.env`)
-- apollo / consul / kuboard:`~/.openclaw/<agent-id>-creds.json` — 脚本按 `--agent-id --env` 自己读
+- apollo / consul / kuboard:`~/.tshoot/<agent-id>-creds.json` — 脚本按 `--agent-id --env` 自己读
 - one2all:Bearer token 在 MCP server 的 `headers.Authorization` 里,LLM 调 MCP 工具不碰凭据
 
 ## datasource 排他契约(grafana mcp 工具调用必看)
@@ -36,23 +37,14 @@ config-map.yaml 里每条服务定位都带**两类指针之一**:
 
 **禁止行为**:先调 `list_datasources` 看到多个 loki/prometheus → 把每个 UID 都查一遍。用户在配置时已选定唯一的"排障专用 datasource",其他 datasource 即便 grafana 列出了也是噪音。本 env 没配 UID → 报"该 env 缺 `datasource_uid_by_env.<env>`,请回 wizard 补",不要瞎选。
 
-## grafana mcp 写工具软约束(2026-05-15 runtime probe 后加)
+## Grafana MCP 写工具软约束
 
-实测 grafana mcp(`mcp-grafana-npx`)在我们的 6 个 disable flag 之后仍**暴露 28 个工具**,其中
-**5 个是写工具**:
+使用官方 `mcp-grafana`，工具名与参数以运行时发现结果为准。常规排障只读日志、指标、数据源和看板；
+禁止自行创建、更新或删除 annotation、folder、dashboard、datasource、snapshot，或安装 plugin。
+`grafana_api_request` 是通用入口，只允许明确的只读请求；不确定副作用时不调用。
+`generate_deeplink` 仅生成链接，可用于只读定位。
 
-```
-create_annotation / create_folder / update_annotation / update_dashboard / generate_deeplink
-```
-
-`generate_deeplink` 实际是生成 URL 不改 grafana 状态,算只读。其余 4 个真写:
-
-**排障禁调清单**:
-- `create_annotation` / `update_annotation` — 排障是诊断,不该改 grafana 状态;真要标记事件用 incident-investigator 的故障快报输出
-- `create_folder` — 排障不该建文件夹
-- `update_dashboard` — 排障不该改 dashboard
-
-**为什么不在 mcp 层硬约束(`--disable-write` flag)**:跟 mysql/redis/kafka produce_message 同款软约束哲学 — 留口子给紧急人工指令(用户在 IDE 里明确说"标记一下故障时间点")可绕过,常规排障 LLM 不主动调。LLM 自主调这 4 个写工具视为越权,立刻 abort 并告知用户。
+写能力保留给用户明确授权的操作，不在 builder 中新增硬禁写开关。
 
 ## 映射文件清单
 
@@ -69,6 +61,7 @@ create_annotation / create_folder / update_annotation / update_dashboard / gener
 | 前端复现入口 / 页面到 API 映射 | `references/frontend-entry-map.yaml` |
 | 正式服务拓扑(仅 automatic/confirmed/manual 边) | `references/service-topology.yaml` |
 | 端点、代码位置、候选/拒绝/过期边证据 | `references/endpoint-evidence.yaml` |
+| Kafka/RabbitMQ 生产者/消费者静态导航 | `references/async-topology.yaml` |
 | 兼容依赖图(正式拓扑投影的下游/数据层) | `references/service-dependency-map.yaml` |
 | 业务表 schema | `references/data-schema-map.yaml` |
 | 经典错误模式(模板内置) | `references/known-errors.yaml` |
@@ -82,6 +75,8 @@ create_annotation / create_folder / update_annotation / update_dashboard / gener
 upstream/downstream 由同一正式图投影，仅用于兼容现有 cascade/runtime 检查。需要解释某条边时再按
 `endpoint_edge` 去 `endpoint-evidence.yaml` 找位置、置信度和 reasons。candidate / rejected / stale
 只能作为待复核证据，不能当成真实调用关系。
+
+`async-topology.yaml` 只收录源码中的 literal topic/queue/exchange。trace 在消息边界中断时，可按 destination 导航到生产者/消费者仓库和代码位置；必须再用 message id、trace link 或同一时间窗口的生产/消费日志验证。动态 topic、路由转换和未埋 message id 的链路应写入 gaps，不得把静态匹配升级为运行时调用。
 
 ## 关键用法 4 条
 
@@ -114,7 +109,7 @@ grep -E "<error pattern>" references/known-errors.yaml references/known-errors.l
 
 `repo-stack-map.yaml` 里 repo 带 `parent_repo` 字段(典型:commerce.git 是从 truss umbrella 切出去的独立仓,本地 clone 在 `<truss-clone>/commerce/`)→ 排障要做以下取证时**先去 umbrella(parent_repo 指向的仓)看一份**:
 
-- **代码基线 / git pull**:**在 umbrella 根目录跑** `git fetch --all && git pull --ff-only && git submodule update --init --recursive`,子模块会自动 checkout 到 umbrella 当前 pin 的 commit。**不要单独 cd 进子模块 `git pull`**,会拉到子模块自己 main 的 HEAD,跟 production 实际部署 commit 错位 → 代码定位看到的不是真问题代码
+- **代码基线**：只读记录 umbrella 当前 commit，并用 `git ls-tree <umbrella-revision> <submodule-path>` 取得该 revision 固定的子模块 commit；需要读历史内容时使用 `git show <revision>:<path>` / `git grep <pattern> <revision>`。排障阶段不得执行 `git fetch`、`git pull`、`git switch`、`git checkout` 或 `git submodule update`，也不能把子模块当前 main/HEAD 当成 umbrella pin 或 production 部署版本
 - **跨仓配置 / 共享 lib**:子模块的代码扫描只看自己,但 monorepo 拆出去的子模块往往跟同 umbrella 其他子模块共享 proto / config / 公共库 → 在 umbrella 根 / `pkg/` / `shared/` 找一遍
 - **历史变更**:故障窗 ±5min 的 commit 既要看子模块也要看 umbrella(umbrella 自己的 .gitmodules / 公共配置改动会同时影响所有子模块)
 - **`.gitmodules` 关系**:`cat <umbrella-clone>/.gitmodules` 能拿到所有姐妹子模块的 URL + 路径,定位"是不是某个姐妹子模块改了对方依赖的接口"

@@ -2,9 +2,11 @@ package bughub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -56,6 +58,79 @@ func TestRegisterArtifactCopiesHashesSecuresAndIsIdempotent(t *testing.T) {
 	again, err := store.ListEvidenceArtifacts(ctx, "case-artifact")
 	if err != nil || again[0].PathOrReference != artifact.PathOrReference {
 		t.Fatalf("clone safety=%+v err=%v", again, err)
+	}
+}
+
+func TestRegisterArtifactBytesCopiesAndPublishesHostEvidence(t *testing.T) {
+	ctx := context.Background()
+	store := openTestCaseStore(t)
+	createTestCase(t, store, "case-host-evidence")
+	attempt := validRunningAttempt("attempt-host-evidence", "case-host-evidence")
+	if err := store.CreateAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("safe uploaded evidence")
+	root := filepath.Join(resolvedTempDir(t), "host-evidence")
+	input := ArtifactInput{
+		ArtifactsRoot: root, CaseID: attempt.CaseID, AttemptID: attempt.ID,
+		Kind: "user_screenshot", Environment: "test", RedactionStatus: RedactionStatusNotRequired,
+	}
+
+	artifact, err := RegisterArtifactBytes(ctx, store, input, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content[0] = 'X'
+	stored, err := ReadEvidenceArtifactFromRoot(ctx, store, root, attempt.CaseID, artifact.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stored.Content) != "safe uploaded evidence" || artifact.Kind != "user_screenshot" {
+		t.Fatalf("stored = %+v content=%q", artifact, stored.Content)
+	}
+	second, err := RegisterArtifactBytes(ctx, store, input, []byte("safe uploaded evidence"))
+	if err != nil || second.ID != artifact.ID {
+		t.Fatalf("idempotent artifact = %+v err=%v", second, err)
+	}
+}
+
+func TestReadEvidenceArtifactChecksCaseOwnershipAndRegisteredDigest(t *testing.T) {
+	ctx := context.Background()
+	store := openTestCaseStore(t)
+	createTestCase(t, store, "case-read-artifact")
+	attempt := validRunningAttempt("attempt-read-artifact", "case-read-artifact")
+	if err := store.CreateAttempt(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(t.TempDir(), "screenshot.png")
+	content := []byte("registered screenshot bytes")
+	if err := os.WriteFile(source, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := RegisterArtifact(ctx, store, ArtifactInput{
+		ArtifactsRoot: filepath.Join(resolvedTempDir(t), "read-artifacts"),
+		SourcePath:    source, CaseID: attempt.CaseID, AttemptID: attempt.ID,
+		Kind: "screenshot", RedactionStatus: RedactionStatusNotRequired,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadEvidenceArtifact(ctx, store, attempt.CaseID, artifact.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Artifact != artifact || string(got.Content) != string(content) {
+		t.Fatalf("content = %+v", got)
+	}
+	if _, err := ReadEvidenceArtifact(ctx, store, "case-other", artifact.ID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cross-case read error = %v", err)
+	}
+	if err := os.WriteFile(artifact.PathOrReference, []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadEvidenceArtifact(ctx, store, attempt.CaseID, artifact.ID); err == nil || !strings.Contains(err.Error(), "digest changed") {
+		t.Fatalf("changed artifact error = %v", err)
 	}
 }
 
@@ -281,12 +356,12 @@ func TestRegisterArtifactContentAddressIgnoresExtensionAndConcurrentRoot(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Close()
+	defer func() { _ = first.Close() }()
 	second, err := OpenCaseStore(databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer second.Close()
+	defer func() { _ = second.Close() }()
 	createTestCase(t, first, "case-content-address")
 	attempt := validRunningAttempt("attempt-content-address", "case-content-address")
 	if err := first.CreateAttempt(ctx, attempt); err != nil {
@@ -408,12 +483,12 @@ func TestRegisterArtifactConcurrentDuplicateAcrossStoreHandles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Close()
+	defer func() { _ = first.Close() }()
 	second, err := OpenCaseStore(databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer second.Close()
+	defer func() { _ = second.Close() }()
 	createTestCase(t, first, "case-handles")
 	attempt := validRunningAttempt("attempt-handles", "case-handles")
 	if err := first.CreateAttempt(ctx, attempt); err != nil {

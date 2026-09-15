@@ -1,6 +1,6 @@
 ---
 name: kafka-runtime-query
-description: 通过环境动态查询 Kafka 集群状态。先通过 routing 获取环境映射,优先用预注册的 kafka-<env> mcp tool 直查(tuannvm/kafka-mcp-server,franz-go 纯 Go 无 native deps;装机器人前用户需手动 `brew install tuannvm/mcp/kafka-mcp-server` 或从 GitHub Release 下 binary,不是 npx/uvx 零安装);mcp 不可用时 fallback kafka CLI(kafka-topics.sh / kafka-consumer-groups.sh)。
+description: 通过环境动态查询 Kafka 集群状态。先通过 routing 获取环境映射,优先用预注册的 kafka-<env> mcp tool 直查(tuannvm/kafka-mcp-server,franz-go 纯 Go 无 native deps；Studio 在支持的平台自动安装固定校验版本);mcp 不可用时 fallback kafka CLI(kafka-topics.sh / kafka-consumer-groups.sh)。
 ---
 
 # Kafka 运行时查询
@@ -18,7 +18,7 @@ description: 通过环境动态查询 Kafka 集群状态。先通过 routing 获
    - **优先 mcp tool**:本系统按 brokers dedup 在每个 env 注册 kafka MCP(`kafka-mcp-server` binary,tuannvm/kafka-mcp-server,MIT,franz-go 纯 Go)。**列工具看注册了几个 source**:
      - 只 1 个 `kafka-<env>`(单 cluster,典型)→ 直接 `tool_use` 调那个。
      - 多个 `kafka-<source>-<env>`(多 cluster)→ **必须查 routing 的 `references/service-to-datastore-source.yaml`** 拿 `service_routing.data_stores.kafka.<service>` 对应 source,只调 `kafka-<对应 source>-<env>`,**禁止瞎选**。
-   - **mcp 不可用**(binary 没装 / 没在 PATH) → fallback **kafka CLI**(`kafka-topics.sh` / `kafka-consumer-groups.sh`,Kafka 标准发行版自带)。
+   - **mcp 不可用**(Studio 自动安装或 runtime probe 失败；不支持的平台可能需要人工安装 binary) → fallback **kafka CLI**(`kafka-topics.sh` / `kafka-consumer-groups.sh`,Kafka 标准发行版自带)。
    - **CLI 也没装** → fallback Python `kafka-python` 包脚本。
 5. 返回证据:topic 列表、partition 分配、consumer-group 消费位点、积压量。
 

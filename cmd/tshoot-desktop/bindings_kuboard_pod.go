@@ -218,7 +218,7 @@ func (a *App) KuboardGetPodLogs(in KuboardGetPodLogsInput) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Kb-Access-Key", s.token)
+	setKuboardV4Auth(req, s.token)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return "", err

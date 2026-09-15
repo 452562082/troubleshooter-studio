@@ -12,11 +12,30 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/generator"
 )
+
+const (
+	codexStudioAgentNetworkConfig = "permissions.studio_agent.network.enabled=true"
+	claudeStudioAgentSettings     = `{"sandbox":{"enabled":false}}`
+	codexGoSandboxDirectory       = ".tshoot-go"
+)
+
+type codexGoSandbox struct {
+	goRoot      string
+	buildCache  string
+	goPath      string
+	moduleCache string
+	telemetry   string
+}
 
 type InvestigationEventSink func(run InvestigationRun, event InvestigationEvent)
 
@@ -47,7 +66,6 @@ func NewCodexInvestigator(store *InvestigationStore, codexBin string) *CodexInve
 		binaries: map[string]string{
 			"codex":       codexBin,
 			"claude-code": "claude",
-			"openclaw":    "openclaw",
 		},
 		active: make(map[string]*activeCodexRun),
 	}
@@ -83,135 +101,11 @@ func (i *CodexInvestigator) SetEventSink(sink InvestigationEventSink) {
 }
 
 func BuildCodexInvestigationPrompt(b Bug, bot BotRef) string {
-	return BuildCodexInvestigationPromptWithValidation(b, bot, "")
-}
-
-func BuildCodexValidationPrompt(b Bug, bot BotRef) string {
-	var sb strings.Builder
-	sb.WriteString("你是 Bug 验证 Agent。\n")
-	sb.WriteString("目标：先做取证验证，不做根因判断，不给修复方案；修复后也可复用同一流程做回归复查。\n")
-	sb.WriteString("请读取 Bug 工单的复现步骤、附件、环境、前端 URL/API 线索；能实际打开页面或请求接口时优先执行，只读取证。\n")
-	sb.WriteString("边界：只复现场景和收集证据；不要读取业务源码定位函数/行号，不要输出\"代码根因/最可能原因/修复建议/候选原因\"。如需代码分析，交给后续排障 Agent。\n")
-	sb.WriteString("如果缺少账号、入口、测试数据或可重放请求，请明确标记 insufficient_info；如果用于修复后复查，请明确 fixed_verified 或 still_reproduces。\n")
-	sb.WriteString(validationAgentExecutionGuidance())
-	sb.WriteString("\n")
-	sb.WriteString(GenerateContext(b, bot))
-	sb.WriteString(validationOutputContract())
-	return sb.String()
-}
-
-func BuildCodexInvestigationPromptWithValidation(b Bug, bot BotRef, validationReport string) string {
-	var sb strings.Builder
-	sb.WriteString("请作为选定的 AI 排障机器人开始排障。\n")
-	sb.WriteString("目标：基于下面 Bug 工单上下文和验证 Agent 已确认的复现证据，完成只读根因分析，输出可执行结论。\n\n")
-	sb.WriteString("## 强制流程（不可跳过）\n\n")
-	sb.WriteString("1. **第一步**：Read `incident-investigator/SKILL.md`，严格按 7 步排障图谱执行。\n")
-	sb.WriteString("2. 从步骤 2 timeline 开始：查最近变更（git log / K8s rollout / 配置 history）。\n")
-	sb.WriteString("3. 步骤 5 多向交叉：根据问题类型选维度，**至少覆盖 3 个维度**（日志 + 代码 + 数据 中至少 2 个），不要只靠验证 Agent 的截图。\n")
-	sb.WriteString("4. 用 trace_id / request_id 查 Jaeger 链路和 Loki/ELK 日志，不要跳过。\n")
-	sb.WriteString("5. 步骤 6 输出故障快报，步骤 7 沉淀。\n\n")
-	sb.WriteString("## 关键约束\n\n")
-	sb.WriteString("- **验证报告仅供复现参考**，不能替代你自己的排障证据链。你必须独立查询日志/指标/链路/代码/配置来确认根因。\n")
-	sb.WriteString("- 禁止只引用验证报告就下结论。没有自己查到的 trace span、日志行、代码片段、配置 diff 之前，不要写\"最可能根因\"。\n")
-	sb.WriteString("- 默认只读，不要修改代码或执行破坏性命令。\n\n")
-	sb.WriteString(GenerateContext(b, bot))
-	if strings.TrimSpace(validationReport) != "" {
-		sb.WriteString("\n## 验证 Agent 报告（复现参考，不是排障结论）\n")
-		sb.WriteString(strings.TrimSpace(validationReport))
-		sb.WriteString("\n")
-	}
-	sb.WriteString(investigationOutputContract())
-	return sb.String()
+	return "请作为选定排障机器人执行只读根因分析，遵循 incident-investigator/SKILL.md 的 7 步排障图谱。Read `incident-investigator/SKILL.md`。从工单、附件、日志、链路、配置、数据和源码收集实际证据；没有自动复现或业务验证阶段。证据不足时明确缺口，不猜测根因。不修改代码或执行写操作。\n" + GenerateContext(b, bot) + investigationOutputContract()
 }
 
 func BuildCodexContinuePrompt(b Bug, bot BotRef, userInput string, prevRun InvestigationRun) string {
-	var sb strings.Builder
-	sb.WriteString("## 用户补充信息（请优先根据此信息调整排障方向）\n\n")
-	sb.WriteString(strings.TrimSpace(userInput))
-	sb.WriteString("\n\n")
-
-	sb.WriteString("以上是用户针对前一轮排障中缺失的信息提供的补充说明。请基于这些补充信息重新排障，重点关注新的线索。\n\n")
-
-	// Get previous validation events
-	var validationParts []string
-	var investigationParts []string
-	for _, e := range prevRun.Events {
-		msg := strings.TrimSpace(e.Message)
-		if msg == "" {
-			continue
-		}
-		phase, _ := e.Meta["phase"].(string)
-		switch phase {
-		case "validation":
-			validationParts = append(validationParts, msg)
-		case "investigation":
-			investigationParts = append(investigationParts, msg)
-		default:
-			investigationParts = append(investigationParts, msg)
-		}
-	}
-
-	// Validation report (from previous run)
-	if len(validationParts) > 0 {
-		sb.WriteString("## 前一轮验证报告（复现参考）\n\n")
-		for _, p := range validationParts {
-			sb.WriteString(p)
-			sb.WriteString("\n\n")
-		}
-	}
-
-	// Previous investigation output
-	if len(investigationParts) > 0 || strings.TrimSpace(prevRun.FinalMessage) != "" {
-		sb.WriteString("## 前一轮排障输出\n\n")
-		for _, p := range investigationParts {
-			sb.WriteString(p)
-			sb.WriteString("\n\n")
-		}
-		if strings.TrimSpace(prevRun.FinalMessage) != "" {
-			sb.WriteString(strings.TrimSpace(prevRun.FinalMessage))
-			sb.WriteString("\n\n")
-		}
-	}
-
-	// Bug context
-	sb.WriteString(GenerateContext(b, bot))
-
-	sb.WriteString(investigationOutputContract())
-	return sb.String()
-}
-
-func BuildCodexValidationContinuePrompt(b Bug, bot BotRef, userInput string, prevRun InvestigationRun) string {
-	var sb strings.Builder
-	sb.WriteString("你是 Bug 验证 Agent。\n")
-	sb.WriteString("目标：基于用户补充信息继续取证验证，不做根因判断，不给修复方案。\n\n")
-	sb.WriteString(validationAgentExecutionGuidance())
-	sb.WriteString("\n")
-	sb.WriteString("## 用户补充信息\n\n")
-	sb.WriteString(strings.TrimSpace(userInput))
-	sb.WriteString("\n\n")
-
-	var previousValidation []string
-	for _, e := range prevRun.Events {
-		msg := strings.TrimSpace(e.Message)
-		if msg == "" {
-			continue
-		}
-		phase, _ := e.Meta["phase"].(string)
-		if phase == "validation" {
-			previousValidation = append(previousValidation, msg)
-		}
-	}
-	if len(previousValidation) > 0 {
-		sb.WriteString("## 前一轮验证证据\n\n")
-		for _, p := range previousValidation {
-			sb.WriteString(p)
-			sb.WriteString("\n\n")
-		}
-	}
-
-	sb.WriteString(GenerateContext(b, bot))
-	sb.WriteString(validationOutputContract())
-	return sb.String()
+	return BuildCodexInvestigationPrompt(b, bot) + "\n## 前轮排障输出（作为证据参考）\n" + prevRun.FinalMessage + "\n## 用户补充信息\n" + strings.TrimSpace(userInput)
 }
 
 func BuildCodexFixPrompt(b Bug, bot BotRef, prevRun InvestigationRun, userInput string) string {
@@ -221,15 +115,15 @@ func BuildCodexFixPrompt(b Bug, bot BotRef, prevRun InvestigationRun, userInput 
 	sb.WriteString("第一步：如果当前机器人 workspace 中存在 `bug-fixer/SKILL.md`，必须先 Read 它，并按其中流程执行。\n")
 	sb.WriteString("如果旧安装还没有该 skill，使用下面内置流程作为兼容兜底。\n\n")
 	sb.WriteString("## 强制流程\n\n")
-	sb.WriteString("1. 先确认当前代码仓库已经切到目标环境对应分支；不要从错误分支修复。\n")
-	sb.WriteString("2. 基于当前环境分支创建独立修复分支，分支名使用 `fix/bug-<source>-<id>-<short>` 风格。\n")
+	sb.WriteString("1. Studio 会同时提供用户批准的开发基线和 routing 确定的目标环境分支；两者是独立概念，当前 checkout 和环境分支都不得擅自替代开发基线。\n")
+	sb.WriteString("2. 必须只在 Studio locked fix workspace 中，从锁定的开发基线 commit 创建独立修复分支。缺少 locked workspace、仓库或开发基线绑定时停止并报告配置缺口；禁止自行从当前 HEAD 或环境分支兜底创建。\n")
 	sb.WriteString("3. 修复 Bug，只做最小必要改动，不做无关重构，不改无关文件。\n")
 	sb.WriteString("4. 运行相关测试、构建或最小验证命令；无法运行时说明具体原因。\n")
 	sb.WriteString("5. `git status` 确认只包含本次修复文件后提交，并推送修复分支。\n")
-	sb.WriteString("6. 最终输出分支名、commit、push 结果、测试结果，并明确通知用户部署该修复分支。\n\n")
+	sb.WriteString("6. 最终输出分支名、commit、push 结果和测试结果，等待 Studio 单独授权后把修复提交分别合入开发基线与环境分支。\n\n")
 	sb.WriteString("## 停止条件\n\n")
 	sb.WriteString("- 如果工作区已有用户未提交改动或无法确认这些改动属于本次修复，停止并说明，不要覆盖。\n")
-	sb.WriteString("- 如果无法确认环境分支、无法创建分支、无法提交或无法推送，停止并说明阻塞点。\n")
+	sb.WriteString("- 如果无法确认开发基线或环境分支、无法创建分支、无法提交或无法推送，停止并说明阻塞点。\n")
 	sb.WriteString("- 不自行部署，不修改生产配置，不执行破坏性命令。\n\n")
 	if strings.TrimSpace(userInput) != "" {
 		sb.WriteString("## 用户补充修复要求\n\n")
@@ -264,7 +158,7 @@ func appendPreviousRunForFix(sb *strings.Builder, prevRun InvestigationRun) {
 		}
 	}
 	if len(validationParts) > 0 {
-		sb.WriteString("## 验证 Agent 证据\n\n")
+		sb.WriteString("## 历史工单证据\n\n")
 		for _, p := range validationParts {
 			sb.WriteString(p)
 			sb.WriteString("\n\n")
@@ -281,31 +175,6 @@ func appendPreviousRunForFix(sb *strings.Builder, prevRun InvestigationRun) {
 			sb.WriteString("\n\n")
 		}
 	}
-}
-
-func validationAgentExecutionGuidance() string {
-	var sb strings.Builder
-	sb.WriteString("\n## 执行环境说明\n")
-	sb.WriteString("- 当前验证 Agent 由桌面应用后台启动，不保证拥有 in-app browser / iab / 可视化浏览器控制能力。\n")
-	sb.WriteString("- 如果浏览器工具返回 unavailable，不要把它本身写入 gaps，也不要要求用户提供浏览器能力；应改用工单附件、本地附件路径、HAR/Network 导出、curl/API 请求、trace/request id、日志或已有截图取证。\n")
-	sb.WriteString("- 只有缺少业务验证必需资料时才写入 gaps，例如后台登录态/测试账号、受影响 URL/route/API、测试数据、HAR/Network 导出、request id 或 trace id。\n")
-	sb.WriteString("- 工具能力限制但不阻塞已有证据判断时，写入 handoff_to_troubleshooter.unchecked_scopes，不要写入 gaps。\n")
-	return sb.String()
-}
-
-func validationOutputContract() string {
-	var sb strings.Builder
-	sb.WriteString("\n请只输出下面的严格 YAML，不得增加字段或解释性段落：\n")
-	sb.WriteString("verification_status: reproduced | not_reproduced | insufficient_info | fixed_verified | still_reproduces\n")
-	sb.WriteString("environment: \"<有效目标环境>\"\n")
-	sb.WriteString("observed_behavior: \"<what-was-observed-during-verification>\"\n")
-	sb.WriteString("expected_behavior: \"<expected>\"\n")
-	sb.WriteString("scenario_hash: \"<原始场景哈希；首次验证可为空，回归必须原样返回>\"\n")
-	sb.WriteString("evidence:\n  - kind: \"<har|screenshot|network|console|api|trace|log|command>\"\n    path: \"<Studio staging 目录内的相对路径>\"\n    captured_at: \"<RFC3339；仅兼容输出，Studio 以 fstat 为准>\"\n    environment: \"<env>\"\n    version: \"<运行版本；回归必填>\"\n    request_id: \"<可空>\"\n    trace_id: \"<可空>\"\n    redaction_status: redacted | not_required # 仅兼容输出，Studio 总会重新扫描\n")
-	sb.WriteString("gaps: []\n")
-	sb.WriteString("只有当阻塞资料已经清空时 gaps 才能输出 []。证据必须通过 path 引用常规文件；不得内联密钥、cookie 或 Authorization。\n")
-	sb.WriteString("最终回答不得输出该结构之外的解释性段落。\n")
-	return sb.String()
 }
 
 func investigationOutputContract() string {
@@ -337,7 +206,7 @@ func fixOutputContract() string {
 	sb.WriteString("environment: \"<env>\"\n")
 	sb.WriteString("branches:\n")
 	sb.WriteString("  - repo: \"<repo>\"\n")
-	sb.WriteString("    base_branch: \"<env-branch>\"\n")
+	sb.WriteString("    base_branch: \"<user-approved-source-baseline-branch>\"\n")
 	sb.WriteString("    fix_branch: \"<fix-branch>\"\n")
 	sb.WriteString("    commit: \"<sha-or-empty>\"\n")
 	sb.WriteString("    pushed: true\n")
@@ -353,17 +222,26 @@ func fixOutputContract() string {
 	sb.WriteString("    result: passed | failed | skipped\n")
 	sb.WriteString("    note: \"<short evidence>\"\n")
 	sb.WriteString("    skipped_reason: \"<required only when result=skipped>\"\n")
-	sb.WriteString("deployment_notice: \"请部署 <repo>/<fix_branch> 到 <env> 后再触发验证 Agent 回归。\"\n")
+	sb.WriteString("deployment_notice: \"修复分支已推送；等待用户独立授权，由 Studio 将修复提交合入开发基线和环境分支，之后由用户人工验收。\"\n")
 	sb.WriteString("risks:\n")
 	sb.WriteString("  - \"<remaining-risk-or-empty>\"\n")
 	sb.WriteString("blocked_reason: \"<only when blocked/failed>\"\n")
 	sb.WriteString("evidence: []\n")
 	sb.WriteString("```\n")
-	sb.WriteString("每个仓库的 base_branch 必须与 target_environment_branch 完全一致；fix_branch 必须是不同的专用修复分支，禁止直接在环境分支修复或推送。\n")
+	sb.WriteString("修复阶段通常不需要另写总结文件作为 evidence，阻塞或失败时保持 `evidence: []`。只有确有可注册的运行时或测试制品时才添加条目，而且每项必须同时包含非空 `kind`、staging 相对 `path` 和 `environment`。\n")
+	sb.WriteString("每个仓库的 base_branch 必须是 Studio 锁定的用户确认开发基线；target_environment_branch 是后续独立集成目标，两者允许不同。fix_branch 必须是不同的专用修复分支，禁止直接在基线分支或环境分支修复、提交或推送；Agent 也不得自行合并这两个目标分支。\n")
 	return sb.String()
 }
 
 func BuildCodexExecCommand(codexBin, workspace, prompt string) (*exec.Cmd, error) {
+	return buildCodexExecCommandWithProfile(codexBin, workspace, prompt, nil, "")
+}
+
+func buildCodexExecCommand(codexBin, workspace, prompt string, imagePaths []string) (*exec.Cmd, error) {
+	return buildCodexExecCommandWithProfile(codexBin, workspace, prompt, imagePaths, "")
+}
+
+func buildCodexExecCommandWithProfile(codexBin, workspace, prompt string, imagePaths []string, profile string) (*exec.Cmd, error) {
 	codexBin = strings.TrimSpace(codexBin)
 	if codexBin == "" {
 		codexBin = "codex"
@@ -382,12 +260,507 @@ func BuildCodexExecCommand(codexBin, workspace, prompt string) (*exec.Cmd, error
 	if !info.IsDir() {
 		return nil, fmt.Errorf("workspace %q is not a directory", workspace)
 	}
-	cmd := exec.Command(codexBin, "exec", "--json", "--sandbox", "workspace-write", "--cd", workspace, "--skip-git-repo-check", prompt)
+	goSandbox, err := prepareCodexGoSandbox(workspace, prompt)
+	if err != nil {
+		return nil, err
+	}
+	filesystemConfig, err := codexFilesystemPermissionConfig(workspace, prompt, imagePaths, goSandbox)
+	if err != nil {
+		return nil, err
+	}
+	args := []string{
+		"exec", "--json",
+		"--enable", "respect_system_proxy",
+		"-c", "suppress_unstable_features_warning=true",
+		// Studio background Agents cannot answer an interactive approval dialog.
+		// More importantly, the named filesystem profile below gives Codex a
+		// host-generated allowlist, so a model command cannot traverse $HOME and
+		// trigger macOS App Data / Documents / Photos privacy prompts.
+		"-c", `approval_policy="never"`,
+		// Current Codex CLI requires default_permissions when named permission
+		// profiles are defined. permission_profile was accepted by older builds
+		// but now leaves the profile table without an active default and makes
+		// `codex exec` fail before the Agent turn starts.
+		"-c", `default_permissions="studio_agent"`,
+		// Every workflow phase may need runtime evidence, dependency downloads,
+		// MCP/API access, or Git transport. A named Codex permission profile has
+		// networking disabled by default, and respect_system_proxy only controls
+		// proxy behavior; it does not grant network access by itself.
+		"-c", codexStudioAgentNetworkConfig,
+		"-c", filesystemConfig,
+	}
+	if profile = strings.TrimSpace(profile); profile != "" {
+		args = append(args, "--profile", profile)
+	}
+	args = append(args, "--cd", workspace, "--skip-git-repo-check")
+	for _, path := range imagePaths {
+		args = append(args, "--image", path)
+	}
+	// Codex defines --image as a variadic option (`--image <FILE>...`). Without
+	// the option terminator, the initial prompt is consumed as another image
+	// path and `codex exec` exits without starting the agent.
+	if len(imagePaths) != 0 {
+		args = append(args, "--")
+	}
+	args = append(args, prompt)
+	cmd := exec.Command(codexBin, args...)
 	cmd.Dir = workspace
+	cmd.Env = codexAgentProcessEnvironment(prompt, goSandbox)
 	return cmd, nil
 }
 
+func buildCodexBotExecCommand(codexBin string, bot BotRef, prompt string, imagePaths []string) (*exec.Cmd, error) {
+	profile, codexHome, err := ensureCodexAgentRuntimeHome(bot)
+	if err != nil {
+		return nil, err
+	}
+	cmd, err := buildCodexExecCommandWithProfile(codexBin, bot.Path, prompt, imagePaths, profile)
+	if err != nil {
+		return nil, err
+	}
+	if codexHome != "" {
+		cmd.Env = setProcessEnv(cmd.Env, "CODEX_HOME", codexHome)
+	}
+	return cmd, nil
+}
+
+func ensureCodexAgentRuntimeHome(bot BotRef) (string, string, error) {
+	agentID := strings.TrimSpace(bot.AgentID)
+	if agentID == "" {
+		return "", "", nil
+	}
+	workspace := filepath.Clean(strings.TrimSpace(bot.Path))
+	skillsDir := filepath.Dir(workspace)
+	if filepath.Base(skillsDir) != "skills" || filepath.Base(workspace) != agentID {
+		// Tests and embedding callers may inject a standalone workspace rather
+		// than a native ~/.codex/skills/<agent> installation. There is no safe
+		// runtime root to infer in that case, so preserve the legacy command.
+		return "", "", nil
+	}
+	if strings.ContainsAny(agentID, "/\\\x00") || agentID == "." || agentID == ".." {
+		return "", "", errors.New("codex agent id is invalid")
+	}
+	codexHome := filepath.Dir(skillsDir)
+	runtimeHome := filepath.Join(codexHome, "tshoot-runtimes", agentID)
+	if err := ensureCodexRuntimeDirectory(runtimeHome); err != nil {
+		return "", "", err
+	}
+
+	// Codex profile layers currently ignore mcp_servers. Give each background
+	// agent an isolated CODEX_HOME whose standard config.toml contains exactly the
+	// managed MCP region. This keeps business MCPs out of the user's global main
+	// session while using a configuration path that codex exec actually loads.
+	agentPath := filepath.Join(codexHome, "agents", agentID+".toml")
+	raw, err := os.ReadFile(agentPath)
+	if err != nil {
+		return "", "", fmt.Errorf("codex runtime config source is missing; re-apply agent %q: %w", agentID, err)
+	}
+	text := string(raw)
+	begin := strings.Index(text, generator.CodexMCPRegionBegin)
+	end := strings.Index(text, generator.CodexMCPRegionEnd)
+	if begin < 0 || end < begin {
+		return "", "", fmt.Errorf("codex runtime config source is invalid and agent %q has no managed MCP region; re-apply the robot", agentID)
+	}
+	bodyStart := begin + len(generator.CodexMCPRegionBegin)
+	body := strings.TrimSpace(text[bodyStart:end])
+	content := "# Managed by tshoot. Used by Studio background codex exec.\n" + body + "\n"
+	configPath := filepath.Join(runtimeHome, "config.toml")
+	if info, err := os.Lstat(configPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return "", "", fmt.Errorf("codex runtime config %s is not a regular file", configPath)
+		}
+	} else if !os.IsNotExist(err) {
+		return "", "", err
+	}
+	if current, readErr := os.ReadFile(configPath); readErr == nil && string(current) == content {
+		if err := os.Chmod(configPath, 0o600); err != nil {
+			return "", "", fmt.Errorf("secure Codex runtime config %s: %w", configPath, err)
+		}
+	} else if readErr != nil && !os.IsNotExist(readErr) {
+		return "", "", fmt.Errorf("read Codex runtime config %s: %w", configPath, readErr)
+	} else if err := replaceCodexRuntimeConfig(configPath, []byte(content)); err != nil {
+		return "", "", err
+	}
+	for _, shared := range []string{"skills", "auth.json"} {
+		target := filepath.Join(codexHome, shared)
+		if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return "", "", fmt.Errorf("inspect shared Codex %s: %w", shared, err)
+		}
+		if err := ensureCodexRuntimeLink(filepath.Join(runtimeHome, shared), target); err != nil {
+			return "", "", err
+		}
+	}
+	return "", runtimeHome, nil
+}
+
+func ensureCodexRuntimeDirectory(path string) error {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("codex runtime home %s is not a directory", path)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect Codex runtime home %s: %w", path, err)
+	} else if err := os.MkdirAll(path, 0o700); err != nil {
+		return fmt.Errorf("create Codex runtime home %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		return fmt.Errorf("secure Codex runtime home %s: %w", path, err)
+	}
+	return nil
+}
+
+func ensureCodexRuntimeLink(path, target string) error {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink == 0 {
+			return fmt.Errorf("codex runtime shared path %s is not a symlink", path)
+		}
+		linked, err := os.Readlink(path)
+		if err != nil {
+			return fmt.Errorf("read Codex runtime link %s: %w", path, err)
+		}
+		if !filepath.IsAbs(linked) {
+			linked = filepath.Join(filepath.Dir(path), linked)
+		}
+		if filepath.Clean(linked) != filepath.Clean(target) {
+			return fmt.Errorf("codex runtime link %s points outside the managed target", path)
+		}
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect Codex runtime link %s: %w", path, err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		return fmt.Errorf("create Codex runtime link %s: %w", path, err)
+	}
+	return nil
+}
+
+func replaceCodexRuntimeConfig(path string, content []byte) error {
+	directory := filepath.Dir(path)
+	temporary, err := os.CreateTemp(directory, ".tshoot-codex-config-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary Codex runtime config: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("secure temporary Codex runtime config: %w", err)
+	}
+	if _, err := temporary.Write(content); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("write temporary Codex runtime config: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("sync temporary Codex runtime config: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close temporary Codex runtime config: %w", err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("replace Codex runtime config %s: %w", path, err)
+	}
+	return nil
+}
+
+func setProcessEnv(values []string, key, value string) []string {
+	prefix := key + "="
+	result := make([]string, 0, len(values)+1)
+	for _, item := range values {
+		if strings.HasPrefix(item, prefix) {
+			continue
+		}
+		result = append(result, item)
+	}
+	return append(result, prefix+value)
+}
+
+var (
+	codexGitBinDirOnce sync.Once
+	codexGitBinDir     string
+)
+
+func codexAgentProcessEnvironment(prompt string, goSandbox *codexGoSandbox) []string {
+	values := os.Environ()
+	staging := codexStagingPathFromPrompt(prompt)
+	if staging == "" || codexRepositoryAccessPhase(staging) != PhaseFix {
+		return values
+	}
+	for key, value := range map[string]string{
+		"GIT_CONFIG_GLOBAL":   os.DevNull,
+		"GIT_CONFIG_NOSYSTEM": "1",
+		"GIT_TERMINAL_PROMPT": "0",
+		"TMPDIR":              staging,
+		"TMP":                 staging,
+		"TEMP":                staging,
+	} {
+		values = setProcessEnv(values, key, value)
+	}
+	if goSandbox != nil {
+		for key, value := range map[string]string{
+			"GOROOT":         goSandbox.goRoot,
+			"GOCACHE":        goSandbox.buildCache,
+			"GOPATH":         goSandbox.goPath,
+			"GOMODCACHE":     goSandbox.moduleCache,
+			"GOTELEMETRY":    "off",
+			"GOTELEMETRYDIR": goSandbox.telemetry,
+			"GOENV":          "off",
+			"GOTOOLCHAIN":    "auto",
+		} {
+			values = setProcessEnv(values, key, value)
+		}
+		goFlags := strings.TrimSpace(processEnvValue(values, "GOFLAGS"))
+		if !strings.Contains(" "+goFlags+" ", " -modcacherw ") {
+			goFlags = strings.TrimSpace(goFlags + " -modcacherw")
+		}
+		values = setProcessEnv(values, "GOFLAGS", goFlags)
+	}
+	if directory := codexHostGitBinDirectory(); directory != "" {
+		path := processEnvValue(values, "PATH")
+		if path == "" {
+			path = directory
+		} else {
+			path = directory + string(os.PathListSeparator) + path
+		}
+		values = setProcessEnv(values, "PATH", path)
+	}
+	if goSandbox != nil {
+		directory := filepath.Join(goSandbox.goRoot, "bin")
+		path := processEnvValue(values, "PATH")
+		if path == "" {
+			path = directory
+		} else {
+			path = directory + string(os.PathListSeparator) + path
+		}
+		values = setProcessEnv(values, "PATH", path)
+	}
+	return values
+}
+
+func prepareCodexGoSandbox(workspace, prompt string) (*codexGoSandbox, error) {
+	staging := codexStagingPathFromPrompt(prompt)
+	if staging == "" || codexRepositoryAccessPhase(staging) != PhaseFix {
+		return nil, nil
+	}
+	goRoot := resolveCodexGoRoot(workspace)
+	if goRoot == "" {
+		// A fix may target JavaScript, Python, or another stack. Absence of a
+		// host Go toolchain must not prevent those Agents from starting.
+		return nil, nil
+	}
+	root := filepath.Join(filepath.Clean(staging), codexGoSandboxDirectory)
+	sandbox := &codexGoSandbox{
+		goRoot:      goRoot,
+		buildCache:  filepath.Join(root, "build-cache"),
+		goPath:      filepath.Join(root, "path"),
+		moduleCache: filepath.Join(root, "path", "pkg", "mod"),
+		telemetry:   filepath.Join(root, "telemetry"),
+	}
+	for _, directory := range []string{root, sandbox.buildCache, sandbox.goPath, sandbox.moduleCache, sandbox.telemetry} {
+		if err := ensureCodexRuntimeDirectory(directory); err != nil {
+			return nil, fmt.Errorf("prepare isolated Codex Go directory: %w", err)
+		}
+	}
+	return sandbox, nil
+}
+
+func resolveCodexGoRoot(workspace string) string {
+	goBinary, err := exec.LookPath("go")
+	if err != nil {
+		return ""
+	}
+	cmd := exec.Command(goBinary, "env", "GOROOT")
+	cmd.Dir = workspace
+	cmd.Env = setProcessEnv(setProcessEnv(os.Environ(), "GOTELEMETRY", "off"), "GOENV", "off")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	goRoot := filepath.Clean(strings.TrimSpace(string(output)))
+	if goRoot == "." || !filepath.IsAbs(goRoot) {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(goRoot); err == nil {
+		goRoot = filepath.Clean(resolved)
+	}
+	info, err := os.Stat(goRoot)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	goExecutable := "go"
+	if runtime.GOOS == "windows" {
+		goExecutable += ".exe"
+	}
+	info, err = os.Stat(filepath.Join(goRoot, "bin", goExecutable))
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return goRoot
+}
+
+func codexRepositoryAccessPhase(staging string) Phase {
+	data, err := os.ReadFile(filepath.Join(staging, repositoryAccessManifestName))
+	if err != nil {
+		return ""
+	}
+	var manifest repositoryAccessManifest
+	if json.Unmarshal(data, &manifest) != nil {
+		return ""
+	}
+	return manifest.Phase
+}
+
+func codexHostGitBinDirectory() string {
+	if runtime.GOOS != "darwin" {
+		return ""
+	}
+	codexGitBinDirOnce.Do(func() {
+		output, err := exec.Command("/usr/bin/xcrun", "--find", "git").Output()
+		if err != nil {
+			return
+		}
+		path := filepath.Clean(strings.TrimSpace(string(output)))
+		if filepath.IsAbs(path) {
+			codexGitBinDir = filepath.Dir(path)
+		}
+	})
+	return codexGitBinDir
+}
+
+func processEnvValue(values []string, key string) string {
+	prefix := key + "="
+	for index := len(values) - 1; index >= 0; index-- {
+		if strings.HasPrefix(values[index], prefix) {
+			return strings.TrimPrefix(values[index], prefix)
+		}
+	}
+	return ""
+}
+
+func codexFilesystemPermissionConfig(workspace, prompt string, imagePaths []string, goSandbox *codexGoSandbox) (string, error) {
+	roots := map[string]string{filepath.Clean(workspace): "write"}
+	addCodexSSHHostVerificationFiles(roots)
+	if goSandbox != nil && roots[goSandbox.goRoot] != "write" {
+		// Grant the exact selected SDK read-only. Go caches and downloaded
+		// modules stay inside the attempt staging directory below.
+		roots[goSandbox.goRoot] = "read"
+	}
+	staging := codexStagingPathFromPrompt(prompt)
+	if staging != "" {
+		if !filepath.IsAbs(staging) {
+			return "", errors.New("studio evidence staging path must be absolute")
+		}
+		staging = filepath.Clean(staging)
+		info, err := os.Stat(staging)
+		if err != nil || !info.IsDir() {
+			return "", fmt.Errorf("studio evidence staging path is unavailable: %s", staging)
+		}
+		roots[staging] = "write"
+		manifestPath := filepath.Join(staging, repositoryAccessManifestName)
+		data, readErr := os.ReadFile(manifestPath)
+		if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			return "", fmt.Errorf("read repository access manifest: %w", readErr)
+		}
+		if readErr == nil {
+			var manifest repositoryAccessManifest
+			if err := json.Unmarshal(data, &manifest); err != nil {
+				return "", fmt.Errorf("parse repository access manifest: %w", err)
+			}
+			for _, root := range manifest.Roots {
+				path := filepath.Clean(strings.TrimSpace(root.Path))
+				if path == "." || !filepath.IsAbs(path) {
+					return "", fmt.Errorf("repository access path for %s must be absolute", root.Repo)
+				}
+				access := strings.TrimSpace(root.Access)
+				if access != "read" && access != "write" {
+					return "", fmt.Errorf("repository access mode for %s is invalid", root.Repo)
+				}
+				info, err := os.Stat(path)
+				if err != nil || !info.IsDir() {
+					return "", fmt.Errorf("repository access path for %s is unavailable", root.Repo)
+				}
+				roots[path] = access
+				if manifest.Phase == PhaseFix && access == "write" {
+					gitMetadata := filepath.Join(path, ".git")
+					gitInfo, gitErr := os.Lstat(gitMetadata)
+					if gitErr != nil || !gitInfo.IsDir() {
+						return "", fmt.Errorf("standalone fix repository Git metadata for %s is unavailable", root.Repo)
+					}
+					// Codex protects .git recursively even when its workspace root is
+					// writable. Reopen only the metadata owned by Studio's standalone
+					// fix clone so the Agent can create, commit, and push its fix branch.
+					roots[gitMetadata] = "write"
+				}
+			}
+		}
+	}
+	for _, imagePath := range imagePaths {
+		path := filepath.Clean(strings.TrimSpace(imagePath))
+		if path == "." || !filepath.IsAbs(path) {
+			return "", errors.New("codex attachment path must be absolute")
+		}
+		roots[path] = "read"
+	}
+
+	paths := make([]string, 0, len(roots))
+	for path := range roots {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	var config strings.Builder
+	config.WriteString(`permissions.studio_agent.filesystem={":minimal"="read"`)
+	for _, path := range paths {
+		config.WriteByte(',')
+		config.WriteString(strconv.Quote(path))
+		config.WriteByte('=')
+		config.WriteString(strconv.Quote(roots[path]))
+	}
+	config.WriteByte('}')
+	return config.String(), nil
+}
+
+func addCodexSSHHostVerificationFiles(roots map[string]string) {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return
+	}
+	sshDir := filepath.Join(filepath.Clean(home), ".ssh")
+	for _, name := range []string{"known_hosts", "known_hosts2"} {
+		path := filepath.Join(sshDir, name)
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if roots[path] != "write" {
+			// Host verification data is public server identity metadata. Grant the
+			// exact regular file only; never expose ~/.ssh, config, or private keys.
+			roots[path] = "read"
+		}
+	}
+}
+
+func codexStagingPathFromPrompt(prompt string) string {
+	const marker = "STUDIO_EVIDENCE_STAGING_DIR="
+	var staging string
+	for _, line := range strings.Split(prompt, "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if !strings.HasPrefix(line, marker) {
+			continue
+		}
+		if candidate := strings.TrimSpace(strings.TrimPrefix(line, marker)); candidate != "" {
+			staging = candidate
+		}
+	}
+	return staging
+}
+
 func BuildClaudeInvestigationCommand(claudeBin, workspace, agentPath, prompt string) (*exec.Cmd, error) {
+	return buildClaudeInvestigationCommand(claudeBin, workspace, agentPath, prompt, nil)
+}
+
+func buildClaudeInvestigationCommand(claudeBin, workspace, agentPath, prompt string, attachmentDirs []string) (*exec.Cmd, error) {
 	claudeBin = strings.TrimSpace(claudeBin)
 	if claudeBin == "" {
 		claudeBin = "claude"
@@ -407,41 +780,32 @@ func BuildClaudeInvestigationCommand(claudeBin, workspace, agentPath, prompt str
 	if agentName == "" {
 		return nil, errors.New("claude agent is required")
 	}
-	cmd := exec.Command(claudeBin, "-p", "--dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--output-format", "stream-json", "--verbose", "--agent", agentName, prompt)
+	// Claude's permission mode and OS sandbox are independent. Disable the
+	// per-invocation sandbox explicitly so a user-level domain allowlist cannot
+	// silently block runtime queries, dependency downloads, or Git transport.
+	args := []string{"-p", "--dangerously-skip-permissions", "--permission-mode", "bypassPermissions", "--settings", claudeStudioAgentSettings, "--output-format", "stream-json", "--verbose", "--agent", agentName}
+	for _, directory := range attachmentDirs {
+		args = append(args, "--add-dir", directory)
+	}
+	// Claude defines --add-dir as a variadic option. Without the option
+	// terminator, the non-interactive prompt is consumed as one more directory
+	// and Claude exits before the phase agent starts. This affects every
+	// screenshot-assisted browser step: planning, locator repair, and final
+	// evidence evaluation.
+	if len(attachmentDirs) != 0 {
+		args = append(args, "--")
+	}
+	args = append(args, prompt)
+	cmd := exec.Command(claudeBin, args...)
 	cmd.Dir = workspace
 	return cmd, nil
 }
 
-func BuildOpenClawInvestigationCommand(openclawBin, agentID, prompt string) (*exec.Cmd, error) {
-	openclawBin = strings.TrimSpace(openclawBin)
-	if openclawBin == "" {
-		openclawBin = "openclaw"
-	}
-	agentID = strings.TrimSpace(agentID)
-	if agentID == "" {
-		return nil, errors.New("openclaw agent is required")
-	}
-	return exec.Command(openclawBin, "agent", "--agent", agentID, "--message", prompt, "--json"), nil
-}
-
 func (i *CodexInvestigator) Start(parent context.Context, bug Bug, bot BotRef) (InvestigationRun, error) {
-	return i.StartWithValidator(parent, bug, bot, ValidatorBotFor(bot))
-}
-
-func (i *CodexInvestigator) StartWithValidator(parent context.Context, bug Bug, bot BotRef, validator BotRef) (InvestigationRun, error) {
 	if i == nil || i.store == nil {
 		return InvestigationRun{}, errors.New("investigation store is required")
 	}
 	target := strings.TrimSpace(bot.Target)
-	validationBot := validator
-	if strings.TrimSpace(validationBot.Key) == "" {
-		validationBot = bot
-	}
-	validationTarget := strings.TrimSpace(validationBot.Target)
-	if validationTarget == "" {
-		validationTarget = target
-	}
-
 	i.mu.Lock()
 	if active, ok, err := i.store.ActiveRunForBug(bug.ID); err != nil {
 		i.mu.Unlock()
@@ -457,8 +821,8 @@ func (i *CodexInvestigator) StartWithValidator(parent context.Context, bug Bug, 
 		}
 	}
 
-	validationPrompt := BuildCodexValidationPrompt(bug, validationBot)
-	validationCmd, validationParser, err := i.buildCommandLocked(validationTarget, validationBot, validationPrompt)
+	prompt := BuildCodexInvestigationPrompt(bug, bot)
+	cmd, parser, err := i.buildCommandLocked(target, bot, prompt)
 	if err != nil {
 		i.mu.Unlock()
 		return InvestigationRun{}, err
@@ -471,7 +835,7 @@ func (i *CodexInvestigator) StartWithValidator(parent context.Context, bug Bug, 
 		BotKey:        bot.Key,
 		Status:        InvestigationRunning,
 		StartedAt:     time.Now().UTC(),
-		PromptPreview: promptPreview(validationPrompt),
+		PromptPreview: promptPreview(prompt),
 	}
 	if err := i.store.Upsert(run); err != nil {
 		i.mu.Unlock()
@@ -482,13 +846,16 @@ func (i *CodexInvestigator) StartWithValidator(parent context.Context, bug Bug, 
 	i.active[run.ID] = active
 
 	i.mu.Unlock()
-	go i.collectRun(ctx, run.ID, bug, bot, target, validationCmd, validationParser, active)
+	go i.collectContinueRun(ctx, run.ID, cmd, parser, active, "investigation")
 	return run, nil
 }
 
 func (i *CodexInvestigator) Continue(ctx context.Context, bug Bug, bot BotRef, userInput string, previousRunID string, phase string) (InvestigationRun, error) {
 	if i == nil || i.store == nil {
 		return InvestigationRun{}, errors.New("investigation store is required")
+	}
+	if phase != "" && phase != "investigation" && phase != "fix" {
+		return InvestigationRun{}, errors.New("unsupported continuation phase")
 	}
 	phase = normalizeContinuationPhase(phase)
 
@@ -510,16 +877,12 @@ func (i *CodexInvestigator) Continue(ctx context.Context, bug Bug, bot BotRef, u
 	}
 
 	continueBot := bot
-	if phase == "validation" {
-		continueBot = ValidatorBotFor(bot)
-	} else if phase == "fix" {
+	if phase == "fix" {
 		continueBot = FixerBotFor(bot)
 	}
 	target := strings.TrimSpace(continueBot.Target)
 	prompt := BuildCodexContinuePrompt(bug, continueBot, userInput, prevRun)
-	if phase == "validation" {
-		prompt = BuildCodexValidationContinuePrompt(bug, continueBot, userInput, prevRun)
-	} else if phase == "fix" {
+	if phase == "fix" {
 		prompt = BuildCodexFixPrompt(bug, continueBot, prevRun, userInput)
 	}
 	continueCmd, parser, err := i.buildCommandLocked(target, continueBot, prompt)
@@ -547,11 +910,7 @@ func (i *CodexInvestigator) Continue(ctx context.Context, bug Bug, bot BotRef, u
 	i.active[run.ID] = active
 
 	i.mu.Unlock()
-	if phase == "validation" {
-		go i.collectValidationContinueRun(ctx, run.ID, bug, bot, continueCmd, parser, active)
-	} else {
-		go i.collectContinueRun(ctx, run.ID, continueCmd, parser, active, phase)
-	}
+	go i.collectContinueRun(ctx, run.ID, continueCmd, parser, active, phase)
 	return run, nil
 }
 
@@ -607,8 +966,6 @@ func (i *CodexInvestigator) StartFix(ctx context.Context, bug Bug, bot BotRef, p
 
 func normalizeContinuationPhase(phase string) string {
 	switch strings.TrimSpace(strings.ToLower(phase)) {
-	case "validation":
-		return "validation"
 	case "fix":
 		return "fix"
 	default:
@@ -630,9 +987,7 @@ func (i *CodexInvestigator) collectContinueRun(ctx context.Context, runID string
 	}()
 
 	stageMessage := "排障 Agent 继续执行（基于用户补充信息）"
-	if phase == "validation" {
-		stageMessage = "验证 Agent 继续取证（基于用户补充信息）"
-	} else if phase == "fix" {
+	if phase == "fix" {
 		stageMessage = "修复 Agent 开始修复（基于排障结论）"
 	}
 	i.emitStageEvent(runID, phase, stageMessage)
@@ -658,96 +1013,24 @@ func (i *CodexInvestigator) collectContinueRun(ctx context.Context, runID string
 	})
 }
 
-func (i *CodexInvestigator) collectValidationContinueRun(ctx context.Context, runID string, bug Bug, bot BotRef, validationCmd *exec.Cmd, validationParser investigationEventParser, active *activeCodexRun) {
-	defer close(active.done)
-	defer i.removeActive(runID)
-	stopKillWatcher := make(chan struct{})
-	defer close(stopKillWatcher)
-	go func() {
-		select {
-		case <-ctx.Done():
-			active.kill()
-		case <-stopKillWatcher:
-		}
-	}()
-
-	i.emitStageEvent(runID, "validation", "验证 Agent 继续取证（基于用户补充信息）")
-	validationReport, validationStatus, validationError := i.runCommandStage(ctx, runID, validationCmd, validationParser, active, "validation")
-	if validationError != nil && validationStatus != InvestigationCancelled {
-		active.setError(validationError)
-	}
-	if validationStatus != InvestigationSucceeded {
-		_ = i.store.Finish(runID, validationStatus, "", runErrorText(ctx, validationError))
-		i.emitEvent(runID, InvestigationEvent{
-			At:      time.Now().UTC(),
-			Type:    "status",
-			Message: string(validationStatus),
-		})
-		return
-	}
-	if !validationReportReadyForInvestigation(validationReport) {
-		i.emitStageEvent(runID, "validation", validationPauseMessage(validationReport))
-		if err := i.store.Finish(runID, InvestigationSucceeded, formatValidationFinalReport(validationReport, bug, bot), ""); err != nil {
-			active.setError(err)
-			return
-		}
-		i.emitEvent(runID, InvestigationEvent{
-			At:      time.Now().UTC(),
-			Type:    "status",
-			Message: string(InvestigationSucceeded),
-		})
-		return
-	}
-	i.emitStageEvent(runID, "validation", "验证 Agent 完成，已将证据交给排障 Agent")
-
-	prompt := BuildCodexInvestigationPromptWithValidation(bug, bot, validationReport)
-	investigationCmd, parser, err := i.buildCommand(strings.TrimSpace(bot.Target), bot, prompt)
-	if err != nil {
-		active.setError(err)
-		_ = i.store.Finish(runID, InvestigationFailed, validationReport, err.Error())
-		i.emitEvent(runID, InvestigationEvent{
-			At:      time.Now().UTC(),
-			Type:    "status",
-			Message: string(InvestigationFailed),
-		})
-		return
-	}
-	finalMessage, finishStatus, runErr := i.runCommandStage(ctx, runID, investigationCmd, parser, active, "investigation")
-	if runErr != nil && finishStatus != InvestigationCancelled {
-		active.setError(runErr)
-	}
-	finishError := ""
-	if finishStatus != InvestigationSucceeded {
-		finishError = runErrorText(ctx, runErr)
-	}
-	if err := i.store.Finish(runID, finishStatus, finalMessage, finishError); err != nil {
-		active.setError(err)
-		return
-	}
-	i.emitEvent(runID, InvestigationEvent{
-		At:      time.Now().UTC(),
-		Type:    "status",
-		Message: string(finishStatus),
-	})
-}
-
 func (i *CodexInvestigator) buildCommandLocked(target string, bot BotRef, prompt string) (*exec.Cmd, investigationEventParser, error) {
 	if i.binaries == nil {
 		i.binaries = make(map[string]string)
 	}
 	switch target {
 	case "codex":
-		cmd, err := BuildCodexExecCommand(firstNonEmpty(i.binaries["codex"], i.codexBin, "codex"), bot.Path, prompt)
-		return cmd, ParseCodexJSONLEvent, err
+		cmd, err := buildCodexBotExecCommand(firstNonEmpty(i.binaries["codex"], i.codexBin, "codex"), bot, prompt, nil)
+		return cmd, newCodexStreamJSONParser(), err
 	case "claude-code":
 		workspace := claudeWorkspace(bot.Path)
 		cmd, err := BuildClaudeInvestigationCommand(firstNonEmpty(i.binaries["claude-code"], "claude"), workspace, bot.Path, prompt)
 		return cmd, ParseClaudeStreamJSONEvent, err
-	case "openclaw":
-		cmd, err := BuildOpenClawInvestigationCommand(firstNonEmpty(i.binaries["openclaw"], "openclaw"), openClawAgentID(bot), prompt)
-		return cmd, ParseOpenClawJSONEvent, err
+	case "opencode":
+		cmd, err := BuildOpenCodeInvestigationCommand(i.binaries["opencode"], bot, prompt, nil)
+		return cmd, newOpenCodeStreamJSONParser(), err
 	case "cursor":
-		return nil, nil, errors.New("暂不支持 Cursor 后台直启，请复制上下文后在 Cursor Custom Agent 中发起")
+		cmd, err := BuildCursorInvestigationCommand(i.binaries["cursor"], bot.Path, prompt)
+		return cmd, newCursorStreamJSONParser(), err
 	default:
 		return nil, nil, fmt.Errorf("暂不支持 %s 后台直启", firstNonEmpty(target, "unknown"))
 	}
@@ -779,226 +1062,6 @@ func (i *CodexInvestigator) Wait(runID string) (InvestigationRun, error) {
 		}
 	}
 	return i.store.Get(runID)
-}
-
-func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, bug Bug, bot BotRef, target string, validationCmd *exec.Cmd, validationParser investigationEventParser, active *activeCodexRun) {
-	defer close(active.done)
-	defer i.removeActive(runID)
-	stopKillWatcher := make(chan struct{})
-	defer close(stopKillWatcher)
-	go func() {
-		select {
-		case <-ctx.Done():
-			active.kill()
-		case <-stopKillWatcher:
-		}
-	}()
-
-	i.emitStageEvent(runID, "validation", "验证 Agent 开始取证验证")
-	validationReport, validationStatus, validationError := i.runCommandStage(ctx, runID, validationCmd, validationParser, active, "validation")
-	if validationError != nil && validationStatus != InvestigationCancelled {
-		active.setError(validationError)
-	}
-	if validationStatus != InvestigationSucceeded {
-		_ = i.store.Finish(runID, validationStatus, "", runErrorText(ctx, validationError))
-		i.emitEvent(runID, InvestigationEvent{
-			At:      time.Now().UTC(),
-			Type:    "status",
-			Message: string(validationStatus),
-		})
-		return
-	}
-	if !validationReportReadyForInvestigation(validationReport) {
-		i.emitStageEvent(runID, "validation", validationPauseMessage(validationReport))
-		if err := i.store.Finish(runID, InvestigationSucceeded, formatValidationFinalReport(validationReport, bug, bot), ""); err != nil {
-			active.setError(err)
-			return
-		}
-		i.emitEvent(runID, InvestigationEvent{
-			At:      time.Now().UTC(),
-			Type:    "status",
-			Message: string(InvestigationSucceeded),
-		})
-		return
-	}
-	i.emitStageEvent(runID, "validation", "验证 Agent 完成，已将证据交给排障 Agent")
-
-	prompt := BuildCodexInvestigationPromptWithValidation(bug, bot, validationReport)
-	investigationCmd, parser, err := i.buildCommand(target, bot, prompt)
-	if err != nil {
-		active.setError(err)
-		_ = i.store.Finish(runID, InvestigationFailed, validationReport, err.Error())
-		i.emitEvent(runID, InvestigationEvent{
-			At:      time.Now().UTC(),
-			Type:    "status",
-			Message: string(InvestigationFailed),
-		})
-		return
-	}
-	finalMessage, finishStatus, runErr := i.runCommandStage(ctx, runID, investigationCmd, parser, active, "investigation")
-	if runErr != nil && finishStatus != InvestigationCancelled {
-		active.setError(runErr)
-	}
-	finishError := ""
-	if finishStatus != InvestigationSucceeded {
-		finishError = runErrorText(ctx, runErr)
-	}
-	if err := i.store.Finish(runID, finishStatus, finalMessage, finishError); err != nil {
-		active.setError(err)
-		return
-	}
-	i.emitEvent(runID, InvestigationEvent{
-		At:      time.Now().UTC(),
-		Type:    "status",
-		Message: string(finishStatus),
-	})
-}
-
-func validationReportReadyForInvestigation(report string) bool {
-	text := strings.TrimSpace(report)
-	if text == "" {
-		return false
-	}
-	lower := strings.ToLower(text)
-	if strings.Contains(lower, "insufficient_info") {
-		return false
-	}
-	gapsPresent, gapsEmpty := validationGapsState(text)
-	if !gapsPresent || !gapsEmpty {
-		return false
-	}
-	// Flow control is allowlist-based: validation must emit a structured terminal
-	// status and explicitly empty blocking gaps before investigation can start.
-	status := validationStatus(text)
-	switch status {
-	case "reproduced", "still_reproduces":
-		return true
-	default:
-		return false
-	}
-}
-
-func validationPauseMessage(report string) string {
-	switch validationStatus(report) {
-	case "not_reproduced":
-		return "验证 Agent 未复现原始 Bug，已暂停进入排障 Agent"
-	case "fixed_verified":
-		return "验证 Agent 确认修复已通过，已暂停进入排障 Agent"
-	case "insufficient_info":
-		return "验证 Agent 信息不足，已暂停进入排障 Agent"
-	default:
-		return "验证 Agent 尚未给出可进入排障的复现结论，已暂停进入排障 Agent"
-	}
-}
-
-func formatValidationFinalReport(report string, bug Bug, bot BotRef) string {
-	report = strings.TrimSpace(strings.ReplaceAll(report, `\n`, "\n"))
-	if report == "" {
-		return ""
-	}
-	if strings.Contains(report, "验证报告 |") {
-		return report
-	}
-	status := validationStatus(report)
-	statusLabel := validationStatusLabel(status)
-	env := normalizeValidationReportEnv(yamlScalar(report, "environment"), bug, bot)
-	frontendURL := firstNonEmpty(yamlNestedScalar(report, "entry", "frontend_url"), "-")
-	apiURL := firstNonEmpty(yamlNestedScalar(report, "entry", "api_url"), "-")
-	observed := firstNonEmpty(yamlScalar(report, "observed_behavior"), "-")
-	expected := firstNonEmpty(yamlScalar(report, "expected_behavior"), "-")
-	evidenceSummary := firstNonEmpty(yamlNestedScalar(report, "handoff_to_troubleshooter", "evidence_summary"), "-")
-	gaps := yamlBlockSummary(report, "gaps")
-	if gaps == "" {
-		gaps = "[]"
-	}
-
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "### 验证报告 | %s | %s\n\n", env, statusLabel)
-	fmt.Fprintf(&sb, "- 结论: %s\n", validationConclusion(status))
-	fmt.Fprintf(&sb, "- 入口: frontend=%s; api=%s\n", frontendURL, apiURL)
-	fmt.Fprintf(&sb, "- 实际现象: %s\n", observed)
-	fmt.Fprintf(&sb, "- 期望表现: %s\n", expected)
-	fmt.Fprintf(&sb, "- 关键证据: %s\n", evidenceSummary)
-	fmt.Fprintf(&sb, "- 需补信息: %s\n\n", gaps)
-	sb.WriteString("#### 原始结构化结果\n\n")
-	sb.WriteString("```yaml\n")
-	sb.WriteString(report)
-	sb.WriteString("\n```\n")
-	return sb.String()
-}
-
-func normalizeValidationReportEnv(env string, bug Bug, bot BotRef) string {
-	env = strings.TrimSpace(strings.Trim(env, "`\"'"))
-	fallback := firstNonEmpty(effectiveBugEnv(bug, bot), "-")
-	if env == "" || env == "-" {
-		return fallback
-	}
-	lower := strings.ToLower(env)
-	if strings.Contains(lower, "bug env") || strings.Contains(lower, "bot env") {
-		bugEnv := fieldFromLooseEnvLabel(env, "bug env")
-		botEnv := fieldFromLooseEnvLabel(env, "bot env")
-		return firstNonEmpty(nonDash(bugEnv), nonDash(botEnv), fallback)
-	}
-	return env
-}
-
-func fieldFromLooseEnvLabel(text, key string) string {
-	lower := strings.ToLower(text)
-	key = strings.ToLower(key)
-	idx := strings.Index(lower, key)
-	if idx < 0 {
-		return ""
-	}
-	rest := strings.TrimSpace(text[idx+len(key):])
-	rest = strings.TrimLeft(rest, " :=：")
-	for _, sep := range []string{",", "，", "|", ";", "；"} {
-		if cut := strings.Index(rest, sep); cut >= 0 {
-			rest = rest[:cut]
-		}
-	}
-	return strings.TrimSpace(rest)
-}
-
-func nonDash(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" || value == "-" {
-		return ""
-	}
-	return value
-}
-
-func validationStatusLabel(status string) string {
-	switch status {
-	case "reproduced":
-		return "已复现"
-	case "not_reproduced":
-		return "未复现"
-	case "insufficient_info":
-		return "信息不足"
-	case "fixed_verified":
-		return "修复已验证"
-	case "still_reproduces":
-		return "修复后仍复现"
-	default:
-		return "结论不完整"
-	}
-}
-
-func validationConclusion(status string) string {
-	switch status {
-	case "reproduced":
-		return "已复现原始 Bug，可以进入排障 Agent。"
-	case "not_reproduced":
-		return "未复现原始 Bug，已暂停进入排障 Agent。"
-	case "insufficient_info":
-		return "验证所需信息不足，用户补充后应继续验证。"
-	case "fixed_verified":
-		return "修复验证通过，已暂停进入排障 Agent。"
-	case "still_reproduces":
-		return "修复后仍可复现，需要进入排障 Agent。"
-	default:
-		return "验证 Agent 未输出可进入排障的完整结构化结论。"
-	}
 }
 
 func formatFixFinalReport(report string) string {
@@ -1064,7 +1127,7 @@ func fixStatusLabel(status string) string {
 func fixConclusion(status string) string {
 	switch strings.TrimSpace(status) {
 	case "fixed_pushed":
-		return "修复分支已生成、提交并推送，等待部署后回归验证。"
+		return "修复分支已生成、提交并推送，等待独立合并授权与人工验收。"
 	case "blocked":
 		return "修复 Agent 遇到阻塞，用户补充信息后可继续修复。"
 	case "failed":
@@ -1086,14 +1149,6 @@ func yamlScalar(report, key string) string {
 		return strings.Trim(value, "`\"'")
 	}
 	return ""
-}
-
-func yamlNestedScalar(report, parent, key string) string {
-	block := yamlRawBlock(report, parent)
-	if block == "" {
-		return ""
-	}
-	return yamlScalar(block, key)
 }
 
 func yamlBlockSummary(report, key string) string {
@@ -1147,43 +1202,6 @@ func yamlRawBlock(report, key string) string {
 	return ""
 }
 
-func validationGapsState(report string) (bool, bool) {
-	report = strings.ReplaceAll(report, `\n`, "\n")
-	lines := strings.Split(report, "\n")
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		lower := strings.ToLower(trimmed)
-		if !strings.HasPrefix(lower, "gaps") {
-			continue
-		}
-		_, value, ok := strings.Cut(trimmed, ":")
-		if !ok {
-			return true, false
-		}
-		value = strings.TrimSpace(value)
-		if value == "[]" || strings.EqualFold(value, "null") {
-			return true, true
-		}
-		if value != "" {
-			return true, false
-		}
-		for _, next := range lines[i+1:] {
-			nextTrimmed := strings.TrimSpace(next)
-			if nextTrimmed == "" {
-				continue
-			}
-			if isTopLevelYAMLKey(next) {
-				break
-			}
-			if nextTrimmed != "[]" {
-				return true, false
-			}
-		}
-		return true, true
-	}
-	return false, false
-}
-
 func isTopLevelYAMLKey(line string) bool {
 	if strings.TrimSpace(line) == "" {
 		return false
@@ -1197,26 +1215,6 @@ func isTopLevelYAMLKey(line string) bool {
 	}
 	key = strings.TrimSpace(key)
 	return key != ""
-}
-
-func validationStatus(report string) string {
-	report = strings.ReplaceAll(report, `\n`, "\n")
-	for _, line := range strings.Split(report, "\n") {
-		line = strings.TrimSpace(strings.ToLower(line))
-		if !strings.HasPrefix(line, "verification_status") {
-			continue
-		}
-		_, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		value = strings.TrimSpace(value)
-		if idx := strings.IndexAny(value, " \t,;|"); idx >= 0 {
-			value = value[:idx]
-		}
-		return strings.Trim(value, "`\"'")
-	}
-	return ""
 }
 
 func (i *CodexInvestigator) buildCommand(target string, bot BotRef, prompt string) (*exec.Cmd, investigationEventParser, error) {
@@ -1236,6 +1234,100 @@ func (i *CodexInvestigator) ExecutePhase(parent context.Context, attemptID strin
 	if err != nil {
 		return PhaseExecutionResult{}, err
 	}
+	if err := applyPhaseStagingEnvironment(cmd, prompt); err != nil {
+		return PhaseExecutionResult{}, err
+	}
+	return i.executePreparedPhase(parent, attemptID, cmd, parser, emit)
+}
+
+func applyPhaseStagingEnvironment(cmd *exec.Cmd, prompt string) error {
+	staging := codexStagingPathFromPrompt(prompt)
+	if staging == "" {
+		return nil
+	}
+	if !filepath.IsAbs(staging) {
+		return errors.New("studio evidence staging path must be absolute")
+	}
+	info, err := os.Stat(staging)
+	if err != nil || !info.IsDir() {
+		return errors.New("studio evidence staging directory is unavailable")
+	}
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = setProcessEnv(cmd.Env, "STUDIO_EVIDENCE_STAGING_DIR", staging)
+	return nil
+}
+
+// ExecutePhaseWithAttachments transports trusted host evidence through the
+// target-specific mechanism: Codex receives --image, Claude receives a
+// its configured workspace so its Read tool can load the rendered PNG.
+func (i *CodexInvestigator) ExecutePhaseWithAttachments(parent context.Context, attemptID string, bot BotRef, prompt string, attachments []PhaseAttachment, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
+	if i == nil {
+		return PhaseExecutionResult{}, errors.New("agent executor is required")
+	}
+	validated, err := validatePhaseAttachments(attachments)
+	if err != nil {
+		return PhaseExecutionResult{}, err
+	}
+	target := strings.TrimSpace(bot.Target)
+	paths := make([]string, 0, len(validated))
+	for _, attachment := range validated {
+		paths = append(paths, attachment.Path)
+	}
+	var cmd *exec.Cmd
+	var parser investigationEventParser
+	cleanup := func() error { return nil }
+	i.mu.Lock()
+	codexBin := firstNonEmpty(i.binaries["codex"], i.codexBin, "codex")
+	claudeBin := firstNonEmpty(i.binaries["claude-code"], "claude")
+	cursorBin := i.binaries["cursor"]
+	openCodeBin := i.binaries["opencode"]
+	i.mu.Unlock()
+	switch target {
+	case "opencode":
+		cmd, err = BuildOpenCodeInvestigationCommand(openCodeBin, bot, prompt+phaseAttachmentPrompt(nil), paths)
+		parser = newOpenCodeStreamJSONParser()
+	case "cursor":
+		cmd, err = BuildCursorInvestigationCommand(cursorBin, bot.Path, prompt+phaseAttachmentPrompt(paths))
+		parser = newCursorStreamJSONParser()
+	case "codex":
+		cmd, err = buildCodexBotExecCommand(codexBin, bot, prompt+phaseAttachmentPrompt(nil), paths)
+		parser = newCodexStreamJSONParser()
+	case "claude-code":
+		directories := make([]string, 0, len(paths))
+		for _, path := range paths {
+			directories = append(directories, filepath.Dir(path))
+		}
+		cmd, err = buildClaudeInvestigationCommand(claudeBin, claudeWorkspace(bot.Path), bot.Path, prompt+phaseAttachmentPrompt(paths), directories)
+		parser = ParseClaudeStreamJSONEvent
+	default:
+		return PhaseExecutionResult{}, fmt.Errorf("暂不支持 %s 后台直启", firstNonEmpty(target, "unknown"))
+	}
+	if err != nil {
+		_ = cleanup()
+		return PhaseExecutionResult{}, err
+	}
+	if err := applyPhaseStagingEnvironment(cmd, prompt); err != nil {
+		_ = cleanup()
+		return PhaseExecutionResult{}, err
+	}
+	result, executeErr := i.executePreparedPhase(parent, attemptID, cmd, parser, emit)
+	cleanupErr := cleanup()
+	if cleanupErr != nil {
+		return PhaseExecutionResult{}, cleanupErr
+	}
+	attachmentTokens := make([]PhaseAttachment, 0, len(paths))
+	for _, path := range paths {
+		attachmentTokens = append(attachmentTokens, PhaseAttachment{Path: path})
+	}
+	if phaseResultContainsAttachmentPath(result.FinalYAML, attachmentTokens) {
+		return PhaseExecutionResult{}, errPhaseAttachmentPathEcho
+	}
+	return result, executeErr
+}
+
+func (i *CodexInvestigator) executePreparedPhase(parent context.Context, attemptID string, cmd *exec.Cmd, parser investigationEventParser, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
 	ctx, cancel := context.WithCancel(parent)
 	active := &activeCodexRun{cancel: cancel, done: make(chan struct{})}
 	i.mu.Lock()
@@ -1268,6 +1360,10 @@ func (i *CodexInvestigator) CancelPhase(ctx context.Context, attemptID string) e
 func executePhaseCommand(ctx context.Context, command *exec.Cmd, parser investigationEventParser, active *activeCodexRun, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
 	cmd := exec.CommandContext(ctx, command.Path, command.Args[1:]...)
 	cmd.Dir = command.Dir
+	cmd.Stdin = command.Stdin
+	if command.Env != nil {
+		cmd.Env = append([]string{}, command.Env...)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return PhaseExecutionResult{}, err
@@ -1291,7 +1387,8 @@ func executePhaseCommand(ctx context.Context, command *exec.Cmd, parser investig
 		stderrDone <- strings.TrimSpace(string(data))
 	}()
 	var result PhaseExecutionResult
-	var failure string
+	var terminalFailure string
+	var recoverableFailure string
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
@@ -1310,31 +1407,52 @@ func executePhaseCommand(ctx context.Context, command *exec.Cmd, parser investig
 		if strings.TrimSpace(final) != "" {
 			result.FinalYAML = final
 		}
-		if strings.TrimSpace(failed) != "" {
-			failure = failed
-		}
+		updateAgentCommandFailure(event, failed, strings.TrimSpace(result.FinalYAML) != "", &terminalFailure, &recoverableFailure)
 	}
-	if err := scanner.Err(); err != nil && failure == "" {
-		failure = err.Error()
+	if err := scanner.Err(); err != nil && terminalFailure == "" {
+		terminalFailure = err.Error()
 	}
 	waitErr := cmd.Wait()
 	active.setProcess(nil)
 	stderrText := <-stderrDone
+
 	result.Usage.Duration = time.Since(started)
 	switch {
 	case ctx.Err() != nil:
 		return result, ctx.Err()
-	case failure != "":
-		return result, errors.New(failure)
+	case terminalFailure != "":
+		return result, errors.New(terminalFailure)
+	case recoverableFailure != "":
+		return result, errors.New(recoverableFailure)
 	case waitErr != nil:
 		if stderrText == "" {
 			stderrText = waitErr.Error()
 		}
 		return result, errors.New(stderrText)
 	case strings.TrimSpace(result.FinalYAML) == "":
-		return result, errors.New("agent returned no final structured result")
+		return result, missingAgentResultError(stderrText)
 	default:
 		return result, nil
+	}
+}
+
+// updateAgentCommandFailure keeps top-level stream errors provisional until the
+// same command emits a terminal success with a final result. Codex emits these
+// errors while reconnecting or falling back from WebSockets to HTTPS, so
+// treating the first one as irrevocable discards a later valid turn.completed.
+// Explicit terminal failures remain fatal even if malformed output follows.
+func updateAgentCommandFailure(event InvestigationEvent, failed string, hasFinal bool, terminalFailure, recoverableFailure *string) {
+	failed = strings.TrimSpace(failed)
+	if failed != "" {
+		switch event.Type {
+		case "turn_failed", "result":
+			*terminalFailure = failed
+		default:
+			*recoverableFailure = failed
+		}
+	}
+	if *terminalFailure == "" && hasFinal && (event.Type == "turn_completed" || event.Type == "result") {
+		*recoverableFailure = ""
 	}
 }
 
@@ -1437,7 +1555,8 @@ func (i *CodexInvestigator) runCommandStage(ctx context.Context, runID string, c
 	}()
 
 	var finalMessage string
-	var failure string
+	var terminalFailure string
+	var recoverableFailure string
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
@@ -1466,42 +1585,55 @@ func (i *CodexInvestigator) runCommandStage(ctx context.Context, runID string, c
 		if strings.TrimSpace(final) != "" {
 			finalMessage = final
 		}
-		if strings.TrimSpace(failed) != "" {
-			failure = failed
-		}
+		updateAgentCommandFailure(event, failed, strings.TrimSpace(finalMessage) != "", &terminalFailure, &recoverableFailure)
 	}
-	if err := scanner.Err(); err != nil && failure == "" {
-		failure = err.Error()
+	if err := scanner.Err(); err != nil && terminalFailure == "" {
+		terminalFailure = err.Error()
 	}
 
 	waitErr := cmd.Wait()
 	active.setProcess(nil)
 	stderrText := <-stderrDone
+
 	switch {
 	case ctx.Err() != nil:
 		return finalMessage, InvestigationCancelled, ctx.Err()
-	case strings.TrimSpace(failure) != "":
-		return finalMessage, InvestigationFailed, errors.New(failure)
+	case strings.TrimSpace(terminalFailure) != "":
+		return finalMessage, InvestigationFailed, errors.New(terminalFailure)
+	case strings.TrimSpace(recoverableFailure) != "":
+		return finalMessage, InvestigationFailed, errors.New(recoverableFailure)
 	case waitErr != nil:
 		errorText := strings.TrimSpace(stderrText)
 		if errorText == "" {
 			errorText = waitErr.Error()
 		}
 		return finalMessage, InvestigationFailed, errors.New(errorText)
+	case strings.TrimSpace(finalMessage) == "":
+		return finalMessage, InvestigationFailed, missingAgentResultError(stderrText)
 	default:
 		return finalMessage, InvestigationSucceeded, nil
 	}
 }
 
 func normalizePhaseEvent(event *InvestigationEvent, phase string) {
-	if event == nil || phase != "validation" {
+	if event == nil {
+		return
+	}
+	labels := map[string][2]string{
+		"validation":    {"开始验证", "验证完成"},
+		"investigation": {"开始排障", "排障完成"},
+		"fix":           {"开始修复", "修复完成"},
+		"regression":    {"开始回归", "回归完成"},
+	}
+	label, ok := labels[phase]
+	if !ok {
 		return
 	}
 	switch event.Type {
 	case "turn_started":
-		event.Message = "开始验证"
+		event.Message = label[0]
 	case "turn_completed":
-		event.Message = "验证完成"
+		event.Message = label[1]
 	}
 }
 
@@ -1604,10 +1736,13 @@ func claudeAgentName(path string) string {
 	return strings.TrimSuffix(base, ext)
 }
 
-func openClawAgentID(bot BotRef) string {
-	if strings.TrimSpace(bot.AgentID) != "" {
-		return strings.TrimSpace(bot.AgentID)
+func missingAgentResultError(stderr string) error {
+	message := "agent returned no final structured result"
+	if stderr = strings.TrimSpace(stderr); stderr != "" && !containsSensitiveData([]byte(stderr)) && !resetURLUserinfoPattern.MatchString(stderr) {
+		if len(stderr) > 2000 {
+			stderr = stderr[:2000]
+		}
+		message += ": " + stderr
 	}
-	pathBase := strings.TrimSuffix(filepath.Base(strings.TrimSpace(bot.Path)), filepath.Ext(strings.TrimSpace(bot.Path)))
-	return firstNonEmpty(pathBase, bot.SystemID, bot.Name)
+	return errors.New(message)
 }

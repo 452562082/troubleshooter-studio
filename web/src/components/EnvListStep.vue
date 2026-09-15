@@ -9,8 +9,11 @@ interface EnvItem {
   id: string
   api_domain: string
   web_domain: string
+  frontend_entries: Array<{
+    id: string; name: string; url: string; repo: string; device_profile: string
+    aliases: string; product_hints: string; module_hints: string; path_prefixes: string
+  }>
   is_prod: boolean
-  deployment_verification?: import('../lib/yamlGenerator').DeploymentVerificationState
 }
 
 defineProps<{
@@ -29,22 +32,26 @@ defineEmits<{
 
 <template>
   <div class="card lg">
-    <h2>环境列表</h2>
+    <h2>在哪个环境排障？</h2>
     <p class="help-text">
-      填业务系统的运行环境(如 dev / test / prod),每个环境填后端 API 域名,可选填前端 Web 域名。建议带上 http/https 前缀。
+      先配置一个常用环境；日志和服务运行状态可以在下一阶段按需连接。
     </p>
     <EnvListItem
       v-for="(env, i) in environments"
       :key="i"
       :env="env"
       :api-probe="urlProbeResults[urlProbeKey(i, 'api')]"
-      :web-probe="urlProbeResults[urlProbeKey(i, 'web')]"
       :has-id-error="hasError(`env.${i}.id`)"
       :has-api-error="hasError(`env.${i}.api_domain`)"
+      :has-entry-error="(entryIndex, field) => hasError(`env.${i}.frontend.${entryIndex}.${field}`)"
       :disable-remove="environments.length <= 1"
       @probe="(kind, url) => $emit('probe', i, kind, url)"
       @remove="$emit('remove', i)"
     />
-    <button class="btn" @click="$emit('add')">+ 添加环境</button>
+    <button class="btn add-environment-button" type="button" @click="$emit('add')">+ 添加环境</button>
   </div>
 </template>
+
+<style scoped>
+.add-environment-button { margin-top: 2px; }
+</style>

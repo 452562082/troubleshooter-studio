@@ -4,356 +4,91 @@
 
 # troubleshooter-studio
 
-AI 排障机器人工作台。用 `troubleshooter.yaml` 描述一个微服务系统，生成可安装到 OpenClaw、Claude Code、Cursor、Codex CLI 的排障机器人。
+AI 排障机器人工作台。从代码仓库和运行环境创建机器人，用 Bug 工单驱动排障、修复和提交。
 
-## 项目模型
-
-| 层级 | 说明 |
-|---|---|
-| 本仓库 | 研制环境：CLI、桌面 app、HTTP server 三入口共享 `internal/`，负责建模、扫描、校验、生成、部署 |
-| 产出物 | 独立运行的排障机器人：skills、MCP、路由表、故障话术，安装后脱离 studio 使用 |
-
-## 故障闭环工作台
-
-桌面工作台用一个持久化 Case 串联六个阶段：验证、排障、修复、合并、人工部署、回归。阶段状态、证据、授权、代码提交、部署观察和回归结果写入本地 SQLite；Studio 重启后从同一 Case 继续，不再根据 Agent 最终文本猜测进度。
-
-流程有两个彼此独立的用户授权点：根因和证据达到修复门槛后，用户先批准启动修复；修复分支完成并推送后，用户再批准把指定 commit 合并并推送到环境分支。授权绑定 Case 版本、仓库、commit、目标分支和目标分支 HEAD，任一范围变化都要重新确认。
-
-Studio 不执行应用部署。环境分支推送后，Case 保持在“等待部署”，由人工部署并点击“已部署，开始验证”或发送明确的“已部署”通知。通知只启动只读版本校验：`manual`、`http` 或 `k8s` verifier 必须证明每个仓库的目标 merge commit 已在指定环境运行，版本不匹配或少一个仓库都不会启动回归。
-
-HTTP verifier 默认拒绝 loopback、内网、link-local 和云 metadata 地址，并在每次连接时重新校验 DNS 结果；确需访问该环境专用内网版本接口时，在对应环境的 `deployment_verification.http` 显式设置 `allow_private: true`。该开关只放行配置 URL 的精确 host，云 metadata 仍永久禁止，也不会使用系统 HTTP 代理。
-
-回归复用首次验证使用的验证 Agent，但使用独立的 `regression` attempt 和本轮新证据。验证通过后 Case 进入 `fixed_verified`；仍复现时保留本轮部署版本和证据，cycle 加一后回到排障阶段。旧 `runs.json` 只导入为只读 `legacy_archived` Case，用户明确“从新一轮验证继续”时才创建新的活动 Case。
-
-完整状态和证据规则见 [排障链路](docs/troubleshooting-flow.md#studio-故障闭环状态机)。
-
-## 从哪里开始
-
-| 目标 | 入口 |
-|---|---|
-| 第一次跑通 | [下载与安装](#下载与安装) → [入口](#入口) → [部署目标](#部署目标) |
-| 看机器人能力 | [机器人能力](#机器人能力) → [排障链路](docs/troubleshooting-flow.md) |
-| 建模新系统 | [适配范围](#适配范围) → [Monorepo / Umbrella](#monorepo--umbrella) → [示例](examples/shop-troubleshooter.yaml) |
-| 维护代码 | [贡献指南](CONTRIBUTING.md) → [决策记录](docs/decisions.md) |
-| 配 CI / 发版 | [CI / Release](docs/CI-RELEASE.md) |
-
-## 入口
-
-| 入口 | 用途 |
-|---|---|
-| 桌面 app | 推荐给个人使用；覆盖建模、扫描、部署、已装管理、工作目录浏览 |
-| CLI `tshoot` | 推荐给脚本、SSH、CI；覆盖 yaml 计算和 4 平台安装 |
-| HTTP server `tshoot serve` | 推荐给浏览器调试和轻量 Web UI；提供校验、计划、生成、doctor、schema API；代码扫描/安装等本机原生能力仍用桌面 app 或 CLI |
-
-## 部署目标
-
-`generation.targets` 决定安装到哪些平台。
-
-| 平台 | 部署位置 | 使用方式 | MCP 配置 |
-|---|---|---|---|
-| OpenClaw | `~/.openclaw/workspace/<name>/` | 客户端 agent 列表选择，安装后需重启客户端 | `~/.openclaw/openclaw.json` |
-| Claude Code | `~/.claude/agents/<name>.md` + `~/.claude/skills/<name>/` | 项目内 `@<name>` 调 subagent | `~/.claude.json` |
-| Cursor | `~/.cursor/agents/<name>.md` + `~/.cursor/skills/<name>/` | AI 侧栏选 Custom Agent，MCP 需在 Settings 启用 | `~/.cursor/mcp.json` |
-| Codex CLI | `~/.codex/agents/<name>.toml` + `~/.codex/skills/<name>/` | 在 `codex` 中用自然语言派生 subagent | agent toml 内联 `[mcp_servers.*]` |
-
-凭据位置：
-
-- OpenClaw：`~/.openclaw/<id>-creds.json`
-- Claude Code / Cursor / Codex：`~/.tshoot/<id>-creds.json`
-
-Codex 需要网络访问时，安装流程会自动 patch `~/.codex/config.toml` 的 `[sandbox_workspace_write].network_access` 并备份原文件。
+支持 **Claude Code、Cursor、Codex CLI、OpenCode**。每个机器人包含排障和修复两个 Agent，可在对应平台独立使用；桌面工作台提供工单管理、授权和故障闭环。
 
 ## 下载与安装
 
-### 可选代码图谱（CodeGraph）
-
-需要在故障期获得符号、调用链和影响面证据时，可显式开启：
-
-```yaml
-code_intelligence:
-  enabled: true
-  provider: codegraph
-```
-
-CodeGraph 首次安装约占 200 MB+，每个仓库在本地生成 `.codegraph/` 索引；索引不上传，遥测已关闭。安装使用固定 v1.3.1 及逐平台 SHA256 校验，并注册一个共享 MCP，通过显式 `projectPath` 查询；不会自动 checkout 或创建 worktree。分支不一致时图谱证据置信度低，机器人会回落 `rg`/`read` 路径。卸载默认保留索引，便于重新启用；需要释放空间时可手动删除 `.codegraph/`。
-
-### 跨仓库服务拓扑
-
-配置了至少两个有本地路径的可运行服务仓库后，部署或重新生成机器人时会扫描 HTTP/HTTPS、Feign 和 gRPC 端点，按“调用端点 → 接收端点”建立跨仓库候选关系。桌面工作台会展示端点位置、匹配理由和冲突，供用户确认、拒绝、改目标或手工补边；人工决定写回 `troubleshooter.yaml` 的 `service_topology.overrides`，它是需要评审和版本管理的真源，自动扫描结果则可随代码重建。
-
-状态含义：
-
-- `automatic`：证据超过确定性门槛，进入正式服务图。
-- `confirmed` / `manual`：人工确认或补录，优先于自动结果，进入正式服务图。
-- `candidate`：证据不足，只在工作台和证据文件展示，不参与自动导航。
-- `rejected` / `stale`：已拒绝，或人工决定找不到当前端点证据，需要复查，不参与正式服务图。
-
-生成物中的 `service-topology-query` 最多沿正式服务图向下游走三跳，并返回每条边的源码位置和确定性理由；运行时 trace 能确定真实链路时仍以 trace 为准。定位到具体仓库和入口端点后，如果启用了 CodeGraph，机器人再把 `projectPath` 和端点位置交给 CodeGraph 做仓库内符号、调用链和影响面分析；CodeGraph 不负责猜跨仓库边，索引不可用时继续回落 `routing`、`rg` 和文件读取。
-
-示例：
-
-```yaml
-service_topology:
-  overrides:
-    - action: confirm
-      from_service: mall-bff
-      to_service: mall-order
-      protocol: http
-      method: POST
-      path: /internal/orders
-```
-
-Release 同步发布到 GitHub 和 GitLab，任选一个源。
-
-### 桌面 app，macOS 推荐安装
+macOS 推荐桌面版，可从 [GitHub Releases](https://github.com/452562082/troubleshooter-studio/releases) 下载，也可使用安装脚本：
 
 ```bash
-# GitLab 源，最新版
-curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
-
-# 私有 GitLab 项目
-export GITLAB_TOKEN=glpat-xxx
-curl -fsSL -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
-  https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
-
-# GitHub 源
 curl -fsSL https://raw.githubusercontent.com/452562082/troubleshooter-studio/main/scripts/install.sh | SOURCE=github bash
-
-# 指定版本
-curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | VERSION=v0.9.23 bash
-curl -fsSL https://raw.githubusercontent.com/452562082/troubleshooter-studio/main/scripts/install.sh | SOURCE=github VERSION=v0.9.23 bash
 ```
 
-脚本会下载 dmg、安装到 `/Applications/`、清理 quarantine 并启动应用。Release 页：
-
-- [GitHub Releases](https://github.com/452562082/troubleshooter-studio/releases)
-- [GitLab Releases](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases)
-
-如果公开 GitLab 源仍提示拿不到 release 列表，先检查本机是否残留无效 token：
+脚本安装到 `/Applications` 并启动应用。指定版本时给右侧 `bash` 设置 `VERSION=vX.Y.Z`。桌面包未签名/公证；手动下载后若提示“已损坏”，确认文件来自上述发布源后可执行：
 
 ```bash
-env | grep GITLAB_TOKEN
-unset GITLAB_TOKEN    # 公开项目可直接匿名访问
+xattr -dr com.apple.quarantine /Applications/TroubleshooterStudio.app
 ```
 
-### 桌面 app，手动安装 dmg
+Linux、Windows 使用发布页中的对应 CLI 二进制。Release 安装的是已发布版本；体验尚未发布的 `test` 分支改动请从源码构建。
 
-1. 下载 `TroubleshooterStudio-vX.Y.Z.dmg.zip`
-2. 用 macOS 自带 Archive Utility 解压
-3. 打开 `.dmg`，把 `.app` 拖到 `Applications`
-4. 首次打开若提示“已损坏”，运行 dmg 内的解锁脚本，或执行：
+## 第一次使用
+
+先安装并登录至少一个 AI 平台的 CLI，再打开桌面端“创建向导”：
+
+1. **选择项目**：选择本地仓库或填写仓库地址，检查扫描结果。项目名称自动填入，内部标识自动生成。
+2. **运行方式**：选择 AI 平台、环境和分支；可检查模型连接。
+3. **排障能力**：按需添加配置源、数据库与缓存、日志与服务状态连接。暂不需要的能力可以跳过；已添加的连接需补全并检查。
+4. **确认并创建**：核对摘要并部署，在“已装机器人”查看结果、诊断或更新机器人。
+
+接着在 **Bug 工单** 中配置工单平台、关联机器人与环境，选择工单进入 **故障闭环**：
+
+```text
+排障 → 授权修复 → 修复与工程测试 → 授权合并 → 提交 → 人工验收
+```
+
+排障输入来自工单信息、已有附件和补充说明。证据不足时可以补充后继续；代码修复与合并分别授权。提交完成不代表已部署或业务验收通过。详见[故障闭环](docs/incident-workflow.md)。
+
+## 支持的平台
+
+| 平台 | YAML target | 默认安装根目录 |
+|---|---|---|
+| Claude Code | `claude-code` | `~/.claude/` |
+| Cursor | `cursor` | `~/.cursor/` |
+| Codex CLI | `codex` | `~/.codex/` |
+| OpenCode | `opencode` | `~/.config/opencode/`，支持 `XDG_CONFIG_HOME` |
+
+Cursor 需要独立的 Agent CLI，仅安装编辑器不能执行后台排障。OpenCode 使用自己的模型账号配置，可运行 `opencode auth login`；也可通过 YAML 的 `agent.target_models.opencode` 指定 `provider/model`。
+
+机器人按名称安装到平台的 agents、skills 等目录；运行时凭据使用 `~/.tshoot/<id>-creds.json`。共享路由按当前仓库选择机器人，未绑定仓库不会自动套用其他项目。
+
+## 配置与 CLI
+
+桌面端适合完整创建与故障闭环；CLI 适合脚本化生成、安装和更新。`tshoot serve` 提供轻量 Web/API，不等同于桌面端全部能力。
 
 ```bash
-xattr -d com.apple.quarantine /Applications/TroubleshooterStudio.app
+tshoot init -o troubleshooter.yaml
+tshoot validate -i troubleshooter.yaml
+tshoot gen -i troubleshooter.yaml -o dist/bot
+tshoot install --path dist/bot-claude-code --target claude-code
 ```
 
-### CLI
+以上以 Claude Code 为例；其他平台需在 `generation.targets` 中选择目标，并使用生成命令输出的对应目录。需要凭据时，安装命令可增加 `--env-file <凭据文件>`。部署后在桌面端运行机器人诊断，确认 MCP 能启动并列出工具。
 
-下载 `tshoot-vX.Y.Z-<os>-<arch>`，Windows 版本自带 `.exe`。
+`tshoot analyze` 扫描仓库，`plan` / `diff` 预览变化，`discover` 查找机器人，`apply` 更新已安装机器人；完整参数见 `tshoot --help`。
 
-```bash
-# macOS / Linux
-chmod +x tshoot-vX.Y.Z-darwin-arm64
-sudo mv tshoot-vX.Y.Z-darwin-arm64 /usr/local/bin/tshoot
-tshoot --help
-```
-
-```powershell
-# Windows PowerShell
-Move-Item tshoot-vX.Y.Z-windows-amd64.exe C:\Users\<you>\bin\tshoot.exe
-tshoot --help
-```
+配置支持常见配置中心、数据库、缓存、消息队列及日志/指标/Trace/K8s 接入。示例见 [examples](examples/)，连接与兼容规则见[资源目录](docs/resource-catalog.md)。CodeGraph 为可选的仓库内代码查询能力，跨仓关系由服务拓扑提供；扫描无法识别的关系需人工补充。
 
 ## 从源码构建
 
-```bash
-git clone <repo> && cd troubleshooter-studio
-```
-
-桌面 app：
+使用 [go.mod](go.mod) 指定的 Go 版本和 [.nvmrc](.nvmrc) 指定的 Node 版本；macOS 桌面构建还需要 Xcode Command Line Tools。
 
 ```bash
-xcode-select --install
-brew install go node
-make desktop-app
-open dist/TroubleshooterStudio.app
+make build          # CLI：bin/tshoot
+make web            # 构建 Web 并更新内嵌资源；之后重新 make build
+make desktop-app    # macOS：dist/TroubleshooterStudio.app
 ```
 
-CLI：
+提交前使用 `make ci`，依赖准备与检查范围见[开发指南](CONTRIBUTING.md)。
 
-```bash
-make
-./bin/tshoot demo
-./bin/tshoot init -o troubleshooter.yaml
-./bin/tshoot gen -i troubleshooter.yaml -o ./out
-./bin/tshoot install --path ./out --target openclaw
-```
+## 文档
 
-Linux / Windows 当前只支持 CLI。`make wails-gen`、`make icon` 是贡献者任务。
+- [故障闭环](docs/incident-workflow.md)：工单输入、授权、提交和恢复。
+- [排障方法](docs/troubleshooting-flow.md)：取证与结论边界。
+- [资源目录](docs/resource-catalog.md)：连接、服务映射与配置兼容。
+- [开发指南](CONTRIBUTING.md) · [测试指南](docs/testing.md) · [CI 与发版](docs/CI-RELEASE.md)。
+- [架构决策](docs/decisions.md)：当前约束及其原因，历史方案通过 Git 追溯。
 
-## 适配范围
-
-<p align="center">
-  <img src="assets/architecture.svg" alt="适配架构" width="900"/>
-</p>
-
-| 类型 | 支持 |
-|---|---|
-| 服务角色 | frontend、gateway、backend、middleware、admin、mobile、common-lib、infra、docs |
-| 可观测性 | Grafana、Prometheus、Loki、Jaeger、Tempo、ELK、SkyWalking、Kuboard/K8s |
-| 数据层 | Redis、MongoDB、Elasticsearch、MySQL、Doris、PostgreSQL、Kafka、RabbitMQ、ClickHouse |
-| 配置源 | Nacos、Apollo、Consul、Kuboard(K8s ConfigMap)、One2All、环境变量 |
-| 技术栈 | Go、Java、PHP、Python、Node/React/Vue/Next.js/Nuxt |
-
-不适用：Serverless / FaaS、单体应用。
-
-## Monorepo / Umbrella
-
-子服务以 git submodule 挂在 umbrella 仓库下时，用 `parent_repo` + `parent_path` 建模：
-
-```yaml
-repos:
-  - name: platform
-    url: https://git.example.com/org/platform.git
-    role: backend
-  - name: payments
-    url: https://git.example.com/org/payments.git
-    parent_repo: platform
-    parent_path: services/payments
-    role: backend
-```
-
-工作台会按 umbrella pin 的 commit 分析子模块，避免把子模块 main HEAD 当成生产代码。
-
-## 桌面 app 页面
-
-| 页面 | 用途 |
-|---|---|
-| 首页 | 概览和下一步建议 |
-| 已装机器人 | 诊断、编辑 yaml、预演、应用、浏览目录、重新生成、卸载 |
-| 创建向导 | 10 步表单生成 `troubleshooter.yaml` 并部署 |
-| YAML 沙盒 | 校验、健康检查、生成计划、产物预览 |
-| 代码扫描 | 反推服务名、配置中心、依赖图、数据 schema |
-| 日志 | install、analyze、系统事件日志 |
-
-## CLI 子命令
-
-| 命令 | 功能 |
-|---|---|
-| `init` | 交互生成 `troubleshooter.yaml` |
-| `serve` | 启动本机轻量 HTTP API + Web UI，默认监听 `127.0.0.1:8080` |
-| `validate` | 校验 yaml |
-| `analyze` | 扫代码，抽取服务、配置中心、依赖图、schema |
-| `plan` / `diff` / `watch` | 干跑、diff、文件变化重跑 |
-| `gen` | 生成 staging 产物 |
-| `install` / `self-test` / `uninstall` | 安装、自检、卸载 |
-| `discover` | 扫本机已装机器人 |
-| `apply` | 用新 yaml 原地更新已装机器人 |
-| `upgrade` | 备份、重生成、diff |
-| `doctor` | 声明与代码实态漂移检测，支持 `--fix` |
-| `demo` | 零配置试跑 |
-| `skill new` | 新建 skill 模板 |
-
-`tshoot serve` 当前覆盖浏览器可安全完成的轻量操作：`/api/validate`、`/api/plan`、`/api/gen`、`/api/doctor`、`/api/schema` 与静态 Web UI。涉及本机文件选择、代码扫描、安装、self-test、钥匙串、OpenClaw 探测等原生能力时，请用桌面 app 或对应 CLI 子命令。
-
-典型流程：
-
-```bash
-./bin/tshoot init -o troubleshooter.yaml
-./bin/tshoot validate -i troubleshooter.yaml
-./bin/tshoot analyze -i troubleshooter.yaml --repos-root ./repos -o analysis.json
-./bin/tshoot gen -i troubleshooter.yaml --analysis analysis.json
-./bin/tshoot install --path dist/<id> --target openclaw
-```
-
-## 机器人能力
-
-生成的 skill 集合按 yaml 裁剪。真源在 [templates/workspace/skills](templates/workspace/skills)，部署后以产物 `AGENTS.md` 为准。
-
-| 能力 | skill |
-|---|---|
-| 路由 | `routing`：env 到域名、分支、配置、日志 app、MCP、依赖图、schema 的映射 |
-| 服务拓扑 | `service-topology-query`：按入口接口查询最多三跳的正式跨仓库路径和端点证据 |
-| 主流程 | `incident-investigator`：症状、时间轴、横向、纵向、多向交叉、根因、沉淀 |
-| 最近变更 | `recent-changes`：K8s rollout、配置 history、git log 聚合 |
-| 配置中心 | `config-executor`：Nacos、Apollo、Consul、Kuboard(K8s ConfigMap)、One2All、环境变量 |
-| 可观测性 | `k8s-runtime-query`、`tracing-query`、`tempo-query`、`skywalking-query`、`elk-log-query` |
-| 数据层 | `redis`、`mongodb`、`es`、`mysql`、`doris`、`postgresql`、`kafka`、`rabbitmq`、`clickhouse` runtime query |
-| 图表 | `diagram-generator`：Mermaid 转 PNG/SVG |
-
-### 排障流程
-
-生成物机器人处理“报错 / 慢 / 不通 / 突增 / 失败”类问题时，会按 7 步证据链推进：
-
-<p align="center">
-  <img src="docs/troubleshooting-journey.png" alt="7步排障旅程图" width="920"/>
-</p>
-
-完整规则见 [排障链路](docs/troubleshooting-flow.md)。
-
-Nacos 当前走自研本地 MCP：`nacos_mcp.py` 在运行时登录并刷新 token，MCP 不可用时回落 HTTP 脚本。`config_centers.endpoints[].addr` 必须填 API 端口，默认 `:8848`，不要填 dashboard/UI 端口。
-
-## Doctor 漂移检测
-
-`tshoot doctor` 检查声明与代码实态不一致：
-
-- `missing-repo`
-- `origin-mismatch`
-- `stack-mismatch`
-- `service-drift`
-- `config-center-drift`
-- `config-center-unused`
-- `data-store-unused`
-- `undeclared-env-profile`
-
-可自动修复的 issue 用 `--fix` 行级替换，并备份到 `troubleshooter.yaml.bak.<ts>`。
-
-## 常用构建命令
-
-```bash
-make                 # CLI: bin/tshoot
-make web             # 前端 dist -> internal/webui/dist/
-make desktop-app     # macOS .app
-make desktop-dmg     # 分发 dmg
-make desktop         # 桌面裸二进制
-make release         # 多平台 CLI 二进制
-make release-notes   # dry-run changelog
-make test            # go test -race -cover ./...
-make lint            # go vet + gofmt + vue-tsc
-make clean           # 清理 bin/ 和 dist/
-```
-
-发版走 CI，见 [docs/CI-RELEASE.md](docs/CI-RELEASE.md)。
-
-## 目录结构
-
-```text
-cmd/tshoot/             CLI 入口
-cmd/tshoot-desktop/     Wails 桌面 app
-api/                    HTTP handler
-web/                    Vue 3 + Vite 前端
-internal/config/        yaml schema 与校验
-internal/analyzer*/     仓库扫描与分析 pipeline
-internal/generator/     模板渲染、diff、plan、IDE agent 生成
-internal/agent/         install、self-test、uninstall、MCP、creds
-internal/doctor/        漂移检测
-internal/upgrade/       备份、重生成、diff
-internal/cchub/         配置中心客户端
-internal/dsprobe/       数据层连通性探测
-internal/labelprobe/    Loki label 探测
-internal/openclaw/      OpenClaw 探测
-internal/aitools/       Claude Code / Cursor / Codex 探测
-internal/mcpcfg/        MCP 配置生成
-internal/skillscaffold/ skill 脚手架
-templates/              机器人 workspace 模板
-examples/               示例 yaml 与 fake repos
-schema/                 troubleshooter schema
-```
-
-## 已知限制
-
-- macOS 桌面 app 未签名/公证，首次打开需清 quarantine。
-- 代码扫描依赖模式识别，配置驱动、注解驱动、自定义包装层重的项目需要手补。
-- downstream 识别覆盖 HTTP、gRPC、服务发现工厂、Java `@FeignClient`、Python `requests/httpx`；配置文件驱动 RPC 需要手补。
-- schema 识别覆盖主流 ORM；裸 SQL、冷门 ORM、自定义命名约定需要手补。
-- 识别精度参考：Go 70-80%，Java 60-70%，Python 60%，Node 50%。
+Apache-2.0，详见 [LICENSE](LICENSE)。

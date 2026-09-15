@@ -91,10 +91,6 @@ func (i FixInspection) Clone() FixInspection {
 	return cloned
 }
 
-type DeploymentVerifier interface {
-	Verify(context.Context, DeploymentVerificationRequest) (DeploymentObservation, error)
-}
-
 // RecoveryContextResolver reloads the full persisted Bug/Bot execution
 // context before a recovered or automatically-created phase is scheduled.
 // In particular, Bot.Path must point at the installed workspace; reconstructing
@@ -130,15 +126,17 @@ func (r MergeRequest) Clone() MergeRequest {
 }
 
 type MergeResult struct {
-	Pushed       bool                             `json:"pushed"`
-	Conflict     bool                             `json:"conflict"`
-	MergeCommits map[string]string                `json:"merge_commits"`
-	Repositories map[string]MergeRepositoryResult `json:"repositories,omitempty"`
-	ErrorMessage string                           `json:"error_message,omitempty"`
+	Pushed               bool                             `json:"pushed"`
+	Conflict             bool                             `json:"conflict"`
+	MergeCommits         map[string]string                `json:"merge_commits"`
+	BaselineMergeCommits map[string]string                `json:"baseline_merge_commits,omitempty"`
+	Repositories         map[string]MergeRepositoryResult `json:"repositories,omitempty"`
+	ErrorMessage         string                           `json:"error_message,omitempty"`
 }
 
 func (r MergeResult) Clone() MergeResult {
 	r.MergeCommits = CloneStringMap(r.MergeCommits)
+	r.BaselineMergeCommits = CloneStringMap(r.BaselineMergeCommits)
 	if r.Repositories != nil {
 		cloned := make(map[string]MergeRepositoryResult, len(r.Repositories))
 		for repo, result := range r.Repositories {
@@ -178,39 +176,6 @@ func (i MergeInspection) Clone() MergeInspection {
 	return i
 }
 
-type DeploymentVerificationRequest struct {
-	CaseID            string            `json:"case_id"`
-	Environment       string            `json:"environment"`
-	ExpectedCommits   map[string]string `json:"expected_commits"`
-	ObservedVersion   string            `json:"observed_version,omitempty"`
-	ObservedCommits   map[string]string `json:"observed_commits,omitempty"`
-	Source            string            `json:"source"`
-	ConfigFingerprint string            `json:"config_fingerprint"`
-	ConfigSnapshot    json.RawMessage   `json:"config_snapshot"`
-}
-
-type DeploymentReservation struct {
-	ReservationID           string                        `json:"reservation_id"`
-	ReservationKey          string                        `json:"reservation_key"`
-	CallerIdempotencyKey    string                        `json:"caller_idempotency_key"`
-	ActorID                 string                        `json:"actor_id"`
-	OriginalExpectedVersion int64                         `json:"original_expected_version"`
-	CycleNumber             int                           `json:"cycle_number"`
-	Environment             string                        `json:"environment"`
-	ExpectedCommits         map[string]string             `json:"expected_commits"`
-	Bug                     Bug                           `json:"bug"`
-	Bot                     BotRef                        `json:"bot"`
-	VerifierInput           DeploymentVerificationRequest `json:"verifier_input"`
-	RegressionInputJSON     []byte                        `json:"regression_input_json"`
-}
-
-func (r DeploymentVerificationRequest) Clone() DeploymentVerificationRequest {
-	r.ExpectedCommits = CloneStringMap(r.ExpectedCommits)
-	r.ObservedCommits = CloneStringMap(r.ObservedCommits)
-	r.ConfigSnapshot = CloneRawMessage(r.ConfigSnapshot)
-	return r
-}
-
 type StartCaseCommand struct {
 	CaseID          string
 	ExpectedVersion int64
@@ -229,6 +194,8 @@ type ResetCaseCommand struct {
 	ExpectedVersion int64
 	Bug             Bug
 	Bot             BotRef
+	FrontendEntry   FrontendEntryBinding
+	FrontendEntries []FrontendEntryBinding
 	InputJSON       json.RawMessage
 }
 
@@ -258,6 +225,8 @@ type CreateAndStartCaseCommand struct {
 	ActorID         string
 	Bug             Bug
 	Bot             BotRef
+	FrontendEntry   FrontendEntryBinding
+	FrontendEntries []FrontendEntryBinding
 	InputJSON       json.RawMessage
 }
 
@@ -283,6 +252,18 @@ type ApproveFixCommand struct {
 	InputJSON          json.RawMessage
 }
 
+type CompleteRemediationCommand struct {
+	CaseID             string
+	ExpectedVersion    int64
+	IdempotencyKey     string
+	ActorID            string
+	RootCauseAttemptID string
+	Summary            string
+	Evidence           string
+	Bug                Bug
+	Bot                BotRef
+}
+
 type ApproveMergeCommand struct {
 	CaseID          string
 	ExpectedVersion int64
@@ -291,22 +272,6 @@ type ApproveMergeCommand struct {
 	FixCommits      map[string]string
 	TargetBranches  map[string]string
 	TargetHeads     map[string]string
-}
-
-type NotifyDeployedCommand struct {
-	CaseID                    string
-	ExpectedVersion           int64
-	IdempotencyKey            string
-	ActorID                   string
-	ExpectedCommits           map[string]string
-	ObservedVersion           string
-	ObservedCommits           map[string]string
-	Source                    string
-	VerifierConfigFingerprint string
-	VerifierConfigSnapshot    json.RawMessage
-	Bug                       Bug
-	Bot                       BotRef
-	InputJSON                 json.RawMessage
 }
 
 type CancelAttemptCommand struct {
@@ -320,14 +285,16 @@ type CancelAttemptCommand struct {
 type PhaseOutcome string
 
 const (
-	PhaseOutcomeReproduced      PhaseOutcome = "reproduced"
-	PhaseOutcomeNotReproduced   PhaseOutcome = "not_reproduced"
-	PhaseOutcomeNeedsEvidence   PhaseOutcome = "needs_evidence"
-	PhaseOutcomeRootCauseReady  PhaseOutcome = "root_cause_ready"
-	PhaseOutcomeFixPushed       PhaseOutcome = "fix_pushed"
-	PhaseOutcomeFixFailed       PhaseOutcome = "fix_failed"
-	PhaseOutcomeFixedVerified   PhaseOutcome = "fixed_verified"
-	PhaseOutcomeStillReproduces PhaseOutcome = "still_reproduces"
+	PhaseOutcomeReproduced                 PhaseOutcome = "reproduced"
+	PhaseOutcomeNotReproduced              PhaseOutcome = "not_reproduced"
+	PhaseOutcomeNeedsEvidence              PhaseOutcome = "needs_evidence"
+	PhaseOutcomeValidationEvidenceRequired PhaseOutcome = "validation_evidence_required"
+	PhaseOutcomeSystemFailed               PhaseOutcome = "system_failed"
+	PhaseOutcomeRootCauseReady             PhaseOutcome = "root_cause_ready"
+	PhaseOutcomeFixPushed                  PhaseOutcome = "fix_pushed"
+	PhaseOutcomeFixFailed                  PhaseOutcome = "fix_failed"
+	PhaseOutcomeFixedVerified              PhaseOutcome = "fixed_verified"
+	PhaseOutcomeStillReproduces            PhaseOutcome = "still_reproduces"
 )
 
 type CompleteAttemptCommand struct {
@@ -349,7 +316,6 @@ type CaseOrchestrator struct {
 	store            *CaseStore
 	runner           PhaseRunner
 	git              GitIntegration
-	deployment       DeploymentVerifier
 	recoveryContext  RecoveryContextResolver
 	recoveryContexts map[string]resolvedRecoveryContext
 	mu               sync.Mutex
@@ -359,8 +325,8 @@ type CaseOrchestrator struct {
 	cancelWorkers    chan struct{}
 }
 
-func NewCaseOrchestrator(store *CaseStore, runner PhaseRunner, git GitIntegration, deployment DeploymentVerifier) *CaseOrchestrator {
-	return &CaseOrchestrator{store: store, runner: runner, git: git, deployment: deployment, recoveryStarted: make(map[string]struct{}), recoveryContexts: make(map[string]resolvedRecoveryContext), scheduleTimeout: 30 * time.Second, cancelTimeout: 30 * time.Second, cancelWorkers: make(chan struct{}, cancelWorkerCapacity)}
+func NewCaseOrchestrator(store *CaseStore, runner PhaseRunner, git GitIntegration) *CaseOrchestrator {
+	return &CaseOrchestrator{store: store, runner: runner, git: git, recoveryStarted: make(map[string]struct{}), recoveryContexts: make(map[string]resolvedRecoveryContext), scheduleTimeout: 30 * time.Second, cancelTimeout: 30 * time.Second, cancelWorkers: make(chan struct{}, cancelWorkerCapacity)}
 }
 
 type resolvedRecoveryContext struct {
@@ -448,11 +414,11 @@ func (o *CaseOrchestrator) StartCase(ctx context.Context, cmd StartCaseCommand) 
 	if err != nil {
 		return IncidentCase{}, err
 	}
-	if incident.Status != CasePendingValidation {
-		return IncidentCase{}, &ErrInvalidTransition{From: incident.Status, To: CaseValidating}
+	if incident.Status != CasePendingInvestigation {
+		return IncidentCase{}, &ErrInvalidTransition{From: incident.Status, To: CaseInvestigating}
 	}
-	attempt := newAttempt(incident, PhaseValidation, AttemptReproduce, cmd.IdempotencyKey, cmd.Bot, cmd.InputJSON, "")
-	return o.beginPhase(ctx, incident, CaseValidating, attempt, cmd.Bug, cmd.Bot, cmd.IdempotencyKey, cmd.ActorID, "validation_started")
+	attempt := newAttempt(incident, PhaseInvestigation, "", cmd.IdempotencyKey, cmd.Bot, cmd.InputJSON, "")
+	return o.beginPhase(ctx, incident, CaseInvestigating, attempt, cmd.Bug, cmd.Bot, cmd.IdempotencyKey, cmd.ActorID, "investigation_started")
 }
 
 func (o *CaseOrchestrator) ResetCase(ctx context.Context, cmd ResetCaseCommand) (IncidentCase, error) {
@@ -470,8 +436,8 @@ func (o *CaseOrchestrator) ResetCaseWithOutcome(ctx context.Context, cmd ResetCa
 	if err := validateCommand(cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey, cmd.ActorID); err != nil {
 		return ResetCaseOutcome{}, err
 	}
-	if strings.TrimSpace(cmd.NewCaseID) == "" {
-		return ResetCaseOutcome{}, errors.New("replacement Case ID is required")
+	if err := validateNewWorkflowCaseID(cmd.NewCaseID); err != nil {
+		return ResetCaseOutcome{}, fmt.Errorf("replacement Case ID: %w", err)
 	}
 	if cmd.CaseID == cmd.NewCaseID {
 		return ResetCaseOutcome{}, errors.New("replacement Case ID must differ from archived Case ID")
@@ -481,6 +447,13 @@ func (o *CaseOrchestrator) ResetCaseWithOutcome(ctx context.Context, cmd ResetCa
 	}
 	if err := validateJSONObject("reset Case input", cmd.InputJSON, true); err != nil {
 		return ResetCaseOutcome{}, err
+	}
+	if !SupportsIncidentWorkflowTarget(cmd.Bot.Target) {
+		return ResetCaseOutcome{}, fmt.Errorf("unsupported incident workflow target %q", cmd.Bot.Target)
+	}
+	environment := resolveIncidentEnvironment(cmd.Bug, cmd.Bot)
+	if environment == "" {
+		return ResetCaseOutcome{}, errors.New("replacement environment is required")
 	}
 
 	release := workflowCommandLocks.acquire("reset-case:" + cmd.CaseID)
@@ -492,39 +465,26 @@ func (o *CaseOrchestrator) ResetCaseWithOutcome(ctx context.Context, cmd ResetCa
 	if incident.BugID != strings.TrimSpace(cmd.Bug.ID) {
 		return ResetCaseOutcome{}, fmt.Errorf("reset Bug %q does not match Case Bug %q", cmd.Bug.ID, incident.BugID)
 	}
-	if cmd.Bot.Key != incident.SelectedBotKey {
-		return ResetCaseOutcome{}, fmt.Errorf("reset Bot %q does not match Case Bot %q", cmd.Bot.Key, incident.SelectedBotKey)
-	}
 	if incident.Source != "" && cmd.Bug.Source != incident.Source {
 		return ResetCaseOutcome{}, fmt.Errorf("reset Bug source %q does not match Case source %q", cmd.Bug.Source, incident.Source)
 	}
 	if incident.SystemID != "" && cmd.Bug.SystemID != incident.SystemID {
 		return ResetCaseOutcome{}, fmt.Errorf("reset Bug system %q does not match Case system %q", cmd.Bug.SystemID, incident.SystemID)
 	}
-	environment := strings.TrimSpace(cmd.Bug.Env)
-	if environment == "" {
-		environment = strings.TrimSpace(cmd.Bot.Env)
-	}
-	if incident.Environment != "" && environment != incident.Environment {
-		return ResetCaseOutcome{}, fmt.Errorf("reset environment %q does not match Case environment %q", environment, incident.Environment)
-	}
-	if incident.CurrentAttemptID != "" {
-		attempt, loadErr := o.store.GetAttempt(ctx, incident.CurrentAttemptID)
-		if loadErr != nil {
-			return ResetCaseOutcome{}, loadErr
-		}
-		if attempt.BotKey != cmd.Bot.Key || attempt.AgentTarget != cmd.Bot.Target {
-			return ResetCaseOutcome{}, fmt.Errorf("reset Bot %q/%q does not match current attempt Bot %q/%q", cmd.Bot.Key, cmd.Bot.Target, attempt.BotKey, attempt.AgentTarget)
-		}
-	}
 	resetRequest := CaseReset{
-		CaseID:          cmd.CaseID,
-		NewCaseID:       cmd.NewCaseID,
-		IdempotencyKey:  cmd.IdempotencyKey,
-		ActorID:         cmd.ActorID,
-		ExpectedVersion: cmd.ExpectedVersion,
-		SelectedBotKey:  cmd.Bot.Key,
-		RequestJSON:     mustJSON(cmd),
+		CaseID:                      cmd.CaseID,
+		NewCaseID:                   cmd.NewCaseID,
+		IdempotencyKey:              cmd.IdempotencyKey,
+		ActorID:                     cmd.ActorID,
+		ExpectedVersion:             cmd.ExpectedVersion,
+		SelectedBotKey:              cmd.Bot.Key,
+		ReplacementBotTarget:        cmd.Bot.Target,
+		ReplacementSystemID:         cmd.Bug.SystemID,
+		ReplacementEnvironment:      environment,
+		ReplacementFrontendEntry:    cmd.FrontendEntry.Clone(),
+		ReplacementFrontendEntries:  cloneFrontendEntryBindings(cmd.FrontendEntries),
+		RequestJSON:                 mustJSON(cmd),
+		replayOnlyLegacyEnvironment: resolveLegacyResetEnvironment(cmd.Bug, cmd.Bot),
 	}
 	fingerprint, err := caseResetFingerprint(resetRequest)
 	if err != nil {
@@ -587,16 +547,19 @@ func (o *CaseOrchestrator) processResetRunnerCancellation(result CaseResetResult
 	if result.CancelledAttemptID == "" {
 		return nil, nil
 	}
+	if result.requestFingerprint != "" {
+		fingerprint = result.requestFingerprint
+	}
 	if o.runner == nil {
 		operation, found, err := o.store.GetResetCancellationOperation(context.Background(), resetKey, fingerprint)
 		if err != nil || !found {
-			return resetCancellationStateUnavailableWarning(), nil
+			return resetCancellationStateUnavailableWarning(), nil //nolint:nilerr // Reset is already committed; cancellation uncertainty is returned as a structured warning.
 		}
 		return warningsForResetCancellation(operation), nil
 	}
 	claimToken, err := newAttemptRunClaimToken()
 	if err != nil {
-		return resetCancellationStateUnavailableWarning(), nil
+		return resetCancellationStateUnavailableWarning(), nil //nolint:nilerr // Reset is already committed; do not invite an unsafe retry of the completed reset.
 	}
 	durable, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	operation, acquired, err := o.store.ClaimResetCancellation(durable, resetKey, fingerprint, claimToken)
@@ -618,7 +581,7 @@ func (o *CaseOrchestrator) processResetRunnerCancellation(result CaseResetResult
 	completed, err := o.store.CompleteResetCancellation(durable, resetKey, fingerprint, claimToken, completionStatus)
 	cancel()
 	if err != nil {
-		return resetCancellationUnknownWarning(), nil
+		return resetCancellationUnknownWarning(), nil //nolint:nilerr // Cancellation may have happened; report the unknown outcome without repeating it.
 	}
 	return warningsForResetCancellation(completed), nil
 }
@@ -645,7 +608,7 @@ func resetCancellationStateUnavailableWarning() []WorkflowWarning {
 }
 
 func resetReplacementStartFailedWarning() []WorkflowWarning {
-	return []WorkflowWarning{{Code: "reset_replacement_start_failed", Message: "接替 Case 的新阶段未能启动，已保留为可恢复状态；请刷新 Case 或重试开始验证。"}}
+	return []WorkflowWarning{{Code: "reset_replacement_start_failed", Message: "接替 Case 的新阶段未能启动，已保留为可恢复状态；请刷新 Case 或重试开始排障。"}}
 }
 
 func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAndStartCaseCommand) (IncidentCase, error) {
@@ -655,11 +618,17 @@ func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAnd
 	if strings.TrimSpace(cmd.CaseID) == "" || strings.TrimSpace(cmd.IdempotencyKey) == "" || strings.TrimSpace(cmd.ActorID) == "" {
 		return IncidentCase{}, errors.New("case ID, idempotency key, and actor ID are required")
 	}
+	if err := validateNewWorkflowCaseID(cmd.CaseID); err != nil {
+		return IncidentCase{}, fmt.Errorf("case ID: %w", err)
+	}
 	if cmd.ExpectedVersion < 0 {
 		return IncidentCase{}, errors.New("expected version must not be negative")
 	}
 	if strings.TrimSpace(cmd.Bug.ID) == "" || strings.TrimSpace(cmd.Bot.Key) == "" || strings.TrimSpace(cmd.Bot.Target) == "" {
 		return IncidentCase{}, errors.New("Bug ID and Bot key/target are required")
+	}
+	if strings.TrimSpace(cmd.Bug.SystemID) == "" {
+		cmd.Bug.SystemID = strings.TrimSpace(cmd.Bot.SystemID)
 	}
 	if len(cmd.InputJSON) == 0 {
 		cmd.InputJSON = []byte(`{}`)
@@ -693,11 +662,13 @@ func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAnd
 	default:
 		return o.StartCase(ctx, StartCaseCommand{CaseID: existing.ID, ExpectedVersion: cmd.ExpectedVersion, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, Bug: cmd.Bug, Bot: cmd.Bot, InputJSON: cmd.InputJSON})
 	}
-	environment := strings.TrimSpace(cmd.Bug.Env)
-	if environment == "" {
-		environment = strings.TrimSpace(cmd.Bot.Env)
+	environment := resolveIncidentEnvironment(cmd.Bug, cmd.Bot)
+	pending := IncidentCase{
+		ID: targetID, BugID: cmd.Bug.ID, Source: cmd.Bug.Source, SystemID: cmd.Bug.SystemID,
+		Environment: environment, FrontendEntry: cmd.FrontendEntry.Clone(),
+		FrontendEntries: newFrontendEntryBindings(cmd.FrontendEntries),
+		Status:          CasePendingInvestigation, CycleNumber: cycle, SelectedBotKey: cmd.Bot.Key,
 	}
-	pending := IncidentCase{ID: targetID, BugID: cmd.Bug.ID, Source: cmd.Bug.Source, SystemID: cmd.Bug.SystemID, Environment: environment, Status: CasePendingValidation, CycleNumber: cycle, SelectedBotKey: cmd.Bot.Key}
 	creation, createErr := o.store.CreateCaseWithIdentity(ctx, CaseCreation{Case: pending, IdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, RequestJSON: mustJSON(cmd)})
 	if createErr != nil {
 		return IncidentCase{}, createErr
@@ -708,129 +679,21 @@ func (o *CaseOrchestrator) CreateAndStartCase(ctx context.Context, cmd CreateAnd
 	return o.StartCase(ctx, StartCaseCommand{CaseID: creation.Case.ID, ExpectedVersion: creation.Case.Version, IdempotencyKey: cmd.IdempotencyKey + ":start", ActorID: cmd.ActorID, Bug: cmd.Bug, Bot: cmd.Bot, InputJSON: cmd.InputJSON})
 }
 
-func (o *CaseOrchestrator) ContinueWithEvidence(ctx context.Context, cmd ContinueWithEvidenceCommand) (IncidentCase, error) {
-	if err := validateCommand(cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey, cmd.ActorID); err != nil {
-		return IncidentCase{}, err
+func resolveIncidentEnvironment(bug Bug, bot BotRef) string {
+	if env := strings.TrimSpace(bot.Env); env != "" {
+		return env
 	}
-	if cmd.Phase == PhaseRegression {
-		release := workflowCommandLocks.acquire("continue-regression:" + cmd.IdempotencyKey)
-		defer release()
-		if replayed, found, replayErr := o.replayRegressionContinuation(ctx, cmd); found || replayErr != nil {
-			return replayed, replayErr
-		}
+	if env := strings.TrimSpace(bug.BotEnv); env != "" {
+		return env
 	}
-	incident, err := o.loadForCommand(ctx, cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey)
-	if err != nil {
-		return IncidentCase{}, err
-	}
-	if cmd.Phase == PhaseRegression {
-		if replayed, found, replayErr := o.replayRegressionContinuation(ctx, cmd); found || replayErr != nil {
-			return replayed, replayErr
-		}
-	}
-	if incident.Status != CaseWaitingEvidence && incident.Status != CaseNotReproduced && incident.Status != CaseFixFailed && incident.Status != CaseDeploymentUnverified && incident.Status != CaseMergeConflict {
-		return IncidentCase{}, ErrApprovalNotReady
-	}
-	if incident.Status == CaseDeploymentUnverified || incident.Status == CaseMergeConflict {
-		to, eventType := CaseWaitingDeployment, "deployment_proof_updated"
-		if incident.Status == CaseMergeConflict {
-			to, eventType = CaseWaitingMergeApproval, "merge_reinspection_confirmed"
-		}
-		evidence := CloneRawMessage(cmd.InputJSON)
-		if len(evidence) == 0 {
-			evidence = []byte(`{}`)
-		}
-		if inputErr := validateJSONObject("continuation evidence", evidence, true); inputErr != nil {
-			return IncidentCase{}, inputErr
-		}
-		payload := mustJSON(map[string]any{"evidence": evidence})
-		mutation, mutationErr := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: cmd.IdempotencyKey, RequestJSON: mustJSON(cmd), Steps: []CaseMutationStep{{To: to, Event: TransitionEvent{ID: stableID("event", cmd.IdempotencyKey), EventType: eventType, ActorType: "user", ActorID: cmd.ActorID, PayloadJSON: payload}}}})
-		if mutationErr != nil {
-			return IncidentCase{}, mutationErr
-		}
-		return mutation.Case, nil
-	}
-	to, mode, phase := continuationTarget(incident, cmd.Phase)
-	if to == "" {
-		return IncidentCase{}, fmt.Errorf("cannot continue phase %q from %s", cmd.Phase, incident.Status)
-	}
-	input := CloneRawMessage(cmd.InputJSON)
-	continuationIdentity := ""
-	if phase == PhaseRegression {
-		previous, loadErr := o.store.GetAttempt(ctx, incident.CurrentAttemptID)
-		if loadErr != nil || previous.Phase != PhaseRegression || previous.Mode != AttemptRegression || previous.CycleNumber != incident.CycleNumber || previous.BotKey != cmd.Bot.Key || previous.AgentTarget != cmd.Bot.Target {
-			return IncidentCase{}, ErrRegressionBinding
-		}
-		var regression RegressionValidationInput
-		if json.Unmarshal(previous.InputJSON, &regression) != nil || o.validatePersistedRegressionBinding(ctx, incident, regression) != nil {
-			return IncidentCase{}, ErrRegressionBinding
-		}
-		canonicalInput, inputErr := canonicalJSONObject(input)
-		if inputErr != nil {
-			return IncidentCase{}, inputErr
-		}
-		if containsSensitiveData(canonicalInput) {
-			return IncidentCase{}, errors.New("regression supplemental evidence contains sensitive data")
-		}
-		continuationIdentity, inputErr = regressionContinuationIdentityDigest(cmd)
-		if inputErr != nil {
-			return IncidentCase{}, inputErr
-		}
-		regression.SupplementalEvidence = canonicalInput
-		input = mustJSON(regression)
-	}
-	attempt := newAttempt(incident, phase, mode, cmd.IdempotencyKey, cmd.Bot, input, incident.CurrentAttemptID)
-	if phase == PhaseRegression {
-		payload := mustJSON(map[string]string{"attempt_id": attempt.ID, "continuation_identity_sha256": continuationIdentity})
-		return o.beginPhaseWithUpdateAndPayload(ctx, incident, to, attempt, cmd.Bug, cmd.Bot, cmd.IdempotencyKey, cmd.ActorID, "evidence_continued", CaseSnapshotUpdate{}, payload)
-	}
-	return o.beginPhase(ctx, incident, to, attempt, cmd.Bug, cmd.Bot, cmd.IdempotencyKey, cmd.ActorID, "evidence_continued")
+	return strings.TrimSpace(bug.Env)
 }
 
-func (o *CaseOrchestrator) replayRegressionContinuation(ctx context.Context, cmd ContinueWithEvidenceCommand) (IncidentCase, bool, error) {
-	replay, found, err := o.store.GetCommittedCaseMutation(ctx, cmd.IdempotencyKey)
-	if err != nil || !found {
-		return IncidentCase{}, found, err
+func resolveLegacyResetEnvironment(bug Bug, bot BotRef) string {
+	if env := strings.TrimSpace(bug.Env); env != "" {
+		return env
 	}
-	identityDigest, digestErr := regressionContinuationIdentityDigest(cmd)
-	if digestErr != nil {
-		return IncidentCase{}, true, ErrIdempotencyConflict
-	}
-	validEvent := replay.Event.EventType == "evidence_continued" &&
-		replay.Event.FromStatus == CaseWaitingEvidence && replay.Event.ActorID == cmd.ActorID &&
-		replay.Event.CaseID == cmd.CaseID && replay.ResultCase.Version >= 2 &&
-		cmd.ExpectedVersion == replay.ResultCase.Version-1 && cmd.Phase == PhaseRegression
-	if !validEvent {
-		return IncidentCase{}, true, ErrIdempotencyConflict
-	}
-	retry, err := o.store.GetAttempt(ctx, replay.ResultCase.CurrentAttemptID)
-	if err != nil || retry.Phase != PhaseRegression || retry.Mode != AttemptRegression || retry.CaseID != cmd.CaseID || retry.ParentAttemptID == "" || retry.ParentAttemptID == retry.ID || retry.BotKey != cmd.Bot.Key || retry.AgentTarget != cmd.Bot.Target {
-		return IncidentCase{}, true, ErrIdempotencyConflict
-	}
-	parent, err := o.store.GetAttempt(ctx, retry.ParentAttemptID)
-	if err != nil || parent.Phase != PhaseRegression || parent.Mode != AttemptRegression || parent.CaseID != cmd.CaseID || parent.CycleNumber != retry.CycleNumber {
-		return IncidentCase{}, true, ErrIdempotencyConflict
-	}
-	var regression RegressionValidationInput
-	if json.Unmarshal(parent.InputJSON, &regression) != nil {
-		return IncidentCase{}, true, ErrIdempotencyConflict
-	}
-	supplement, inputErr := canonicalJSONObject(cmd.InputJSON)
-	if inputErr != nil || containsSensitiveData(supplement) {
-		return IncidentCase{}, true, ErrIdempotencyConflict
-	}
-	regression.SupplementalEvidence = supplement
-	if !bytes.Equal(mustJSON(regression), retry.InputJSON) {
-		return IncidentCase{}, true, ErrIdempotencyConflict
-	}
-	var payload struct {
-		AttemptID                  string `json:"attempt_id"`
-		ContinuationIdentitySHA256 string `json:"continuation_identity_sha256"`
-	}
-	if json.Unmarshal(replay.Event.PayloadJSON, &payload) != nil || payload.AttemptID != retry.ID || payload.ContinuationIdentitySHA256 != identityDigest {
-		return IncidentCase{}, true, ErrIdempotencyConflict
-	}
-	return replay.ResultCase.Clone(), true, nil
+	return strings.TrimSpace(bot.Env)
 }
 
 func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand) (IncidentCase, error) {
@@ -852,6 +715,29 @@ func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand
 	if incident.Status != CaseWaitingFixApproval {
 		return IncidentCase{}, ErrApprovalNotReady
 	}
+	rootCauseResult, err := validatedRootCauseResult(ctx, o.store, incident, cmd.RootCauseAttemptID)
+	if err != nil {
+		return IncidentCase{}, err
+	}
+	if !rootCauseResult.UsesCodeFixWorkflow() {
+		return IncidentCase{}, ErrApprovalScope
+	}
+	sourceBaselines, err := resolveRemediationFixSourceBaselines(cmd.Bot.Path, incident.Environment, cmd.InputJSON, rootCauseResult)
+	if err != nil {
+		return IncidentCase{}, fmt.Errorf("invalid fix source baseline approval: %w", err)
+	}
+	cmd.InputJSON, err = withFixSourceBaselines(cmd.InputJSON, sourceBaselines)
+	if err != nil {
+		return IncidentCase{}, fmt.Errorf("canonicalize fix source baseline approval: %w", err)
+	}
+	root, err := o.store.GetAttempt(ctx, cmd.RootCauseAttemptID)
+	if err != nil {
+		return IncidentCase{}, err
+	}
+	cmd.InputJSON, err = withApprovedFixReworkContext(cmd.InputJSON, root.InputJSON)
+	if err != nil {
+		return IncidentCase{}, fmt.Errorf("inherit approved fix rework context: %w", err)
+	}
 	if incident.CurrentAttemptID != cmd.RootCauseAttemptID {
 		if replay, replayErr := o.hasEvent(ctx, incident.ID, cmd.IdempotencyKey); replayErr != nil {
 			return IncidentCase{}, replayErr
@@ -859,10 +745,7 @@ func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand
 			return o.replayFixApproval(ctx, cmd)
 		}
 	}
-	if err := validateFixApprovalRootCause(ctx, o.store, incident, cmd.RootCauseAttemptID); err != nil {
-		return IncidentCase{}, err
-	}
-	attempt, request := buildFixApprovalMutation(cmd, incident.CycleNumber)
+	attempt, request := buildFixApprovalMutation(cmd, incident.CycleNumber, sourceBaselines)
 	mutation, err := o.store.ApplyCaseMutation(ctx, request)
 	if err != nil {
 		return IncidentCase{}, err
@@ -879,9 +762,14 @@ func (o *CaseOrchestrator) ApproveFix(ctx context.Context, cmd ApproveFixCommand
 	return mutation.Case, nil
 }
 
-func buildFixApprovalMutation(cmd ApproveFixCommand, cycleNumber int) (PhaseAttempt, CaseMutation) {
+func buildFixApprovalMutation(cmd ApproveFixCommand, cycleNumber int, sourceBaselines map[string]string) (PhaseAttempt, CaseMutation) {
 	incident := IncidentCase{ID: cmd.CaseID, CycleNumber: cycleNumber}
-	scope, _ := json.Marshal(map[string]string{"root_cause_attempt_id": cmd.RootCauseAttemptID})
+	scopeValue := map[string]any{"root_cause_attempt_id": cmd.RootCauseAttemptID, "source_baselines": sourceBaselines}
+	if rework, ok := fixReworkFromInput(cmd.InputJSON); ok {
+		scopeValue["rework_of_fix_attempt_id"] = rework.SourceFixAttemptID
+		scopeValue["required_fix_branch_suffix"] = rework.RequiredFixBranchSuffix
+	}
+	scope, _ := json.Marshal(scopeValue)
 	approval := Approval{ID: stableID("approval", cmd.IdempotencyKey), CaseID: cmd.CaseID, Kind: ApprovalStartFix, Actor: cmd.ActorID, CaseVersion: cmd.ExpectedVersion, ScopeJSON: scope}
 	attempt := newAttempt(incident, PhaseFix, "", cmd.IdempotencyKey, cmd.Bot, cmd.InputJSON, cmd.RootCauseAttemptID)
 	update := CaseSnapshotUpdate{CurrentAttemptID: workflowStringPtr(attempt.ID), SelectedBotKey: workflowStringPtr(cmd.Bot.Key)}
@@ -895,7 +783,27 @@ func (o *CaseOrchestrator) replayFixApproval(ctx context.Context, cmd ApproveFix
 	if err != nil {
 		return IncidentCase{}, err
 	}
-	_, request := buildFixApprovalMutation(cmd, root.CycleNumber)
+	incident, incidentErr := o.store.GetCase(ctx, cmd.CaseID)
+	if incidentErr != nil {
+		return IncidentCase{}, incidentErr
+	}
+	rootCauseResult, parseErr := ParseInvestigationResult(root.OutputJSON)
+	if parseErr != nil || !rootCauseResult.UsesCodeFixWorkflow() {
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	sourceBaselines, parseErr := resolveRemediationFixSourceBaselines(cmd.Bot.Path, incident.Environment, cmd.InputJSON, rootCauseResult)
+	if parseErr != nil {
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	cmd.InputJSON, parseErr = withFixSourceBaselines(cmd.InputJSON, sourceBaselines)
+	if parseErr != nil {
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	cmd.InputJSON, parseErr = withApprovedFixReworkContext(cmd.InputJSON, root.InputJSON)
+	if parseErr != nil {
+		return IncidentCase{}, ErrIdempotencyConflict
+	}
+	_, request := buildFixApprovalMutation(cmd, root.CycleNumber, sourceBaselines)
 	result, err := o.store.ApplyCaseMutation(ctx, request)
 	if err != nil {
 		return IncidentCase{}, err
@@ -932,7 +840,7 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 	if err != nil {
 		return IncidentCase{}, err
 	}
-	fixes, targets := map[string]string{}, map[string]string{}
+	fixes, targets, baselines := map[string]string{}, map[string]string{}, map[string]string{}
 	selected := []CodeChange{}
 	var scopeValue MergeApprovalScope
 	if hasReservation {
@@ -965,6 +873,11 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 			}
 			fixes[change.Repo] = change.FixCommit
 			targets[change.Repo] = change.TargetEnvironmentBranch
+			baseline := strings.TrimSpace(approved.BaselineBranch)
+			if baseline == "" { // Backward-compatible recovery for pre-dual-target approvals.
+				baseline = change.TargetEnvironmentBranch
+			}
+			baselines[change.Repo] = baseline
 			selected = append(selected, change)
 		}
 	} else {
@@ -977,16 +890,19 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 			if change.AttemptID == incident.CurrentAttemptID && change.FixCommit != "" && change.TargetEnvironmentBranch != "" {
 				fixes[change.Repo] = change.FixCommit
 				targets[change.Repo] = change.TargetEnvironmentBranch
+				baselines[change.Repo] = change.BaseBranch
 				selected = append(selected, change)
 			}
 		}
 	}
-	if len(selected) == 0 || !sameStringMapKeys(fixes, targets) {
+	if len(selected) == 0 || !sameStringMapKeys(fixes, targets) || !sameStringMapKeys(fixes, baselines) {
 		return IncidentCase{}, ErrApprovalScope
 	}
 	approvedChanges := make([]ApprovedCodeChange, 0, len(selected))
 	request := MergeRequest{CaseID: incident.ID, FixCommits: fixes, TargetBranches: targets, Changes: selected}
 	targetHeads := map[string]string{}
+	baselineRequest := buildBaselineMergeRequest(incident.ID, selected, baselines)
+	baselineHeads := map[string]string{}
 	if !hasReservation && o.git != nil {
 		inspection, inspectErr := o.git.Inspect(ctx, request)
 		if inspectErr != nil {
@@ -1006,6 +922,19 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 		if !reflect.DeepEqual(targetHeads, cmd.TargetHeads) {
 			return o.recordStaleMergeApproval(incident, cmd.IdempotencyKey, selected, targetHeads)
 		}
+		if len(baselineRequest.Changes) > 0 {
+			baselineInspection, baselineErr := o.git.Inspect(ctx, baselineRequest)
+			if baselineErr != nil {
+				return incident, baselineErr
+			}
+			for _, change := range baselineRequest.Changes {
+				repoResult, ok := baselineInspection.Repositories[change.Repo]
+				if !ok || strings.TrimSpace(repoResult.TargetHead) == "" || repoResult.ApprovalKey != MergeApprovalKey(incident.ID, change.Repo, change.FixCommit, change.TargetEnvironmentBranch, repoResult.TargetHead) {
+					return IncidentCase{}, ErrApprovalScope
+				}
+				baselineHeads[change.Repo] = repoResult.TargetHead
+			}
+		}
 	}
 	if hasReservation {
 		for _, approved := range scopeValue.CodeChanges {
@@ -1013,6 +942,12 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 				return IncidentCase{}, ErrApprovalScope
 			}
 			targetHeads[approved.Repo] = approved.TargetHead
+			if approved.BaselineBranch != "" && approved.BaselineBranch != approved.TargetBranch {
+				if approved.BaselineHead == "" || approved.BaselineApprovalKey != MergeApprovalKey(incident.ID, approved.Repo, approved.FixCommit, approved.BaselineBranch, approved.BaselineHead) {
+					return IncidentCase{}, ErrApprovalScope
+				}
+				baselineHeads[approved.Repo] = approved.BaselineHead
+			}
 		}
 		if len(targetHeads) != len(selected) {
 			return IncidentCase{}, ErrApprovalScope
@@ -1020,9 +955,15 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 	}
 	request.Changes = selected
 	request.TargetHeads = targetHeads
+	baselineRequest.TargetHeads = baselineHeads
 	for _, change := range selected {
 		head := targetHeads[change.Repo]
-		approvedChanges = append(approvedChanges, ApprovedCodeChange{ID: change.ID, Repo: change.Repo, FixCommit: change.FixCommit, TargetBranch: change.TargetEnvironmentBranch, TargetHead: head, ApprovalKey: MergeApprovalKey(incident.ID, change.Repo, change.FixCommit, change.TargetEnvironmentBranch, head)})
+		baselineBranch := baselines[change.Repo]
+		baselineHead := baselineHeads[change.Repo]
+		if baselineBranch == change.TargetEnvironmentBranch {
+			baselineHead = head
+		}
+		approvedChanges = append(approvedChanges, ApprovedCodeChange{ID: change.ID, Repo: change.Repo, FixCommit: change.FixCommit, BaselineBranch: baselineBranch, BaselineHead: baselineHead, BaselineApprovalKey: MergeApprovalKey(incident.ID, change.Repo, change.FixCommit, baselineBranch, baselineHead), TargetBranch: change.TargetEnvironmentBranch, TargetHead: head, ApprovalKey: MergeApprovalKey(incident.ID, change.Repo, change.FixCommit, change.TargetEnvironmentBranch, head)})
 	}
 	sort.Slice(approvedChanges, func(i, j int) bool { return approvedChanges[i].Repo < approvedChanges[j].Repo })
 	if !hasReservation {
@@ -1040,9 +981,34 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 		if loadErr != nil || current.Status != CaseMerging {
 			return current, loadErr
 		}
-		return o.recoverReservedMerge(ctx, current, cmd.IdempotencyKey, selected, request)
+		return o.recoverReservedMerge(ctx, current, cmd.IdempotencyKey, selected, baselineRequest, request)
+	}
+	baselineResult := MergeResult{Pushed: true, MergeCommits: map[string]string{}}
+	if len(baselineRequest.Changes) > 0 {
+		baselineResult, err = o.git.MergeAndPush(ctx, baselineRequest)
+		if err != nil {
+			if errors.Is(err, ErrMergeApprovalStale) {
+				return o.recordStaleMergeApproval(reserved.Case, cmd.IdempotencyKey, selected, nil)
+			}
+			if baselineResult.Conflict || errors.Is(err, ErrGitMergeConflict) {
+				for i := range selected {
+					if repoResult, ok := baselineResult.Repositories[selected[i].Repo]; ok && repoResult.Conflict {
+						selected[i].PushStatus = "conflict"
+					}
+				}
+				return o.recordMergeConflict(reserved.Case, cmd.IdempotencyKey, selected, fmt.Errorf("merge fix into confirmed baseline: %w", err))
+			}
+			return o.recordMergeAmbiguous(reserved.Case, cmd.IdempotencyKey, selected, fmt.Errorf("push confirmed baseline: %w", err))
+		}
+		for _, change := range baselineRequest.Changes {
+			repoResult, ok := baselineResult.Repositories[change.Repo]
+			if !ok || !repoResult.Pushed || repoResult.MergeCommit == "" {
+				return o.recordMergeAmbiguous(reserved.Case, cmd.IdempotencyKey, selected, fmt.Errorf("confirmed baseline push is incomplete for %s", change.Repo))
+			}
+		}
 	}
 	result, callErr := o.git.MergeAndPush(ctx, request)
+	result.BaselineMergeCommits = CloneStringMap(baselineResult.MergeCommits)
 	allPushed := len(result.Repositories) == len(selected)
 	for index := range selected {
 		repoResult, ok := result.Repositories[selected[index].Repo]
@@ -1102,11 +1068,29 @@ func (o *CaseOrchestrator) ApproveMerge(ctx context.Context, cmd ApproveMergeCom
 		result.MergeCommits[selected[index].Repo] = selected[index].MergeCommit
 	}
 	completedKey := cmd.IdempotencyKey + ":completed"
-	done, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: reserved.Case.Version, IdempotencyKey: completedKey, RequestJSON: mustJSON(result), CodeChanges: selected, Steps: []CaseMutationStep{{To: CaseWaitingDeployment, Event: TransitionEvent{ID: stableID("event", completedKey), EventType: "merge_pushed", ActorType: "git", ActorID: "git-integration", PayloadJSON: mustJSON(result)}}}})
+	done, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: reserved.Case.Version, IdempotencyKey: completedKey, RequestJSON: mustJSON(result), CodeChanges: selected, Steps: []CaseMutationStep{{To: CaseSubmitted, Event: TransitionEvent{ID: stableID("event", completedKey), EventType: "merge_pushed", ActorType: "git", ActorID: "git-integration", PayloadJSON: mustJSON(result)}}}})
 	if err != nil {
 		return IncidentCase{}, err
 	}
 	return done.Case, nil
+}
+
+func buildBaselineMergeRequest(caseID string, changes []CodeChange, baselines map[string]string) MergeRequest {
+	request := MergeRequest{CaseID: caseID, FixCommits: map[string]string{}, TargetBranches: map[string]string{}}
+	for _, original := range changes {
+		baseline := strings.TrimSpace(baselines[original.Repo])
+		if baseline == "" || baseline == strings.TrimSpace(original.TargetEnvironmentBranch) {
+			continue
+		}
+		change := original.Clone()
+		change.TargetEnvironmentBranch = baseline
+		change.MergeBaseHead = ""
+		change.MergeCommit = ""
+		request.Changes = append(request.Changes, change)
+		request.FixCommits[change.Repo] = change.FixCommit
+		request.TargetBranches[change.Repo] = baseline
+	}
+	return request
 }
 
 func (o *CaseOrchestrator) recordStaleMergeApproval(incident IncidentCase, key string, changes []CodeChange, heads map[string]string) (IncidentCase, error) {
@@ -1119,9 +1103,27 @@ func (o *CaseOrchestrator) recordStaleMergeApproval(incident IncidentCase, key s
 	return mutation.Case, ErrMergeApprovalStale
 }
 
-func (o *CaseOrchestrator) recoverReservedMerge(ctx context.Context, incident IncidentCase, key string, changes []CodeChange, request MergeRequest) (IncidentCase, error) {
+func (o *CaseOrchestrator) recoverReservedMerge(ctx context.Context, incident IncidentCase, key string, changes []CodeChange, baselineRequest, request MergeRequest) (IncidentCase, error) {
 	if o.git == nil {
 		return incident, nil
+	}
+	if len(baselineRequest.Changes) > 0 {
+		baselineResult, baselineErr := o.git.MergeAndPush(ctx, baselineRequest)
+		if baselineErr != nil {
+			if errors.Is(baselineErr, ErrMergeApprovalStale) {
+				return o.recordStaleMergeApproval(incident, key, changes, nil)
+			}
+			if baselineResult.Conflict || errors.Is(baselineErr, ErrGitMergeConflict) {
+				return o.recordMergeConflict(incident, key, changes, fmt.Errorf("recover confirmed baseline merge: %w", baselineErr))
+			}
+			return o.recordMergeAmbiguous(incident, key, changes, fmt.Errorf("recover confirmed baseline push: %w", baselineErr))
+		}
+		for _, change := range baselineRequest.Changes {
+			repoResult, ok := baselineResult.Repositories[change.Repo]
+			if !ok || !repoResult.Pushed || repoResult.MergeCommit == "" {
+				return o.recordMergeAmbiguous(incident, key, changes, fmt.Errorf("recovered baseline push is incomplete for %s", change.Repo))
+			}
+		}
 	}
 	inspection, err := o.git.Inspect(ctx, request)
 	if err != nil {
@@ -1233,7 +1235,7 @@ func (o *CaseOrchestrator) resumeInspectedMerge(ctx context.Context, incident In
 		return o.recordMergeAmbiguous(incident, key, changes, errors.New("merge push remains incomplete"))
 	}
 	completedKey := key + ":completed"
-	done, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: completedKey, RequestJSON: mustJSON(changes), CodeChanges: changes, Steps: []CaseMutationStep{{To: CaseWaitingDeployment, Event: TransitionEvent{ID: stableID("event", completedKey), EventType: "merge_push_resumed", ActorType: "git", ActorID: "git-integration", PayloadJSON: mustJSON(changes)}}}})
+	done, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: completedKey, RequestJSON: mustJSON(changes), CodeChanges: changes, Steps: []CaseMutationStep{{To: CaseSubmitted, Event: TransitionEvent{ID: stableID("event", completedKey), EventType: "merge_push_resumed", ActorType: "git", ActorID: "git-integration", PayloadJSON: mustJSON(changes)}}}})
 	if err != nil {
 		return IncidentCase{}, err
 	}
@@ -1281,209 +1283,6 @@ func (o *CaseOrchestrator) recordMergeAmbiguous(incident IncidentCase, key strin
 		return IncidentCase{}, errors.Join(cause, err)
 	}
 	return m.Case, cause
-}
-
-func (o *CaseOrchestrator) latestMergeDeploymentScope(ctx context.Context, incident IncidentCase) (MergeApprovalScope, []CodeChange, map[string]string, error) {
-	approvals, err := o.store.ListApprovals(ctx, incident.ID)
-	if err != nil {
-		return MergeApprovalScope{}, nil, nil, err
-	}
-	var scope MergeApprovalScope
-	found := false
-	for i := len(approvals) - 1; i >= 0; i-- {
-		if approvals[i].Kind != ApprovalMergeEnvironmentBranch {
-			continue
-		}
-		var candidate MergeApprovalScope
-		if json.Unmarshal(approvals[i].ScopeJSON, &candidate) == nil && candidate.CycleNumber == incident.CycleNumber && candidate.FixAttemptID == incident.CurrentAttemptID {
-			scope = candidate
-			found = true
-			break
-		}
-	}
-	if !found {
-		return scope, nil, nil, ErrApprovalScope
-	}
-	all, err := o.store.ListCodeChanges(ctx, incident.ID)
-	if err != nil {
-		return scope, nil, nil, err
-	}
-	byID := map[string]CodeChange{}
-	for _, change := range all {
-		byID[change.ID] = change
-	}
-	selected := make([]CodeChange, 0, len(scope.CodeChanges))
-	expected := map[string]string{}
-	for _, approved := range scope.CodeChanges {
-		change, ok := byID[approved.ID]
-		if !ok || change.AttemptID != scope.FixAttemptID || change.Repo != approved.Repo || change.FixCommit != approved.FixCommit || change.TargetEnvironmentBranch != approved.TargetBranch || change.PushStatus != "pushed" || change.MergeCommit == "" {
-			return scope, nil, nil, ErrApprovalScope
-		}
-		selected = append(selected, change)
-		expected[change.Repo] = change.MergeCommit
-	}
-	if len(expected) != len(scope.CodeChanges) {
-		return scope, nil, nil, ErrApprovalScope
-	}
-	return scope, selected, expected, nil
-}
-
-func (o *CaseOrchestrator) NotifyDeployed(ctx context.Context, cmd NotifyDeployedCommand) (IncidentCase, error) {
-	if err := validateCommand(cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey, cmd.ActorID); err != nil {
-		return IncidentCase{}, err
-	}
-	reserveKey := fmt.Sprintf("deployment-reserve:%s:v%d", cmd.CaseID, cmd.ExpectedVersion)
-	release := workflowCommandLocks.acquire(reserveKey)
-	defer release()
-	var reservation DeploymentReservation
-	reservationEvent, found, err := o.store.GetEventByIdempotencyKey(ctx, reserveKey)
-	if err != nil {
-		return IncidentCase{}, err
-	}
-	incident, err := o.store.GetCase(ctx, cmd.CaseID)
-	if err != nil {
-		return IncidentCase{}, err
-	}
-	if found {
-		if err := json.Unmarshal(reservationEvent.PayloadJSON, &reservation); err != nil {
-			return IncidentCase{}, err
-		}
-		if identityErr := validateDeploymentReservationIdentity(reservation, reserveKey, cmd.IdempotencyKey, reservationEvent.ActorID); identityErr != nil || cmd.ActorID != reservationEvent.ActorID {
-			if identityErr == nil {
-				identityErr = fmt.Errorf("%w: command actor does not match reservation event", ErrDeploymentReservationIdentityInvalid)
-			}
-			return IncidentCase{}, errors.Join(ErrIdempotencyConflict, identityErr)
-		}
-		supplied := reservation.VerifierInput
-		supplied.ObservedVersion = cmd.ObservedVersion
-		supplied.ObservedCommits = CloneStringMap(cmd.ObservedCommits)
-		supplied.Source = reservation.VerifierInput.Source
-		if !reflect.DeepEqual(supplied, reservation.VerifierInput) || !reflect.DeepEqual(cmd.Bot, reservation.Bot) || !reflect.DeepEqual(cmd.Bug, reservation.Bug) {
-			return IncidentCase{}, ErrIdempotencyConflict
-		}
-		if _, resultFound, resultErr := o.store.GetEventByIdempotencyKey(ctx, reserveKey+":result"); resultErr != nil {
-			return IncidentCase{}, resultErr
-		} else if resultFound {
-			return incident, nil
-		}
-	} else {
-		if incident.Version != cmd.ExpectedVersion {
-			return IncidentCase{}, ErrCaseVersionConflict
-		}
-		if incident.Status != CaseWaitingDeployment {
-			return IncidentCase{}, ErrApprovalNotReady
-		}
-		scope, _, expected, scopeErr := o.latestMergeDeploymentScope(ctx, incident)
-		if scopeErr != nil {
-			return IncidentCase{}, scopeErr
-		}
-		request := DeploymentVerificationRequest{CaseID: incident.ID, Environment: incident.Environment, ExpectedCommits: expected, ObservedVersion: cmd.ObservedVersion, ObservedCommits: CloneStringMap(cmd.ObservedCommits), Source: normalizedDeploymentSource(cmd.Source), ConfigFingerprint: strings.TrimSpace(cmd.VerifierConfigFingerprint), ConfigSnapshot: CloneRawMessage(cmd.VerifierConfigSnapshot)}
-		reservation = DeploymentReservation{ReservationID: stableID("deployment-reservation", reserveKey), ReservationKey: reserveKey, CallerIdempotencyKey: cmd.IdempotencyKey, ActorID: cmd.ActorID, OriginalExpectedVersion: cmd.ExpectedVersion, CycleNumber: scope.CycleNumber, Environment: incident.Environment, ExpectedCommits: expected, Bug: cmd.Bug, Bot: cmd.Bot, VerifierInput: request}
-		payload := mustJSON(reservation)
-		reserved, reserveErr := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: cmd.ExpectedVersion, IdempotencyKey: reserveKey, RequestJSON: payload, Steps: []CaseMutationStep{{To: CaseDeploymentUnverified, Event: TransitionEvent{ID: stableID("event", reserveKey), EventType: "deployment_verification_reserved", ActorType: "user", ActorID: cmd.ActorID, PayloadJSON: payload}}, {To: CaseDeploymentUnverified, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", reserveKey+":start"), EventType: "deployment_verification_started", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: payload}}}})
-		if reserveErr != nil {
-			return IncidentCase{}, reserveErr
-		}
-		incident = reserved.Case
-	}
-	request := reservation.VerifierInput
-	if o.deployment == nil {
-		return o.recordDeploymentResult(incident, reservation, DeploymentObservation{Result: DeploymentResultUnavailable, VerificationSource: "deployment-verifier"}, errors.New("deployment verifier unavailable"))
-	}
-	observation, verifyErr := o.deployment.Verify(ctx, request)
-	return o.recordDeploymentResult(incident, reservation, observation, verifyErr)
-}
-
-func normalizedDeploymentSource(source string) string {
-	if source = strings.ToLower(strings.TrimSpace(source)); source != "" {
-		return source
-	}
-	return "manual"
-}
-
-func (o *CaseOrchestrator) recordDeploymentResult(incident IncidentCase, reservation DeploymentReservation, observation DeploymentObservation, verifyErr error) (IncidentCase, error) {
-	durable, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	now := time.Now().UTC()
-	observation.ID = stableID("deployment", reservation.ReservationKey)
-	observation.CaseID = incident.ID
-	observation.Environment = incident.Environment
-	observation.ExpectedCommits = CloneStringMap(reservation.ExpectedCommits)
-	observation.UserNotifiedAt = &now
-	if observation.ObservedAt.IsZero() {
-		observation.ObservedAt = now
-	}
-	if observation.VerificationSource == "" {
-		observation.VerificationSource = "deployment-verifier"
-	}
-	key := reservation.ReservationKey + ":result"
-	steps := []CaseMutationStep{}
-	if observation.Result == DeploymentResultMatched && verifyErr == nil {
-		steps = append(steps, CaseMutationStep{To: CaseWaitingDeployment, Event: TransitionEvent{ID: stableID("event", key), EventType: "deployment_verification_completed", ActorType: "studio", ActorID: "deployment-verifier", PayloadJSON: mustJSON(observation)}}, CaseMutationStep{To: CaseDeploymentVerified, Event: TransitionEvent{ID: stableID("event", key+":verified"), EventType: "deployment_verified", ActorType: "studio", ActorID: "deployment-verifier", PayloadJSON: mustJSON(observation)}})
-	} else {
-		if verifyErr != nil {
-			observation.Result = DeploymentResultUnavailable
-			if observation.DiagnosticCode == "" {
-				observation.DiagnosticCode = "verifier_unavailable"
-				observation.DiagnosticMessage = "部署版本验证暂不可用"
-			}
-		}
-		steps = append(steps, CaseMutationStep{To: CaseDeploymentUnverified, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", key), EventType: "deployment_unverified", ActorType: "studio", ActorID: "deployment-verifier", PayloadJSON: mustJSON(observation)}})
-	}
-	mutation, err := o.store.ApplyCaseMutation(durable, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: mustJSON(map[string]any{"observation": observation, "error_code": observation.DiagnosticCode}), Observations: []DeploymentObservation{observation}, Steps: steps})
-	if err != nil {
-		return IncidentCase{}, errors.Join(verifyErr, err)
-	}
-	if observation.Result == DeploymentResultMatched && verifyErr == nil && !mutation.Replay {
-		if _, startErr := o.StartRegression(durable, mutation.Case.ID, mutation.Case.Version); startErr != nil {
-			current, _ := o.store.GetCase(durable, mutation.Case.ID)
-			if waiting, handled, readinessErr := o.failSafeRegressionReadiness(durable, current, startErr); handled {
-				return waiting, readinessErr
-			}
-			return current, startErr
-		}
-		current, loadErr := o.store.GetCase(durable, mutation.Case.ID)
-		if loadErr != nil {
-			return IncidentCase{}, loadErr
-		}
-		return current, nil
-	}
-	return mutation.Case, verifyErr
-}
-
-func (o *CaseOrchestrator) failSafeRegressionReadiness(ctx context.Context, incident IncidentCase, cause error) (IncidentCase, bool, error) {
-	if !errors.Is(cause, ErrRegressionOriginalScenario) && !errors.Is(cause, ErrRegressionOriginalEvidence) {
-		return IncidentCase{}, false, nil
-	}
-	if incident.Status == CaseWaitingEvidence {
-		return incident, true, nil
-	}
-	if incident.Status != CaseDeploymentVerified {
-		return IncidentCase{}, true, cause
-	}
-	reason := "original_validation_scenario_incomplete"
-	if errors.Is(cause, ErrRegressionOriginalEvidence) {
-		reason = "original_validation_evidence_missing"
-	}
-	key := fmt.Sprintf("regression-readiness:%s:cycle:%d:%s", incident.ID, incident.CycleNumber, reason)
-	payload := mustJSON(map[string]string{"reason": reason})
-	update := CaseSnapshotUpdate{}
-	attempts, listErr := o.store.ListAttempts(ctx, AttemptFilter{CaseID: incident.ID})
-	if listErr != nil {
-		return IncidentCase{}, true, listErr
-	}
-	for index := len(attempts) - 1; index >= 0; index-- {
-		candidate := attempts[index]
-		if candidate.Phase == PhaseValidation && candidate.Mode == AttemptReproduce && candidate.Status == AttemptStatusSucceeded {
-			update.CurrentAttemptID = workflowStringPtr(candidate.ID)
-			break
-		}
-	}
-	mutation, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: payload, Snapshot: update, Steps: []CaseMutationStep{{To: CaseWaitingEvidence, Event: TransitionEvent{ID: stableID("event", key), EventType: "regression_readiness_evidence_required", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: payload}}}})
-	if err != nil {
-		return IncidentCase{}, true, err
-	}
-	return mutation.Case, true, nil
 }
 
 func (o *CaseOrchestrator) CancelAttempt(ctx context.Context, cmd CancelAttemptCommand) (IncidentCase, error) {
@@ -1625,32 +1424,19 @@ func (o *CaseOrchestrator) CompleteAttempt(ctx context.Context, cmd CompleteAtte
 	expectedAttemptOutput := CloneRawMessage(attempt.OutputJSON)
 	if intent, found, parseErr := parseCompletionIntent(attempt.OutputJSON); parseErr != nil {
 		return IncidentCase{}, parseErr
-	} else if found && !equivalentCompletionCommands(intent, cmd) {
-		return IncidentCase{}, ErrIdempotencyConflict
+	} else if found {
+
+		if !equivalentCompletionCommands(intent, cmd) {
+			return IncidentCase{}, ErrIdempotencyConflict
+		}
 	}
 	if err := validateCompletionAttemptPhase(attempt.Phase, cmd); err != nil {
 		return IncidentCase{}, err
 	}
-	if cmd.Outcome == PhaseOutcomeReproduced {
-		result, parseErr := ParseValidationResult(cmd.OutputJSON)
-		if parseErr != nil || result.VerificationStatus != "reproduced" {
-			return IncidentCase{}, errors.Join(errors.New("reproduced completion requires a complete validation result"), parseErr)
-		}
-		artifacts, artifactErr := o.store.ListEvidenceArtifacts(ctx, incident.ID)
-		if artifactErr != nil {
-			return IncidentCase{}, artifactErr
-		}
-		registered := false
-		for _, artifact := range artifacts {
-			if artifact.AttemptID == attempt.ID {
-				registered = true
-				break
-			}
-		}
-		if !registered {
-			return IncidentCase{}, errors.New("reproduced completion requires a registered evidence artifact")
-		}
+	if err := validateFixReworkCompletion(attempt, cmd); err != nil {
+		return IncidentCase{}, err
 	}
+
 	if cmd.Outcome == PhaseOutcomeFixPushed && !cmd.remoteFixInspected {
 		inspection, inspectErr := o.inspectFixWithRetry(ctx, FixInspectionRequest{CaseID: incident.ID, Attempt: attempt.Clone(), Changes: cmd.CodeChanges})
 		if inspectErr != nil {
@@ -1667,11 +1453,9 @@ func (o *CaseOrchestrator) CompleteAttempt(ctx context.Context, cmd CompleteAtte
 			return failed, errors.Join(ErrFixRemoteMismatch, finishErr, loadErr)
 		}
 	}
-	if err := o.validateRegressionCompletion(ctx, incident, attempt, cmd); err != nil {
-		return IncidentCase{}, err
-	}
+
 	attempt.OutputJSON, attempt.ErrorCode, attempt.ErrorMessage, attempt.Usage = CloneRawMessage(cmd.OutputJSON), cmd.ErrorCode, cmd.ErrorMessage, cmd.Usage
-	if cmd.Outcome == PhaseOutcomeFixFailed || cmd.Outcome == PhaseOutcomeNeedsEvidence {
+	if cmd.Outcome == PhaseOutcomeFixFailed || cmd.Outcome == PhaseOutcomeNeedsEvidence || cmd.Outcome == PhaseOutcomeSystemFailed {
 		attempt.Status = AttemptStatusFailed
 	} else {
 		attempt.Status = AttemptStatusSucceeded
@@ -1717,14 +1501,16 @@ func (o *CaseOrchestrator) rebuildCommittedCompletion(ctx context.Context, repla
 		return CompleteAttemptCommand{}, ErrIdempotencyConflict
 	}
 	outcomes := map[string]PhaseOutcome{
-		"validation_reproduced":     PhaseOutcomeReproduced,
-		"validation_not_reproduced": PhaseOutcomeNotReproduced,
-		"evidence_required":         PhaseOutcomeNeedsEvidence,
-		"root_cause_ready":          PhaseOutcomeRootCauseReady,
-		"fix_pushed":                PhaseOutcomeFixPushed,
-		"fix_failed":                PhaseOutcomeFixFailed,
-		"regression_fixed":          PhaseOutcomeFixedVerified,
-		"regression_failed":         PhaseOutcomeStillReproduces,
+		"validation_reproduced":               PhaseOutcomeReproduced,
+		"validation_not_reproduced":           PhaseOutcomeNotReproduced,
+		"evidence_required":                   PhaseOutcomeNeedsEvidence,
+		"validation_evidence_refresh_started": PhaseOutcomeValidationEvidenceRequired,
+		"phase_system_failed":                 PhaseOutcomeSystemFailed,
+		"root_cause_ready":                    PhaseOutcomeRootCauseReady,
+		"fix_pushed":                          PhaseOutcomeFixPushed,
+		"fix_failed":                          PhaseOutcomeFixFailed,
+		"regression_fixed":                    PhaseOutcomeFixedVerified,
+		"regression_failed":                   PhaseOutcomeStillReproduces,
 	}
 	outcome, ok := outcomes[replay.Event.EventType]
 	if !ok || !jsonValuesEqual(replay.Event.PayloadJSON, attempt.OutputJSON) {
@@ -1771,6 +1557,9 @@ func (o *CaseOrchestrator) inspectFixWithRetry(ctx context.Context, request FixI
 			return inspection, ctx.Err()
 		}
 	}
+	if errors.Is(err, ErrFixInspectionUnavailable) {
+		return inspection, err
+	}
 	return inspection, errors.Join(ErrFixInspectionUnavailable, err)
 }
 
@@ -1787,41 +1576,26 @@ func (o *CaseOrchestrator) applyOutcome(ctx context.Context, incident IncidentCa
 		steps = append(steps, CaseMutationStep{To: to, Event: TransitionEvent{ID: stableID("event", fmt.Sprintf("%s:%d", cmd.IdempotencyKey, len(steps))), EventType: eventType, ActorType: actorType, ActorID: actorID, PayloadJSON: mustJSON(payload)}})
 	}
 	switch cmd.Outcome {
-	case PhaseOutcomeReproduced:
-		add(CaseReproduced, "validation_reproduced", "agent", actor, cmd.OutputJSON)
-		add(CaseInvestigating, "investigation_started", "studio", "orchestrator", map[string]string{"parent_attempt_id": attempt.ID})
-		created := newAttempt(incident, PhaseInvestigation, "", cmd.IdempotencyKey+":investigation", BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget}, []byte(`{}`), attempt.ID)
-		next = &created
-		update.CurrentAttemptID = workflowStringPtr(created.ID)
-	case PhaseOutcomeNotReproduced:
-		add(CaseNotReproduced, "validation_not_reproduced", "agent", actor, cmd.OutputJSON)
 	case PhaseOutcomeNeedsEvidence:
 		add(CaseWaitingEvidence, "evidence_required", "agent", actor, cmd.OutputJSON)
+	case PhaseOutcomeSystemFailed:
+		add(CaseWaitingEvidence, "phase_system_failed", "studio", "orchestrator", cmd.OutputJSON)
 	case PhaseOutcomeRootCauseReady:
+		result, err := ParseInvestigationResult(cmd.OutputJSON)
+		if err != nil {
+			return IncidentCase{}, err
+		}
 		add(CaseRootCauseReady, "root_cause_ready", "agent", actor, cmd.OutputJSON)
-		add(CaseWaitingFixApproval, "fix_approval_requested", "studio", "orchestrator", map[string]string{"attempt_id": attempt.ID})
+		if result.UsesCodeFixWorkflow() {
+			add(CaseWaitingFixApproval, "fix_approval_requested", "studio", "orchestrator", map[string]string{"attempt_id": attempt.ID})
+		} else {
+			add(CaseWaitingRemediation, "remediation_confirmation_requested", "studio", "orchestrator", map[string]string{"attempt_id": attempt.ID, "root_cause_type": string(result.RootCauseType), "remediation_mode": string(result.Remediation.Mode)})
+		}
 	case PhaseOutcomeFixPushed:
 		add(CaseFixPushed, "fix_pushed", "agent", actor, cmd.OutputJSON)
 		add(CaseWaitingMergeApproval, "merge_approval_requested", "studio", "orchestrator", map[string]string{"attempt_id": attempt.ID})
 	case PhaseOutcomeFixFailed:
 		add(CaseFixFailed, "fix_failed", "agent", actor, cmd.OutputJSON)
-	case PhaseOutcomeFixedVerified:
-		add(CaseFixedVerified, "regression_fixed", "agent", actor, cmd.OutputJSON)
-		update.ClosedAtSet = true
-		update.ClosedAt = cloneTimePtr(attempt.FinishedAt)
-	case PhaseOutcomeStillReproduces:
-		cycle := incident.CycleNumber + 1
-		add(CaseStillReproduces, "regression_failed", "agent", actor, cmd.OutputJSON)
-		add(CaseInvestigating, "next_cycle_investigation_started", "studio", "orchestrator", map[string]int{"cycle": cycle})
-		nextInput, err := o.buildNextCycleInvestigationInput(ctx, attempt, cmd.OutputJSON)
-		if err != nil {
-			return IncidentCase{}, err
-		}
-		created := newAttempt(incident, PhaseInvestigation, "", cmd.IdempotencyKey+":investigation", BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget}, nextInput, attempt.ID)
-		created.CycleNumber = cycle
-		next = &created
-		update.CycleNumber = &cycle
-		update.CurrentAttemptID = workflowStringPtr(created.ID)
 	default:
 		return IncidentCase{}, fmt.Errorf("unsupported phase outcome %q", cmd.Outcome)
 	}
@@ -1870,19 +1644,25 @@ func (o *CaseOrchestrator) beginPhaseWithUpdate(ctx context.Context, incident In
 }
 
 func (o *CaseOrchestrator) beginPhaseWithUpdateAndPayload(ctx context.Context, incident IncidentCase, to CaseStatus, attempt PhaseAttempt, bug Bug, bot BotRef, key, actor, eventType string, update CaseSnapshotUpdate, payload json.RawMessage) (IncidentCase, error) {
+	return o.beginPhaseMutation(ctx, incident, to, attempt, bug, bot, key, actor, eventType, update, payload)
+}
+
+func (o *CaseOrchestrator) beginPhaseMutation(ctx context.Context, incident IncidentCase, to CaseStatus, attempt PhaseAttempt, bug Bug, bot BotRef, key, actor, eventType string, update CaseSnapshotUpdate, payload json.RawMessage) (IncidentCase, error) {
 	update.CurrentAttemptID = workflowStringPtr(attempt.ID)
 	update.SelectedBotKey = workflowStringPtr(bot.Key)
 	request, _ := json.Marshal(map[string]any{"attempt": attempt, "to": to, "event_type": eventType, "actor": actor})
 	actorType := "user"
-	if actor == "recovery" {
+	switch actor {
+	case "recovery":
 		actorType = "recovery"
-	} else if actor == "studio" {
+	case "studio":
 		actorType = "studio"
 	}
 	if len(payload) == 0 {
 		payload = mustJSON(map[string]string{"attempt_id": attempt.ID})
 	}
-	mutation, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: request, CreateAttempts: []PhaseAttempt{attempt}, Snapshot: update, Steps: []CaseMutationStep{{To: to, Event: TransitionEvent{ID: stableID("event", key), EventType: eventType, ActorType: actorType, ActorID: actor, PayloadJSON: payload}}}})
+	mutationRequest := CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key, RequestJSON: request, CreateAttempts: []PhaseAttempt{attempt}, Snapshot: update, Steps: []CaseMutationStep{{To: to, Event: TransitionEvent{ID: stableID("event", key), EventType: eventType, ActorType: actorType, ActorID: actor, PayloadJSON: payload}}}}
+	mutation, err := o.store.ApplyCaseMutation(ctx, mutationRequest)
 	if err != nil {
 		return IncidentCase{}, err
 	}
@@ -1899,9 +1679,14 @@ func (o *CaseOrchestrator) beginPhaseWithUpdateAndPayload(ctx context.Context, i
 }
 
 func (o *CaseOrchestrator) phaseScheduleFailure(ctx context.Context, incident IncidentCase, attempt PhaseAttempt, key string, cause error) (IncidentCase, error) {
-	attempt.Status, attempt.OutputJSON, attempt.ErrorCode, attempt.ErrorMessage = AttemptStatusFailed, []byte(`{}`), "schedule_failed", cause.Error()
+	errorCode := phaseScheduleErrorCode(cause)
+	errorMessage := phaseScheduleErrorMessage(cause)
+	attempt.Status = AttemptStatusFailed
+	attempt.OutputJSON = mustJSON(map[string]string{"error_code": errorCode, "error_message": errorMessage})
+	attempt.ErrorCode = errorCode
+	attempt.ErrorMessage = errorMessage
 	failureKey := key + ":schedule-failed"
-	request := mustJSON(map[string]string{"error": cause.Error(), "attempt_id": attempt.ID})
+	request := mustJSON(map[string]string{"error_code": errorCode, "error_message": errorMessage, "attempt_id": attempt.ID})
 	failureCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	mutationRequest := CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: failureKey, RequestJSON: request, FinishAttempts: []PhaseAttempt{attempt}, Steps: []CaseMutationStep{{To: failureStateForPhase(attempt.Phase), Event: TransitionEvent{ID: stableID("event", failureKey), EventType: "phase_schedule_failed", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: request}}}}
@@ -1909,21 +1694,49 @@ func (o *CaseOrchestrator) phaseScheduleFailure(ctx context.Context, incident In
 		mutationRequest.DeleteFixCheckpointAttemptID = attempt.ID
 	}
 	mutation, err := o.store.ApplyCaseMutation(failureCtx, mutationRequest)
+	scheduleErr := &phaseScheduleStartError{phase: attempt.Phase, message: errorMessage, cause: cause}
 	if err != nil {
-		return IncidentCase{}, errors.Join(cause, err)
+		return IncidentCase{}, errors.Join(scheduleErr, err)
 	}
-	return mutation.Case, fmt.Errorf("schedule phase %s: %w", attempt.Phase, cause)
+	return mutation.Case, scheduleErr
 }
+
+func phaseScheduleErrorCode(cause error) string {
+
+	return "schedule_failed"
+}
+
+func phaseScheduleErrorMessage(cause error) string {
+
+	const fallback = "阶段 Agent 启动失败，请检查运行环境后重试"
+	if cause == nil {
+		return fallback
+	}
+	detail := strings.TrimSpace(cause.Error())
+	if detail == "" || containsSensitiveData([]byte(detail)) {
+		return fallback
+	}
+	const maxDetailRunes = 600
+	runes := []rune(detail)
+	if len(runes) > maxDetailRunes {
+		detail = string(runes[:maxDetailRunes]) + "…"
+	}
+	return "阶段 Agent 启动失败：" + detail
+}
+
+type phaseScheduleStartError struct {
+	phase   Phase
+	message string
+	cause   error
+}
+
+func (e *phaseScheduleStartError) Error() string {
+	return fmt.Sprintf("schedule phase %s: %s", e.phase, e.message)
+}
+
+func (e *phaseScheduleStartError) Unwrap() error { return e.cause }
 
 func mustJSON(value any) json.RawMessage { encoded, _ := json.Marshal(value); return encoded }
-
-func (o *CaseOrchestrator) externalFailure(ctx context.Context, incident IncidentCase, to CaseStatus, key, actor, eventType string, cause error) (IncidentCase, error) {
-	failed, _, err := o.transition(ctx, incident, to, key+":failed", actor, eventType, map[string]string{"error": cause.Error()}, CaseSnapshotUpdate{})
-	if err != nil {
-		return IncidentCase{}, errors.Join(cause, err)
-	}
-	return failed, cause
-}
 
 func (o *CaseOrchestrator) transition(ctx context.Context, incident IncidentCase, to CaseStatus, key, actor, eventType string, payload any, update CaseSnapshotUpdate) (IncidentCase, bool, error) {
 	encoded, err := json.Marshal(payload)
@@ -1989,28 +1802,11 @@ func (o *CaseOrchestrator) eventByKey(ctx context.Context, caseID, key string) (
 	return TransitionEvent{}, false, nil
 }
 
-func (o *CaseOrchestrator) ensureAttempt(ctx context.Context, attempt PhaseAttempt) error {
-	if err := o.store.CreateAttempt(ctx, attempt); err == nil {
-		return nil
-	}
-	stored, loadErr := o.store.GetAttempt(ctx, attempt.ID)
-	if loadErr != nil {
-		return loadErr
-	}
-	if !sameOrchestratedAttempt(stored, attempt) {
-		return fmt.Errorf("%w: attempt %s stored=%+v requested=%+v", ErrIdempotencyConflict, attempt.ID, stored, attempt)
-	}
-	return nil
-}
-
-func sameOrchestratedAttempt(left, right PhaseAttempt) bool {
-	return left.ID == right.ID && left.CaseID == right.CaseID && left.CycleNumber == right.CycleNumber && left.Phase == right.Phase && left.Mode == right.Mode && left.Status == right.Status && left.AgentTarget == right.AgentTarget && left.BotKey == right.BotKey && string(left.InputJSON) == string(right.InputJSON) && left.ParentAttemptID == right.ParentAttemptID
-}
-
 func newAttempt(incident IncidentCase, phase Phase, mode AttemptMode, key string, bot BotRef, input json.RawMessage, parent string) PhaseAttempt {
 	if len(input) == 0 {
 		input = []byte(`{}`)
 	}
+
 	return PhaseAttempt{ID: stableID("attempt", key), CaseID: incident.ID, CycleNumber: incident.CycleNumber, Phase: phase, Mode: mode, Status: AttemptStatusRunning, AgentTarget: bot.Target, BotKey: bot.Key, InputJSON: CloneRawMessage(input), OutputJSON: []byte(`{}`), ParentAttemptID: parent}
 }
 
@@ -2039,41 +1835,101 @@ func failureStateForPhase(phase Phase) CaseStatus {
 	switch phase {
 	case PhaseFix:
 		return CaseFixFailed
-	case PhaseRegression, PhaseValidation, PhaseInvestigation:
-		return CaseWaitingEvidence
-	default:
-		return CaseWaitingEvidence
-	}
-}
-
-func continuationTarget(incident IncidentCase, requested Phase) (CaseStatus, AttemptMode, Phase) {
-	phase := requested
-	if phase == "" {
-		switch incident.Status {
-		case CaseNotReproduced:
-			phase = PhaseValidation
-		case CaseFixFailed:
-			phase = PhaseFix
-		case CaseDeploymentUnverified:
-			return "", "", ""
-		case CaseMergeConflict:
-			return "", "", ""
-		default:
-			phase = PhaseInvestigation
-		}
-	}
-	switch phase {
-	case PhaseValidation:
-		return CaseValidating, AttemptReproduce, phase
 	case PhaseInvestigation:
-		return CaseInvestigating, "", phase
-	case PhaseFix:
-		return CaseFixing, "", phase
-	case PhaseRegression:
-		return CaseRegressionValidating, AttemptRegression, phase
+		return CaseWaitingEvidence
 	default:
-		return "", "", ""
+		return CaseWaitingEvidence
 	}
 }
 
 func workflowStringPtr(value string) *string { return &value }
+
+func (o *CaseOrchestrator) ContinueWithEvidence(ctx context.Context, cmd ContinueWithEvidenceCommand) (IncidentCase, error) {
+	if err := validateCommand(cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey, cmd.ActorID); err != nil {
+		return IncidentCase{}, err
+	}
+	if err := validateJSONObject("continuation input", cmd.InputJSON, true); err != nil {
+		return IncidentCase{}, err
+	}
+	if o == nil || o.store == nil {
+		return IncidentCase{}, errors.New("case orchestrator store is required")
+	}
+	commandDigest := sha256.Sum256(mustJSON(cmd))
+	identity := hex.EncodeToString(commandDigest[:])
+	release := workflowCommandLocks.acquire("continue:" + cmd.IdempotencyKey)
+	defer release()
+	if replay, found, err := o.store.GetCommittedCaseMutation(ctx, cmd.IdempotencyKey); err != nil {
+		return IncidentCase{}, err
+	} else if found {
+		var payload struct {
+			Identity string `json:"continuation_identity_sha256"`
+		}
+		if json.Unmarshal(replay.Event.PayloadJSON, &payload) != nil || payload.Identity != identity || replay.Event.CaseID != cmd.CaseID || replay.Event.ActorID != cmd.ActorID {
+			return IncidentCase{}, ErrIdempotencyConflict
+		}
+		return replay.ResultCase, nil
+	}
+	incident, err := o.loadForCommand(ctx, cmd.CaseID, cmd.ExpectedVersion, cmd.IdempotencyKey)
+	if err != nil {
+		return IncidentCase{}, err
+	}
+	if cmd.Phase != "" && cmd.Phase != PhaseInvestigation && cmd.Phase != PhaseFix {
+		return IncidentCase{}, errors.New("only investigation and fix phases are supported")
+	}
+	if incident.Status == CaseMergeConflict {
+		result, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: cmd.IdempotencyKey, RequestJSON: mustJSON(cmd), Steps: []CaseMutationStep{{To: CaseWaitingMergeApproval, Event: TransitionEvent{ID: stableID("event", cmd.IdempotencyKey), EventType: "merge_reinspection_confirmed", ActorType: "user", ActorID: cmd.ActorID, PayloadJSON: mustJSON(map[string]any{"evidence": cmd.InputJSON, "continuation_identity_sha256": identity})}}}})
+		return result.Case, err
+	}
+	to, mode, phase := continuationTarget(incident, cmd.Phase)
+	if to == "" {
+		return IncidentCase{}, ErrApprovalNotReady
+	}
+	previous, err := o.store.GetAttempt(ctx, incident.CurrentAttemptID)
+	if err != nil {
+		return IncidentCase{}, err
+	}
+	if previous.CaseID != incident.ID || previous.CycleNumber != incident.CycleNumber || previous.Phase != phase || previous.BotKey != cmd.Bot.Key || previous.AgentTarget != cmd.Bot.Target {
+		return IncidentCase{}, ErrApprovalScope
+	}
+	parentID, input := previous.ID, CloneRawMessage(cmd.InputJSON)
+	if phase == PhaseFix {
+		// A retry inherits the approved scope and root cause. Supplemental text cannot
+		// replace the baseline, repositories or rework identity of the approved fix.
+		var original, supplemental map[string]json.RawMessage
+		if err := json.Unmarshal(previous.InputJSON, &original); err != nil {
+			return IncidentCase{}, err
+		}
+		if err := json.Unmarshal(cmd.InputJSON, &supplemental); err != nil {
+			return IncidentCase{}, err
+		}
+		if original == nil {
+			original = map[string]json.RawMessage{}
+		}
+		if value, ok := supplemental["user_input"]; ok {
+			original["user_input"] = value
+		}
+		input = mustJSON(original)
+		parentID = previous.ParentAttemptID
+	}
+	attempt := newAttempt(incident, phase, mode, cmd.IdempotencyKey, cmd.Bot, input, parentID)
+	result, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: cmd.IdempotencyKey, RequestJSON: mustJSON(cmd), CreateAttempts: []PhaseAttempt{attempt}, Snapshot: CaseSnapshotUpdate{CurrentAttemptID: workflowStringPtr(attempt.ID)}, Steps: []CaseMutationStep{{To: to, Event: TransitionEvent{ID: stableID("event", cmd.IdempotencyKey), EventType: "evidence_continued", ActorType: "user", ActorID: cmd.ActorID, PayloadJSON: mustJSON(map[string]string{"attempt_id": attempt.ID, "continuation_identity_sha256": identity})}}}})
+	if err != nil || result.Replay {
+		return result.Case, err
+	}
+	if o.runner == nil {
+		return o.phaseScheduleFailure(ctx, result.Case, attempt, cmd.IdempotencyKey, errors.New("phase runner is unavailable"))
+	}
+	if err := o.startPhase(attempt, cmd.Bug, cmd.Bot); err != nil {
+		return o.phaseScheduleFailure(ctx, result.Case, attempt, cmd.IdempotencyKey, err)
+	}
+	return result.Case, nil
+}
+func continuationTarget(incident IncidentCase, requested Phase) (CaseStatus, AttemptMode, Phase) {
+	if incident.Status == CaseFixFailed && (requested == "" || requested == PhaseFix) {
+		return CaseFixing, "", PhaseFix
+	}
+	if incident.Status == CaseWaitingEvidence && (requested == "" || requested == PhaseInvestigation) {
+		return CaseInvestigating, "", PhaseInvestigation
+	}
+	return "", "", ""
+}

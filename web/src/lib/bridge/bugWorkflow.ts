@@ -1,10 +1,12 @@
 import * as App from '../../../wailsjs/go/main/App'
+import { main as WailsMain } from '../../../wailsjs/go/models'
 import { isDesktop } from './shared'
 
 const desktopOnly = 'Incident Case 工作流只在桌面 app 可用'
 
-export type CaseStatus = 'pending_validation' | 'validating' | 'waiting_evidence' | 'reproduced' |
+export type CaseStatus = 'pending_investigation' | 'submitted' | 'remediation_recorded' | 'pending_validation' | 'validating' | 'waiting_evidence' | 'reproduced' |
   'not_reproduced' | 'investigating' | 'root_cause_ready' | 'waiting_fix_approval' |
+  'waiting_remediation' | 'remediation_applied' |
   'fixing' | 'fix_failed' | 'fix_pushed' | 'waiting_merge_approval' | 'merging' |
   'merge_conflict' | 'waiting_deployment' | 'deployment_unverified' |
   'deployment_verified' | 'regression_validating' | 'fixed_verified' |
@@ -20,6 +22,8 @@ export interface IncidentCase {
   source: string
   system_id: string
   environment: string
+  frontend_entry?: FrontendEntryBinding
+  frontend_entries?: FrontendEntryBinding[]
   status: CaseStatus
   cycle_number: number
   current_attempt_id: string
@@ -30,6 +34,11 @@ export interface IncidentCase {
   created_at: string
   updated_at: string
   closed_at?: string | null
+}
+
+export interface FrontendEntryBinding {
+  id: string; name: string; url: string; config_url?: string; repo?: string; device_profile?: string
+  resolution_source: string; score?: number; reason?: string; config_sha256?: string
 }
 
 export interface PhaseAttempt {
@@ -51,7 +60,7 @@ export interface PhaseAttempt {
   usage: { input_tokens?: number; output_tokens?: number; duration?: number }
 }
 
-export interface EvidenceArtifact { id: string; case_id: string; attempt_id: string; kind: string; path_or_reference: string; sha256: string; captured_at: string; environment: string; version: string; request_id: string; trace_id: string; redaction_status: string }
+export interface IncidentArtifact { id: string; case_id: string; attempt_id: string; kind: string; sha256: string; size: number; captured_at: string; environment: string; version: string; request_id: string; trace_id: string }
 export interface Approval { id: string; case_id: string; kind: string; actor: string; approved_at: string; case_version: number; scope_json: Record<string, unknown>; fix_commits: Record<string, string>; target_branches: Record<string, string> }
 export interface CodeChange { id: string; case_id: string; attempt_id: string; repo: string; base_branch: string; fix_branch: string; fix_commit: string; test_evidence: unknown; target_environment_branch: string; merge_base_head: string; merge_commit: string; push_remote: string; push_status: string }
 export interface DeploymentObservation { id: string; case_id: string; environment: string; expected_commits: Record<string, string>; observed_version: string; observed_images: Record<string, string>; observed_commits: Record<string, string>; verified_commit_ancestors?: Record<string, string>; observed_at?: string; diagnostic_code?: string; diagnostic_message?: string; verification_source: string; result: string }
@@ -71,17 +80,17 @@ export interface WorkflowMetrics {
   first_regression_success_rate: number
   still_reproduces_rate: number
 }
-export interface WorkflowReminder { case_id: string; bug_id: string; environment: string; waiting_since: string; waiting_age: number; sequence: number; reservation_key: string; delivery_attempt: number }
 
 export interface IncidentCaseDetail {
   case: IncidentCase
   attempts: PhaseAttempt[]
-  artifacts: EvidenceArtifact[]
+  phase_events?: IncidentPhaseEvent[]
+  artifacts: IncidentArtifact[]
   approvals: Approval[]
   code_changes: CodeChange[]
   deployment_observations: DeploymentObservation[]
   events: TransitionEvent[]
-  deployment_verification?: { provider: 'manual' | 'http' | 'k8s' | 'unavailable'; available: boolean; hint: string }
+  bug_ticket_resolution?: { state: 'not_ready' | 'pending' | 'resolved' | 'unknown'; source_status?: string }
 }
 
 export interface IncidentPhaseEvent {
@@ -102,9 +111,10 @@ export type IncidentCaseEventPayload = {
   error: { message: string; retryable: boolean }
 }
 
-interface WorkflowCommandInput { case_id: string; expected_version: number; idempotency_key: string; actor_id: string }
-export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: string; bot_key?: string; input_json?: Record<string, unknown> }
-export interface ResetIncidentCaseInput extends WorkflowCommandInput { new_case_id: string; bot_key: string; input_json?: Record<string, unknown> }
+export interface WorkflowCommandInput { case_id: string; expected_version: number; idempotency_key: string; actor_id: string }
+export interface IncidentArtifactPreview { artifact_id: string; mime_type: 'image/png'; base64_data: string; size: number }
+export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: string; bot_key?: string; bot_environment?: string; input_json?: Record<string, unknown> }
+export interface ResetIncidentCaseInput extends WorkflowCommandInput { new_case_id: string; bot_key: string; bot_environment?: string; input_json?: Record<string, unknown> }
 export interface WorkflowWarning { code: string; message: string }
 export interface ResetIncidentCaseResult { case: IncidentCase; warnings: WorkflowWarning[] }
 export type IncidentWorkflowConflictCode = 'case_version_conflict' | 'idempotency_conflict'
@@ -130,10 +140,20 @@ export function isIncidentWorkflowConflict(error: unknown): boolean {
   return incidentWorkflowConflictCode(error) !== ''
 }
 export interface ContinueIncidentCaseInput extends WorkflowCommandInput { phase: Phase; input_json?: Record<string, unknown> }
+export interface IncidentEvidenceImageInput { name: string; mime_type: 'image/png' | 'image/jpeg'; base64_data: string }
+export interface UploadIncidentEvidenceImagesInput { case_id: string; attempt_id: string; expected_version: number; images: IncidentEvidenceImageInput[] }
+export interface IncidentEvidenceImage { artifact_id: string; name: string; mime_type: 'image/png'; size: number }
+export interface IncidentEvidenceFileInput { name: string; mime_type: string; base64_data: string }
+export interface UploadIncidentEvidenceFilesInput { case_id: string; attempt_id: string; expected_version: number; files: IncidentEvidenceFileInput[] }
+export interface IncidentEvidenceFile { artifact_id: string; name: string; mime_type: string; size: number }
 export interface ApproveIncidentFixInput extends WorkflowCommandInput { root_cause_attempt_id: string; input_json?: Record<string, unknown> }
+export interface ReconsiderIncidentRemediationInput extends WorkflowCommandInput { root_cause_attempt_id: string; proposal: string }
+export interface DisputeIncidentRootCauseInput extends WorkflowCommandInput { root_cause_attempt_id: string; reason: string; evidence_artifact_ids?: string[] }
+export interface CompleteIncidentRemediationInput extends WorkflowCommandInput { root_cause_attempt_id: string; summary: string; evidence: string }
 export interface ApproveIncidentMergeInput extends WorkflowCommandInput { fix_commits: Record<string, string>; target_branches: Record<string, string>; target_heads?: Record<string, string> }
-export interface NotifyIncidentDeployedInput extends WorkflowCommandInput { observed_version: string; observed_commits?: Record<string, string>; version_source?: string; notification_text?: string; input_json?: Record<string, unknown> }
 export interface CancelIncidentAttemptInput extends WorkflowCommandInput { attempt_id: string }
+export interface DeleteIncidentHistoryInput { case_id: string; bug_id: string }
+export interface DeleteIncidentHistoryResult { bug_id: string; case_ids: string[]; cleanup_warning?: string }
 
 export async function listIncidentCases(): Promise<IncidentCase[]> {
   if (!isDesktop()) return []
@@ -141,25 +161,34 @@ export async function listIncidentCases(): Promise<IncidentCase[]> {
   return Array.isArray(result) ? result.map(normalizeCase) : []
 }
 
+export async function deleteIncidentHistory(input: DeleteIncidentHistoryInput): Promise<DeleteIncidentHistoryResult> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  const raw = record(await App.DeleteIncidentHistory(input))
+  return {
+    bug_id: String(raw.bug_id ?? input.bug_id),
+    case_ids: Array.isArray(raw.case_ids) ? raw.case_ids.map(String) : [],
+    cleanup_warning: typeof raw.cleanup_warning === 'string' ? raw.cleanup_warning : undefined,
+  }
+}
+
 export async function getIncidentWorkflowMetrics(): Promise<WorkflowMetrics> {
   if (!isDesktop()) return emptyWorkflowMetrics()
   return { ...emptyWorkflowMetrics(), ...(await App.GetIncidentWorkflowMetrics()) } as WorkflowMetrics
 }
 
-export async function listPendingIncidentWorkflowReminders(): Promise<WorkflowReminder[]> {
-  if (!isDesktop()) return []
-  const result = await App.ListPendingIncidentWorkflowReminders()
-  return Array.isArray(result) ? result as WorkflowReminder[] : []
-}
-
-export async function ackIncidentWorkflowReminder(input: { case_id: string; reservation_key: string; delivery_attempt: number; actor_id: string }): Promise<void> {
-  if (!isDesktop()) throw new Error(desktopOnly)
-  await App.AckIncidentWorkflowReminder(input)
-}
-
 export async function getIncidentCase(caseID: string): Promise<IncidentCaseDetail> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeDetail(await App.GetIncidentCase(caseID))
+}
+export async function listIncidentFixBranches(caseID: string, rootCauseAttemptID: string): Promise<Record<string, string[]>> {
+  if (!isDesktop()) return {}
+  const raw = record(await App.ListIncidentFixBranches(caseID, rootCauseAttemptID))
+  const result: Record<string, string[]> = {}
+  for (const [repo, branches] of Object.entries(raw)) {
+    if (!repo.trim() || !Array.isArray(branches)) continue
+    result[repo] = [...new Set(branches.map(branch => typeof branch === 'string' ? branch.trim() : '').filter(Boolean))]
+  }
+  return result
 }
 
 export async function startIncidentCase(input: StartIncidentCaseInput): Promise<IncidentCase> {
@@ -193,21 +222,79 @@ export async function continueIncidentCase(input: ContinueIncidentCaseInput): Pr
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.ContinueIncidentCase(input))
 }
+export async function uploadIncidentEvidenceImages(input: UploadIncidentEvidenceImagesInput): Promise<IncidentEvidenceImage[]> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  const raw = await App.UploadIncidentEvidenceImages(new WailsMain.UploadIncidentEvidenceImagesInput(input))
+  if (!Array.isArray(raw)) throw new Error('补充证据上传返回了无效结果')
+  return raw.map(item => {
+    const value = record(item)
+    const size = value.size
+    if (typeof value.artifact_id !== 'string' || !value.artifact_id || typeof value.name !== 'string' || value.mime_type !== 'image/png' || typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0) {
+      throw new Error('补充证据上传返回了无效图片')
+    }
+    return { artifact_id: value.artifact_id, name: value.name, mime_type: 'image/png', size }
+  })
+}
+export async function uploadIncidentEvidenceFiles(input: UploadIncidentEvidenceFilesInput): Promise<IncidentEvidenceFile[]> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  const raw = await App.UploadIncidentEvidenceFiles(new WailsMain.UploadIncidentEvidenceFilesInput(input))
+  if (!Array.isArray(raw)) throw new Error('测试文件上传返回了无效结果')
+  return raw.map(item => {
+    const value = record(item)
+    const size = value.size
+    if (typeof value.artifact_id !== 'string' || !value.artifact_id || typeof value.name !== 'string' || !value.name || typeof value.mime_type !== 'string' || typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0) {
+      throw new Error('测试文件上传返回了无效文件')
+    }
+    return { artifact_id: value.artifact_id, name: value.name, mime_type: value.mime_type, size }
+  })
+}
 export async function approveIncidentFix(input: ApproveIncidentFixInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.ApproveIncidentFix(input))
+}
+export async function reconsiderIncidentRemediation(input: ReconsiderIncidentRemediationInput): Promise<IncidentCase> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  return normalizeCase(await App.ReconsiderIncidentRemediation(input))
+}
+export async function disputeIncidentRootCause(input: DisputeIncidentRootCauseInput): Promise<IncidentCase> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  return normalizeCase(await App.DisputeIncidentRootCause(input))
+}
+export async function completeIncidentRemediation(input: CompleteIncidentRemediationInput): Promise<IncidentCase> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  return normalizeCase(await App.CompleteIncidentRemediation(input))
 }
 export async function approveIncidentMerge(input: ApproveIncidentMergeInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.ApproveIncidentMerge({ ...input, target_heads: input.target_heads || {} }))
 }
-export async function notifyIncidentDeployed(input: NotifyIncidentDeployedInput): Promise<IncidentCase> {
-  if (!isDesktop()) throw new Error(desktopOnly)
-  return normalizeCase(await App.NotifyIncidentDeployed(input))
-}
 export async function cancelIncidentAttempt(input: CancelIncidentAttemptInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.CancelIncidentAttempt(input))
+}
+export async function getIncidentArtifactPreview(caseID: string, artifactID: string): Promise<IncidentArtifactPreview> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  const raw = record(await App.GetIncidentArtifactPreview(caseID, artifactID))
+  const base64Data = typeof raw.base64_data === 'string' ? raw.base64_data : ''
+  const size = raw.size
+  const maxPreviewBytes = 16 * 1024 * 1024
+  const canonicalBase64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
+  if (raw.artifact_id !== artifactID || raw.mime_type !== 'image/png' || typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0 || size > maxPreviewBytes || base64Data.length !== Math.ceil(size / 3) * 4 || !canonicalBase64.test(base64Data)) {
+    throw new Error('故障证据预览不是有效的 PNG 图片')
+  }
+  let decoded = ''
+  try { decoded = atob(base64Data) } catch { throw new Error('故障证据预览不是有效的 PNG 图片') }
+  const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+  if (decoded.length !== size || btoa(decoded) !== base64Data || signature.some((byte, index) => decoded.charCodeAt(index) !== byte)) {
+    throw new Error('故障证据预览不是有效的 PNG 图片')
+  }
+  return { artifact_id: artifactID, mime_type: 'image/png', base64_data: base64Data, size }
+}
+export async function saveIncidentArtifact(caseID: string, artifactID: string): Promise<boolean> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  const saved = await App.SaveIncidentArtifact(caseID, artifactID)
+  if (typeof saved !== 'boolean') throw new Error('保存故障证据返回了无效结果')
+  return saved
 }
 
 function record(raw: unknown): Record<string, unknown> {
@@ -235,16 +322,48 @@ function normalizeCase(raw: unknown): IncidentCase {
   } as IncidentCase
 }
 
+function normalizeArtifact(raw: unknown): IncidentArtifact {
+  const source = record(raw)
+  return {
+    id: String(source.id ?? ''),
+    case_id: String(source.case_id ?? ''),
+    attempt_id: String(source.attempt_id ?? ''),
+    kind: String(source.kind ?? ''),
+    sha256: String(source.sha256 ?? ''),
+    size: typeof source.size === 'number' ? source.size : 0,
+    captured_at: String(source.captured_at ?? ''),
+    environment: String(source.environment ?? ''),
+    version: String(source.version ?? ''),
+    request_id: String(source.request_id ?? ''),
+    trace_id: String(source.trace_id ?? ''),
+  }
+}
+
 function normalizeDetail(raw: unknown): IncidentCaseDetail {
   const source = record(raw)
   return {
     case: normalizeCase(source.case),
     attempts: Array.isArray(source.attempts) ? source.attempts as PhaseAttempt[] : [],
-    artifacts: Array.isArray(source.artifacts) ? source.artifacts as EvidenceArtifact[] : [],
+    phase_events: Array.isArray(source.phase_events) ? source.phase_events.map(item => {
+      const event = record(item)
+      return {
+        ...(typeof event.at === 'string' ? { at: event.at } : {}),
+        ...(typeof event.type === 'string' ? { type: event.type } : {}),
+        ...(typeof event.message === 'string' ? { message: event.message } : {}),
+        meta: record(event.meta),
+      }
+    }) : [],
+    artifacts: Array.isArray(source.artifacts) ? source.artifacts.map(normalizeArtifact) : [],
     approvals: Array.isArray(source.approvals) ? source.approvals as Approval[] : [],
     code_changes: Array.isArray(source.code_changes) ? source.code_changes as CodeChange[] : [],
     deployment_observations: Array.isArray(source.deployment_observations) ? source.deployment_observations as DeploymentObservation[] : [],
     events: Array.isArray(source.events) ? source.events as TransitionEvent[] : [],
+    bug_ticket_resolution: {
+      state: ['not_ready', 'pending', 'resolved', 'unknown'].includes(String(record(source.bug_ticket_resolution).state))
+        ? String(record(source.bug_ticket_resolution).state) as 'not_ready' | 'pending' | 'resolved' | 'unknown'
+        : 'unknown',
+      source_status: String(record(source.bug_ticket_resolution).source_status ?? ''),
+    },
   }
 }
 
@@ -267,4 +386,15 @@ export function normalizeIncidentCaseEvent(raw: unknown): IncidentCaseEventPaylo
     snapshot: normalizeDetail(source.snapshot),
     ...(source.phase_event ? { phase_event: { ...phase, meta: record(phase.meta) } } : {}),
   }
+}
+
+export interface IncidentEvidenceSelection { images: IncidentEvidenceImageInput[]; files: IncidentEvidenceFileInput[] }
+export async function selectIncidentEvidence(): Promise<IncidentEvidenceSelection> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  const result = await App.SelectIncidentEvidence()
+  const images = (result?.images || []).map((image): IncidentEvidenceImageInput => {
+    if (image.mime_type !== 'image/png' && image.mime_type !== 'image/jpeg') throw new Error('截图格式不受支持')
+    return { name: image.name, mime_type: image.mime_type, base64_data: image.base64_data }
+  })
+  return { images, files: result?.files || [] }
 }

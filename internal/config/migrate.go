@@ -3,6 +3,8 @@
 // 走完迁移就符合新 schema,validate 不用再为兼容老结构留特例。
 package config
 
+import "fmt"
+
 func migrateObservabilityEndpoints(cfg *SystemConfig) {
 	obs := &cfg.Infrastructure.Observability
 
@@ -107,4 +109,138 @@ func migrateLegacyConfigCenter(cfg *SystemConfig) {
 			cfg.Repos[i].ConfigSource = defaultSource
 		}
 	}
+}
+
+// migrateResourceCatalog derives the normalized catalog for legacy YAML. New
+// YAML that already declares catalog entries remains authoritative. The legacy
+// fields stay populated because older templates and external integrations may
+// still read them during the compatibility window.
+func migrateResourceCatalog(cfg *SystemConfig) {
+	// Give every data-store instance a stable ID first, including explicit
+	// catalogs that may reference a legacy data_stores block without IDs.
+	typeCount := map[string]int{}
+	usedIDs := map[string]bool{}
+	for i := range cfg.Infrastructure.DataStores {
+		ds := &cfg.Infrastructure.DataStores[i]
+		if ds.ID != "" {
+			usedIDs[ds.ID] = true
+			continue
+		}
+		typeCount[ds.Type]++
+		candidate := ds.Type
+		if typeCount[ds.Type] > 1 || usedIDs[candidate] {
+			candidate = fmt.Sprintf("%s-%d", ds.Type, typeCount[ds.Type])
+		}
+		for usedIDs[candidate] {
+			typeCount[ds.Type]++
+			candidate = fmt.Sprintf("%s-%d", ds.Type, typeCount[ds.Type])
+		}
+		ds.ID = candidate
+		usedIDs[candidate] = true
+	}
+
+	if len(cfg.ResourceCatalog.Services) == 0 {
+		byID := map[string]*ServiceResource{}
+		for _, repo := range cfg.Repos {
+			for _, service := range repo.ServiceNames {
+				if service == "" {
+					continue
+				}
+				if _, exists := byID[service]; exists {
+					continue
+				}
+				item := ServiceResource{
+					ID: service, Repository: repo.Name,
+					ConfigSources: map[string]string{}, DataStores: map[string][]string{}, Workloads: map[string]string{},
+				}
+				cfg.ResourceCatalog.Services = append(cfg.ResourceCatalog.Services, item)
+				byID[service] = &cfg.ResourceCatalog.Services[len(cfg.ResourceCatalog.Services)-1]
+			}
+		}
+		// Slice growth can move entries, so rebuild pointers before enriching.
+		byID = map[string]*ServiceResource{}
+		for i := range cfg.ResourceCatalog.Services {
+			byID[cfg.ResourceCatalog.Services[i].ID] = &cfg.ResourceCatalog.Services[i]
+		}
+		for _, ds := range cfg.Infrastructure.DataStores {
+			for _, ep := range ds.Endpoints {
+				item := byID[ep.Service]
+				if item == nil || ep.Env == "" {
+					continue
+				}
+				item.DataStores[ep.Env] = appendUnique(item.DataStores[ep.Env], ds.ID)
+			}
+		}
+	}
+
+	if len(cfg.ResourceCatalog.Workloads) == 0 {
+		workloads := map[string]int{}
+		serviceByID := map[string]*ServiceResource{}
+		for i := range cfg.ResourceCatalog.Services {
+			serviceByID[cfg.ResourceCatalog.Services[i].ID] = &cfg.ResourceCatalog.Services[i]
+		}
+		for _, entry := range cfg.Infrastructure.Observability.K8sRuntime.ServiceMap {
+			id := entry.Service
+			if id == "" {
+				continue
+			}
+			idx, exists := workloads[id]
+			if !exists {
+				repository := ""
+				if service := serviceByID[entry.Service]; service != nil {
+					repository = service.Repository
+				} else {
+					for _, repo := range cfg.Repos {
+						if repo.Name == entry.Service {
+							repository = repo.Name
+							break
+						}
+					}
+				}
+				if repository == "" {
+					continue
+				}
+				cfg.ResourceCatalog.Workloads = append(cfg.ResourceCatalog.Workloads, WorkloadResource{
+					ID: id, Repository: repository, Service: entry.Service, Names: map[string]string{},
+				})
+				idx = len(cfg.ResourceCatalog.Workloads) - 1
+				workloads[id] = idx
+			}
+			item := &cfg.ResourceCatalog.Workloads[idx]
+			name := entry.Workload
+			if name == "" {
+				name = entry.Service
+			}
+			item.Names[entry.Env] = name
+			if service := serviceByID[entry.Service]; service != nil {
+				service.Workloads[entry.Env] = id
+			}
+		}
+		// Frontend/mobile repositories are runtime identities even when they have
+		// no configuration-center service name or current K8s mapping.
+		for _, repo := range cfg.Repos {
+			if repo.EffectiveRole() != RoleFrontend && repo.EffectiveRole() != RoleMobile {
+				continue
+			}
+			if _, exists := workloads[repo.Name]; exists || repo.Name == "" {
+				continue
+			}
+			names := map[string]string{}
+			for _, env := range cfg.Environments {
+				names[env.ID] = repo.Name
+			}
+			cfg.ResourceCatalog.Workloads = append(cfg.ResourceCatalog.Workloads, WorkloadResource{
+				ID: repo.Name, Repository: repo.Name, Names: names,
+			})
+		}
+	}
+}
+
+func appendUnique(items []string, value string) []string {
+	for _, item := range items {
+		if item == value {
+			return items
+		}
+	}
+	return append(items, value)
 }

@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
@@ -68,7 +67,6 @@ func TestDerivePrompts_Nacos(t *testing.T) {
 	for _, want := range []string{
 		"CC_ADDR_DEV", "CC_USER_DEV", "CC_PASS_DEV",
 		"CC_ADDR_PROD", "CC_USER_PROD", "CC_PASS_PROD",
-		"MODEL",
 	} {
 		if !contains(got, want) {
 			t.Errorf("missing per-env prompt %s; got=%v", want, got)
@@ -200,6 +198,29 @@ func TestPrefillCredsFromYAML_ObservabilityK8sRuntimeOne2All(t *testing.T) {
 	}
 }
 
+func TestPrefillCredsFromYAML_IgnoresSecretReferences(t *testing.T) {
+	cfg := &config.SystemConfig{
+		Infrastructure: config.Infrastructure{
+			ConfigCenters: []config.ConfigCenter{{
+				ID: "default", Type: "nacos",
+				Endpoints: []config.ConfigCenterEndpoint{{
+					Env: "dev", Addr: "nacos:8848", User: "{{CC_USER_DEV}}", Pass: "{{CC_PASS_DEV}}",
+				}},
+			}},
+		},
+	}
+	got := PrefillCredsFromYAML(cfg)
+	if got["CC_ADDR_DEV"] != "nacos:8848" {
+		t.Fatalf("non-secret endpoint should remain available: %v", got)
+	}
+	if _, ok := got["CC_USER_DEV"]; ok {
+		t.Fatalf("secret reference must not be treated as a credential: %v", got)
+	}
+	if _, ok := got["CC_PASS_DEV"]; ok {
+		t.Fatalf("secret reference must not be treated as a credential: %v", got)
+	}
+}
+
 func TestDerivePrompts_Messaging(t *testing.T) {
 	cfg := mkCfg("nacos", []string{"dev"})
 	cfg.Infrastructure.Messaging = []config.Messaging{
@@ -297,16 +318,10 @@ func TestDerivePrompts_LegacyDefaultIDKeepsOldNames(t *testing.T) {
 }
 
 // MODEL prompt 总是出现,且 prompt 文案带 cfg.Agent.Model 默认值
-func TestDerivePrompts_ModelDefaultEmbedded(t *testing.T) {
-	cfg := mkCfg("nacos", []string{"dev"})
-	got := DerivePrompts(cfg)
-	for _, p := range got {
+func TestDerivePrompts_NoRuntimeModel(t *testing.T) {
+	for _, p := range derive(t, mkCfg("nacos", []string{"dev"})) {
 		if p.Name == "MODEL" {
-			if !strings.Contains(p.Prompt, cfg.Agent.Model) {
-				t.Errorf("MODEL prompt should embed default %q; got %q", cfg.Agent.Model, p.Prompt)
-			}
-			return
+			t.Fatal("retired runtime model prompt remains")
 		}
 	}
-	t.Errorf("MODEL prompt missing")
 }

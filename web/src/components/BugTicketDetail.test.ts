@@ -88,6 +88,18 @@ describe('BugTicketDetail', () => {
     expect(wrapper.emitted('openIncident')).toEqual([['zentao-840']])
   })
 
+  it('shows local history deletion only when explicitly enabled', async () => {
+    const wrapper = mount(BugTicketDetail, {
+      props: { bug: { ...bug, inbox_state: 'history' }, mode: 'full', allowDeleteHistory: true },
+    })
+
+    await wrapper.get('[data-action="delete-bug-history"]').trigger('click')
+
+    expect(wrapper.emitted('deleteHistory')).toEqual([[bug.id]])
+    await wrapper.setProps({ allowDeleteHistory: false })
+    expect(wrapper.find('[data-action="delete-bug-history"]').exists()).toBe(false)
+  })
+
   it('renders a compact summary without full-only fields or actions', () => {
     const wrapper = mount(BugTicketDetail, { props: { bug, mode: 'summary' } })
 

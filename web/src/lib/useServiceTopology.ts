@@ -11,8 +11,8 @@ export interface UseServiceTopologyOptions {
   blocked?: () => boolean
 }
 
-function normalizedProtocol(value: string): 'http' | 'grpc' {
-  return value.trim().toLowerCase() === 'grpc' ? 'grpc' : 'http'
+function normalizedProtocol(value?: string): 'http' | 'grpc' {
+  return value?.trim().toLowerCase() === 'grpc' ? 'grpc' : 'http'
 }
 
 function normalizedMethod(value?: string): string | undefined {
@@ -74,6 +74,9 @@ export function overrideForEdge(
 }
 
 function semanticKey(value: ServiceTopologyOverrideState): string {
+  if (value.scope === 'service') {
+    return ['service', value.fromService.trim(), value.toService.trim()].join('\u001f')
+  }
   const protocol = normalizedProtocol(value.protocol)
   return [
     value.fromService.trim(),
@@ -87,6 +90,10 @@ function semanticKey(value: ServiceTopologyOverrideState): string {
 
 function edgeKey(edge: topology.CandidateEdge): string {
   return semanticKey(overrideForEdge('confirm', edge))
+}
+
+function serviceKey(fromService: string, toService: string): string {
+  return ['service', fromService.trim(), toService.trim()].join('\u001f')
 }
 
 export function upsertTopologyOverride(
@@ -118,7 +125,9 @@ function derivedSnapshot(
   const edges = (source.edges ?? []).map((edge) => {
     const key = edgeKey(edge)
     presentKeys.add(key)
-    const decision = decisions.get(key)
+    const relationKey = serviceKey(edge.from_service, edge.to_service)
+    presentKeys.add(relationKey)
+    const decision = decisions.get(key) ?? decisions.get(relationKey)
     let status = edge.status
     // 后端把“仍有 confirm override，但本轮证据消失”的关系标为 stale。
     // 这类状态不能被本地即时派生重新涂成 confirmed，否则用户看不到证据已过期。
@@ -136,7 +145,7 @@ function derivedSnapshot(
       to_endpoint: '',
       from_service: decision.fromService,
       to_service: decision.toService,
-      protocol: decision.protocol,
+      protocol: decision.protocol ?? '',
       method: decision.method,
       path: decision.path,
       rpc_method: decision.rpcMethod,

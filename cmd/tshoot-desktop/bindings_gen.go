@@ -118,7 +118,6 @@ func (a *App) Diff(yamlText, existingDir string) (*generator.Plan, error) {
 //
 // Path 加 target 前缀,跟用户最终看到的目录结构对齐:
 //
-//	openclaw     openclaw/agents/<name>.md(实际落到 ~/.openclaw/workspace/<id>/agents/<name>.md)
 //	claude-code  claude-code/agents/<name>.md(实际落到 ~/.claude/agents/<name>.md)
 //	cursor       cursor/agents/<name>.md(实际落到 ~/.cursor/agents/<name>.md)
 //
@@ -142,7 +141,6 @@ type GenPreviewResult struct {
 }
 
 // GenPreview 按 yaml 的 generation.targets 真跑一遍 generator,把每个 target 的产物
-// 都读回来给 UI 预览。跟 cmd/tshoot/gen.go 保持同一逻辑(openclaw staging 复用 / 单
 // claude-code 时建临时 staging 等),用户在 EditorPage 看到的就是"真实部署到 AI 平台
 // 的内容",不是 staging 中间形态。
 //
@@ -157,26 +155,13 @@ func (a *App) GenPreview(yamlText string) (*GenPreviewResult, error) {
 		return nil, err
 	}
 	defer os.RemoveAll(tmp)
-
-	// 主 outDir(openclaw 落地)+ 兄弟目录(<outDir>-claude-code / <outDir>-cursor)
-	outDir := filepath.Join(tmp, "openclaw")
+	outDir := filepath.Join(tmp, "workspace")
 	g := generator.New(cfg, a.templateRoot, outDir)
 	g.TshootVersion = version
 	g.TroubleshooterYAMLSource = []byte(yamlText)
 
 	targets := cfg.Generation.ResolvedTargets()
-	hasOpenclaw, hasOther := false, false
-	for _, t := range targets {
-		switch t {
-		case "openclaw":
-			hasOpenclaw = true
-		case "claude-code", "cursor", "codex":
-			hasOther = true
-		}
-	}
-	// 没勾 openclaw 但有 claude-code / cursor:跟 cmd/tshoot/gen.go 同样套路,先建临时
-	// staging 让 GenerateClaudeCode/Cursor 复用 workspace 渲染,完事即清。
-	if hasOther && !hasOpenclaw {
+	{
 		stagingDir, err := os.MkdirTemp("", "tshoot-preview-staging-*")
 		if err != nil {
 			return nil, fmt.Errorf("create staging: %w", err)
@@ -194,26 +179,8 @@ func (a *App) GenPreview(yamlText string) (*GenPreviewResult, error) {
 
 	// 按 target 各跑一遍,失败任一直接返错(让用户看到 yaml 里某个 target 渲染哪儿挂了)
 	for _, target := range targets {
-		switch target {
-		case "openclaw":
-			if err := g.Generate(); err != nil {
-				return nil, fmt.Errorf("gen openclaw: %w", err)
-			}
-			if hasOther {
-				g.SharedStaging = g.OutputDir
-			}
-		case "claude-code":
-			if err := g.GenerateClaudeCode(); err != nil {
-				return nil, fmt.Errorf("gen claude-code: %w", err)
-			}
-		case "cursor":
-			if err := g.GenerateCursor(); err != nil {
-				return nil, fmt.Errorf("gen cursor: %w", err)
-			}
-		case "codex":
-			if err := g.GenerateCodex(); err != nil {
-				return nil, fmt.Errorf("gen codex: %w", err)
-			}
+		if err := g.GenerateTarget(target); err != nil {
+			return nil, err
 		}
 	}
 
@@ -228,8 +195,6 @@ func (a *App) GenPreview(yamlText string) (*GenPreviewResult, error) {
 	}
 
 	// 每个 target 对应一个产物根目录;walk 时给每条文件加 target/ 前缀,
-	// openclaw 还要剥掉 staging 里的 "templates/workspace-template/" 前缀,
-	// 让用户看到的路径就是 ~/.openclaw/workspace/<id>/ 下的真实结构。
 	type targetRoot struct {
 		target string
 		root   string
@@ -237,16 +202,7 @@ func (a *App) GenPreview(yamlText string) (*GenPreviewResult, error) {
 	}
 	var roots []targetRoot
 	for _, t := range targets {
-		switch t {
-		case "openclaw":
-			roots = append(roots, targetRoot{target: "openclaw", root: outDir, strip: filepath.Join("templates", "workspace-template")})
-		case "claude-code":
-			roots = append(roots, targetRoot{target: "claude-code", root: outDir + "-claude-code"})
-		case "cursor":
-			roots = append(roots, targetRoot{target: "cursor", root: outDir + "-cursor"})
-		case "codex":
-			roots = append(roots, targetRoot{target: "codex", root: outDir + "-codex"})
-		}
+		roots = append(roots, targetRoot{target: t, root: outDir + "-" + t})
 	}
 
 	const previewMax = 200 * 1024
@@ -262,7 +218,6 @@ func (a *App) GenPreview(yamlText string) (*GenPreviewResult, error) {
 			if err != nil {
 				return nil //nolint:nilerr // path 算不出相对就 skip,walk 继续
 			}
-			// openclaw:剥 templates/workspace-template/ 前缀;不在那个子树下的(比如根级
 			// scripts/install.sh)就照原样保留,加 target 前缀以区分。
 			if r.strip != "" && strings.HasPrefix(rel, r.strip+string(filepath.Separator)) {
 				rel = rel[len(r.strip)+1:]

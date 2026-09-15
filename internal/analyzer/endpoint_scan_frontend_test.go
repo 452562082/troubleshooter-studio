@@ -69,6 +69,32 @@ class OrderController {
 	assertEndpoint(t, got, topology.DirectionInbound, "DELETE", "/api/orders/{param}", "", "nest-route")
 }
 
+func TestScanEndpoints_NodeFrontendClientWrappers(t *testing.T) {
+	root := fixtureRepo(t, map[string]string{
+		"src/generated.ts": `
+httpClient.request<Result>({ url: '/api/content/getRecommendVideoList', method: 'GET', params })
+apiFetch<unknown>({
+  path: '/joy/rpc/v1/content/add_bookshelf',
+  body: JSON.stringify(body),
+  method: 'POST',
+})
+`,
+		"src/members.ts": `
+httpClient.get<{ memberships: Membership[] }>('/api/user/getMyMemberships')
+request<Response>('/api/user/login', { method: 'post', body })
+`,
+	})
+
+	got, err := ScanEndpointsContext(context.Background(), EndpointScanOptions{Repo: "mall-web", Services: []string{"mall-web"}, Stack: "node", RepoPath: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertEndpoint(t, got, topology.DirectionOutbound, "GET", "/api/content/getRecommendVideoList", "", "http-client")
+	assertEndpoint(t, got, topology.DirectionOutbound, "POST", "/joy/rpc/v1/content/add_bookshelf", "", "api-fetch")
+	assertEndpoint(t, got, topology.DirectionOutbound, "GET", "/api/user/getMyMemberships", "", "http-client")
+	assertEndpoint(t, got, topology.DirectionOutbound, "POST", "/api/user/login", "", "request-client")
+}
+
 func TestScanEndpoints_NginxProxyPassIsTargetHint(t *testing.T) {
 	root := fixtureRepo(t, map[string]string{
 		"deploy/nginx.conf": `location /api/ { proxy_pass http://mall-bff; }`,

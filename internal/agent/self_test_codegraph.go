@@ -43,7 +43,7 @@ func probeCodeGraphIndexes(ctx context.Context, cfg *config.SystemConfig, worksp
 
 	var repos []config.Repo
 	for _, repo := range cfg.Repos {
-		if !repo.Analysis.Enabled {
+		if !repo.Analysis.IsEnabled() {
 			continue
 		}
 		repos = append(repos, repo)

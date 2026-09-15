@@ -1,6 +1,8 @@
 package bughub
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"hash/fnv"
 	"path/filepath"
@@ -31,6 +33,19 @@ type artifactHooks struct {
 }
 
 var artifactPublicationLocks [64]sync.Mutex
+
+// Most supported Unix filesystems cap one pathname component at 255 bytes.
+// Case IDs are logical database identifiers and legacy reset flows could grow
+// them beyond that limit, so the evidence store must not use an unbounded ID as
+// a directory name. Keep existing short paths stable and map only oversized
+// IDs to a deterministic, collision-resistant component.
+func artifactStorageCaseComponent(caseID string) string {
+	if len([]byte(caseID)) <= 255 {
+		return caseID
+	}
+	digest := sha256.Sum256([]byte(caseID))
+	return "case-sha256-" + hex.EncodeToString(digest[:])
+}
 
 func lockArtifactPublication(root, caseID, digest string) func() {
 	absRoot, _ := filepath.Abs(root)

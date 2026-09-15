@@ -36,140 +36,110 @@ func (g *workflowE2EGit) MergeAndPush(ctx context.Context, request MergeRequest)
 }
 func (g *workflowE2EGit) pushCount() int { g.mu.Lock(); defer g.mu.Unlock(); return g.pushes }
 
-type workflowE2EVerifier struct {
-	inner DeploymentVerifier
-	mu    sync.Mutex
-	calls int
-}
+func TestWorkflowE2ESubmissionSurvivesSQLiteReopen(t *testing.T) {
+	for _, target := range workflowAgentTargets {
+		t.Run(target, func(t *testing.T) {
+			ctx := context.Background()
+			dbPath := filepath.Join(t.TempDir(), "workflow.db")
+			store, err := OpenCaseStore(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-func (v *workflowE2EVerifier) Verify(ctx context.Context, request DeploymentVerificationRequest) (DeploymentObservation, error) {
-	v.mu.Lock()
-	v.calls++
-	v.mu.Unlock()
-	return v.inner.Verify(ctx, request)
-}
-func (v *workflowE2EVerifier) callCount() int { v.mu.Lock(); defer v.mu.Unlock(); return v.calls }
+			fixture := newGitFixture(t)
+			fixCommit := fixture.makeFix(t, "repair checkout race\n")
+			git := &workflowE2EGit{inner: fixture.service(t)}
+			runner := &recordingPhaseRunner{}
+			orchestrator := NewCaseOrchestrator(store, runner, git)
+			orchestrator.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(_ context.Context, incident IncidentCase, attempt PhaseAttempt) (Bug, BotRef, error) {
+				return Bug{ID: incident.BugID, Source: incident.Source, SystemID: incident.SystemID, Env: incident.Environment}, BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget, Path: t.TempDir(), Env: incident.Environment}, nil
+			}))
+			bug := Bug{ID: "bug-e2e", Source: "zentao", SystemID: "shop", Env: "test", Expected: "checkout succeeds"}
+			validator := BotRef{Key: "validator", Target: target, Path: t.TempDir(), Env: "test"}
 
-func TestWorkflowE2EFixedVerifiedSurvivesSQLiteReopen(t *testing.T) {
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "workflow.db")
-	store, err := OpenCaseStore(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+			incident, err := orchestrator.CreateAndStartCase(ctx, CreateAndStartCaseCommand{CaseID: "case-e2e", IdempotencyKey: "e2e:create", ActorID: "alice", Bug: bug, Bot: validator, InputJSON: []byte(`{"reproduction_steps":["submit checkout"],"expected_behavior":"checkout succeeds"}`)})
+			if err != nil || incident.Status != CaseInvestigating {
+				t.Fatalf("start=%+v err=%v", incident, err)
+			}
+			investigation, _ := store.GetAttempt(ctx, incident.CurrentAttemptID)
+			rootOutput := []byte(`{"investigation_status":"root_cause_ready","environment":"test","root_cause":"checkout race","confidence":"high","evidence":[],"gaps":[]}`)
+			incident, err = orchestrator.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: incident.ID, AttemptID: investigation.ID, ExpectedVersion: incident.Version, IdempotencyKey: "e2e:investigation", ActorID: "investigator", Outcome: PhaseOutcomeRootCauseReady, OutputJSON: rootOutput})
+			if err != nil || incident.Status != CaseWaitingFixApproval {
+				t.Fatalf("investigation=%+v err=%v", incident, err)
+			}
 
-	fixture := newGitFixture(t)
-	fixCommit := fixture.makeFix(t, "repair checkout race\n")
-	git := &workflowE2EGit{inner: fixture.service(t)}
-	runner := &recordingPhaseRunner{}
-	verifier := &workflowE2EVerifier{inner: ManualVersionVerifier{Environment: "test"}}
-	orchestrator := NewCaseOrchestrator(store, runner, git, verifier)
-	orchestrator.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(_ context.Context, incident IncidentCase, attempt PhaseAttempt) (Bug, BotRef, error) {
-		return Bug{ID: incident.BugID, Source: incident.Source, SystemID: incident.SystemID, Env: incident.Environment}, BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget, Path: t.TempDir(), Env: incident.Environment}, nil
-	}))
-	bug := Bug{ID: "bug-e2e", Source: "zentao", SystemID: "shop", Env: "test", Expected: "checkout succeeds"}
-	validator := BotRef{Key: "validator", Target: "codex", Path: t.TempDir(), Env: "test"}
+			fixKey := StartFixApprovalKey(incident.ID, investigation.ID, incident.Version)
+			incident, err = orchestrator.ApproveFix(ctx, ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: fixKey, ActorID: "alice", RootCauseAttemptID: investigation.ID, Bug: bug, Bot: BotRef{Key: "fixer", Target: target, Path: t.TempDir(), Env: "test"}, InputJSON: []byte(`{"source_baselines":{"api":"feature/work"}}`)})
+			if err != nil || incident.Status != CaseFixing {
+				t.Fatalf("fix approval=%+v err=%v", incident, err)
+			}
+			fixAttempt, _ := store.GetAttempt(ctx, incident.CurrentAttemptID)
+			tests := []FixTestResult{{Repo: "api", Commit: fixCommit, Command: "go test ./...", Result: "passed"}}
+			testJSON, _ := json.Marshal(tests)
+			fixOutput := mustJSON(FixResult{FixStatus: "fixed_pushed", Environment: "test", Branches: []FixBranchResult{{Repo: "api", BaseBranch: "test", FixBranch: "fix/bug", Commit: fixCommit, Pushed: true, TargetEnvironmentBranch: "test", PushRemote: "origin"}}, Changes: []FixChangeResult{{Repo: "api", Summary: "guard checkout race"}}, Tests: tests, DeploymentNotice: "deploy api to test", Risks: []string{}, Evidence: []ArtifactReference{}})
+			change := CodeChange{ID: "change-api", CaseID: incident.ID, AttemptID: fixAttempt.ID, Repo: "api", BaseBranch: "test", FixBranch: "fix/bug", FixCommit: fixCommit, TestEvidence: testJSON, TargetEnvironmentBranch: "test", PushRemote: "origin", PushStatus: "pushed"}
+			incident, err = orchestrator.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: incident.ID, AttemptID: fixAttempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "e2e:fix", ActorID: "fixer", Outcome: PhaseOutcomeFixPushed, OutputJSON: fixOutput, CodeChanges: []CodeChange{change}})
+			if err != nil || incident.Status != CaseWaitingMergeApproval {
+				t.Fatalf("fix=%+v err=%v", incident, err)
+			}
 
-	incident, err := orchestrator.CreateAndStartCase(ctx, CreateAndStartCaseCommand{CaseID: "case-e2e", IdempotencyKey: "e2e:create", ActorID: "alice", Bug: bug, Bot: validator, InputJSON: []byte(`{"reproduction_steps":["submit checkout"],"expected_behavior":"checkout succeeds"}`)})
-	if err != nil || incident.Status != CaseValidating {
-		t.Fatalf("start=%+v err=%v", incident, err)
-	}
-	validation, _ := store.GetAttempt(ctx, incident.CurrentAttemptID)
-	originalArtifact := EvidenceArtifact{ID: "e2e-original-evidence", CaseID: incident.ID, AttemptID: validation.ID, Kind: "api", PathOrReference: "/artifacts/e2e/original", SHA256: strings.Repeat("a", 64), CapturedAt: validation.StartedAt.Add(time.Second), Environment: "test", Version: "before-fix", RequestID: "request-e2e-original", RedactionStatus: RedactionStatusNotRequired}
-	if _, _, err := store.recordEvidenceArtifact(ctx, originalArtifact, nil); err != nil {
-		t.Fatal(err)
-	}
-	validationOutput := []byte(`{"verification_status":"reproduced","environment":"test","observed_behavior":"timeout","expected_behavior":"checkout succeeds","evidence":[{"kind":"api","path":"response.json","environment":"test","redaction_status":"not_required"}],"gaps":[]}`)
-	incident, err = orchestrator.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: incident.ID, AttemptID: validation.ID, ExpectedVersion: incident.Version, IdempotencyKey: "e2e:validation", ActorID: "validator", Outcome: PhaseOutcomeReproduced, OutputJSON: validationOutput})
-	if err != nil || incident.Status != CaseInvestigating {
-		t.Fatalf("validation=%+v err=%v", incident, err)
-	}
-	investigation, _ := store.GetAttempt(ctx, incident.CurrentAttemptID)
-	rootOutput := []byte(`{"investigation_status":"root_cause_ready","environment":"test","root_cause":"checkout race","confidence":"high","evidence":[],"gaps":[]}`)
-	incident, err = orchestrator.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: incident.ID, AttemptID: investigation.ID, ExpectedVersion: incident.Version, IdempotencyKey: "e2e:investigation", ActorID: "investigator", Outcome: PhaseOutcomeRootCauseReady, OutputJSON: rootOutput})
-	if err != nil || incident.Status != CaseWaitingFixApproval {
-		t.Fatalf("investigation=%+v err=%v", incident, err)
-	}
+			inspection, err := git.Inspect(ctx, MergeRequest{CaseID: incident.ID, FixCommits: map[string]string{"api": fixCommit}, TargetBranches: map[string]string{"api": "test"}, Changes: []CodeChange{change}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			mergeKey := "e2e:merge-approval"
+			incident, err = orchestrator.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: mergeKey, ActorID: "alice", TargetHeads: map[string]string{"api": inspection.Repositories["api"].TargetHead}})
+			if err != nil || incident.Status != CaseSubmitted || git.pushCount() != 1 {
+				t.Fatalf("merge=%+v pushes=%d err=%v", incident, git.pushCount(), err)
+			}
+			changes, _ := store.ListCodeChanges(ctx, incident.ID)
+			if len(changes) != 1 || changes[0].FixCommit != fixCommit || changes[0].MergeCommit != fixCommit || strings.TrimSpace(runGitTest(t, fixture.repo, "ls-remote", "origin", "refs/heads/test")) != fixCommit+"\trefs/heads/test" {
+				t.Fatalf("changes=%+v", changes)
+			}
 
-	fixKey := StartFixApprovalKey(incident.ID, investigation.ID, incident.Version)
-	incident, err = orchestrator.ApproveFix(ctx, ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: fixKey, ActorID: "alice", RootCauseAttemptID: investigation.ID, Bug: bug, Bot: BotRef{Key: "fixer", Target: "codex", Path: t.TempDir(), Env: "test"}, InputJSON: []byte(`{}`)})
-	if err != nil || incident.Status != CaseFixing {
-		t.Fatalf("fix approval=%+v err=%v", incident, err)
-	}
-	fixAttempt, _ := store.GetAttempt(ctx, incident.CurrentAttemptID)
-	tests := []FixTestResult{{Repo: "api", Commit: fixCommit, Command: "go test ./...", Result: "passed"}}
-	testJSON, _ := json.Marshal(tests)
-	fixOutput := mustJSON(FixResult{FixStatus: "fixed_pushed", Environment: "test", Branches: []FixBranchResult{{Repo: "api", BaseBranch: "test", FixBranch: "fix/bug", Commit: fixCommit, Pushed: true, TargetEnvironmentBranch: "test", PushRemote: "origin"}}, Changes: []FixChangeResult{{Repo: "api", Summary: "guard checkout race"}}, Tests: tests, DeploymentNotice: "deploy api to test", Risks: []string{}, Evidence: []ArtifactReference{}})
-	change := CodeChange{ID: "change-api", CaseID: incident.ID, AttemptID: fixAttempt.ID, Repo: "api", BaseBranch: "test", FixBranch: "fix/bug", FixCommit: fixCommit, TestEvidence: testJSON, TargetEnvironmentBranch: "test", PushRemote: "origin", PushStatus: "pushed"}
-	incident, err = orchestrator.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: incident.ID, AttemptID: fixAttempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "e2e:fix", ActorID: "fixer", Outcome: PhaseOutcomeFixPushed, OutputJSON: fixOutput, CodeChanges: []CodeChange{change}})
-	if err != nil || incident.Status != CaseWaitingMergeApproval {
-		t.Fatalf("fix=%+v err=%v", incident, err)
-	}
-
-	inspection, err := git.Inspect(ctx, MergeRequest{CaseID: incident.ID, FixCommits: map[string]string{"api": fixCommit}, TargetBranches: map[string]string{"api": "test"}, Changes: []CodeChange{change}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mergeKey := "e2e:merge-approval"
-	incident, err = orchestrator.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: mergeKey, ActorID: "alice", TargetHeads: map[string]string{"api": inspection.Repositories["api"].TargetHead}})
-	if err != nil || incident.Status != CaseWaitingDeployment || git.pushCount() != 1 {
-		t.Fatalf("merge=%+v pushes=%d err=%v", incident, git.pushCount(), err)
-	}
-	changes, _ := store.ListCodeChanges(ctx, incident.ID)
-	if len(changes) != 1 || changes[0].FixCommit != fixCommit || changes[0].MergeCommit != fixCommit || strings.TrimSpace(runGitTest(t, fixture.repo, "ls-remote", "origin", "refs/heads/test")) != fixCommit+"\trefs/heads/test" {
-		t.Fatalf("changes=%+v", changes)
-	}
-
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	store, err = OpenCaseStore(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	reopened, err := store.GetCase(ctx, incident.ID)
-	if err != nil || reopened.Status != CaseWaitingDeployment {
-		t.Fatalf("reopened=%+v err=%v", reopened, err)
-	}
-	runnerAfterRestart := &recordingPhaseRunner{}
-	orchestrator = NewCaseOrchestrator(store, runnerAfterRestart, git, verifier)
-	notify := NotifyDeployedCommand{CaseID: reopened.ID, ExpectedVersion: reopened.Version, IdempotencyKey: "e2e:deployed", ActorID: "alice", ObservedVersion: "build-e2e", ObservedCommits: map[string]string{"api": fixCommit}, Source: "manual", Bug: bug, Bot: validator, InputJSON: []byte(`{}`)}
-	incident, err = orchestrator.NotifyDeployed(ctx, notify)
-	if err != nil || incident.Status != CaseRegressionValidating || verifier.callCount() != 1 {
-		t.Fatalf("deployed=%+v verifier=%d err=%v", incident, verifier.callCount(), err)
-	}
-	regression, _ := store.GetAttempt(ctx, incident.CurrentAttemptID)
-	recordRegressionArtifact(t, store, regression, "request-e2e-fresh", time.Now().UTC().Add(time.Second))
-	incident, err = orchestrator.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: incident.ID, AttemptID: regression.ID, ExpectedVersion: incident.Version, IdempotencyKey: "e2e:regression", ActorID: "validator", Outcome: PhaseOutcomeFixedVerified, OutputJSON: regressionOutput(t, regression, "fixed_verified", "checkout succeeds")})
-	if err != nil || incident.Status != CaseFixedVerified || incident.ClosedAt == nil {
-		t.Fatalf("regression=%+v err=%v", incident, err)
-	}
-
-	approvals, _ := store.ListApprovals(ctx, incident.ID)
-	observations, _ := store.ListDeploymentObservations(ctx, incident.ID)
-	events, _ := store.ListEvents(ctx, incident.ID)
-	if len(approvals) != 2 || approvals[0].Kind == approvals[1].Kind || len(observations) != 1 || runnerAfterRestart.startCount() != 1 {
-		t.Fatalf("approvals=%+v observations=%+v starts=%d", approvals, observations, runnerAfterRestart.startCount())
-	}
-	keys := map[string]struct{}{}
-	visited := make([]CaseStatus, 0, len(events))
-	for _, event := range events {
-		if _, duplicate := keys[event.IdempotencyKey]; duplicate {
-			t.Fatalf("duplicate event key %q", event.IdempotencyKey)
-		}
-		keys[event.IdempotencyKey] = struct{}{}
-		visited = append(visited, event.ToStatus)
-	}
-	wantPath := []CaseStatus{CaseValidating, CaseReproduced, CaseInvestigating, CaseRootCauseReady, CaseWaitingFixApproval, CaseFixing, CaseFixPushed, CaseWaitingMergeApproval, CaseMerging, CaseWaitingDeployment, CaseDeploymentVerified, CaseRegressionValidating, CaseFixedVerified}
-	next := 0
-	for _, status := range visited {
-		if next < len(wantPath) && status == wantPath[next] {
-			next++
-		}
-	}
-	if next != len(wantPath) {
-		t.Fatalf("success path stopped at %d/%d: visited=%v", next, len(wantPath), visited)
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store, err = OpenCaseStore(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			reopened, err := store.GetCase(ctx, incident.ID)
+			if err != nil || reopened.Status != CaseSubmitted {
+				t.Fatalf("reopened=%+v err=%v", reopened, err)
+			}
+			runnerAfterRestart := &recordingPhaseRunner{}
+			orchestrator = NewCaseOrchestrator(store, runnerAfterRestart, git)
+			if err := orchestrator.RecoverInterrupted(ctx); err != nil {
+				t.Fatal(err)
+			}
+			approvals, _ := store.ListApprovals(ctx, incident.ID)
+			observations, _ := store.ListDeploymentObservations(ctx, incident.ID)
+			events, _ := store.ListEvents(ctx, incident.ID)
+			if len(approvals) != 2 || approvals[0].Kind == approvals[1].Kind || len(observations) != 0 || runnerAfterRestart.startCount() != 0 {
+				t.Fatalf("approvals=%+v observations=%+v starts=%d", approvals, observations, runnerAfterRestart.startCount())
+			}
+			keys := map[string]struct{}{}
+			visited := make([]CaseStatus, 0, len(events))
+			for _, event := range events {
+				if _, duplicate := keys[event.IdempotencyKey]; duplicate {
+					t.Fatalf("duplicate event key %q", event.IdempotencyKey)
+				}
+				keys[event.IdempotencyKey] = struct{}{}
+				visited = append(visited, event.ToStatus)
+			}
+			wantPath := []CaseStatus{CaseInvestigating, CaseRootCauseReady, CaseWaitingFixApproval, CaseFixing, CaseFixPushed, CaseWaitingMergeApproval, CaseMerging, CaseSubmitted}
+			next := 0
+			for _, status := range visited {
+				if next < len(wantPath) && status == wantPath[next] {
+					next++
+				}
+			}
+			if next != len(wantPath) {
+				t.Fatalf("success path stopped at %d/%d: visited=%v", next, len(wantPath), visited)
+			}
+		})
 	}
 }
 
@@ -182,15 +152,15 @@ func TestWorkflowE2E_ResetStartsFreshAuditedCase(t *testing.T) {
 	}
 
 	runner := &recordingPhaseRunner{}
-	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	orchestrator := NewCaseOrchestrator(store, runner, nil)
 	bug := Bug{ID: "840", Source: "zentao", SystemID: "shop", Env: "test", Expected: "checkout succeeds"}
 	bot := BotRef{Key: "validator", Target: "codex", Path: t.TempDir(), Env: "test"}
 	first, err := orchestrator.CreateAndStartCase(ctx, CreateAndStartCaseCommand{CaseID: "case-840-candidate-a", IdempotencyKey: "e2e:840:start:a", ActorID: "alice", Bug: bug, Bot: bot, InputJSON: []byte(`{"reproduction_steps":["submit checkout"]}`)})
-	if err != nil || first.Status != CaseValidating {
+	if err != nil || first.Status != CaseInvestigating {
 		t.Fatalf("first=%+v err=%v", first, err)
 	}
 	reused, err := orchestrator.CreateAndStartCase(ctx, CreateAndStartCaseCommand{CaseID: "case-840-candidate-b", IdempotencyKey: "e2e:840:start:b", ActorID: "alice", Bug: bug, Bot: bot, InputJSON: []byte(`{"reproduction_steps":["retry checkout"]}`)})
-	if err != nil || reused.ID != first.ID || reused.Status != CaseValidating || runner.startCount() != 1 {
+	if err != nil || reused.ID != first.ID || reused.Status != CaseInvestigating || runner.startCount() != 1 {
 		t.Fatalf("first=%+v reused=%+v starts=%d err=%v", first, reused, runner.startCount(), err)
 	}
 	if _, err := store.GetCase(ctx, "case-840-candidate-b"); !errors.Is(err, ErrCaseNotFound) {
@@ -238,7 +208,7 @@ func TestWorkflowE2E_ResetStartsFreshAuditedCase(t *testing.T) {
 
 	reset := ResetCaseCommand{CaseID: first.ID, NewCaseID: "case-840-reset", ExpectedVersion: first.Version, IdempotencyKey: "e2e:840:reset", ActorID: "alice", Bug: bug, Bot: bot, InputJSON: []byte(`{"reason":"retry from validation"}`)}
 	replacement, err := orchestrator.ResetCase(ctx, reset)
-	if err != nil || replacement.ID != reset.NewCaseID || replacement.Status != CaseValidating || replacement.ResetFromCaseID != first.ID || runner.startCount() != 2 {
+	if err != nil || replacement.ID != reset.NewCaseID || replacement.Status != CaseInvestigating || replacement.ResetFromCaseID != first.ID || runner.startCount() != 2 {
 		t.Fatalf("replacement=%+v starts=%d err=%v", replacement, runner.startCount(), err)
 	}
 
@@ -256,7 +226,7 @@ func TestWorkflowE2E_ResetStartsFreshAuditedCase(t *testing.T) {
 		t.Fatalf("archived=%+v err=%v", archived, err)
 	}
 	reopenedReplacement, err := store.GetCase(ctx, replacement.ID)
-	if err != nil || reopenedReplacement.Status != CaseValidating || reopenedReplacement.ResetFromCaseID != archived.ID || reopenedReplacement.CurrentAttemptID == "" || reopenedReplacement.ClosedAt != nil {
+	if err != nil || reopenedReplacement.Status != CaseInvestigating || reopenedReplacement.ResetFromCaseID != archived.ID || reopenedReplacement.CurrentAttemptID == "" || reopenedReplacement.ClosedAt != nil {
 		t.Fatalf("replacement=%+v err=%v", reopenedReplacement, err)
 	}
 	oldAttempt, err := store.GetAttempt(ctx, validation.ID)
@@ -284,7 +254,7 @@ func TestWorkflowE2E_ResetStartsFreshAuditedCase(t *testing.T) {
 	}
 
 	immutable := archived.Clone()
-	if _, err := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil).CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: archived.ID, AttemptID: validation.ID, ExpectedVersion: archived.Version, IdempotencyKey: "e2e:840:late-completion", ActorID: "validator", Outcome: PhaseOutcomeNeedsEvidence, OutputJSON: []byte(`{"verification_status":"insufficient_info","environment":"test","evidence":[],"gaps":["trace"]}`)}); err == nil {
+	if _, err := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil).CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: archived.ID, AttemptID: validation.ID, ExpectedVersion: archived.Version, IdempotencyKey: "e2e:840:late-completion", ActorID: "validator", Outcome: PhaseOutcomeNeedsEvidence, OutputJSON: []byte(`{"verification_status":"insufficient_info","environment":"test","evidence":[],"gaps":["trace"]}`)}); err == nil {
 		t.Fatal("late completion mutated reset archive")
 	}
 	archivedAfterLateCompletion, err := store.GetCase(ctx, archived.ID)
@@ -293,7 +263,7 @@ func TestWorkflowE2E_ResetStartsFreshAuditedCase(t *testing.T) {
 	}
 
 	restartedRunner := &recordingPhaseRunner{}
-	restarted := NewCaseOrchestrator(store, restartedRunner, nil, nil)
+	restarted := NewCaseOrchestrator(store, restartedRunner, nil)
 	restarted.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(_ context.Context, incident IncidentCase, attempt PhaseAttempt) (Bug, BotRef, error) {
 		return Bug{ID: incident.BugID, Source: incident.Source, SystemID: incident.SystemID, Env: incident.Environment, Expected: bug.Expected}, BotRef{Key: attempt.BotKey, Target: attempt.AgentTarget, Path: bot.Path, Env: incident.Environment}, nil
 	}))
@@ -301,11 +271,11 @@ func TestWorkflowE2E_ResetStartsFreshAuditedCase(t *testing.T) {
 		t.Fatal(err)
 	}
 	recovered, err := store.GetCase(ctx, replacement.ID)
-	if err != nil || recovered.Status != CaseValidating || recovered.CurrentAttemptID == reopenedReplacement.CurrentAttemptID || restartedRunner.startCount() != 1 {
+	if err != nil || recovered.Status != CaseInvestigating || recovered.CurrentAttemptID == reopenedReplacement.CurrentAttemptID || restartedRunner.startCount() != 1 {
 		t.Fatalf("recovered=%+v starts=%d err=%v", recovered, restartedRunner.startCount(), err)
 	}
 	recoveredAttempt, err := store.GetAttempt(ctx, recovered.CurrentAttemptID)
-	if err != nil || recoveredAttempt.Status != AttemptStatusRunning || recoveredAttempt.Phase != PhaseValidation {
+	if err != nil || recoveredAttempt.Status != AttemptStatusRunning || recoveredAttempt.Phase != PhaseInvestigation {
 		t.Fatalf("recovered attempt=%+v err=%v", recoveredAttempt, err)
 	}
 
@@ -318,8 +288,8 @@ func TestWorkflowE2E_ResetStartsFreshAuditedCase(t *testing.T) {
 	if _, _, err := store.recordEvidenceArtifact(ctx, replacementArtifact, nil); err != nil {
 		t.Fatal(err)
 	}
-	progressed, err := restarted.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: recovered.ID, AttemptID: recoveredAttempt.ID, ExpectedVersion: recovered.Version, IdempotencyKey: "e2e:840:replacement-validation", ActorID: "validator", Outcome: PhaseOutcomeReproduced, OutputJSON: []byte(`{"verification_status":"reproduced","environment":"test","observed_behavior":"timeout","expected_behavior":"checkout succeeds","evidence":[{"kind":"api","path":"response.json","environment":"test","redaction_status":"not_required"}],"gaps":[]}`)})
-	if err != nil || progressed.Status != CaseInvestigating || progressed.ID != replacement.ID {
+	progressed, err := restarted.CompleteAttempt(ctx, CompleteAttemptCommand{CaseID: recovered.ID, AttemptID: recoveredAttempt.ID, ExpectedVersion: recovered.Version, IdempotencyKey: "e2e:840:replacement-validation", ActorID: "validator", Outcome: PhaseOutcomeNeedsEvidence, OutputJSON: []byte(`{"investigation_status":"insufficient_info","environment":"test","evidence":[],"gaps":["request id"]}`)})
+	if err != nil || progressed.Status != CaseWaitingEvidence || progressed.ID != replacement.ID {
 		t.Fatalf("progressed=%+v err=%v", progressed, err)
 	}
 	archivedAfterProgress, err := store.GetCase(ctx, archived.ID)
@@ -406,8 +376,8 @@ func TestWorkflowE2EFailureAndRecoveryBoundaries(t *testing.T) {
 	t.Run("missing evidence pauses before investigation", func(t *testing.T) {
 		store := newOrchestratorStore(t)
 		runner := &recordingPhaseRunner{}
-		o := NewCaseOrchestrator(store, runner, nil, nil)
-		incident := createWorkflowCase(t, store, "e2e-missing", CasePendingValidation)
+		o := NewCaseOrchestrator(store, runner, nil)
+		incident := createWorkflowCase(t, store, "e2e-missing", CasePendingInvestigation)
 		incident, _ = o.StartCase(context.Background(), StartCaseCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "missing:start", ActorID: "alice", Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "validator", Target: "codex"}, InputJSON: []byte(`{}`)})
 		attempt, _ := store.GetAttempt(context.Background(), incident.CurrentAttemptID)
 		incident, err := o.CompleteAttempt(context.Background(), CompleteAttemptCommand{CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version, IdempotencyKey: "missing:result", ActorID: "validator", Outcome: PhaseOutcomeNeedsEvidence, OutputJSON: []byte(`{"verification_status":"insufficient_info","environment":"test","evidence":[],"gaps":["trace"]}`)})
@@ -418,37 +388,10 @@ func TestWorkflowE2EFailureAndRecoveryBoundaries(t *testing.T) {
 
 	t.Run("stale fix authorization is rejected", func(t *testing.T) {
 		_, incident, root, runner, o := prepareFixApprovalCase(t, validRootCauseOutput())
-		cmd := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version + 1, ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{}`)}
+		cmd := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version + 1, ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"source_baselines":{"api":"feature/work"}}`)}
 		cmd.IdempotencyKey = StartFixApprovalKey(cmd.CaseID, cmd.RootCauseAttemptID, cmd.ExpectedVersion)
 		if _, err := o.ApproveFix(context.Background(), cmd); !errors.Is(err, ErrCaseVersionConflict) || runner.startCount() != 0 {
 			t.Fatalf("starts=%d err=%v", runner.startCount(), err)
-		}
-	})
-
-	t.Run("mismatch and partial multi repo deployment stay unverified", func(t *testing.T) {
-		request := DeploymentVerificationRequest{CaseID: "case", Environment: "test", Source: "manual", ExpectedCommits: map[string]string{"api": "a", "web": "b"}, ObservedVersion: "old", ObservedCommits: map[string]string{"api": "a"}}
-		got, err := (ManualVersionVerifier{Environment: "test"}).Verify(context.Background(), request)
-		if err != nil || got.Result != DeploymentResultMismatched || got.VerifiedAt != nil {
-			t.Fatalf("observation=%+v err=%v", got, err)
-		}
-	})
-
-	t.Run("still reproduces increments cycle and investigates", func(t *testing.T) {
-		store, incident, _, _ := prepareRegressionCase(t, 1)
-		runner := &recordingPhaseRunner{}
-		o := NewCaseOrchestrator(store, runner, nil, nil)
-		o.SetRecoveryContextResolver(RecoveryContextResolverFunc(func(_ context.Context, c IncidentCase, a PhaseAttempt) (Bug, BotRef, error) {
-			return Bug{ID: c.BugID}, BotRef{Key: a.BotKey, Target: a.AgentTarget, Path: t.TempDir()}, nil
-		}))
-		attempt, err := o.StartRegression(context.Background(), incident.ID, incident.Version)
-		if err != nil {
-			t.Fatal(err)
-		}
-		recordRegressionArtifact(t, store, attempt, "request-e2e-still", time.Now().UTC().Add(time.Second))
-		current, _ := store.GetCase(context.Background(), incident.ID)
-		next, err := o.CompleteAttempt(context.Background(), CompleteAttemptCommand{CaseID: current.ID, AttemptID: attempt.ID, ExpectedVersion: current.Version, IdempotencyKey: "e2e:still", ActorID: "validator", Outcome: PhaseOutcomeStillReproduces, OutputJSON: regressionOutput(t, attempt, "still_reproduces", "timeout remains")})
-		if err != nil || next.Status != CaseInvestigating || next.CycleNumber != 2 {
-			t.Fatalf("case=%+v err=%v", next, err)
 		}
 	})
 
@@ -468,10 +411,10 @@ func TestWorkflowE2EFailureAndRecoveryBoundaries(t *testing.T) {
 			t.Fatalf("cases=%+v", cases)
 		}
 		runner := &recordingPhaseRunner{}
-		o := NewCaseOrchestrator(store, runner, nil, nil)
+		o := NewCaseOrchestrator(store, runner, nil)
 		continued, err := o.CreateAndStartCase(context.Background(), CreateAndStartCaseCommand{CaseID: cases[0].ID, ExpectedVersion: cases[0].Version, IdempotencyKey: "legacy:restart", ActorID: "alice", Bug: Bug{ID: cases[0].BugID, Env: "test"}, Bot: BotRef{Key: "validator", Target: "codex", Path: t.TempDir()}, InputJSON: []byte(`{}`)})
 		archived, _ := store.GetCase(context.Background(), cases[0].ID)
-		if err != nil || archived.Status != CaseLegacyArchived || continued.ID == archived.ID || continued.Status != CaseValidating {
+		if err != nil || archived.Status != CaseLegacyArchived || continued.ID == archived.ID || continued.Status != CaseInvestigating {
 			t.Fatalf("archived=%+v continued=%+v err=%v", archived, continued, err)
 		}
 	})

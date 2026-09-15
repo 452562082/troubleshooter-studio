@@ -1,28 +1,11 @@
 import { readFileSync } from 'node:fs'
 import { mount } from '@vue/test-utils'
+import { defineComponent, nextTick, ref } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import {
-  approveIncidentFix,
-  approveIncidentMerge,
-  cancelBugInvestigation,
-  clearBugPlatformLogin,
-  continueIncidentCase,
-  deleteBugPlatform,
-  discoverBots,
-  fetchBugByID,
-  listBugInvestigationRuns,
-  listBugPlatforms,
-  listBugs,
-  loginBugPlatform,
-  notifyIncidentDeployed,
-  previewBugAttachment,
-  saveBugPlatform,
-  startBugInvestigation,
-  startIncidentCase,
-  syncBugPlatform,
-} from '../lib/bridge'
+import { approveIncidentFix, approveIncidentMerge, cancelBugInvestigation, clearBugPlatformLogin, continueIncidentCase, deleteBugHistory, deleteBugPlatform, discoverBots, fetchBugByID, listBugInvestigationRuns, listBugPlatforms, listBugs, loginBugPlatform, previewBugAttachment, saveBugPlatform, startBugInvestigation, startIncidentCase, syncBugPlatform } from '../lib/bridge'
 import { copyToClipboard } from '../lib/clipboard'
 import { confirmDialog } from '../lib/confirm'
+import { toast } from '../lib/toast'
 import BugInboxPage from './BugInboxPage.vue'
 
 const router = vi.hoisted(() => ({ push: vi.fn() }))
@@ -36,6 +19,7 @@ vi.mock('../lib/bridge', () => ({
   cancelBugInvestigation: vi.fn(),
   clearBugPlatformLogin: vi.fn(),
   continueIncidentCase: vi.fn(),
+  deleteBugHistory: vi.fn(),
   deleteBugPlatform: vi.fn(),
   discoverBots: vi.fn().mockResolvedValue([]),
   fetchBugByID: vi.fn(),
@@ -43,7 +27,6 @@ vi.mock('../lib/bridge', () => ({
   listBugPlatforms: vi.fn().mockResolvedValue([]),
   listBugs: vi.fn().mockResolvedValue([]),
   loginBugPlatform: vi.fn(),
-  notifyIncidentDeployed: vi.fn(),
   previewBugAttachment: vi.fn(),
   saveBugPlatform: vi.fn(),
   startBugInvestigation: vi.fn(),
@@ -88,6 +71,7 @@ afterEach(() => {
   vi.mocked(discoverBots).mockReset().mockResolvedValue([])
   vi.mocked(clearBugPlatformLogin).mockReset()
   vi.mocked(deleteBugPlatform).mockReset()
+  vi.mocked(deleteBugHistory).mockReset()
   vi.mocked(fetchBugByID).mockReset()
   vi.mocked(listBugInvestigationRuns).mockReset().mockResolvedValue([])
   vi.mocked(listBugPlatforms).mockReset().mockResolvedValue([])
@@ -102,7 +86,6 @@ afterEach(() => {
   vi.mocked(continueIncidentCase).mockReset()
   vi.mocked(approveIncidentFix).mockReset()
   vi.mocked(approveIncidentMerge).mockReset()
-  vi.mocked(notifyIncidentDeployed).mockReset()
   vi.mocked(copyToClipboard).mockReset().mockResolvedValue(true)
   vi.mocked(confirmDialog).mockReset().mockResolvedValue(true)
 })
@@ -130,6 +113,21 @@ describe('BugInboxPage', () => {
     await detailPanel.get('[data-action="open-incident"]').trigger('click')
     expect(router.push).toHaveBeenCalledWith({ path: '/incidents', query: { bug_id: 'lark-17' } })
     wrapper.unmount()
+  })
+
+  it('keeps the sync action in the Bug list heading without absolute overlap', async () => {
+    vi.mocked(listBugs).mockResolvedValue([bug])
+    const wrapper = await mountedInbox()
+    const panel = wrapper.get('.ticket-list-panel')
+    const action = panel.get('.list-heading .list-actions [data-action="sync-enabled-platforms"]')
+
+    expect(action.text()).toContain('同步我的 Bug')
+    expect(panel.find(':scope > [data-action="sync-enabled-platforms"]').exists()).toBe(false)
+
+    const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
+    expect(source).not.toMatch(/\.refresh-button\s*\{[^}]*position:\s*absolute/)
+    expect(source).not.toContain('.ticket-list-panel :deep(.list-heading) { padding-right: 112px; }')
+    expect(source).toMatch(/\.ticket-list-panel \{[^}]*display: grid;[^}]*align-content: start;[^}]*gap: var\(--sp-3\);/)
   })
 
   it('declares concrete mobile touch-target and full-width save contracts', () => {
@@ -207,31 +205,6 @@ describe('BugInboxPage', () => {
     expect(source).toContain('.danger-icon-button:hover, .danger-icon-button:focus-visible { background: var(--c-danger-bg); color: var(--c-danger); }')
   })
 
-  it('is a browse-only inbox and opens the selected ticket in the incident route', async () => {
-    vi.mocked(listBugs).mockResolvedValue([bug])
-    const wrapper = await mountedInbox()
-
-    expect(wrapper.text()).toContain('Bug 工单')
-    expect(wrapper.text()).toContain('复现步骤')
-    expect(wrapper.text()).toContain('打开结算页')
-    expect(wrapper.findComponent({ name: 'BugTicketList' }).exists()).toBe(true)
-    expect(wrapper.findComponent({ name: 'BugTicketDetail' }).props('mode')).toBe('full')
-    expect(wrapper.text()).not.toContain('开始故障闭环')
-    expect(wrapper.text()).not.toContain('允许修复')
-    expect(wrapper.find('.workbench-view-tabs').exists()).toBe(false)
-
-    await wrapper.get('[data-action="open-incident"]').trigger('click')
-
-    expect(router.push).toHaveBeenCalledWith({ path: '/incidents', query: { bug_id: 'zentao-840' } })
-    expect(startBugInvestigation).not.toHaveBeenCalled()
-    expect(cancelBugInvestigation).not.toHaveBeenCalled()
-    expect(startIncidentCase).not.toHaveBeenCalled()
-    expect(continueIncidentCase).not.toHaveBeenCalled()
-    expect(approveIncidentFix).not.toHaveBeenCalled()
-    expect(approveIncidentMerge).not.toHaveBeenCalled()
-    expect(notifyIncidentDeployed).not.toHaveBeenCalled()
-  })
-
   it('filters shared ticket rows and selects another full detail', async () => {
     vi.mocked(listBugs).mockResolvedValue([
       bug,
@@ -245,6 +218,80 @@ describe('BugInboxPage', () => {
 
     expect(wrapper.get('.ticket-detail h2').text()).toBe('缓存命中下降')
     expect(wrapper.text()).toContain('平台')
+  })
+
+  it('keeps resolved Bugs in a dedicated history view', async () => {
+    vi.mocked(listBugs).mockResolvedValue([
+      { ...bug, inbox_state: 'active', status: 'active' },
+      { ...bug, id: 'zentao-839', source_id: '839', title: '历史搜索故障', inbox_state: 'history', status: 'resolved', archive_reason: 'source_resolved' },
+    ])
+    const wrapper = await mountedInbox()
+
+    expect(wrapper.get('[data-ticket-view="inbox"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.find('[data-ticket-id="zentao-840"]').exists()).toBe(true)
+    expect(wrapper.find('[data-ticket-id="zentao-839"]').exists()).toBe(false)
+
+    await wrapper.get('[data-ticket-view="history"]').trigger('click')
+
+    expect(wrapper.get('[data-ticket-view="history"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.find('[data-ticket-id="zentao-840"]').exists()).toBe(false)
+    expect(wrapper.get('[data-ticket-id="zentao-839"]').text()).toContain('已解决')
+    expect(wrapper.get('.ticket-detail h2').text()).toBe('历史搜索故障')
+
+    await wrapper.get('[data-action="open-incident"]').trigger('click')
+    expect(router.push).toHaveBeenCalledWith({ path: '/incidents', query: { bug_id: 'zentao-839', view: 'history' } })
+  })
+
+  it('refreshes a cached inbox on activation and moves the selected resolved Bug to history', async () => {
+    vi.mocked(listBugs)
+      .mockResolvedValueOnce([{ ...bug, inbox_state: 'active', status: 'active' }] as any)
+      .mockResolvedValueOnce([{ ...bug, inbox_state: 'history', status: 'resolved' }] as any)
+    const active = ref(true)
+    const Host = defineComponent({
+      components: { BugInboxPage },
+      setup: () => ({ active }),
+      template: '<KeepAlive><BugInboxPage v-if="active" /></KeepAlive>',
+    })
+    const wrapper = mount(Host)
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.get('[data-ticket-view="inbox"]').attributes('aria-selected')).toBe('true')
+
+    active.value = false
+    await nextTick()
+    active.value = true
+    await nextTick()
+    await flushPromises()
+
+    expect(listBugs).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[data-ticket-view="history"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.get('[data-ticket-id="zentao-840"]').text()).toContain('已解决')
+  })
+
+  it('permanently deletes a local Bug history item after explicit confirmation', async () => {
+    const historical = { ...bug, inbox_state: 'history', status: 'resolved' }
+    vi.mocked(listBugs)
+      .mockResolvedValueOnce([historical] as any)
+      .mockResolvedValueOnce([])
+    vi.mocked(deleteBugHistory).mockResolvedValue({
+      bug_id: bug.id,
+      deleted: true,
+      deleted_cases: 1,
+    })
+    const wrapper = await mountedInbox()
+    await wrapper.get('[data-ticket-view="history"]').trigger('click')
+
+    await wrapper.get('[data-action="delete-bug-history"]').trigger('click')
+    await flushPromises()
+
+    expect(confirmDialog).toHaveBeenCalledWith(expect.objectContaining({
+      danger: true,
+      defaultAction: 'cancel',
+      confirmText: '永久删除',
+    }))
+    expect(deleteBugHistory).toHaveBeenCalledWith({ bug_id: bug.id })
+    expect(wrapper.text()).toContain('暂无历史工单')
+    expect(toast.success).toHaveBeenCalledWith('Bug 本地历史已删除')
   })
 
   it('keeps platform configuration collapsed and saves mapped bots with their environment', async () => {
@@ -281,6 +328,70 @@ describe('BugInboxPage', () => {
     }))
   })
 
+  it('retains Cursor as a configurable incident workflow bot', async () => {
+    vi.mocked(discoverBots).mockResolvedValue([
+      {
+        path: '/repo/base-codex', ghost: false,
+        meta: { system_id: 'base', system_name: 'Base Codex', target: 'codex', agent_id: 'base-troubleshooter' },
+        environments: ['test'],
+      } as any,
+      {
+        path: '/repo/base-cursor', ghost: false,
+        meta: { system_id: 'base', system_name: 'Base Cursor', target: 'cursor', agent_id: 'base-troubleshooter' },
+        environments: ['test'],
+      } as any,
+    ])
+    vi.mocked(listBugPlatforms).mockResolvedValue([{
+      id: 'zentao-main', name: '测试环境', type: 'zentao', auth_mode: 'feishu_sso',
+      bot_mappings: [{ bot_key: '/repo/base-cursor|cursor', env: 'test' }], enabled: true,
+    }])
+
+    const wrapper = await mountedInbox()
+    await wrapper.get('[data-action="toggle-platform-config"]').trigger('click')
+
+    expect(wrapper.findAll('.bot-config-row')).toHaveLength(1)
+    expect(wrapper.get('.bot-config-row').text()).toContain('Base Cursor')
+    await wrapper.get('[data-action="toggle-bot-picker"]').trigger('click')
+    expect(wrapper.find('[data-bot-key="/repo/base-cursor|cursor"]').exists()).toBe(false)
+    expect(wrapper.find('[data-bot-key="/repo/base-codex|codex"]').exists()).toBe(true)
+    await wrapper.get('[aria-label="移除机器人"]').trigger('click')
+    expect(wrapper.find('[data-bot-key="/repo/base-cursor|cursor"]').exists()).toBe(true)
+    await wrapper.get('[data-bot-key="/repo/base-cursor|cursor"]').trigger('click')
+    expect(wrapper.get('.bot-config-row').text()).toContain('Base Cursor')
+  })
+
+  it('retains OpenCode as a configurable incident workflow bot', async () => {
+    vi.mocked(discoverBots).mockResolvedValue([
+      {
+        path: '/repo/base-codex', ghost: false,
+        meta: { system_id: 'base', system_name: 'Base Codex', target: 'codex', agent_id: 'base-troubleshooter' },
+        environments: ['test'],
+      } as any,
+      {
+        path: '/repo/base-opencode', ghost: false,
+        meta: { system_id: 'base', system_name: 'Base OpenCode', target: 'opencode', agent_id: 'base-troubleshooter' },
+        environments: ['test'],
+      } as any,
+    ])
+    vi.mocked(listBugPlatforms).mockResolvedValue([{
+      id: 'zentao-main', name: '测试环境', type: 'zentao', auth_mode: 'feishu_sso',
+      bot_mappings: [{ bot_key: '/repo/base-opencode|opencode', env: 'test' }], enabled: true,
+    }])
+
+    const wrapper = await mountedInbox()
+    await wrapper.get('[data-action="toggle-platform-config"]').trigger('click')
+
+    expect(wrapper.findAll('.bot-config-row')).toHaveLength(1)
+    expect(wrapper.get('.bot-config-row').text()).toContain('Base OpenCode')
+    await wrapper.get('[data-action="toggle-bot-picker"]').trigger('click')
+    expect(wrapper.find('[data-bot-key="/repo/base-opencode|opencode"]').exists()).toBe(false)
+    expect(wrapper.find('[data-bot-key="/repo/base-codex|codex"]').exists()).toBe(true)
+    await wrapper.get('[aria-label="移除机器人"]').trigger('click')
+    expect(wrapper.find('[data-bot-key="/repo/base-opencode|opencode"]').exists()).toBe(true)
+    await wrapper.get('[data-bot-key="/repo/base-opencode|opencode"]').trigger('click')
+    expect(wrapper.get('.bot-config-row').text()).toContain('Base OpenCode')
+  })
+
   it('presents platform configuration as labelled compact sections with a readable disclosure state', async () => {
     vi.mocked(listBugPlatforms).mockResolvedValue([{
       id: 'zentao-main', name: '测试环境', type: 'zentao', base_url: 'https://zentao.example.com',
@@ -309,6 +420,33 @@ describe('BugInboxPage', () => {
       '平台名称', '平台类型', '平台地址', '登录方式',
     ]))
     expect(config.get('.login-status-badge').text()).toBe('未登录')
+  })
+
+  it('keeps the sync/access layout ordered and responsive', async () => {
+    const wrapper = await mountedInbox()
+    await wrapper.get('[data-action="toggle-platform-config"]').trigger('click')
+
+    const syncAccess = wrapper.get('.sync-access-section')
+    expect(syncAccess.find('[data-action="sync-platform"]').exists()).toBe(false)
+    const controlRow = syncAccess.get(':scope > .sync-control-row')
+    expect(Array.from(controlRow.element.children).map(element => element.classList[0])).toEqual([
+      'sync-settings',
+      'sync-control-divider',
+      'manual-bug-row',
+    ])
+    expect(controlRow.get('.sync-control-divider').attributes('aria-hidden')).toBe('true')
+    expect(controlRow.find('.manual-bug-row .manual-bug-field').exists()).toBe(true)
+    expect(controlRow.find('.manual-bug-row [data-action="fetch-bug"]').exists()).toBe(true)
+    expect(controlRow.element.nextElementSibling).toBe(syncAccess.get(':scope > .hook-row').element)
+
+    const source = readFileSync('src/pages/BugInboxPage.vue', 'utf8')
+    const tabletCSS = source.split('@media (max-width: 900px) {')[1]?.split('\n}')[0] || ''
+    const mobileCSS = source.split('@media (max-width: 640px) {')[1]?.split('\n}')[0] || ''
+    expect(source).toContain('.sync-control-row { min-width: 0; display: grid; grid-template-columns: auto 1px minmax(0, 1fr);')
+    expect(source).toContain('.sync-control-divider { align-self: stretch; width: 1px; background: var(--c-line); }')
+    expect(tabletCSS).toContain('.sync-control-row { grid-template-columns: minmax(0, 1fr); }')
+    expect(tabletCSS).toContain('.sync-control-divider { width: 100%; height: 1px; }')
+    expect(mobileCSS).toContain('.manual-bug-row .compact-button { width: 100%; }')
   })
 
   it('keeps save beside platform status and persists disabling the platform', async () => {
@@ -359,7 +497,7 @@ describe('BugInboxPage', () => {
     const addBot = wrapper.get('[data-action="toggle-bot-picker"]')
     expect(addBot.find('svg[aria-hidden="true"]').exists()).toBe(true)
 
-    const sync = wrapper.get('[data-action="sync-platform"]')
+    const sync = wrapper.get('[data-action="sync-enabled-platforms"]')
     expect(sync.classes()).toContain('secondary-button')
     expect(sync.classes()).not.toContain('accent-button')
     expect(sync.classes()).not.toContain('primary-button')
@@ -377,82 +515,89 @@ describe('BugInboxPage', () => {
     expect(footer.get('[data-action="save-platform"]').classes()).toContain('primary-button')
   })
 
-  it('keeps platform sync separate from local list refresh', async () => {
-    const platform = {
-      id: 'zentao-main', name: '测试环境', type: 'zentao',
-      auth_mode: 'feishu_sso', enabled: true,
-    }
-    vi.mocked(listBugPlatforms).mockResolvedValue([platform])
-    vi.mocked(listBugs).mockResolvedValue([bug])
-    vi.mocked(syncBugPlatform).mockResolvedValue({
-      platform_id: 'zentao-main', fetched: 1, stored: 1,
-    })
+  it('synchronizes every enabled platform and refreshes the local list once', async () => {
+    vi.mocked(listBugPlatforms).mockResolvedValue([
+      { id: 'zentao-a', name: '禅道 A', type: 'zentao', enabled: true },
+      { id: 'zentao-off', name: '停用平台', type: 'zentao', enabled: false },
+      { id: 'zentao-b', name: '禅道 B', type: 'zentao', enabled: true },
+    ])
+    let resolveFirst!: (result: { platform_id: string; fetched: number; stored: number }) => void
+    vi.mocked(syncBugPlatform)
+      .mockImplementationOnce(() => new Promise(resolve => {
+        resolveFirst = resolve
+      }))
+      .mockResolvedValueOnce({ platform_id: 'zentao-b', fetched: 1, stored: 1 })
     const wrapper = await mountedInbox()
-    await wrapper.get('[data-action="toggle-platform-config"]').trigger('click')
-
     vi.mocked(listBugs).mockClear()
-    vi.mocked(syncBugPlatform).mockClear()
-    const refresh = wrapper.get('[data-action="refresh-tickets"]')
-    expect(refresh.text()).toContain('刷新列表')
-    expect(refresh.find('svg[aria-hidden="true"]').exists()).toBe(true)
-    await refresh.trigger('click')
-    await flushPromises()
-    expect(listBugs).toHaveBeenCalledTimes(1)
-    expect(syncBugPlatform).not.toHaveBeenCalled()
 
-    vi.mocked(listBugs).mockClear()
-    const sync = wrapper.get('[data-action="sync-platform"]')
-    expect(sync.text()).toContain('从平台同步')
-    expect(sync.find('svg[aria-hidden="true"]').exists()).toBe(true)
-    await sync.trigger('click')
-    await flushPromises()
-    expect(syncBugPlatform).toHaveBeenCalledWith('zentao-main')
-    expect(listBugs).toHaveBeenCalledTimes(1)
-  })
-
-  it('shows a disabled loading state while refreshing the local list', async () => {
-    const wrapper = await mountedInbox()
-    let resolveRefresh!: (bugs: (typeof bug)[]) => void
-    vi.mocked(listBugs).mockImplementationOnce(() => new Promise(resolve => {
-      resolveRefresh = resolve
-    }))
-
-    const refresh = wrapper.get('[data-action="refresh-tickets"]')
-    await refresh.trigger('click')
+    await wrapper.get('[data-action="sync-enabled-platforms"]').trigger('click')
     await wrapper.vm.$nextTick()
-    expect(refresh.attributes('disabled')).toBeDefined()
-    expect(refresh.text()).toContain('刷新中…')
-    expect(refresh.get('svg').classes()).toContain('spinning')
 
-    resolveRefresh([bug])
+    expect(vi.mocked(syncBugPlatform).mock.calls).toEqual([['zentao-a']])
+    resolveFirst({ platform_id: 'zentao-a', fetched: 2, stored: 2 })
     await flushPromises()
-    expect(refresh.attributes('disabled')).toBeUndefined()
-    expect(refresh.text()).toContain('刷新列表')
+
+    expect(vi.mocked(syncBugPlatform).mock.calls).toEqual([['zentao-a'], ['zentao-b']])
+    expect(listBugs).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[data-action="sync-platform"]').exists()).toBe(false)
   })
 
-  it('shows a disabled loading state while synchronizing the platform', async () => {
-    const platform = {
-      id: 'zentao-main', name: '测试环境', type: 'zentao',
-      auth_mode: 'feishu_sso', enabled: true,
-    }
-    vi.mocked(listBugPlatforms).mockResolvedValue([platform])
+  it('continues synchronizing after a failed platform and reports its name', async () => {
+    vi.mocked(listBugPlatforms).mockResolvedValue([
+      { id: 'zentao-a', name: '禅道 A', type: 'zentao', enabled: true },
+      { id: 'zentao-b', name: '禅道 B', type: 'zentao', enabled: true },
+    ])
+    vi.mocked(syncBugPlatform)
+      .mockRejectedValueOnce(new Error('登录过期'))
+      .mockResolvedValueOnce({ platform_id: 'zentao-b', fetched: 1, stored: 1 })
     const wrapper = await mountedInbox()
-    await wrapper.get('[data-action="toggle-platform-config"]').trigger('click')
+    vi.mocked(listBugs).mockClear()
+
+    await wrapper.get('[data-action="sync-enabled-platforms"]').trigger('click')
+    await flushPromises()
+
+    expect(vi.mocked(syncBugPlatform).mock.calls).toEqual([['zentao-a'], ['zentao-b']])
+    expect(listBugs).toHaveBeenCalledTimes(1)
+    expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('禅道 A'))
+  })
+
+  it('shows 请先启用 Bug 平台 when no enabled platform exists', async () => {
+    vi.mocked(listBugPlatforms).mockResolvedValue([
+      { id: 'zentao-off', name: '停用平台', type: 'zentao', enabled: false },
+    ])
+    const wrapper = await mountedInbox()
+    vi.mocked(listBugs).mockClear()
+
+    await wrapper.get('[data-action="sync-enabled-platforms"]').trigger('click')
+    await flushPromises()
+
+    expect(syncBugPlatform).not.toHaveBeenCalled()
+    expect(listBugs).not.toHaveBeenCalled()
+    expect(toast.info).toHaveBeenCalledWith('请先启用 Bug 平台')
+  })
+
+  it('shows a disabled loading state while synchronizing enabled platforms', async () => {
+    vi.mocked(listBugPlatforms).mockResolvedValue([
+      { id: 'zentao-main', name: '测试环境', type: 'zentao', enabled: true },
+    ])
     let resolveSync!: (result: { platform_id: string; fetched: number; stored: number }) => void
     vi.mocked(syncBugPlatform).mockImplementationOnce(() => new Promise(resolve => {
       resolveSync = resolve
     }))
+    const wrapper = await mountedInbox()
 
-    const sync = wrapper.get('[data-action="sync-platform"]')
+    const sync = wrapper.get('[data-action="sync-enabled-platforms"]')
     await sync.trigger('click')
     await wrapper.vm.$nextTick()
     expect(sync.attributes('disabled')).toBeDefined()
     expect(sync.text()).toContain('同步中…')
+    expect(sync.get('svg').classes()).toContain('spinning')
 
     resolveSync({ platform_id: 'zentao-main', fetched: 1, stored: 1 })
     await flushPromises()
     expect(sync.attributes('disabled')).toBeUndefined()
-    expect(sync.text()).toContain('从平台同步')
+    expect(sync.text()).toContain('同步我的 Bug')
+    expect(sync.get('svg').classes()).not.toContain('spinning')
   })
 
   it('associates visible labels with bot environment, bot search, and manual Bug controls', async () => {
@@ -535,7 +680,7 @@ describe('BugInboxPage', () => {
     const newPlatform = wrapper.get('[data-action="new-platform"]')
     expect(newPlatform.text()).toContain('新建平台')
     expect(newPlatform.find('svg[aria-hidden="true"]').exists()).toBe(true)
-    expect(wrapper.text()).toContain('从平台同步')
+    expect(wrapper.get('[data-action="sync-enabled-platforms"]').text()).toContain('同步我的 Bug')
     expect(wrapper.find('input[placeholder="指派人账号,仅后台同步时用于筛选"]').exists()).toBe(false)
     expect(wrapper.find('input[placeholder="Hook Secret,留空自动生成"]').exists()).toBe(false)
     expect(wrapper.get('[data-action="login-platform"]').attributes('disabled')).toBeUndefined()
@@ -613,7 +758,7 @@ describe('BugInboxPage', () => {
     await flushPromises()
     expect(loginBugPlatform).toHaveBeenCalledWith({ platform_id: 'zentao-main' })
 
-    await wrapper.get('[data-action="sync-platform"]').trigger('click')
+    await wrapper.get('[data-action="sync-enabled-platforms"]').trigger('click')
     await flushPromises()
     expect(syncBugPlatform).toHaveBeenCalledWith('zentao-main')
 

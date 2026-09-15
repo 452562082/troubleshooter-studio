@@ -3,8 +3,6 @@
 // 职责:从 ~/.claude/{agents,skills,scripts}/(或 ~/.cursor/...)摘掉已装机器人,
 // 同时清掉中间包 ~/.tshoot/<target>/<id>/。两端都得清:中间包不清,BotsPage 仍能扫到。
 //
-// 跟 uninstall_native_openclaw.go 的区别:
-//   - openclaw 装在 ~/.openclaw/workspace/<name>/ + ~/.openclaw/openclaw.json agents.list
 //   - claude-code / cursor 装在用户级 ~/.claude|.cursor/{agents,skills,scripts}/<name>
 //   - 共同:都需要清中间包 ~/.tshoot/<target>/<system_id>/
 package agent
@@ -21,12 +19,6 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 )
-
-// readSystemIDFromMeta 从 tshoot.json 读 system_id 字段。读不到返回空串(调用方 fallback)。
-func readSystemIDFromMeta(metaPath string) string {
-	m := readMetaFromPath(metaPath)
-	return m.SystemID
-}
 
 func readMetaFromPath(metaPath string) discover.Meta {
 	data, err := os.ReadFile(metaPath)
@@ -143,6 +135,20 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 				logf("[ok] %s 已删除", bak)
 			}
 		}
+		if t == TargetCodex {
+			runtimeHome := codexAgentRuntimeHome(root, name)
+			if err := os.RemoveAll(runtimeHome); err == nil {
+				logf("[ok] %s 已删除", runtimeHome)
+			} else {
+				logf("[warn] 删 %s 失败:%v", runtimeHome, err)
+			}
+			legacyProfile := filepath.Join(root, "tshoot-"+name+".config.toml")
+			if err := os.Remove(legacyProfile); err == nil {
+				logf("[ok] %s 已删除", legacyProfile)
+			} else if !os.IsNotExist(err) {
+				logf("[warn] 删 %s 失败:%v", legacyProfile, err)
+			}
+		}
 	}
 
 	// 2b) codex 老版本残留清理:troubleshooter-studio 早期版本会另外往 ~/.codex/mcp.json
@@ -201,13 +207,13 @@ func UninstallNative(installedDir, target string) (*UninstallNativeResult, error
 	}
 
 	// 老产物清理:之前版本会下 mcp-grafana go 二进制到 <root>/bin/mcp-grafana
-	// (Windows 加 .exe)。现已改走 npx mcp-grafana-npx,旧二进制留着没人用,遇到就清掉。
+	// (Windows 加 .exe)。现已改走 uvx mcp-grafana,旧二进制留着没人用,遇到就清掉。
 	// 老 codex agent 共用 + 其它 IDE 各一份的判断已不再适用 — 反正只是个 30MiB 的孤儿。
 	for _, name := range []string{"mcp-grafana", "mcp-grafana.exe"} {
 		legacy := filepath.Join(root, "bin", name)
 		if _, err := os.Stat(legacy); err == nil {
 			if rmErr := os.Remove(legacy); rmErr == nil {
-				logf("[ok] 老 %s 二进制已删(改走 npx mcp-grafana-npx)", legacy)
+				logf("[ok] 老 %s 二进制已删(改走 uvx mcp-grafana)", legacy)
 			}
 		}
 	}
@@ -277,6 +283,13 @@ func deriveInstallRoot(installedDir string, t IDETarget, home string) string {
 // 也命中,迁移期顺手清)。返回真删了哪些 keys 给 UI 展示。
 func cleanIDEMCPServers(t IDETarget, home, root, systemID string, logf func(format string, a ...any)) []string {
 	prefix := systemID + "-"
+	if t == TargetOpenCode {
+		removed, err := mergeOpenCodeMCP(t.MCPConfigPath(home), prefix, nil, false)
+		if err != nil {
+			logf("[warn] OpenCode MCP 清理失败: %v", err)
+		}
+		return removed
+	}
 	if t == TargetCodex {
 		codexBin, err := exec.LookPath("codex")
 		if err != nil {

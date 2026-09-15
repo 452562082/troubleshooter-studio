@@ -30,6 +30,7 @@ func LoadFromBytes(data []byte) (*SystemConfig, error) {
 	// migrate 必须在 validate 之前 —— 老 yaml 单源 schema 走完 migrate 才符合新 schema。
 	migrateLegacyConfigCenter(&cfg)
 	migrateObservabilityEndpoints(&cfg)
+	migrateResourceCatalog(&cfg)
 	if err := Validate(&cfg); err != nil {
 		return nil, fmt.Errorf("validate: %w", err)
 	}

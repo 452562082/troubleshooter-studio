@@ -13,16 +13,16 @@ func TestParseTargets(t *testing.T) {
 		in   string
 		want []string
 	}{
-		{"empty → all 3", "", []string{"openclaw", "claude-code", "cursor"}},
-		{"single", "openclaw", []string{"openclaw"}},
-		{"space sep", "openclaw cursor", []string{"openclaw", "cursor"}},
-		{"comma sep", "openclaw,cursor", []string{"openclaw", "cursor"}},
-		{"semicolon sep", "openclaw;cursor", []string{"openclaw", "cursor"}},
-		{"mixed sep + padding", "  openclaw , cursor ", []string{"openclaw", "cursor"}},
-		{"case insensitive", "OPENCLAW Cursor", []string{"openclaw", "cursor"}},
-		{"dedup", "openclaw openclaw cursor", []string{"openclaw", "cursor"}},
-		{"all unknown → fallback openclaw", "bogus unknown", []string{"openclaw"}},
-		{"partial unknown filtered", "openclaw bogus cursor", []string{"openclaw", "cursor"}},
+		{"empty → all 4", "", []string{"claude-code", "cursor", "codex", "opencode"}},
+		{"single", "codex", []string{"codex"}},
+		{"space sep", "codex cursor", []string{"codex", "cursor"}},
+		{"comma sep", "codex,cursor", []string{"codex", "cursor"}},
+		{"semicolon sep", "codex;cursor", []string{"codex", "cursor"}},
+		{"mixed sep + padding", "  codex , cursor ", []string{"codex", "cursor"}},
+		{"case insensitive", "CODEX Cursor", []string{"codex", "cursor"}},
+		{"dedup", "codex codex cursor", []string{"codex", "cursor"}},
+		{"all unknown rejected", "bogus unknown", nil},
+		{"partial unknown filtered", "codex bogus cursor", []string{"codex", "cursor"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -83,7 +83,7 @@ func TestRun_Prefill(t *testing.T) {
 	// targets (1)
 	in := script(
 		"", "", "", // system
-		"", "", "", // agent
+		"",         // agent
 		"",         // envs 复用
 		"",         // repos 复用
 		"",         // config center
@@ -105,7 +105,7 @@ func TestRun_Prefill(t *testing.T) {
 	if ans.SystemID != "preshop" || ans.SystemName != "PreShop" || ans.SystemDescription != "描述" {
 		t.Errorf("system prefill lost: %+v", ans)
 	}
-	if ans.AgentName != "Bot" || ans.AgentModel != "anthropic/claude-opus-4-7" || ans.WorkspaceName != "BotWS" {
+	if ans.AgentName != "Bot" || ans.WorkspaceName != "preshop-troubleshooter" {
 		t.Errorf("agent prefill lost: %+v", ans)
 	}
 	if len(ans.Envs) != 2 || ans.Envs[0].ID != "dev" || ans.Envs[1].ID != "prod" || !ans.Envs[1].IsProd {
@@ -148,7 +148,7 @@ func TestWizard_Snapshot_AfterCompletedRun(t *testing.T) {
 	// 跑完完整最小向导，Snapshot 应等同于最终 Answers（或其快照）
 	in := script(
 		"shop", "Shop", "", // system
-		"", "", "", // agent
+		"",                   // agent
 		"dev", "api-dev", "", // env 1
 		"",         // env 2 empty → end
 		"",         // repo empty → end

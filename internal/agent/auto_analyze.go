@@ -44,7 +44,6 @@ import (
 // 也不让部署 UI 永远转。
 const autoAnalyzeTimeout = 60 * time.Second
 
-// autoAnalyzeCacheTTL:一次部署 wizard 里 4 个 target(openclaw/claude-code/cursor/codex)
 // 串行调 ImportAndDeploy,每个内部各跑一次 RunAutoAnalyze,实测每个 ~4-5s = 总共 ~20s
 // 重复扫同一份 repo —— 纯浪费。加 process-level cache,按完整配置摘要 + topology schema
 // + sorted repo path/HEAD 生成 key,首次跑写 cache,后续 target 命中直接复用 result。

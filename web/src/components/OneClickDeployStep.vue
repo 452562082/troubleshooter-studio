@@ -2,6 +2,7 @@
 // OneClickDeployStep —— Step 10 一键部署面板:列出本次会装到的目标 + 总按钮。
 // deploySummary / deployLoading / deployError 都在父端,本组件只渲染 + 转发 click。
 
+import type { TargetDeployState } from '../lib/useDeployFlow'
 import type { TargetId } from '../lib/constants'
 import type { CodeGraphIndexReport } from '../lib/bridge/install'
 
@@ -12,6 +13,8 @@ interface DeploySummaryItem {
 }
 
 withDefaults(defineProps<{
+  targetStates?: Record<string, TargetDeployState>
+  deployComplete?: boolean
   deploySummary: DeploySummaryItem[]
   deployLoading: boolean
   deployError: string | null
@@ -31,6 +34,8 @@ withDefaults(defineProps<{
 })
 
 defineEmits<{
+  (e: 'open-bugs'): void
+  (e: 'open-incidents'): void
   (e: 'run-deploy'): void
   (e: 'retry-codegraph'): void
 }>()
@@ -38,13 +43,12 @@ defineEmits<{
 
 <template>
   <div class="card lg">
-    <h2>一键部署</h2>
+    <h2>创建机器人</h2>
     <p class="help-text" style="margin-bottom:14px;">
-      按 Step 2 勾选的目标一次性部署,直接复用前面填的凭证,<strong>跑完即生效</strong>。
-      OpenClaw 若有字段前面没填,会回退到「已装机器人」页让你补齐。
+      自动生成机器人并部署到所选平台，完成后检查工具连接。
     </p>
     <div v-if="deploySummary.length === 0" class="alert warn">
-      Step 2 没勾选任何部署目标,无法一键部署。请回 Step 2 至少勾选一个 AI 平台。
+      “运行方式” 没勾选任何部署目标,无法一键部署。请回 “运行方式” 至少勾选一个 AI 平台。
     </div>
     <div v-else class="deploy-final-block">
       <div class="deploy-targets-line">
@@ -60,12 +64,22 @@ defineEmits<{
           :disabled="deployLoading || codeGraphRetrying || deploySummary.length === 0"
           @click="$emit('run-deploy')"
         >
-          {{ deployLoading ? '部署中…' : `🚀 部署到 ${deploySummary.length} 个目标` }}
+          {{ deployLoading ? '正在创建…' : deployError ? '重试未完成的平台' : deployComplete ? '检查并应用当前配置' : '创建机器人' }}
         </button>
       </div>
       <div v-if="deployLoading && deployProgressLine" class="deploy-progress-line">
         <span class="deploy-progress-dot" />
         <span class="deploy-progress-text">{{ deployProgressLine }}</span>
+      </div>
+      <ul v-if="targetStates && Object.keys(targetStates).length" class="deploy-platform-results" aria-live="polite">
+        <li v-for="item in deploySummary" :key="item.target" :data-status="targetStates[item.target]?.status">
+          <strong>{{ item.label }}</strong><span>{{ targetStates[item.target]?.message || '等待创建' }}</span>
+        </li>
+      </ul>
+      <div v-if="deployComplete" class="deploy-success-actions">
+        <p>机器人已创建。关联 Bug 工单后，就可以在故障闭环中选择它。</p>
+        <button class="btn primary" @click="$emit('open-bugs')">关联 Bug 工单</button>
+        <button class="btn" @click="$emit('open-incidents')">前往故障闭环</button>
       </div>
       <div v-if="deployError" class="alert error">{{ deployError }}</div>
     </div>
@@ -286,4 +300,13 @@ defineEmits<{
     animation: none;
   }
 }
+</style>
+
+<style scoped>
+.deploy-platform-results { list-style: none; padding: 0; margin: 16px 0; }
+.deploy-platform-results li { display: grid; grid-template-columns: 120px 1fr; gap: 12px; padding: 12px; border-bottom: 1px solid #e2e8f0; font-size: 13px; overflow-wrap: anywhere; }
+.deploy-platform-results [data-status=success] span { color: #15803d; }
+.deploy-platform-results [data-status=error] span { color: #b91c1c; }
+.deploy-success-actions { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; padding: 16px; margin-top: 16px; }
+.deploy-success-actions .btn { margin-right: 8px; }
 </style>

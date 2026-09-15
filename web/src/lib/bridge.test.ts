@@ -36,7 +36,7 @@ describe('bridge.discoverBots', () => {
   })
 
   it('桌面模式转发到 window.go.main.App.DiscoverBots', async () => {
-    const mockBot = { meta: { system_id: 'x', target: 'openclaw' }, path: '/a', mod_time: '' }
+    const mockBot = { meta: { system_id: 'x', target: 'claude-code' }, path: '/a', mod_time: '' }
     const spy = vi.fn().mockResolvedValue([mockBot])
     ;(window as any).go = { main: { App: { DiscoverBots: spy } } }
     const r = await discoverBots(['/extra'])

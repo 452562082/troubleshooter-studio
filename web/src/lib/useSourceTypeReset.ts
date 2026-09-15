@@ -8,6 +8,7 @@
 // configCenterType 会在 "" → "nacos" 之间瞬变(reset → ingest 多源),期间禁用本 watcher 的
 // 破坏性清空,否则刚反填的 envNamespaces / serviceConfigSel / ccHubStateByEnv 全没了。
 import { watch, type Ref } from 'vue'
+import { probeKey } from './yamlShared'
 import { toast } from './toast'
 import type { CCHubEnvState } from './useCCHubState'
 import type { DSByService, DSScanState } from './useDataStoreState'
@@ -24,6 +25,7 @@ export interface UseSourceTypeResetDeps {
 
   // Step 7 数据层状态(切源后清)
   scannedDS: Record<string, DSByService>
+  manualEntries?: Record<string, boolean>
   dsScanState: Record<string, DSScanState>
   dsAutoFilled: Record<string, boolean>
   dsImportStatus: { value: 'idle' | 'loading' | 'ok' | 'error' }
@@ -50,7 +52,13 @@ export function useSourceTypeReset(deps: UseSourceTypeResetDeps) {
     for (const k of Object.keys(deps.serviceConfigSel))   delete deps.serviceConfigSel[k]
     for (const k of Object.keys(deps.serviceConfigGroup)) delete deps.serviceConfigGroup[k]
     for (const k of Object.keys(deps.ccHubStateByEnv))    delete deps.ccHubStateByEnv[k]
-    for (const k of Object.keys(deps.scannedDS))          delete deps.scannedDS[k]
+    for (const [env, services] of Object.entries(deps.scannedDS)) {
+      for (const [svc, stores] of Object.entries(services)) {
+        for (const id of Object.keys(stores)) if (!deps.manualEntries?.[probeKey(env, svc, id)]) delete stores[id]
+        if (!Object.keys(stores).length) delete services[svc]
+      }
+      if (!Object.keys(services).length) delete deps.scannedDS[env]
+    }
     for (const k of Object.keys(deps.dsScanState))        delete deps.dsScanState[k]
     for (const k of Object.keys(deps.dsAutoFilled))       delete deps.dsAutoFilled[k]
     deps.dsImportStatus.value = 'idle'
@@ -58,7 +66,7 @@ export function useSourceTypeReset(deps: UseSourceTypeResetDeps) {
     deps.dsImportStats.matched = 0
     const any = cleaned.namespaces || cleaned.services || cleaned.scans || cleaned.dsEntries
     if (any) {
-      toast.info(`已切至 ${newType},清空上一源(${oldType})的 Step 5/7 扫描与数据层识别结果`)
+      toast.info(`已切至 ${newType},已刷新原配置源的识别结果，手动连接保留`)
     }
   })
 }

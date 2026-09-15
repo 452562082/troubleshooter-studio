@@ -73,6 +73,48 @@ func frontendEndpointsForRepo(ctx *Context, repoName string) []string {
 	return out
 }
 
+type frontendApplicationView struct {
+	Environment   string
+	ID            string
+	Name          string
+	URL           string
+	DeviceProfile string
+	Aliases       []string
+	ProductHints  []string
+	ModuleHints   []string
+	PathPrefixes  []string
+}
+
+func frontendApplicationsForRepo(ctx *Context, repoName string) []frontendApplicationView {
+	if ctx == nil {
+		return nil
+	}
+	var out []frontendApplicationView
+	for _, environment := range ctx.Environments {
+		entries := environment.EffectiveFrontendEntries()
+		for _, entry := range entries {
+			if entry.Repo != "" && entry.Repo != repoName {
+				continue
+			}
+			out = append(out, frontendApplicationView{
+				Environment: environment.ID, ID: entry.ID, Name: entry.Name, URL: entry.URL,
+				DeviceProfile: entry.DeviceProfile, Aliases: entry.Aliases, ProductHints: entry.ProductHints,
+				ModuleHints: entry.ModuleHints, PathPrefixes: entry.PathPrefixes,
+			})
+		}
+	}
+	return out
+}
+
+func frontendURLForRepoEnvironment(ctx *Context, repoName, environmentID string) string {
+	for _, application := range frontendApplicationsForRepo(ctx, repoName) {
+		if application.Environment == environmentID {
+			return application.URL
+		}
+	}
+	return ""
+}
+
 func frontendCandidateServicesForRepo(ctx *Context, repoName string) []string {
 	if ctx == nil {
 		return nil
@@ -420,6 +462,8 @@ func funcMap() template.FuncMap {
 		"lower":                                  strings.ToLower,
 		"dataStoreSkill":                         dataStoreSkillName,
 		"frontendEndpointsForRepo":               frontendEndpointsForRepo,
+		"frontendApplicationsForRepo":            frontendApplicationsForRepo,
+		"frontendURLForRepoEnvironment":          frontendURLForRepoEnvironment,
 		"frontendCandidateServicesForRepo":       frontendCandidateServicesForRepo,
 		"frontendRouteCandidatesForRepoEndpoint": frontendRouteCandidatesForRepoEndpoint,
 		"dependencyServicesForRepo":              dependencyServicesForRepo,
@@ -460,24 +504,10 @@ func funcMap() template.FuncMap {
 			}
 			return nil
 		},
-		// repoConfigSource 找到拥有 service 的 repo,返回它的 config_source。
-		// 没找到 / 没绑(单源场景):返回 "default"。
-		"repoConfigSource": func(ctx *Context, service string) string {
-			for _, r := range ctx.Repos {
-				names := r.ServiceNames
-				if len(names) == 0 {
-					names = []string{r.Name}
-				}
-				for _, sn := range names {
-					if sn == service {
-						if r.ConfigSource != "" {
-							return r.ConfigSource
-						}
-						return "default"
-					}
-				}
-			}
-			return "default"
+		// repoConfigSource resolves the formal (env, service) catalog binding
+		// first and falls back to legacy repos[].config_source.
+		"repoConfigSource": func(ctx *Context, env, service string) string {
+			return ctx.ConfigSourceFor(env, service)
 		},
 		// configSourceByID 按 id 找 ConfigCenters[] 里的源;找不到返回主源(兜底,
 		// 避免 yaml 引用不存在 id 时模板崩),配 doctor 检查给用户预警。
@@ -637,8 +667,6 @@ func funcMap() template.FuncMap {
 			return out
 		},
 		// mcpKeyForAgentSource 跟 mcpKeyForAgent 镜像:加 agent-id 前缀,Claude Code/Cursor
-		// 共享 settings.json 池场景必备,避免多 system 同名 mcp 互相覆盖。OpenClaw 也走
-		// 这条路保持三平台命名统一(install_native_openclaw 同步用 mcpKeyForAgent)。
 		// sourceID == prefix 时(用户没改 source.id 直接用 type)做去重,避免出现
 		// "truss-nacos-nacos-dev" 这种叠词。
 		"mcpKeyForAgentSource": func(agentID, prefix, sourceID, envID string) string {
@@ -667,6 +695,7 @@ type endpointView struct {
 	Env           string
 	Addr          string
 	NamespaceHint string
+	MCPURL        string
 }
 
 func toConfigCenterView(cc config.ConfigCenter) ConfigCenterView {
@@ -677,7 +706,7 @@ func toConfigCenterView(cc config.ConfigCenter) ConfigCenterView {
 	}
 	for _, ep := range cc.Endpoints {
 		out.Endpoints = append(out.Endpoints, endpointView{
-			Env: ep.Env, Addr: ep.Addr, NamespaceHint: ep.NamespaceHint,
+			Env: ep.Env, Addr: ep.Addr, NamespaceHint: ep.NamespaceHint, MCPURL: ep.MCPURL,
 		})
 	}
 	return out

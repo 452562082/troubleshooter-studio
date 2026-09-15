@@ -9,11 +9,43 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
+
+func TestRegisterArtifactUsesBoundedStorageDirectoryForLongCaseID(t *testing.T) {
+	ctx := context.Background()
+	store := openTestCaseStore(t)
+	caseID := "case-reset-" + strings.Repeat("nested-reset-", 28)
+	attemptID := "attempt-long-case-artifact"
+	createTestCase(t, store, caseID)
+	if err := store.CreateAttempt(ctx, validRunningAttempt(attemptID, caseID)); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(resolvedTempDir(t), "long-case-artifacts")
+	content := []byte("safe browser evidence for a legacy long Case ID")
+	artifact, err := RegisterArtifactBytes(ctx, store, ArtifactInput{
+		ArtifactsRoot: root, CaseID: caseID, AttemptID: attemptID,
+		Kind: "screenshot", RedactionStatus: RedactionStatusNotRequired,
+	}, content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storageComponent := filepath.Base(filepath.Dir(artifact.PathOrReference))
+	if storageComponent == caseID || len([]byte(storageComponent)) > 255 {
+		t.Fatalf("storage component=%q bytes=%d", storageComponent, len([]byte(storageComponent)))
+	}
+	read, err := ReadEvidenceArtifactFromRoot(ctx, store, root, caseID, artifact.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(read.Content) != string(content) {
+		t.Fatalf("content=%q", read.Content)
+	}
+}
 
 func TestRegisterArtifactRejectsOversizedSourceBeforeReading(t *testing.T) {
 	ctx, store, input := secureArtifactFixture(t, "oversized")
@@ -66,6 +98,13 @@ func TestRegisterArtifactRejectsSourceSymlinkAndFIFO(t *testing.T) {
 	input.SourcePath = fifo
 	if _, err := RegisterArtifact(ctx, store, input); err == nil {
 		t.Fatal("expected FIFO rejection")
+	}
+	// If the non-blocking reader rejected and closed before the writer goroutine
+	// was scheduled, briefly reopen the FIFO so the writer can observe a reader
+	// and terminate instead of leaking across the rest of the package tests.
+	drain, _ := os.OpenFile(fifo, os.O_RDONLY|unix.O_NONBLOCK, 0)
+	if drain != nil {
+		defer drain.Close()
 	}
 	select {
 	case <-writerDone:
@@ -174,6 +213,78 @@ func TestRegisterArtifactRejectsCaseDirectorySwapBeforeCommit(t *testing.T) {
 		if len(entry.Name()) == 64 {
 			t.Fatalf("artifact escaped to replacement directory: %s", entry.Name())
 		}
+	}
+}
+
+func TestReadEvidenceArtifactRejectsParentDirectorySymlinkReplacement(t *testing.T) {
+	ctx, store, input := secureArtifactFixture(t, "read-parent-link")
+	content := []byte("safe registered browser screenshot")
+	source := filepath.Join(resolvedTempDir(t), "read-parent-link-source.png")
+	if err := os.WriteFile(source, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input.SourcePath = source
+	input.Kind = "screenshot"
+	artifact, err := RegisterArtifact(ctx, store, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caseDir := filepath.Dir(artifact.PathOrReference)
+	moved := caseDir + "-moved"
+	if err := os.Rename(caseDir, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, caseDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadEvidenceArtifact(ctx, store, input.CaseID, artifact.ID); err == nil {
+		t.Fatal("registered artifact read followed a replaced parent-directory symlink")
+	}
+}
+
+func TestReadEvidenceArtifactRejectsHardLinkReplacement(t *testing.T) {
+	ctx, store, input := secureArtifactFixture(t, "read-hardlink")
+	content := []byte("safe registered network evidence")
+	source := filepath.Join(resolvedTempDir(t), "read-hardlink-source.json")
+	if err := os.WriteFile(source, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input.SourcePath = source
+	artifact, err := RegisterArtifact(ctx, store, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(resolvedTempDir(t), "read-hardlink-outside.json")
+	if err := os.WriteFile(outside, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(artifact.PathOrReference); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(outside, artifact.PathOrReference); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadEvidenceArtifact(ctx, store, input.CaseID, artifact.ID); err == nil {
+		t.Fatal("registered artifact read accepted a hard-link replacement")
+	}
+}
+
+func TestReadEvidenceArtifactFromRootRequiresRegisteredStoreOwnership(t *testing.T) {
+	ctx, store, input := secureArtifactFixture(t, "read-root-ownership")
+	source := filepath.Join(resolvedTempDir(t), "read-root-source.txt")
+	if err := os.WriteFile(source, []byte("safe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input.SourcePath = source
+	artifact, err := RegisterArtifact(ctx, store, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadEvidenceArtifactFromRoot(ctx, store, input.ArtifactsRoot, input.CaseID, artifact.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadEvidenceArtifactFromRoot(ctx, store, resolvedTempDir(t), input.CaseID, artifact.ID); err == nil {
+		t.Fatal("registered artifact read accepted a different artifact-store root")
 	}
 }
 

@@ -4,13 +4,15 @@
 //       不必 mount Vue 组件。
 
 import yaml from 'js-yaml'
-import { Target } from './constants'
 import type { CredField } from './credFields'
 import { yamlStr, hasAnyLokiMapping, emitLokiLabelMapping, type LokiEnvMapping } from './yamlEmit'
+import { isEffectiveObsFieldHidden, resolveObsFieldValue } from './obsConnection'
 // VIA_GRAFANA_ELIGIBLE 跨 generator/useObsAccessMode/importer 共用,在 yamlShared 集中。
 // re-export 给老 import("from './yamlGenerator'")兼容。
 export { VIA_GRAFANA_ELIGIBLE } from './yamlShared'
 import { VIA_GRAFANA_ELIGIBLE, placeholderName } from './yamlShared'
+import type { ConfigSourceInstance } from './configSourceInstances'
+import { inferFrontendDeviceProfile, resolveFrontendEntryID } from './frontendEntries'
 
 // ── 类型(跟 InitPage 现有 reactive 形状对齐) ────────────────────────
 
@@ -31,8 +33,21 @@ export interface YAMLGenEnvironment {
   id: string
   api_domain: string
   web_domain: string
+  frontend_entries?: YAMLGenFrontendEntry[]
   is_prod: boolean
   deployment_verification?: DeploymentVerificationState
+}
+
+export interface YAMLGenFrontendEntry {
+  id: string
+  name: string
+  url: string
+  repo: string
+  device_profile: string
+  aliases: string
+  product_hints: string
+  module_hints: string
+  path_prefixes: string
 }
 
 export interface DeploymentVerificationState {
@@ -78,7 +93,8 @@ export interface ServiceTopologyOverrideState {
   action: 'confirm' | 'reject' | 'add'
   fromService: string
   toService: string
-  protocol: 'http' | 'grpc'
+  scope?: 'service'
+  protocol?: 'http' | 'grpc'
   method?: string
   path?: string
   rpcMethod?: string
@@ -142,8 +158,12 @@ export interface YAMLGenContext {
   /** k8s_runtime 的 provider:"kuboard"(默认) 或 "one2all" */
   k8sRuntimeProvider?: string
   scannedDS: Record<string, Record<string, Record<string, Record<string, string>>>>
+  dataStoreTypes?: Record<string, string>
+  sourceInstances?: ConfigSourceInstance[]
+  sourceEnvNamespaces?: Record<string, string>
   activeSourceTypes: string[]
   allServiceNames: string[]
+  runtimeWorkloadNames?: string[]
   isMultiSource: boolean
   targetOptions: readonly string[]
   modelConsumingTargets: readonly string[]
@@ -151,7 +171,7 @@ export interface YAMLGenContext {
   CC_FIELDS_BY_TYPE: Record<string, CredField[]>
   // 帮助函数:行为对齐 InitPage 同名实现,内部直接 closure-read InitPage 状态
   normalizeDomain(s: string): string
-  getServiceSource(svc: string): string
+  getServiceSource(svc: string, envID?: string): string
   isFieldHidden(t: string, envID: string, f: CredField, getSibling: (k: string) => string): boolean
   isObsFieldHidden(toolKey: string, envID: string, f: CredField): boolean
   getObsAccessMode(obsKey: string, envID: string): 'via_grafana' | 'direct'
@@ -164,14 +184,32 @@ export interface YAMLGenContext {
   recomputeEnabledDataStoresFromScanned(): void
 }
 
+export interface YAMLGenOptions {
+  /** 基础代码扫描不消费人工拓扑决策，避免过期服务关系阻断重新识别。 */
+  omitServiceTopology?: boolean
+  /**
+   * 生成可迁移、可直接部署的配置。开启后会把向导当前持有的凭据写入 YAML。
+   * 默认关闭，避免预览、草稿和机器人元数据意外持久化明文凭据。
+   */
+  includeSecrets?: boolean
+}
+
+/** 返回仍待填写的 {{PLACEHOLDER}}，供可部署配置导出前做完整性拦截。 */
+export function unresolvedYAMLPlaceholders(yamlText: string): string[] {
+  const names = new Set<string>()
+  for (const match of yamlText.matchAll(/\{\{\s*([^{}\s]+)\s*\}\}/g)) names.add(match[1])
+  return [...names].sort()
+}
+
 // ── 主函数(对齐原 InitPage::generateYAML) ────────────────────────
 
-export function generateYAML(ctx: YAMLGenContext): string {
+export function generateYAML(ctx: YAMLGenContext, options: YAMLGenOptions = {}): string {
   // 出 yaml 之前先按 scannedDS 实时刷一次 enabledDataStores —— 这是 skills_whitelist
   // 派生 + Step 5 env-vars 字段集 + 校验逻辑共同的"启用清单",必须跟用户 Step 6 实际看到的
   // 数据层组件一致。
   ctx.recomputeEnabledDataStoresFromScanned()
   const lines: string[] = []
+  const includeSecrets = options.includeSecrets === true
   const k8sRuntimeProvider = (): string => {
     if (ctx.k8sRuntimeProvider) return ctx.k8sRuntimeProvider
     for (const env of ctx.environments) {
@@ -185,6 +223,9 @@ export function generateYAML(ctx: YAMLGenContext): string {
   // 顶部导言注释(解析时被忽略,只给用户看)
   lines.push('# 由初始化向导生成，可手工调整。字段说明：schema/troubleshooter.schema.yaml')
   lines.push('# 以下行尾 # 注释仅为提示，YAML 解析时会被忽略。')
+  if (includeSecrets) {
+    lines.push('# 警告：此文件包含可直接部署的明文凭据，请通过受控渠道传输，禁止提交到版本库。')
+  }
 
   // system
   lines.push('system:')
@@ -197,25 +238,8 @@ export function generateYAML(ctx: YAMLGenContext): string {
   lines.push('agent:')
   // agent.id 空时推导 "<system.id>-troubleshooter",跟历史命名兼容。
   const agentID = (ctx.agent.id || '').trim() || `${ctx.system.id || 'my-system'}-troubleshooter`
-  lines.push(`  id: ${agentID}            # AI 平台里的稳定标识(OpenClaw agents.list / Claude Code / Cursor subagent 名)`)
+  lines.push(`  id: ${agentID}            # AI 平台里的稳定标识(Claude Code / Cursor subagent 名)`)
   lines.push(`  name: ${yamlStr(ctx.agent.name || ctx.agentNameDefault)}`)
-  // model 是 openclaw 专属;workspace_name 不再单独 emit(Go 端 ResolveWorkspaceName 用 agent.id 当目录名)
-  if (ctx.enabledTargets[Target.Openclaw]) {
-    lines.push(`  model: ${ctx.agent.model}    # OpenClaw gateway 路由用的 LLM model id`)
-    const tmEntries: [string, string][] = []
-    for (const t of ctx.modelConsumingTargets) {
-      if (!ctx.enabledTargets[t]) continue
-      const v = (ctx.targetModels[t] || '').trim()
-      if (v && v !== ctx.agent.model) tmEntries.push([t, v])
-    }
-    if (tmEntries.length > 0) {
-      lines.push('  target_models:     # per-target 模型覆盖;key 只认 openclaw(其它 target 不消费)')
-      for (const [t, m] of tmEntries) {
-        lines.push(`    ${t}: ${m}`)
-      }
-    }
-  }
-
   // environments
   lines.push('')
   lines.push('# environments：声明系统的所有环境。每个 env 会注册一套独立的 MCP 实例')
@@ -224,12 +248,30 @@ export function generateYAML(ctx: YAMLGenContext): string {
   for (const env of ctx.environments) {
     lines.push(`  - id: ${env.id || 'env'}`)
     const apiD = ctx.normalizeDomain(env.api_domain)
-    const webD = ctx.normalizeDomain(env.web_domain)
     if (apiD) lines.push(`    api_domain: ${yamlStr(apiD)}     # 后端接口(带 http/https 前缀更明确;不带视为 https)`)
-    if (webD) lines.push(`    web_domain: ${yamlStr(webD)}     # 前端入口(同上)`)
+    const frontendEntries = Array.isArray(env.frontend_entries) ? env.frontend_entries : []
+    if (frontendEntries.length > 0) {
+      lines.push('    frontend_entries:')
+      const usedEntryIDs = new Set<string>()
+      for (let entryIndex = 0; entryIndex < frontendEntries.length; entryIndex++) {
+        const entry = frontendEntries[entryIndex]
+        const entryID = resolveFrontendEntryID(entry.id, entry.name, usedEntryIDs)
+        const entryName = entry.name.trim() || `前端应用 ${entryIndex + 1}`
+        const deviceProfile = entry.device_profile.trim() || inferFrontendDeviceProfile(entryName)
+        lines.push(`      - id: ${entryID}`)
+        lines.push(`        name: ${yamlStr(entryName)}`)
+        lines.push(`        url: ${yamlStr(entry.url.trim())}`)
+        if (entry.repo.trim()) lines.push(`        repo: ${yamlStr(entry.repo.trim())}`)
+        if (deviceProfile) lines.push(`        device_profile: ${deviceProfile}`)
+        for (const [key, value] of [['aliases', entry.aliases], ['product_hints', entry.product_hints], ['module_hints', entry.module_hints], ['path_prefixes', entry.path_prefixes]] as const) {
+          const values = value.split(',').map(item => item.trim()).filter(Boolean)
+          if (values.length > 0) lines.push(`        ${key}: [${values.map(yamlStr).join(', ')}]`)
+        }
+      }
+    }
     lines.push(`    is_prod: ${env.is_prod}         # 生产环境标记:true 时机器人默认更保守、查询前二次确认`)
     const verification = env.deployment_verification
-    if (verification?.provider === 'http') {
+    if (verification?.provider === 'http' && verification.http.url.trim() && verification.http.json_pointer.trim()) {
       lines.push('    deployment_verification:')
       lines.push('      provider: http')
       lines.push('      http:')
@@ -239,15 +281,8 @@ export function generateYAML(ctx: YAMLGenContext): string {
     } else if (verification?.provider === 'k8s') {
       lines.push('    deployment_verification:')
       lines.push('      provider: k8s')
-      lines.push('      k8s:')
-      lines.push(`        cluster: ${yamlStr(verification.k8s.cluster)}`)
-      lines.push(`        namespace: ${yamlStr(verification.k8s.namespace)}`)
-      lines.push('        deployments_by_repo:')
-      for (const [repo, deployment] of Object.entries(verification.k8s.deployments_by_repo).sort(([a], [b]) => a.localeCompare(b))) {
-        if (repo && deployment) lines.push(`          ${yamlStr(repo)}: ${yamlStr(deployment)}`)
-      }
-      if (verification.k8s.commit_annotation) lines.push(`        commit_annotation: ${yamlStr(verification.k8s.commit_annotation)}`)
-      if (verification.k8s.image_label) lines.push(`        image_label: ${yamlStr(verification.k8s.image_label)}`)
+      // K8s 定位唯一来源是 observability.k8s_runtime.service_map。旧 YAML 仍可导入，
+      // 但新向导不再生成第二份 cluster/namespace/Deployment/版本字段。
     }
   }
 
@@ -292,13 +327,91 @@ export function generateYAML(ctx: YAMLGenContext): string {
         lines.push(`      ${eid}: ${branch}`)
       }
     }
-    // 多源场景声明本仓库走哪个源(取本仓服务列表里第一个的 source)。
+    // Legacy repository-wide binding is emitted only when every service/env in
+    // this repository shares one source. Mixed bindings live exclusively in
+    // resource_catalog and must not be flattened back to a misleading value.
     if (ctx.isMultiSource) {
       const svcs = repo.service_names.split(',').map(s => s.trim()).filter(Boolean)
-      const firstSvc = svcs[0] || repo.name
-      const src = ctx.getServiceSource(firstSvc)
-      if (src && src !== ctx.activeSourceTypes[0]) {
+      const sources = new Set<string>()
+      for (const env of ctx.environments) {
+        if (!env.id) continue
+        for (const svc of (svcs.length > 0 ? svcs : [repo.name])) {
+          const source = ctx.getServiceSource(svc, env.id)
+          if (source) sources.add(source)
+        }
+      }
+      const src = sources.size === 1 ? Array.from(sources)[0] : ''
+      const firstSourceID = ctx.sourceInstances?.[0]?.id || ctx.activeSourceTypes[0]
+      if (src && src !== firstSourceID) {
         lines.push(`    config_source: ${src}    # 引用 infrastructure.config_centers[].id`)
+      }
+    }
+  }
+
+  // Formal resource catalog: stable identities and per-environment bindings.
+  // Infrastructure blocks below still own connection details; this block only
+  // references source/data/workload IDs and is therefore safe to consume across
+  // repositories and environments.
+  const runtimeResources = ctx.runtimeWorkloadNames || ctx.allServiceNames
+  const repoForResource = (resource: string) => ctx.repos.find(repo =>
+    repo.service_names.split(',').map(s => s.trim()).filter(Boolean).includes(resource),
+  ) || ctx.repos.find(repo => repo.name === resource)
+  const businessServices = new Set(ctx.allServiceNames)
+  if (ctx.allServiceNames.length > 0 || runtimeResources.length > 0) {
+    lines.push('')
+    lines.push('resource_catalog:       # 服务/Workload 身份与环境级资源绑定;连接详情仍在 infrastructure')
+    if (ctx.allServiceNames.length > 0) {
+      lines.push('  services:')
+      for (const svc of ctx.allServiceNames) {
+        const repo = repoForResource(svc)
+        if (!repo) continue
+        lines.push(`    - id: ${yamlStr(svc)}`)
+        lines.push(`      repository: ${yamlStr(repo.name)}`)
+        const sourceRows: string[] = []
+        const dataRows: string[] = []
+        const workloadRows: string[] = []
+        for (const env of ctx.environments) {
+          if (!env.id) continue
+          const selected = ctx.getServiceSource(svc, env.id)
+          if (selected && selected !== 'none') {
+            sourceRows.push(`        ${env.id}: ${yamlStr(selected)}`)
+          }
+          const dsTypes = Object.keys(ctx.scannedDS[env.id]?.[svc] || {}).sort()
+          if (dsTypes.length > 0) {
+            dataRows.push(`        ${env.id}: [${dsTypes.map(yamlStr).join(', ')}]`)
+          }
+          if (runtimeResources.includes(svc)) {
+            workloadRows.push(`        ${env.id}: ${yamlStr(svc)}`)
+          }
+        }
+        if (sourceRows.length > 0) {
+          lines.push('      config_sources:')
+          lines.push(...sourceRows)
+        }
+        if (dataRows.length > 0) {
+          lines.push('      data_stores:')
+          lines.push(...dataRows)
+        }
+        if (workloadRows.length > 0) {
+          lines.push('      workloads:')
+          lines.push(...workloadRows)
+        }
+      }
+    }
+    if (runtimeResources.length > 0) {
+      lines.push('  workloads:')
+      for (const resource of runtimeResources) {
+        const repo = repoForResource(resource)
+        if (!repo) continue
+        lines.push(`    - id: ${yamlStr(resource)}`)
+        lines.push(`      repository: ${yamlStr(repo.name)}`)
+        if (businessServices.has(resource)) lines.push(`      service: ${yamlStr(resource)}`)
+        lines.push('      names:')
+        for (const env of ctx.environments) {
+          if (!env.id) continue
+          const runtimeName = ctx.k8sRuntimeSvcMap[ctx.svcKey(env.id, resource)]?.workload || resource
+          lines.push(`        ${env.id}: ${yamlStr(runtimeName)}`)
+        }
       }
     }
   }
@@ -310,7 +423,7 @@ export function generateYAML(ctx: YAMLGenContext): string {
     lines.push('  provider: codegraph')
   }
 
-  if (ctx.serviceTopology.overrides.length > 0) {
+  if (!options.omitServiceTopology && ctx.serviceTopology.overrides.length > 0) {
     lines.push('')
     lines.push('service_topology:')
     lines.push('  overrides:')
@@ -318,7 +431,8 @@ export function generateYAML(ctx: YAMLGenContext): string {
       lines.push(`    - action: ${override.action}`)
       lines.push(`      from_service: ${yamlStr(override.fromService)}`)
       lines.push(`      to_service: ${yamlStr(override.toService)}`)
-      lines.push(`      protocol: ${override.protocol}`)
+      if (override.scope) lines.push(`      scope: ${override.scope}`)
+      if (override.protocol) lines.push(`      protocol: ${override.protocol}`)
       if (override.method) lines.push(`      method: ${yamlStr(override.method)}`)
       if (override.path) lines.push(`      path: ${yamlStr(override.path)}`)
       if (override.rpcMethod) lines.push(`      rpc_method: ${yamlStr(override.rpcMethod)}`)
@@ -329,10 +443,12 @@ export function generateYAML(ctx: YAMLGenContext): string {
   lines.push('')
   lines.push('infrastructure:')
 
-  // config_center / config_centers:用户填过的所有字段(含密码)都进 yaml,空字段给占位符
-  // ⚠ 代价:yaml 带明文密码,分享范围必须可控
-  const emitSourceBody = (out: string[], baseIndent: string, type: string, sourceID: string, includeServiceMap: boolean) => {
-    const data = ctx.sourceCreds[type] || { creds: {} }
+  // config_center / config_centers:常规预览只写环境引用；显式导出可部署配置时写入真实凭据。
+  const emitSourceBody = (
+    out: string[], baseIndent: string, type: string, sourceID: string,
+    includeServiceMap: boolean, placeholderSourceID = sourceID,
+  ) => {
+    const data = ctx.sourceCreds[sourceID] || ctx.sourceCreds[type] || { creds: {} }
     const fields = ctx.CC_FIELDS_BY_TYPE[type] || []
     const isKuboard = type === 'kuboard'
     const isOne2All = type === 'one2all'
@@ -347,12 +463,14 @@ export function generateYAML(ctx: YAMLGenContext): string {
       const mcpURL = (sharedCreds['mcp_url'] || '').trim()
       const token = (sharedCreds['token'] || '').trim()
       if (mcpURL || token) {
-        out.push(`${baseIndent}endpoints:     # ⚠ 含明文 token,仅团队私密范围分享,别 commit 公开 git`)
+        out.push(`${baseIndent}endpoints:`)
         out.push(`${baseIndent}  - url: ${mcpURL ? yamlStr(mcpURL) : '"{{ONE2ALL_MCP_URL}}"'}      # MCP server 完整 URL`)
-        if (token) out.push(`${baseIndent}    token: ${yamlStr(token)}      # ⚠ secret`)
+        out.push(includeSecrets && token
+          ? `${baseIndent}    token: ${yamlStr(token)}      # 可迁移部署凭据`
+          : `${baseIndent}    token: "{{ONE2ALL_TOKEN}}"      # 系统钥匙串/部署注入`)
       }
     } else if (endpointFields.length > 0) {
-      out.push(`${baseIndent}endpoints:     # ⚠ 含明文凭证,仅团队私密范围分享,别 commit 公开 git`)
+      out.push(`${baseIndent}endpoints:`)
       for (const env of ctx.environments) {
         if (!env.id) continue
         out.push(`${baseIndent}  - env: ${env.id}`)
@@ -361,11 +479,18 @@ export function generateYAML(ctx: YAMLGenContext): string {
           if (f.uiOnly) continue
           if (ctx.isFieldHidden(type, env.id, f, (k) => (envCreds[k] || ''))) continue
           const v = (envCreds[f.key] || '').trim()
+          if (f.key === 'mcp_url' && !v) continue
           if (v) {
-            const comment = f.secret ? '      # ⚠ secret,yaml 分享注意范围' : ''
-            out.push(`${baseIndent}    ${f.key}: ${yamlStr(v)}${comment}`)
+            if (f.secret && !includeSecrets) {
+              const ph = placeholderName(f.envVar(env.id), placeholderSourceID)
+              out.push(`${baseIndent}    ${f.key}: "{{${ph}}}"      # 系统钥匙串/部署注入`)
+            } else {
+              out.push(`${baseIndent}    ${f.key}: ${yamlStr(v)}`)
+            }
           } else {
-            const ph = placeholderName(f.envVar(env.id), sourceID)
+            // 可部署导出不为可选字段制造虚假的"仍需填写"占位符。
+            if (includeSecrets && f.optional) continue
+            const ph = placeholderName(f.envVar(env.id), placeholderSourceID)
             out.push(`${baseIndent}    ${f.key}: "{{${ph}}}"      # 没填,部署时交互收集`)
           }
         }
@@ -377,7 +502,7 @@ export function generateYAML(ctx: YAMLGenContext): string {
         if (!env.id) continue
         const perEnv: string[] = []
         for (const svc of ctx.allServiceNames) {
-          if (ctx.getServiceSource(svc) !== type) continue
+          if (ctx.getServiceSource(svc, env.id) !== sourceID) continue
           if (isKuboard) {
             const loc = ctx.kuboardSvcMap[ctx.svcKey(env.id, svc)]
             if (!loc) continue
@@ -403,7 +528,8 @@ export function generateYAML(ctx: YAMLGenContext): string {
           } else {
             const dataId = (ctx.serviceConfigSel[ctx.svcKey(env.id, svc)] || '').trim()
             if (!dataId) continue
-            const ns = (ctx.envNamespaces[env.id] || '').trim()
+            const nsKey = `${sourceID}::${env.id}`
+            const ns = (ctx.sourceEnvNamespaces?.[nsKey] || ctx.envNamespaces[env.id] || '').trim()
             const group = (ctx.serviceConfigGroup[ctx.svcKey(env.id, svc)] || '').trim()
             perEnv.push(`${baseIndent}      ${yamlStr(svc)}:`)
             if (ns) perEnv.push(`${baseIndent}        namespace: ${yamlStr(ns)}`)
@@ -441,21 +567,17 @@ export function generateYAML(ctx: YAMLGenContext): string {
     }
   }
 
-  const active = ctx.activeSourceTypes
-  if (active.length === 0) {
+  const instances = ctx.sourceInstances?.filter(item => ctx.activeSourceTypes.includes(item.type))
+    || ctx.activeSourceTypes.map(type => ({ id: type, type }))
+  if (instances.length === 0) {
     lines.push('  config_center:        # 没勾配置源,写 none 占位')
     lines.push('    type: none')
-  } else if (active.length === 1) {
-    const t = active[0]
-    lines.push('  config_center:        # 配置中心:nacos/apollo/consul/kuboard/one2all/env-vars/none')
-    lines.push(`    type: ${t}`)
-    emitSourceBody(lines, '    ', t, 'default', true)
   } else {
-    lines.push('  config_centers:        # 多源配置:每个源独立 type/凭证;repos[].config_source 引用 id')
-    for (const t of active) {
-      lines.push(`    - id: ${t}        # 源 id 跟 type 同名(简单模式;同 type 多源需手编辑)`)
-      lines.push(`      type: ${t}`)
-      emitSourceBody(lines, '      ', t, t, true)
+    lines.push('  config_centers:        # 配置源实例；id 是服务路由的稳定引用，可存在多个同 type 实例')
+    for (const instance of instances) {
+      lines.push(`    - id: ${yamlStr(instance.id)}`)
+      lines.push(`      type: ${instance.type}`)
+      emitSourceBody(lines, '      ', instance.type, instance.id, true)
     }
   }
 
@@ -463,12 +585,14 @@ export function generateYAML(ctx: YAMLGenContext): string {
   const lokiDeps = {
     environments: ctx.environments.map(e => ({ id: e.id })),
     lokiMappingByEnv: ctx.lokiMappingByEnv,
-    allServiceNames: ctx.allServiceNames,
+    allServiceNames: ctx.runtimeWorkloadNames || ctx.allServiceNames,
   }
   const anyObs = Object.values(ctx.enabledObservability).some(Boolean) || hasAnyLokiMapping(lokiDeps)
   if (anyObs) {
     lines.push('')
-    lines.push('  observability:        # ⚠ 含明文凭证,仅团队私密范围分享')
+    lines.push(includeSecrets
+      ? '  observability:        # 可部署导出包含当前已配置凭据'
+      : '  observability:        # secret 字段仅写环境引用,值由系统钥匙串/部署注入')
     for (const spec of ctx.OBS_TOOL_SPECS) {
       if (!ctx.enabledObservability[spec.key]) continue
       lines.push(`    ${spec.key}:`)
@@ -492,12 +616,22 @@ export function generateYAML(ctx: YAMLGenContext): string {
         const fieldLines: string[] = []
         for (const f of spec.fields) {
           if (f.uiOnly) continue
-          if (ctx.isObsFieldHidden(spec.key, env.id, f)) continue
-          const k = ctx.toolKeyFor('obs', spec.key, env.id, f.key)
-          const v = (ctx.toolInputs[k] || '').trim()
+          if (isEffectiveObsFieldHidden({
+            toolInputs: ctx.toolInputs,
+            sourceCreds: ctx.sourceCreds,
+            toolKeyFor: ctx.toolKeyFor,
+          }, spec.key, env.id, f, ctx.isObsFieldHidden)) continue
+          const v = resolveObsFieldValue({
+            toolInputs: ctx.toolInputs,
+            sourceCreds: ctx.sourceCreds,
+            toolKeyFor: ctx.toolKeyFor,
+          }, spec.key, env.id, f.key)
           if (v) {
-            const note = f.secret ? '      # ⚠ secret' : ''
-            fieldLines.push(`          ${f.key}: ${yamlStr(v)}${note}`)
+            if (f.secret && !includeSecrets) {
+              fieldLines.push(`          ${f.key}: "{{${f.envVar(env.id)}}}"      # 系统钥匙串/部署注入`)
+            } else {
+              fieldLines.push(`          ${f.key}: ${yamlStr(v)}`)
+            }
           }
         }
         if (fieldLines.length > 0) {
@@ -535,7 +669,7 @@ export function generateYAML(ctx: YAMLGenContext): string {
           // kuboard 需要 cluster,one2all 需要 cluster_id
           const hasCluster = rtProvider === 'one2all' ? !!eloc?.cluster_id : !!eloc?.cluster
           if (!hasCluster) continue
-          for (const svc of ctx.allServiceNames) {
+          for (const svc of (ctx.runtimeWorkloadNames || ctx.allServiceNames)) {
             const sloc = ctx.k8sRuntimeSvcMap[ctx.svcKey(env.id, svc)]
             // 没挑 workload 也照样落一行 cluster+ns,routing skill 至少能定位到 ns 级,
             // 落到具体 pod 时再 fallback 到 svc 名做 label 模糊匹配。
@@ -567,20 +701,24 @@ export function generateYAML(ctx: YAMLGenContext): string {
   }
 
   // data_stores:从 scannedDS(env → service → dsKey → fields)推导
-  const dsTypesUsed = new Set<string>()
+  const dsInstancesUsed = new Set<string>()
   for (const envID of Object.keys(ctx.scannedDS)) {
     for (const svc of Object.keys(ctx.scannedDS[envID])) {
       for (const dsKey of Object.keys(ctx.scannedDS[envID][svc])) {
-        dsTypesUsed.add(dsKey)
+        dsInstancesUsed.add(dsKey)
       }
     }
   }
-  if (dsTypesUsed.size > 0) {
+  if (dsInstancesUsed.size > 0) {
     lines.push('')
-    lines.push('  data_stores:          # 从各服务配置自动识别的数据层;⚠ 含明文凭证,分享注意范围')
-    for (const dsType of Array.from(dsTypesUsed).sort()) {
+    lines.push(includeSecrets
+      ? '  data_stores:          # 从各服务配置自动识别;可部署导出包含当前已配置凭据'
+      : '  data_stores:          # 从各服务配置自动识别;secret 字段仅写环境引用')
+    for (const dsID of Array.from(dsInstancesUsed).sort()) {
+      const dsType = ctx.dataStoreTypes?.[dsID] || dsID
       const spec = ctx.toolSpecByKey('ds', dsType)
-      lines.push(`    - type: ${dsType}`)
+      lines.push(`    - id: ${yamlStr(dsID)}`)
+      lines.push(`      type: ${dsType}`)
       lines.push('      enabled: true')
       lines.push('      readonly_enforced: true    # 强制只读;generator 拒绝写操作')
       const epRows: string[] = []
@@ -589,13 +727,17 @@ export function generateYAML(ctx: YAMLGenContext): string {
         const svcs = ctx.scannedDS[env.id]
         if (!svcs) continue
         for (const svc of Object.keys(svcs).sort()) {
-          const fields = svcs[svc]?.[dsType]
+          const fields = svcs[svc]?.[dsID]
           if (!fields) continue
           const fieldLines: string[] = []
           for (const [fKey, val] of Object.entries(fields)) {
             if (!val) continue
-            const note = spec?.fields.find(f => f.key === fKey)?.secret ? '          # ⚠ secret' : ''
-            fieldLines.push(`          ${fKey}: ${yamlStr(val)}${note}`)
+            const field = spec?.fields.find(f => f.key === fKey)
+            if (field?.secret && !includeSecrets) {
+              fieldLines.push(`          ${fKey}: "{{${field.envVar(env.id)}}}"      # 系统钥匙串/部署注入`)
+            } else {
+              fieldLines.push(`          ${fKey}: ${yamlStr(val)}`)
+            }
           }
           if (fieldLines.length > 0) {
             epRows.push(`        - env: ${env.id}`)
@@ -618,7 +760,7 @@ export function generateYAML(ctx: YAMLGenContext): string {
   // output_dir 故意不写:CLI `tshoot gen` 才会读它,桌面 ImportAndDeploy 走 ~/.tshoot/...,
   // wizard 用户不需要;CLI 用户可以手动加这一行覆盖默认 ./dist。
   const selectedTargets = ctx.targetOptions.filter(t => ctx.enabledTargets[t])
-  const targetList = selectedTargets.length ? selectedTargets : ['openclaw']
+  const targetList = selectedTargets.length ? selectedTargets : ['claude-code']
   lines.push('  targets:                             # 每个 target 产出一份机器人产物（同一份 troubleshooter.yaml）')
   for (const t of targetList) {
     lines.push(`    - ${t}`)
@@ -634,7 +776,7 @@ export function generateYAML(ctx: YAMLGenContext): string {
   // meta
   lines.push('')
   lines.push('meta:')
-  lines.push('  schema_version: "0.1"')
+  lines.push('  schema_version: "0.2"')
   lines.push('  tshoot_template_ref:')
   lines.push('    repo: troubleshooter-studio')
   lines.push('    ref: main')

@@ -70,12 +70,11 @@ func validateCompletionCommand(command CompleteAttemptCommand) error {
 		return errors.New("completion attempt ID is required")
 	}
 	switch command.Outcome {
-	case PhaseOutcomeReproduced, PhaseOutcomeNotReproduced, PhaseOutcomeNeedsEvidence,
-		PhaseOutcomeRootCauseReady, PhaseOutcomeFixPushed, PhaseOutcomeFixFailed,
-		PhaseOutcomeFixedVerified, PhaseOutcomeStillReproduces:
+	case PhaseOutcomeNeedsEvidence, PhaseOutcomeSystemFailed, PhaseOutcomeRootCauseReady, PhaseOutcomeFixPushed, PhaseOutcomeFixFailed:
 	default:
 		return fmt.Errorf("unsupported completion outcome %q", command.Outcome)
 	}
+
 	if err := validateJSONObject("completion output", command.OutputJSON, true); err != nil {
 		return err
 	}
@@ -102,10 +101,10 @@ func (s *CaseStore) SaveCompletionIntentIfRunning(ctx context.Context, command C
 	if err != nil {
 		return fmt.Errorf("begin completion intent save: %w", err)
 	}
-	defer tx.Rollback()
-	var caseID, status, existing string
+	defer func() { _ = tx.Rollback() }()
+	var caseID, status, existing, inputJSON string
 	var phase Phase
-	if err := tx.QueryRowContext(ctx, `SELECT case_id,status,output_json,phase FROM phase_attempts WHERE id=?`, command.AttemptID).Scan(&caseID, &status, &existing, &phase); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT case_id,status,output_json,phase,input_json FROM phase_attempts WHERE id=?`, command.AttemptID).Scan(&caseID, &status, &existing, &phase, &inputJSON); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrCaseNotFound
 		}
@@ -115,6 +114,9 @@ func (s *CaseStore) SaveCompletionIntentIfRunning(ctx context.Context, command C
 		return errors.New("completion intent attempt belongs to a different Case")
 	}
 	if err := validateCompletionAttemptPhase(phase, command); err != nil {
+		return err
+	}
+	if err := validateFixReworkCompletion(PhaseAttempt{Phase: phase, InputJSON: []byte(inputJSON)}, command); err != nil {
 		return err
 	}
 	if AttemptStatus(status) != AttemptStatusQueued && AttemptStatus(status) != AttemptStatusRunning {

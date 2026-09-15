@@ -25,6 +25,10 @@ environments:
   - id: prod
     api_domain: api.shop.example.com
     web_domain: www.shop.example.com
+    browser_allowed_origins:
+      - https://static.shop.example.com
+    browser_auth_origins:
+      - https://login.shop.example.com
     is_prod: true
 
 repos:
@@ -173,7 +177,7 @@ infrastructure:
         user_token_placeholder: "{{MCP_USER_TOKEN}}"
 
 generation:
-  targets: [openclaw]
+  targets: [claude-code, opencode]
   skills_whitelist:
     - routing
     - incident-investigator

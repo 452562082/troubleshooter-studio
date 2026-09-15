@@ -86,7 +86,7 @@ func (r *AgentPhaseRunner) LoadFixCheckpoint(ctx context.Context, attempt PhaseA
 	if err != nil {
 		return nil, err
 	}
-	defer staging.Close()
+	defer func() { _ = staging.Close() }()
 	captured, err := staging.Capture(fixCheckpointManifestName)
 	if err != nil {
 		return nil, err
@@ -99,7 +99,7 @@ func (r *AgentPhaseRunner) CleanupFixCheckpoint(_ context.Context, attempt Phase
 	if err != nil {
 		return err
 	}
-	defer staging.Close()
+	defer func() { _ = staging.Close() }()
 	return staging.Cleanup()
 }
 

@@ -14,7 +14,7 @@
 //   - main.go             入口 + App struct + wails.Run + 模板解析
 //   - bindings_core.go    Version / Validate / Gen / Plan / Diff / Analyze / Doctor / DiscoverBots
 //   - bindings_apply.go   ApplyBot / ImportAndDeploy
-//   - bindings_deploy.go  ScanInstallPrompts / ReadEnv / RunInstall / RevealInFinder
+//   - bindings_deploy.go  UninstallBot / ForgetGhostBot / RevealInFinder
 //   - dialogs.go          OpenYAML / OpenDir / SaveYAML + 原生对话框 helpers
 package main
 
@@ -62,14 +62,6 @@ type App struct {
 	ctxMu sync.RWMutex
 	ctx   context.Context
 
-	// installMu 保护 installCancel 字段；install 和 cancel 是不同 Wails goroutine
-	// 过来的,没锁会 race。
-	installMu sync.Mutex
-	// installCancel 是当前正在跑的 install.sh 的 cancel 函数,nil=没有 install 在跑。
-	// RunInstall 赋值并 defer 清空;CancelInstall 读取并调用。同一时刻只允许一个
-	// install 跑,前端 UI 会禁用"部署"按钮避免并发。
-	installCancel context.CancelFunc
-
 	// analyzeMu/analyzeCancel 保护代码扫描长任务。Analyze 和 CancelAnalyze 来自不同
 	// Wails goroutine,必须加锁避免 race。
 	analyzeMu     sync.Mutex
@@ -89,16 +81,18 @@ type App struct {
 	// Bindings only adapt commands to this runtime; persistence and transitions
 	// remain inside bughub's CaseStore and CaseOrchestrator.
 	workflowMu                   sync.Mutex
-	workflowReminderOnce         sync.Once
 	workflowRoot                 string
 	workflowStore                *bughub.CaseStore
 	workflowOrchestrator         *bughub.CaseOrchestrator
 	workflowRunner               *bughub.AgentPhaseRunner
+	workflowRecoveryPending      bool
 	workflowInitErr              error
 	workflowLoadBug              func(string) (bughub.Bug, error)
 	workflowLoadBot              func(string) (bughub.BotRef, error)
 	workflowLoadDeploymentConfig func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error)
 	workflowK8sReaderFactory     func(context.Context, *config.SystemConfig, config.Environment) (bughub.K8sDeploymentReader, error)
+	workflowPickEvidence         func(context.Context) ([]string, error)
+	workflowSaveArtifact         func(string, string, context.Context) (string, error)
 	workflowEmit                 func(string, any)
 	workflowRuntimeFactory       func(*bughub.CaseStore, *bughub.InvestigationStore) incidentWorkflowRuntime
 }
@@ -203,7 +197,6 @@ func (a *App) QuitApp() {
 }
 
 // fixGUIPath 修 macOS 桌面 app 由 launchd / Finder 启动时 PATH 被精简到
-// /usr/bin:/bin:/usr/sbin:/sbin 的问题——self-test、install 子进程、findOpenclawCLI
 // 都依赖能看见用户装的 uvx / npx / brew 工具。靠 fallback 候选路径(brew prefix /
 // cargo bin / asdf shims / nvm ...) 永远列不全，干脆 shell-out 拿用户 login shell
 // 的完整 PATH 写回进程 env。

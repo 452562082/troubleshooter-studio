@@ -62,22 +62,6 @@ func (o *CaseOrchestrator) RecoverInterrupted(ctx context.Context) error {
 		if IsTerminalCaseStatus(incident.Status) {
 			continue
 		}
-		if incident.Status == CaseDeploymentUnverified {
-			if recoveryErr := o.recoverDeploymentVerification(ctx, incident); recoveryErr != nil {
-				recoveredErr = errors.Join(recoveredErr, recoveryErr)
-			}
-			continue
-		}
-		if incident.Status == CaseDeploymentVerified {
-			if _, recoveryErr := o.StartRegression(ctx, incident.ID, incident.Version); recoveryErr != nil && !errors.Is(recoveryErr, ErrRegressionDuplicate) {
-				if _, handled, readinessErr := o.failSafeRegressionReadiness(ctx, incident, recoveryErr); handled {
-					recoveredErr = errors.Join(recoveredErr, readinessErr)
-				} else {
-					recoveredErr = errors.Join(recoveredErr, fmt.Errorf("recover verified deployment %s: %w", incident.ID, recoveryErr))
-				}
-			}
-			continue
-		}
 		if incident.Status != CaseMerging {
 			continue
 		}
@@ -154,21 +138,16 @@ func (o *CaseOrchestrator) recoveryAttemptNeedsPhaseContext(ctx context.Context,
 	if incident.CurrentAttemptID != attempt.ID {
 		return CanTransition(incident.Status, statusForPhase(attempt.Phase)), nil
 	}
-	completion, found, err := parseCompletionIntent(attempt.OutputJSON)
+	_, found, err := parseCompletionIntent(attempt.OutputJSON)
 	if err != nil {
 		return false, err
 	}
 	if found {
-		return completion.Outcome == PhaseOutcomeReproduced || completion.Outcome == PhaseOutcomeStillReproduces, nil
+		return false, nil
 	}
+
 	switch incident.Status {
-	case CaseValidating, CaseInvestigating:
-		return o.recoveryRetryAvailable(ctx, incident, attempt)
-	case CaseRegressionValidating:
-		matched, err := o.latestDeploymentMatched(ctx, incident.ID)
-		if err != nil || !matched {
-			return false, err
-		}
+	case CaseInvestigating:
 		return o.recoveryRetryAvailable(ctx, incident, attempt)
 	default:
 		return false, nil
@@ -187,51 +166,6 @@ func (o *CaseOrchestrator) recoveryRetryAvailable(ctx context.Context, incident 
 		}
 	}
 	return count < 2, nil
-}
-
-func (o *CaseOrchestrator) recoverDeploymentVerification(ctx context.Context, incident IncidentCase) error {
-	typed, found, err := o.store.latestDeploymentReservationEvent(ctx, incident.ID)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return nil
-	}
-	var reservation DeploymentReservation
-	reservationEventKey := typed.IdempotencyKey
-	if decodeErr := json.Unmarshal(typed.PayloadJSON, &reservation); decodeErr != nil {
-		return o.recordInvalidDeploymentReservation(ctx, incident, reservationEventKey, fmt.Errorf("decode deployment reservation: %w", decodeErr))
-	}
-	if identityErr := validateDeploymentReservationIdentity(reservation, reservationEventKey, reservation.CallerIdempotencyKey, typed.ActorID); identityErr != nil {
-		return o.recordInvalidDeploymentReservation(ctx, incident, reservationEventKey, identityErr)
-	}
-	if _, resultFound, resultErr := o.store.GetEventByIdempotencyKey(ctx, reservation.ReservationKey+":result"); resultErr != nil || resultFound {
-		return resultErr
-	}
-	if o.deployment == nil {
-		return nil
-	}
-	observation, verifyErr := o.deployment.Verify(ctx, reservation.VerifierInput)
-	_, recordErr := o.recordDeploymentResult(incident, reservation, observation, verifyErr)
-	return recordErr
-}
-
-func (o *CaseOrchestrator) recordInvalidDeploymentReservation(ctx context.Context, incident IncidentCase, reservationKey string, cause error) error {
-	if strings.TrimSpace(reservationKey) == "" {
-		reservationKey = "deployment-reservation:" + incident.ID
-	}
-	auditKey := reservationKey + ":identity-invalid"
-	payload := mustJSON(map[string]string{"error": cause.Error()})
-	if existing, found, err := o.store.GetEventByIdempotencyKey(ctx, auditKey); err != nil {
-		return err
-	} else if found {
-		if existing.EventType == "deployment_reservation_invalid" && string(existing.PayloadJSON) == string(payload) {
-			return nil
-		}
-		return ErrIdempotencyConflict
-	}
-	_, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: auditKey, RequestJSON: payload, Steps: []CaseMutationStep{{To: CaseDeploymentUnverified, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", auditKey), EventType: "deployment_reservation_invalid", ActorType: "studio", ActorID: "recovery", PayloadJSON: payload}}}})
-	return err
 }
 
 func (o *CaseOrchestrator) recoverMergeWithoutAttempt(ctx context.Context, incident IncidentCase) error {
@@ -311,26 +245,25 @@ func (o *CaseOrchestrator) recoverAttempt(ctx context.Context, attempt PhaseAtte
 			}
 			return o.finishFixRecoveryFailure(ctx, incident, attempt, err.Error())
 		}
-		if err == nil && checkpointFound && attempt.Phase == PhaseFix {
-			if cleaner, ok := o.runner.(FixCheckpointCleaner); ok {
-				_ = cleaner.CleanupFixCheckpoint(ctx, attempt, checkpoint.StagingLocator)
+		if err == nil {
+			if cleaner, ok := o.runner.(AttemptStagingCleaner); ok {
+				_ = cleaner.CleanupAttemptStaging(ctx, attempt)
+			} else if checkpointFound && attempt.Phase == PhaseFix {
+				if cleaner, ok := o.runner.(FixCheckpointCleaner); ok {
+					_ = cleaner.CleanupFixCheckpoint(ctx, attempt, checkpoint.StagingLocator)
+				}
 			}
 		}
 		return err
 	}
+
 	attempt.Status = AttemptStatusInterrupted
 	attempt.OutputJSON = []byte(`{}`)
 	attempt.ErrorCode = "studio_restarted"
 	attempt.ErrorMessage = "phase process was interrupted by Studio restart"
 	switch incident.Status {
-	case CaseValidating, CaseInvestigating:
+	case CaseInvestigating:
 		return o.recoverReadOnly(ctx, incident, attempt, true)
-	case CaseRegressionValidating:
-		matched, err := o.latestDeploymentMatched(ctx, incident.ID)
-		if err != nil {
-			return err
-		}
-		return o.recoverReadOnly(ctx, incident, attempt, matched)
 	case CaseFixing:
 		if err := o.reserveInspectionOnly(ctx, incident, attempt); err != nil {
 			return err
@@ -587,6 +520,9 @@ func buildRecoveredFixCompletion(incident IncidentCase, attempt PhaseAttempt, in
 	if err := validateCompletionAttemptPhase(attempt.Phase, command); err != nil {
 		return CompleteAttemptCommand{}, err
 	}
+	if err := validateFixReworkCompletion(attempt, command); err != nil {
+		return CompleteAttemptCommand{}, err
+	}
 	return command, nil
 }
 
@@ -650,20 +586,6 @@ func (o *CaseOrchestrator) inspectInterruptedMerge(ctx context.Context, incident
 	return err
 }
 
-func (o *CaseOrchestrator) latestDeploymentMatched(ctx context.Context, caseID string) (bool, error) {
-	observations, err := o.store.ListDeploymentObservations(ctx, caseID)
-	if err != nil {
-		return false, err
-	}
-	for index := len(observations) - 1; index >= 0; index-- {
-		if observations[index].VerificationSource == "user-notification" {
-			continue
-		}
-		return observations[index].Result == DeploymentResultMatched, nil
-	}
-	return false, nil
-}
-
 func decodeRecoveryMergeRequest(caseID string, input json.RawMessage) (MergeRequest, error) {
 	var request MergeRequest
 	if err := json.Unmarshal(input, &request); err != nil {
@@ -678,15 +600,15 @@ func decodeRecoveryMergeRequest(caseID string, input json.RawMessage) (MergeRequ
 
 func statusForPhase(phase Phase) CaseStatus {
 	switch phase {
-	case PhaseValidation:
-		return CaseValidating
 	case PhaseInvestigation:
 		return CaseInvestigating
-	case PhaseRegression:
-		return CaseRegressionValidating
 	case PhaseFix:
 		return CaseFixing
 	default:
 		return ""
 	}
+}
+
+type AttemptStagingCleaner interface {
+	CleanupAttemptStaging(context.Context, PhaseAttempt) error
 }

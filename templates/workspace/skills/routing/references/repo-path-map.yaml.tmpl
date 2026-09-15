@@ -8,7 +8,8 @@
 #
 # bot 运行时(routing skill / code-locator)读这里找"truss 这个 repo 在哪"做代码
 # 分析。本文件缺失或某个 repo 的 local_path 为空时,应当提示用户跑向导补齐,而不是
-# 在代码里静默跳过。
+# 在代码里静默跳过。严禁用 find/fd/locate/glob/递归 ls 扫描 /Users、$HOME 或它们的
+# 上级目录来猜仓库位置；这会越过 Studio 的仓库授权边界并触发操作系统隐私权限。
 {{- if not .RepoLocalPaths}}
 #
 # 当前无任何仓库路径 —— 导入 troubleshooter.yaml 的新用户默认没路径,需要在向导里

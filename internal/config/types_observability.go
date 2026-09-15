@@ -22,6 +22,7 @@ type ObsEndpoint struct {
 
 	// K8s Runtime (Kuboard) 专属:API 凭证 / 用户名密码
 	AccessKey string `yaml:"access_key,omitempty"`
+	MCPURL    string `yaml:"mcp_url,omitempty"`
 	Username  string `yaml:"username,omitempty"`
 	Password  string `yaml:"password,omitempty"`
 }

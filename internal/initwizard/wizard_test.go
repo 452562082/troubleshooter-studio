@@ -26,8 +26,6 @@ func TestRun_MinimalAllDefaults(t *testing.T) {
 		"Shop",      // name
 		"",          // description
 		"",          // agent name
-		"",          // workspace
-		"",          // model
 		"dev",       // env 1 id
 		"api-dev.x", // domain
 		"",          // is_prod default (n, since id != "prod")
@@ -84,7 +82,7 @@ func TestRun_MinimalAllDefaults(t *testing.T) {
 func TestRun_FullWithOneRepo(t *testing.T) {
 	in := script(
 		"bank", "Bank", "银行中台",
-		"", "", "",
+		"",
 		"dev", "api-dev.bank", "",
 		"", // end envs (only 1 env)
 		// repo 1
@@ -133,7 +131,7 @@ func TestRun_FullWithOneRepo(t *testing.T) {
 func TestWriteYAML_ProducesValidTroubleshooterYaml(t *testing.T) {
 	in := script(
 		"demo", "Demo", "",
-		"", "", "",
+		"",
 		"dev", "api-dev.demo", "",
 		"prod", "api.demo", "",
 		"",
@@ -189,7 +187,7 @@ func TestRun_BadIDReprompts(t *testing.T) {
 		"BadID!",   // invalid → re-prompt
 		"good-id",  // valid
 		"Good", "", // name, description
-		"", "", "", // agent
+		"", // agent
 		"dev", "api", "",
 		"",         // envs end
 		"",         // repos end

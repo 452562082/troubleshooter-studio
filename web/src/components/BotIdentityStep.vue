@@ -3,15 +3,13 @@
 // 从 InitPage 抽出来,InitPage 调用变 <BotIdentityStep ... /> 一行。
 //
 // props 形态对齐 InitPage 现有 reactive object / closure helper(同 ConfigSourceStep /
-// ObservabilityStep / DataStoreStep 的迁移取舍)。Target enum / openclaw 探测三态都
 // 透传,本组件只组合现有 helper 不做新逻辑。
 
-import type { OpenClawModelEntry } from '../lib/bridge'
-import { Target } from '../lib/constants'
+import { reactive } from 'vue'
+import { probeAgentAvailability } from '../lib/bridge/aitools'
 import TargetInstallBadge from './TargetInstallBadge.vue'
 
 interface AgentForm { name: string; id?: string }
-type OpenClawDetectStatus = 'idle' | 'loading' | 'ok' | 'not-installed' | 'error'
 
 const props = defineProps<{
   agent: AgentForm
@@ -32,30 +30,27 @@ const props = defineProps<{
   anyTargetSelected: boolean
   targetModels: Record<string, string>
 
-  // OpenClaw 探测
-  openclawDetectStatus: OpenClawDetectStatus
-  openclawDetectError: string
-  openclawDetectedModels: OpenClawModelEntry[]
-  openclawResolvedDir: string
-  openclawVersion: string
-  openclawAuthProviders: string[]
-  openclawInstallDir: string
 }>()
 void props  // 给 IDE 提示;运行时 Vue 自己用 props 不需要显式引用
 
 const emit = defineEmits<{
   refreshAITools: []
-  pickOpenClawInstallDir: []
-  runOpenClawDetect: [installDir: string]
   modelChange: [t: string, e: Event]
 }>()
+const availability = reactive<Record<string, {status: string; message: string}>>({})
+async function checkPlatform(target: string) {
+  if (availability[target]?.status === 'loading') return
+  availability[target] = { status: 'loading', message: '正在调用当前默认模型，最多等待 75 秒…' }
+  try { availability[target] = await probeAgentAvailability(target) }
+  catch { availability[target] = { status: 'error', message: '检查未完成，请确认桌面工作台已更新后重试' } }
+}
 </script>
 
 <template>
   <div class="card lg">
-    <h2>机器人身份</h2>
+    <h2>使用哪个 AI 平台？</h2>
     <p class="help-text" style="margin-bottom:14px">
-      给机器人起个名字,选要部署到哪些 AI 平台。
+      先选一个常用平台，需要时也可以部署到多个平台。
     </p>
     <div class="form-group">
       <label>机器人名称 <span class="required">*</span></label>
@@ -67,31 +62,11 @@ const emit = defineEmits<{
       />
     </div>
 
-    <!-- agent.id:AI 平台里的稳定标识(OpenClaw agents.list[*].id / Claude Code / Cursor subagent 名),
-         同时也作为 OpenClaw workspace 目录名(~/.openclaw/workspace/<id>/)。
-         跟随 system.id 自动派生,只读;想改请回 Step 1 改 system.id。 -->
-    <div class="form-group">
-      <label>
-        AI 平台标识
-        <span class="help-icon" title="OpenClaw agents.list[*].id + workspace 目录名;Claude Code / Cursor 的 subagent 名。从 system.id 派生(<system.id>-troubleshooter)。">?</span>
-        <span class="auto-tag">自动派生</span>
-      </label>
-      <input
-        :value="agent.id || agentIdDefault"
-        type="text"
-        readonly
-        class="readonly-input"
-        title="只读;跟随 system.id 自动派生"
-      />
-    </div>
 
-    <!-- 部署平台卡片:每家一张,勾选的卡片内联露出该 target 相关配置(模型 / 工作区名)。
-         claude-code / cursor 不消费模型,只展示"模型由用户客户端自己选"。
-         openclaw 是唯一需要工作区名的,勾选时多一行输入框。 -->
     <div class="form-group">
       <label>
-        部署到哪些 AI 平台 <span class="required">*</span>
-        <span class="field-hint">— 可多选;勾了哪些,相关配置(模型 / 工作区)就展开填</span>
+        AI 平台 <span class="required">*</span>
+        <span class="field-hint">— 选择常用平台，可多选</span>
       </label>
       <div class="target-grid">
         <div
@@ -105,7 +80,7 @@ const emit = defineEmits<{
               type="checkbox"
               v-model="enabledTargets[t]"
               :disabled="targetDetectedInstalled(t) === false"
-              :title="targetDetectedInstalled(t) === false ? `本机未检测到 ${targetLabels[t]},装好后再回来勾选` : ''"
+              :title="targetDetectedInstalled(t) === false ? `本机未检测到 ${targetLabels[t]},安装命令行工具后重新检测` : ''"
             />
             <span class="target-title">{{ targetLabels[t] }}</span>
             <TargetInstallBadge v-bind="targetBadgeProps(t)" />
@@ -115,10 +90,10 @@ const emit = defineEmits<{
                不提供 force enable 兜底(避免用户装到孤儿目录的 confusion)。
                若 detector 漏扫(IDE 装在非标准位置),用户可点重新扫描重试。 -->
           <div
-            v-if="t !== 'openclaw' && targetDetectedInstalled(t) === false"
+            v-if="targetDetectedInstalled(t) === false"
             class="target-missing-actions"
           >
-            <span>⚠ 本机未检测到 {{ targetLabels[t] }} —— 装好 IDE 后回来 →</span>
+            <span>⚠ 本机未检测到 {{ targetLabels[t] }}，请安装对应的命令行工具后重新检测</span>
             <button
               type="button"
               class="btn-link"
@@ -126,84 +101,23 @@ const emit = defineEmits<{
               @click="emit('refreshAITools')"
             >{{ aitoolsRefreshing ? '⏳ 扫描中…' : '🔄 重新扫描' }}</button>
           </div>
+          <div v-if="enabledTargets[t]" class="platform-check">
+            <p aria-live="polite" :class="availability[t]?.status">{{ availability[t]?.message || '账号与模型尚未检查' }}</p>
+            <button type="button" class="btn" :disabled="availability[t]?.status === 'loading'" @click="checkPlatform(t)">
+              {{ availability[t]?.status === 'loading' ? '检查中…' : '检查账号与模型' }}
+            </button>
+            <small>发送一条简短测试消息，使用平台当前默认模型。</small>
+          </div>
           <!-- 勾选后展示 install.sh 跑完后的最终落地位置 —— AI 平台从这里读 agent。 -->
-          <div v-if="enabledTargets[t]" class="target-deploy-path">
+          <details v-if="enabledTargets[t]" class="wizard-advanced"><summary>部署位置与内部标识</summary>
+          <div class="target-deploy-path">
             <span class="target-deploy-path-label">部署位置</span>
             <span class="auto-tag" :title="targetDeployPathHints[t]">自动</span>
             <code :title="targetDeployPaths[t]">{{ targetDeployPaths[t] || '…' }}</code>
-          </div>
+          </div><code>{{ agent.id || agentIdDefault }}</code></details>
 
           <!-- 勾选后才展开下面配置区。claude-code / cursor 没有要配的字段,
                直接不渲染 target-body,免得露出空白容器很难看 -->
-          <div v-if="enabledTargets[t] && t === 'openclaw'" class="target-body">
-            <!-- OpenClaw 模型:只从本地 openclaw 配置读,不给手填回路。
-                 Why: openclaw gateway 只认自己 config.yaml 里声明过的 model id。 -->
-            <template v-if="t === 'openclaw'">
-              <div v-if="openclawDetectStatus === 'loading'" class="target-field target-note">
-                <span class="scan-spinner-mini"></span>正在读 OpenClaw 配置…
-              </div>
-              <div v-else-if="openclawDetectStatus === 'not-installed'" class="target-field openclaw-warn">
-                <div>⚠ 本机未检测到 OpenClaw 安装(默认找 <code>~/.openclaw</code>)</div>
-                <div style="margin-top:4px">
-                  请先安装 OpenClaw 并配置好 <code>config.yaml</code> 里的
-                  <code>models:</code> 字段,然后回来点"重新扫描";
-                  或者手动选择 OpenClaw 安装目录。
-                </div>
-                <div class="openclaw-warn-actions">
-                  <button type="button" class="btn" @click="emit('runOpenClawDetect', '')">🔄 重新扫描</button>
-                  <button type="button" class="btn" @click="emit('pickOpenClawInstallDir')">选择安装目录…</button>
-                </div>
-              </div>
-              <div v-else-if="openclawDetectStatus === 'error'" class="target-field openclaw-warn">
-                <div>✗ 读 OpenClaw 配置失败: {{ openclawDetectError }}</div>
-                <div class="openclaw-warn-actions">
-                  <button type="button" class="btn" @click="emit('pickOpenClawInstallDir')">改选目录…</button>
-                  <button type="button" class="btn" @click="emit('runOpenClawDetect', openclawInstallDir)">重试</button>
-                </div>
-              </div>
-              <div v-else-if="openclawDetectStatus === 'ok' && openclawDetectedModels.length > 0" class="target-field">
-                <label class="target-field-label">
-                  使用的模型
-                  <span class="auto-tag">读自 {{ openclawResolvedDir }}{{ openclawVersion ? ` · v${openclawVersion}` : '' }}</span>
-                  <button type="button" class="btn-link" @click="emit('pickOpenClawInstallDir')">改目录</button>
-                  <button type="button" class="btn-link" @click="emit('runOpenClawDetect', openclawInstallDir)">🔄 重读</button>
-                </label>
-                <select
-                  :value="targetModels[Target.Openclaw]"
-                  @change="(e: Event) => emit('modelChange', 'openclaw', e)"
-                >
-                  <!-- model.id 已是完整 "<provider>/<model>" 格式(openclaw 约定),直接用 id 作 option value -->
-                  <option
-                    v-for="m in openclawDetectedModels"
-                    :key="m.id"
-                    :value="m.id"
-                  >{{ m.label || m.id }}</option>
-                </select>
-                <div v-if="openclawAuthProviders.length" class="target-hint" style="padding-left:0;margin-top:4px">
-                  已配置凭证 provider: {{ openclawAuthProviders.join(', ') }}
-                </div>
-              </div>
-              <!-- 目录找到 + openclaw.json 能解析,但三个模型源全空:
-                   typical case 是用户刚装 openclaw 还没 configure 过 / 没装过任何 agent。 -->
-              <div v-else-if="openclawDetectStatus === 'ok'" class="target-field openclaw-warn">
-                <div>
-                  ⚠ 找到 OpenClaw 安装(<code>{{ openclawResolvedDir }}</code>),
-                  但<strong>配置里还没声明任何模型</strong>
-                </div>
-                <div style="margin-top:4px">
-                  openclaw.json 里的 <code>agents.defaults.model.primary</code> /
-                  <code>agents.defaults.models</code> / <code>agents.list[].model</code> 三处都空。
-                  先跑一次 <code>openclaw configure</code> 选默认模型,
-                  或装一个 agent 让它产生 model 记录,再回来"重新扫描"。
-                </div>
-                <div class="openclaw-warn-actions">
-                  <button type="button" class="btn" @click="emit('runOpenClawDetect', openclawInstallDir)">🔄 重新扫描</button>
-                  <button type="button" class="btn" @click="emit('pickOpenClawInstallDir')">改选目录…</button>
-                </div>
-              </div>
-            </template>
-
-          </div>
         </div>
       </div>
       <div v-if="!anyTargetSelected" class="error-text" style="margin-top:6px">
@@ -212,3 +126,11 @@ const emit = defineEmits<{
     </div>
   </div>
 </template>
+
+<style scoped>
+.platform-check { margin-top: 14px; padding-top: 12px; border-top: 1px solid #e2e8f0; }
+.platform-check p { font-size: 13px; color: #64748b; margin: 0 0 8px; }
+.platform-check .ready { color: #15803d; }
+.platform-check .error { color: #b91c1c; }
+.platform-check small { display: block; margin-top: 8px; font-size: 12px; color: #64748b; }
+</style>

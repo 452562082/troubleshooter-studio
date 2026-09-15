@@ -69,6 +69,17 @@ type BugPlatformDeleteInput struct {
 	PlatformID string `json:"platform_id"`
 }
 
+type BugHistoryDeleteInput struct {
+	BugID string `json:"bug_id"`
+}
+
+type BugHistoryDeleteResult struct {
+	BugID          string `json:"bug_id"`
+	Deleted        bool   `json:"deleted"`
+	DeletedCases   int    `json:"deleted_cases"`
+	CleanupWarning string `json:"cleanup_warning,omitempty"`
+}
+
 type BugLoginResult struct {
 	PlatformID   string `json:"platform_id"`
 	AuthMode     string `json:"auth_mode"`
@@ -126,6 +137,54 @@ func (a *App) ListBugs() ([]bughub.Bug, error) {
 	return bugStore().List()
 }
 
+// DeleteBugHistory deletes only Studio's local archived snapshot, attachment
+// cache, and terminal incident history. It never deletes the source ticket.
+func (a *App) DeleteBugHistory(input BugHistoryDeleteInput) (BugHistoryDeleteResult, error) {
+	bugID := strings.TrimSpace(input.BugID)
+	result := BugHistoryDeleteResult{BugID: bugID}
+	if bugID == "" {
+		return result, errors.New("bug_id is required")
+	}
+	bugs := bugStore()
+	bug, found, err := bugs.Get(bugID)
+	if err != nil {
+		return result, err
+	}
+	if !found {
+		return result, nil
+	}
+	if bug.InboxState != bughub.BugInboxHistory {
+		return result, bughub.ErrBugHistoryRequired
+	}
+	store, _, err := a.workflowComponents()
+	if err != nil {
+		return result, err
+	}
+	history, err := bughub.DeleteTerminalCaseHistoryForBug(
+		a.workflowCommandContext(),
+		store,
+		filepath.Join(a.workflowRoot, "artifacts"),
+		bugID,
+	)
+	if err != nil {
+		return result, err
+	}
+	result.DeletedCases = len(history.CaseIDs)
+	result.CleanupWarning = history.CleanupWarning
+	deleted, err := bugs.DeleteHistory(bugID)
+	if err != nil {
+		return result, err
+	}
+	result.Deleted = deleted
+	if deleted {
+		cacheDir := filepath.Join(bughub.DefaultRoot(), "attachments", safePathSegment(bugID))
+		if err := os.RemoveAll(cacheDir); err != nil && result.CleanupWarning == "" {
+			result.CleanupWarning = "工单记录已删除，但部分本地附件缓存清理失败"
+		}
+	}
+	return result, nil
+}
+
 func (a *App) SyncBugPlatform(platformID string) (bughub.SyncResult, error) {
 	platform, err := getBugPlatform(platformID)
 	if err != nil {
@@ -134,9 +193,6 @@ func (a *App) SyncBugPlatform(platformID string) (bughub.SyncResult, error) {
 	result, err := runZentaoSyncWithSessionRecovery(platform, func(platform bughub.PlatformConfig) (bughub.SyncResult, error) {
 		return bughub.SyncZentaoAssigned(platform, bugStore(), nil)
 	})
-	if err == nil {
-		cleanupPrunedBugAttachmentCaches(result)
-	}
 	return result, err
 }
 
@@ -183,14 +239,15 @@ func (a *App) PreviewBugAttachment(input BugAttachmentPreviewInput) (BugAttachme
 func readBugAttachmentPreview(platformID string, bugID string, attachmentIndex int, att bughub.Attachment) ([]byte, string, bughub.Attachment, error) {
 	if strings.TrimSpace(att.LocalPath) != "" {
 		data, err := os.ReadFile(att.LocalPath)
-		if err != nil {
-			return nil, "", att, err
+		if err == nil {
+			contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(att.LocalPath)))
+			if contentType, contentErr := bughub.ValidateAttachmentContent(att, data, contentType); contentErr == nil {
+				return data, contentType, att, nil
+			}
 		}
-		contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(att.LocalPath)))
-		if contentType == "" {
-			contentType = http.DetectContentType(data)
-		}
-		return data, contentType, att, nil
+		// Missing or poisoned caches are recoverable. Clear the locator and let
+		// the authenticated remote fetch replace it with verified bytes.
+		att.LocalPath = ""
 	}
 	platform, err := getBugPlatform(platformID)
 	if err != nil {
@@ -233,6 +290,10 @@ func readBugAttachmentPreview(platformID string, bugID string, attachmentIndex i
 }
 
 func cacheBugAttachment(bugID string, idx int, att bughub.Attachment, data []byte, contentType string) (bughub.Attachment, error) {
+	contentType, err := bughub.ValidateAttachmentContent(att, data, contentType)
+	if err != nil {
+		return att, err
+	}
 	dir := filepath.Join(bughub.DefaultRoot(), "attachments", safePathSegment(bugID))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return att, err
@@ -247,16 +308,6 @@ func cacheBugAttachment(bugID string, idx int, att bughub.Attachment, data []byt
 		att.Type = contentType
 	}
 	return att, nil
-}
-
-func cleanupPrunedBugAttachmentCaches(result bughub.SyncResult) {
-	for _, id := range result.PrunedIDs {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
-		}
-		_ = os.RemoveAll(filepath.Join(bughub.DefaultRoot(), "attachments", safePathSegment(id)))
-	}
 }
 
 func (a *App) LoginBugPlatform(input BugLoginInput) (BugLoginResult, error) {
@@ -315,11 +366,54 @@ func (a *App) MatchBugBots(bugID string) ([]bughub.BotMatch, error) {
 	if !ok {
 		return nil, os.ErrNotExist
 	}
-	bots, err := a.bugBotRefs()
+	bots, err := a.resolvedBugBotRefs(selected)
 	if err != nil {
 		return nil, err
 	}
 	return bughub.MatchBots(selected, bots), nil
+}
+
+func (a *App) resolvedBugBotRefs(bug bughub.Bug) ([]bughub.BotRef, error) {
+	bots, err := a.bugBotRefs()
+	if err != nil {
+		return nil, err
+	}
+	return a.applyStoredBugBotEnvironments(bug, bots)
+}
+
+func (a *App) applyStoredBugBotEnvironments(bug bughub.Bug, bots []bughub.BotRef) ([]bughub.BotRef, error) {
+	var platform *bughub.PlatformConfig
+	configured, ok, err := bugPlatformStore().Get(bug.PlatformID)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		platform = &configured
+	}
+	return applyBugBotEnvironments(bug, bots, platform), nil
+}
+
+func applyBugBotEnvironments(bug bughub.Bug, bots []bughub.BotRef, platform *bughub.PlatformConfig) []bughub.BotRef {
+	mapped := map[string]string{}
+	if platform != nil {
+		for _, item := range platform.BotMappings {
+			mapped[strings.TrimSpace(item.BotKey)] = strings.TrimSpace(item.Env)
+		}
+	}
+	fallback := strings.TrimSpace(bug.BotEnv)
+	if fallback == "" {
+		fallback = strings.TrimSpace(bug.Env)
+	}
+	out := make([]bughub.BotRef, len(bots))
+	copy(out, bots)
+	for i := range out {
+		env, found := mapped[out[i].Key]
+		if !found || env == "" {
+			env = fallback
+		}
+		out[i].Env = env
+	}
+	return out
 }
 
 func (a *App) SaveBugSelectedBot(input BugSelectedBotInput) (bughub.Bug, error) {
@@ -372,7 +466,7 @@ func (a *App) bugBotRefs() ([]bughub.BotRef, error) {
 	}
 	bots := make([]bughub.BotRef, 0, len(agents))
 	for _, ag := range agents {
-		if ag.Ghost {
+		if ag.Ghost || !bughub.SupportsIncidentWorkflowTarget(ag.Meta.Target) {
 			continue
 		}
 		key := ag.Path + "|" + ag.Meta.Target

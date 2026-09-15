@@ -336,16 +336,17 @@ func matchedRouteEdge(outbound Endpoint, match routeCandidate, descriptors map[s
 	edge := candidateEdge(outbound, inbound)
 	evidence := targetEvidence(outbound.TargetHint, inbound, descriptors[serviceKey{repo: inbound.Repo, service: inbound.Service}])
 
-	if match.kind == routeTransformed {
+	switch match.kind {
+	case routeTransformed:
 		edge.Reasons = append(edge.Reasons, "path_transform_proven")
 		scoreTransformedRoute(&edge, evidence, duplicateRoute, targetAmbiguous)
-	} else if match.kind == routeSimilar {
+	case routeSimilar:
 		edge.Reasons = append(edge.Reasons, "http_method_compatible", "path_suffix_similar")
 		scoreSimilarRoute(&edge, evidence)
-	} else if match.kind == routeTemplate {
+	case routeTemplate:
 		edge.Reasons = append(edge.Reasons, "method_path_template")
 		scoreExactRoute(&edge, evidence, duplicateRoute, targetAmbiguous)
-	} else {
+	default:
 		edge.Reasons = append(edge.Reasons, exactRouteReason(edge.Protocol))
 		scoreExactRoute(&edge, evidence, duplicateRoute, targetAmbiguous)
 	}
@@ -413,10 +414,11 @@ func candidateEdge(outbound, inbound Endpoint) CandidateEdge {
 		ToService:    inbound.Service,
 		Protocol:     protocol,
 	}
-	if protocol == "http" {
+	switch protocol {
+	case "http":
 		edge.Method = preferredMethod(outbound.Method, inbound.Method)
 		edge.Path = NormalizePath(inbound.Path)
-	} else if protocol == "grpc" {
+	case "grpc":
 		edge.RPCMethod = normalizeRPCMethod(inbound.RPCMethod)
 	}
 	return edge

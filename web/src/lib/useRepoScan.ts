@@ -27,6 +27,7 @@ import {
 } from './bridge'
 import { toast } from './toast'
 import { canonicalizeGitURL } from './canonicalGitURL'
+import { serviceNamesAfterScan } from './repoServiceIdentity'
 
 // 跟 InitPage 的 RepoItem / RepoRole / EnvItem 形状对齐(放宽到 string 避免严格 union 跨边界匹配难)。
 export interface RepoScanItem {
@@ -72,6 +73,11 @@ export interface RepoScanEnv {
   is_prod?: boolean
 }
 
+export interface RepoScanYAMLOptions {
+  /** 单仓基础扫描不消费人工拓扑决策；排除后避免旧服务名关系阻断重新识别。 */
+  omitServiceTopology?: boolean
+}
+
 export interface RepoScanDeps {
   /** repo.name → 真实 git 分支列表(scan 后填,env_branches 下拉的 options 用) */
   repoBranchesMap: Ref<Record<string, string[]>>
@@ -84,12 +90,10 @@ export interface RepoScanDeps {
   resolvedReposRoot: Ref<string>
   /** 启发式:env id / is_prod → 从 branches 选最匹配的长期分支 */
   pickBranchForEnv: (env: RepoScanEnv, branches: string[]) => string
-  /** 业务服务角色判定(只有这些角色才反填 service_names) */
-  isServiceRole: (role?: string) => boolean
   /** url → 推 repo.name(本地反填用) */
   deriveRepoName: (url: string) => string
   /** 跑 bridgeAnalyzeV2 前要把当前 InitPage state 序列化成 yaml,closure 持有 25+ 个 InitPage reactive */
-  generateYAML: () => string
+  generateYAML: (options?: RepoScanYAMLOptions) => string
 }
 
 export function useRepoScan(deps: RepoScanDeps) {
@@ -231,8 +235,8 @@ export function useRepoScan(deps: RepoScanDeps) {
   // pickLocalRepoDir 本地模式:用户点"选目录"挑一个已 clone 好的仓库目录。
   // 选了新目录 = 换了仓库,彻底重置身份(URL / 名字 / 手改标记 / 已扫过)再从新目录反填,
   // 然后触发扫描。不保留上一个目录的任何身份字段 —— 新目录可能 git remote 完全不一样,
-  // 继承旧 URL 会误导用户。scanSingleRepo 内部还会再清 stack / service_names / 分支映射,
-  // 保证扫描结果不会混着两次的数据。
+  // 继承旧 URL 会误导用户。scanSingleRepo 会在分析成功后一次性替换扫描结果，
+  // 失败时则保留上一份完整、可用的识别信息。
   async function pickLocalRepoDir(r: RepoScanItem) {
     if (!isDesktop()) {
       toast.error('选目录需要桌面 app 环境')
@@ -387,22 +391,16 @@ export function useRepoScan(deps: RepoScanDeps) {
       return
     }
 
+    const roleBeforeScan = r.role
+    const serviceNamesBeforeScan = r.service_names
     r._scanning = true
     r._scanError = undefined
-    // 扫描开始前,把上一次扫描留下的 stack / service_names / 分支全清零。
-    // 这样用户换了目录(比如从 truss 切到 nacos-go)后,新目录如果没识别出 service_names,
-    // UI 会老老实实显示空,而不是残留前一个仓库的 7 个服务名。分支下拉同理。
-    // 名字 / URL 不清:用户可能已经在上面的 pickLocalRepoDir / 自动反填改掉了,不动。
-    r.stack = ''
-    r.service_names = ''
-    for (const eid of Object.keys(r.env_branches)) {
-      r.env_branches[eid] = ''
-    }
-    if (r.name in deps.repoBranchesMap.value) {
-      delete deps.repoBranchesMap.value[r.name]
-    }
     try {
-      const yamlText = deps.generateYAML()
+      // 单仓扫描只需要仓库、环境与基础资源配置，不消费人工确认的跨仓拓扑关系。
+      // 旧实现先清 service_names 再生成完整 YAML，导致仍引用旧服务名的 override
+      // 在真正分析代码前被后端 schema 校验拒绝。现在保留页面旧状态，并明确从扫描输入
+      // 排除 service_topology；扫描成功后再原子替换扫描派生字段。
+      const yamlText = deps.generateYAML({ omitServiceTopology: true })
       const res = (await bridgeAnalyzeV2(yamlText, effectiveRoot, repoPaths, autoClone, r.name)) as {
         per_repo?: Array<{
           name: string
@@ -427,43 +425,43 @@ export function useRepoScan(deps: RepoScanDeps) {
         return
       }
 
-      // service_names 只对"业务服务"类角色(backend / gateway / middleware / admin)
-      // 反填 —— frontend / common-lib / mobile / infra / docs 这类不是服务,反填上服务
-      // 名只会污染 routing skill 和后续的配置中心 / 数据层扫描。role 还没识别出来时(空)
-      // 也按"业务服务"处理,等 refreshRoleHint 跑完再说。
-      //
-      // 多服务场景(rpt.service_names.length > 1):**不**自动把全部子服务名塞进 service_names —
-      // 这跟 refreshSubmoduleHints 弹的"合并为本仓 N 个服务名"banner 冲突(banner 等用户显式决定,
-      // analyzer 抢先填 = banner 形同虚设,Step 5 立刻看到一堆未确认的服务名)。多服务时按"单一
-      // 仓 = 单一服务"兜底,用户决定 → banner 的"合并"或"拆分"按钮接管。
+      // 先在临时副本上完成角色推荐和所有派生计算。分析或推荐失败时页面仍保留上一次
+      // 成功结果；只有下面全部准备完成后才同步写回 reactive repo。
+      const staged: RepoScanItem = {
+        ...r,
+        stack: hit.detected_stack || '',
+        framework: hit.detected_framework || '',
+        env_branches: { ...r.env_branches },
+      }
+      // role 推荐必须先完成，再决定 service_names 的语义。旧逻辑先按 backend 写入
+      // package.json.name，随后异步把 role 改成 frontend，却没有再次同步身份，导致 UI
+      // 隐藏且 K8s/日志只能退化猜仓库名。
+      await refreshRoleHint(staged)
       const rpt = (res.report?.repos || []).find(rr => rr.name === r.name)
-      if (deps.isServiceRole(r.role)) {
-        if (rpt?.service_names?.length === 1) {
-          // 单服务场景:直接填,不弹 banner
-          r.service_names = rpt.service_names[0]
-        } else if (rpt?.service_names && rpt.service_names.length > 1) {
-          // 多服务场景:留给 refreshSubmoduleHints 的 banner;此处按 r.name 兜底,
-          // 用户点"合并为本仓 N 个服务名"按钮才把 N 个服务名填进 r.service_names。
-          if (!r.service_names.trim() && r.name) r.service_names = r.name
-        } else if (!r.service_names.trim() && r.name) {
-          // analyzer 没扫出 service_names(配置 key 不显式 / 单服务仓 / monorepo 子目录 等场景),
-          // 默认就用 repo.name 当服务名。"一个仓 = 一个服务"是 95% 用户的预期。
-          // 用户想覆盖直接改 chip;routing skill 用这个 key 命中 config-map / k8s_runtime.service_map。
-          r.service_names = r.name
-        }
-      } else {
-        // 非业务服务角色:即便 analyzer 扫到 service_names 也清掉(可能是误判)
-        r.service_names = ''
+      const nextServiceNames = serviceNamesAfterScan({
+        role: staged.role,
+        repoName: r.name,
+        detectedServiceNames: rpt?.service_names,
+        previousRole: roleBeforeScan,
+        previousServiceNames: serviceNamesBeforeScan,
+      })
+      const nextBranches = [...new Set((hit.branches || []).map(branch => branch.trim()).filter(Boolean))]
+      const nextEnvBranches: Record<string, string> = {}
+      for (const env of deps.environments) {
+        if (!env.id) continue
+        nextEnvBranches[env.id] = deps.pickBranchForEnv(env, nextBranches)
       }
-      if (hit.detected_stack) r.stack = hit.detected_stack
-      if (hit.branches?.length) {
-        deps.repoBranchesMap.value[r.name] = hit.branches
-        for (const env of deps.environments) {
-          if (!env.id) continue
-          const mapped = deps.pickBranchForEnv(env, hit.branches)
-          if (mapped) r.env_branches[env.id] = mapped
-        }
-      }
+
+      r.stack = staged.stack
+      r.framework = staged.framework
+      r.role = staged.role
+      r._roleHint = staged._roleHint
+      r._roleHintLoading = false
+      r.service_names = nextServiceNames
+      for (const eid of Object.keys(r.env_branches)) r.env_branches[eid] = ''
+      for (const [eid, branch] of Object.entries(nextEnvBranches)) r.env_branches[eid] = branch
+      if (nextBranches.length > 0) deps.repoBranchesMap.value[r.name] = nextBranches
+      else delete deps.repoBranchesMap.value[r.name]
 
       // 配置中心提示:toast 一次,不静默改 Step 5
       const cc = res.report?.config_center
@@ -473,9 +471,6 @@ export function useRepoScan(deps: RepoScanDeps) {
       r._scanned = true
       // 记下这次扫描对应的身份(URL 或本地目录),用户以后改了就判定结果过期
       r._scannedSource = r._source === 'local' ? (r._localPath || '') : r.url
-      // 扫完顺手刷一次 role 推荐 —— 此时 stack 已经识别出来,本地路径也已就位,
-      // 后端的 RecommendRoleForRepo 能进一步看 package.json/pom.xml/go.mod 的依赖,推得最准。
-      refreshRoleHint(r)
       // monorepo 检测:看是不是 workspaces / multi-module pom / cmd 多入口 / services/ 多子目录。
       // 命中 N>1 → UI 下面会弹"一键拆成 N 行"banner。
       refreshSubmoduleHints(r)

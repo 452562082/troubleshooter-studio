@@ -94,13 +94,14 @@ function onInput(e: Event) {
     <label class="cc-field-label">
       {{ field.label }}
       <span v-if="field.optional" class="auto-tag">选填</span>
-      <span v-if="field.secret" class="cc-scope-tag secret" title="Secret:会写入 yaml,分享时注意范围">🔒 Secret</span>
+      <span v-if="field.secret" class="cc-scope-tag secret" title="保存在系统钥匙串，配置文件使用引用">保密</span>
     </label>
     <div class="cc-field-row">
       <!-- 1. enum 字段 -->
       <select
         v-if="field.options"
         :value="modelValue || (field.options[0]?.value || '')"
+        :aria-label="field.label"
         class="cc-input"
         @change="onSelect"
       >
@@ -112,6 +113,7 @@ function onInput(e: Event) {
         v-else-if="isKuboardCascade && field.key === 'cluster'"
         :value="modelValue"
         :disabled="kuboardState?.status !== 'ok'"
+        :aria-label="field.label"
         class="cc-input"
         @change="onSelect"
       >
@@ -125,6 +127,7 @@ function onInput(e: Event) {
         v-else-if="isKuboardCascade && field.key === 'namespace'"
         :value="modelValue"
         :disabled="kuboardState?.status !== 'ok' || !siblingClusterValue"
+        :aria-label="field.label"
         class="cc-input"
         @change="onSelect"
       >
@@ -139,6 +142,7 @@ function onInput(e: Event) {
         v-else-if="isKuboardCascade && field.key === 'configmap'"
         :value="modelValue"
         :disabled="kuboardState?.status !== 'ok' || !siblingNamespaceValue"
+        :aria-label="field.label"
         class="cc-input"
         @change="onSelect"
       >
@@ -156,6 +160,7 @@ function onInput(e: Event) {
         :placeholder="field.placeholder || ''"
         autocomplete="off"
         spellcheck="false"
+        :aria-label="field.label"
         class="cc-input"
         @input="onInput"
       />
@@ -175,8 +180,8 @@ function onInput(e: Event) {
         @click="emit('clear')"
       >🗑</button>
     </div>
-    <div v-if="!field.uiOnly" class="cc-env-hint">
+    <details v-if="!field.uiOnly" class="cc-env-hint"><summary>高级：环境变量引用</summary>
       对应环境变量:<code>{{ field.envVar(envID || 'ENV') }}{{ envVarSuffix }}</code>
-    </div>
+    </details>
   </div>
 </template>

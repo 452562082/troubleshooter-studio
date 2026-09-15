@@ -19,8 +19,6 @@ func TestResolvePath_AllTargets(t *testing.T) {
 		wantScope  Scope
 		wantNested bool
 	}{
-		{TargetOpenClaw, "", filepath.Join(home, ".openclaw", "openclaw.json"), ScopeUser, true},
-		{TargetOpenClaw, project, filepath.Join(home, ".openclaw", "openclaw.json"), ScopeUser, true}, // projectRoot 忽略
 		{TargetClaudeCode, project, filepath.Join(project, ".mcp.json"), ScopeProject, false},
 		{TargetClaudeCode, "", filepath.Join(home, ".claude.json"), ScopeUser, false},
 		{TargetCursor, project, filepath.Join(project, ".cursor", "mcp.json"), ScopeProject, false},
@@ -38,9 +36,7 @@ func TestResolvePath_AllTargets(t *testing.T) {
 			if r.Scope != tc.wantScope {
 				t.Errorf("Scope: got %q want %q", r.Scope, tc.wantScope)
 			}
-			if r.NestedUnderMCP != tc.wantNested {
-				t.Errorf("NestedUnderMCP: got %v want %v", r.NestedUnderMCP, tc.wantNested)
-			}
+
 		})
 	}
 }
@@ -83,46 +79,6 @@ func TestMergeWrite_CreateNew_ClaudeSchema(t *testing.T) {
 	}
 }
 
-func TestMergeWrite_CreateNew_OpenclawSchema(t *testing.T) {
-	// openclaw 用 nested mcp.servers,Path 是固定的 ~/.openclaw/openclaw.json;
-	// 走 HOME override 写到 tmp 测
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
-	resolved, err := ResolvePath(TargetOpenClaw, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	servers := map[string]Server{
-		"nacos": {
-			Command: "uvx",
-			Args:    []string{"nacos-mcp-router@latest"},
-		},
-	}
-	if err := MergeWrite(resolved, servers); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := os.ReadFile(resolved.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var doc map[string]any
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		t.Fatal(err)
-	}
-	// 顶层 "mcp" 下嵌套 "servers"
-	mcpBlock, ok := doc["mcp"].(map[string]any)
-	if !ok {
-		t.Fatalf("mcp block missing:\n%s", string(raw))
-	}
-	serversBlock, ok := mcpBlock["servers"].(map[string]any)
-	if !ok {
-		t.Fatal("mcp.servers missing")
-	}
-	if _, ok := serversBlock["nacos"]; !ok {
-		t.Error("nacos server missing")
-	}
-}
-
 // 关键:合并时不能破坏用户手配的其它 MCP server / 其它顶层字段
 func TestMergeWrite_PreservesOtherEntries(t *testing.T) {
 	dir := t.TempDir()
@@ -141,10 +97,9 @@ func TestMergeWrite_PreservesOtherEntries(t *testing.T) {
 	}
 
 	resolved := &Resolved{
-		Target:         TargetClaudeCode,
-		Scope:          ScopeProject,
-		Path:           path,
-		NestedUnderMCP: false,
+		Target: TargetClaudeCode,
+		Scope:  ScopeProject,
+		Path:   path,
 	}
 	servers := map[string]Server{
 		"nacos-mcp-server": {Command: "uvx", Args: []string{"nacos-mcp-router@latest"}},
@@ -177,7 +132,7 @@ func TestMergeWrite_OverridesSameKey(t *testing.T) {
 	if err := os.WriteFile(path, []byte(pre), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	resolved := &Resolved{Target: TargetClaudeCode, Path: path, NestedUnderMCP: false}
+	resolved := &Resolved{Target: TargetClaudeCode, Path: path}
 	if err := MergeWrite(resolved, map[string]Server{
 		"nacos": {Command: "new-cmd", Args: []string{"v2"}},
 	}); err != nil {

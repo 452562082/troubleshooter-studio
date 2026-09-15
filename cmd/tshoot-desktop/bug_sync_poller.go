@@ -58,7 +58,6 @@ func syncEnabledBugPlatforms() {
 			fmt.Printf("[warn] bug platform poll %s failed: %v\n", platform.ID, err)
 			continue
 		}
-		cleanupPrunedBugAttachmentCaches(result)
 		if result.Stored > 0 {
 			fmt.Printf("[info] bug platform poll %s stored %d/%d bugs\n", platform.ID, result.Stored, result.Fetched)
 		}

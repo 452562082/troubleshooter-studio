@@ -1,6 +1,6 @@
 ---
 name: skywalking-query
-description: 通过 SkyWalking GraphQL API 查询分布式链路追踪与服务拓扑。按 trace ID、service name、endpoint 查询 span 与指标，定位跨服务延迟与错误传播路径。
+description: 优先通过官方 SkyWalking MCP，必要时通过 GraphQL API 查询分布式链路追踪与服务拓扑。按 trace ID、service name、endpoint 查询 span 与指标，定位跨服务延迟与错误传播路径。
 ---
 
 # SkyWalking 查询
@@ -23,7 +23,27 @@ description: 通过 SkyWalking GraphQL API 查询分布式链路追踪与服务�
    - **无 trace ID**：按 service + endpoint + 时间范围搜索
    - **看全局拓扑**：查询 service topology
 
-## SkyWalking GraphQL API（端口 12800）
+## 官方 MCP（优先）
+
+每个环境使用 `{{.System.ID}}-skywalking-<env>`，URL 和可选 Basic Auth 凭据已绑定，
+不需要在工具参数中填写密码。先发现工具并检查 schema，再按已确定的环境查询：
+
+- `list_layers`、`list_services`、`list_endpoints`：定位服务与端点。
+- `query_traces`：按实际 schema 提供 trace 条件与时间范围。
+- `query_services_topology`、`query_endpoints_topology`：查询调用关系。
+- `query_logs`、`query_alarms`：查询同一时间窗口的日志和告警。
+
+默认只读取故障附近的有限时间窗口，限制分页；没有数据不能等同于服务正常。
+安装会下载固定版本并校验摘要。未提供发布包的平台（例如 Windows）、安装失败、
+或缺少所需查询工具时，使用下方 GraphQL API。401/403 或 GraphQL `errors` 应报告
+认证/查询失败，不能换身份绕过；`tools/list` 成功不代表后端数据可读。
+
+## SkyWalking GraphQL API（兜底，默认端口 12800）
+
+URL 使用当前环境的 OAP 地址；如果配置了 Basic Auth，使用同环境安装凭据
+`~/.tshoot/{{.AgentID}}-creds.json` 中 `skywalking.<env>.user/pass`，
+地址为同一段的 `url`；不要把密码复制进报告。
+以下示例省略认证参数；实际调用需按该环境网关要求附带认证。
 
 ### 按 trace ID 查询
 

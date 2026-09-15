@@ -3,8 +3,7 @@
 
 凭证来源：
   1. CLI --url / --access-key / --username / --password
-  2. ~/.openclaw/<agent-id>-creds.json
-  3. ~/.tshoot/<agent-id>-creds.json
+  2. ~/.tshoot/<agent-id>-creds.json
 
 支持两种 creds 结构：
   {"kuboard":{"dev":{"url":"...","access_key":"..."}}}
@@ -18,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import ssl
@@ -37,7 +37,6 @@ def error_out(msg: str, hint: str = "", code: int = 2) -> int:
 
 def find_creds_file(agent_id: str) -> str:
     paths = [
-        os.path.expanduser(f"~/.openclaw/{agent_id}-creds.json"),
         os.path.expanduser(f"~/.tshoot/{agent_id}-creds.json"),
     ]
     for p in paths:
@@ -45,7 +44,7 @@ def find_creds_file(agent_id: str) -> str:
             return p
     raise FileNotFoundError(
         "creds file not found in any of: "
-        f"~/.openclaw/{agent_id}-creds.json, ~/.tshoot/{agent_id}-creds.json"
+        f"~/.tshoot/{agent_id}-creds.json"
     )
 
 
@@ -124,9 +123,15 @@ def http_json_allow_status(url: str, headers: dict[str, str], timeout: int = 15)
         raise
 
 
+def kuboard_auth_headers(token: str) -> dict[str, str]:
+    if token.count(".") == 2:
+        return {"Authorization": "Bearer " + token, "Accept": "application/json"}
+    return {"Kb-Access-Key": token, "Accept": "application/json"}
+
+
 def kuboard_login(base: str, username: str, password: str) -> str:
     url = base + "/api/login.kuboard.cn/v4/login"
-    body = json.dumps({"username": username, "password": password}).encode("utf-8")
+    body = json.dumps({"username": username, "password": base64.b64encode(password.encode("utf-8")).decode("ascii"), "userSource": "dao"}).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=body,
@@ -157,7 +162,7 @@ def resolve_cluster_uid(base: str, token: str, cluster_name: str) -> str:
         + "/api/cluster.kuboard.cn/v4/cluster-cache/cluster-namespace-tree"
         + "?apiGroupName=&resource=configmaps&namespaced=true"
     )
-    payload = http_json_allow_status(url, {"Kb-Access-Key": token, "Accept": "application/json"})
+    payload = http_json_allow_status(url, kuboard_auth_headers(token))
     items = ((payload.get("data") or {}).get("treeItems") or [])
     for it in items:
         if it.get("name") == cluster_name:
@@ -176,7 +181,7 @@ def fetch_configmap_data(base: str, token: str, cluster_uid: str, namespace: str
         "name": name,
     })
     url = base + "/api/cluster.kuboard.cn/v4/cluster-cache/direct?" + query
-    payload = http_json(url, {"Kb-Access-Key": token, "Accept": "application/json"})
+    payload = http_json(url, kuboard_auth_headers(token))
 
     for it in ((payload.get("data") or {}).get("list") or []):
         cm = it.get("data") or it

@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/platform"
 	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 )
 
@@ -27,25 +28,6 @@ func Validate(c *SystemConfig) error {
 	if c.Agent.Name == "" {
 		return fmt.Errorf("agent.name required")
 	}
-	// workspace_name / model 仅 openclaw target 消费;其它 target(claude-code / cursor)
-	// 不读这两个字段,所以只在勾了 openclaw 时才强制必填。
-	hasOpenclaw := false
-	for _, t := range c.Generation.ResolvedTargets() {
-		if t == "openclaw" {
-			hasOpenclaw = true
-			break
-		}
-	}
-	if hasOpenclaw {
-		// workspace_name 可空,有 system.id / agent.id 就能 ResolveWorkspaceName() 出来;
-		// 老 yaml 里显式写了 workspace_name 的也兼容。完全空才拦。
-		if c.ResolveWorkspaceName() == "" {
-			return fmt.Errorf("openclaw target 需要 system.id / agent.id / agent.workspace_name 至少一个非空")
-		}
-		if c.Agent.Model == "" {
-			return fmt.Errorf("agent.model required (openclaw target)")
-		}
-	}
 
 	if len(c.Environments) == 0 {
 		return fmt.Errorf("environments must have at least 1 entry")
@@ -59,6 +41,45 @@ func Validate(c *SystemConfig) error {
 			return fmt.Errorf("duplicate environment id: %s", env.ID)
 		}
 		envIDs[env.ID] = true
+		entryIDs := map[string]bool{}
+		for j, entry := range env.FrontendEntries {
+			if entry.ID == "" || !idPattern.MatchString(entry.ID) {
+				return fmt.Errorf("environments[%s].frontend_entries[%d].id must match [a-z0-9][a-z0-9-]*", env.ID, j)
+			}
+			if entryIDs[entry.ID] {
+				return fmt.Errorf("environments[%s] duplicate frontend entry id: %s", env.ID, entry.ID)
+			}
+			entryIDs[entry.ID] = true
+			if entry.ID == "default-web" && strings.TrimSpace(env.WebDomain) != "" {
+				return fmt.Errorf("environments[%s].frontend_entries[%d].id default-web is reserved while web_domain is configured", env.ID, j)
+			}
+			if strings.TrimSpace(entry.Name) == "" {
+				return fmt.Errorf("environments[%s].frontend_entries[%d].name required", env.ID, j)
+			}
+			if err := validateFrontendEntryURL(entry.URL); err != nil {
+				return fmt.Errorf("environments[%s].frontend_entries[%d].url: %w", env.ID, j, err)
+			}
+			switch entry.DeviceProfile {
+			case "", "desktop", "mobile", "tablet":
+			default:
+				return fmt.Errorf("environments[%s].frontend_entries[%d].device_profile=%q invalid (valid: desktop/mobile/tablet)", env.ID, j, entry.DeviceProfile)
+			}
+			for k, prefix := range entry.PathPrefixes {
+				if strings.TrimSpace(prefix) == "" || !strings.HasPrefix(prefix, "/") || strings.ContainsAny(prefix, "?#") {
+					return fmt.Errorf("environments[%s].frontend_entries[%d].path_prefixes[%d] must start with '/' and not contain query or fragment", env.ID, j, k)
+				}
+			}
+		}
+		for j, origin := range env.BrowserAllowedOrigins {
+			if err := validateBrowserAuthOrigin(origin); err != nil {
+				return fmt.Errorf("environments[%s].browser_allowed_origins[%d]: %w", env.ID, j, err)
+			}
+		}
+		for j, origin := range env.BrowserAuthOrigins {
+			if err := validateBrowserAuthOrigin(origin); err != nil {
+				return fmt.Errorf("environments[%s].browser_auth_origins[%d]: %w", env.ID, j, err)
+			}
+		}
 	}
 
 	if c.CodeIntelligence.Enabled && c.CodeIntelligence.Provider == "" {
@@ -149,6 +170,16 @@ func Validate(c *SystemConfig) error {
 			return fmt.Errorf("repos[%s].config_source=%q references unknown config_centers[].id (有效 id: %v)", r.Name, r.ConfigSource, sortedKeys(sourceIDs))
 		}
 	}
+	for _, env := range c.Environments {
+		for i, entry := range env.FrontendEntries {
+			if entry.Repo != "" && !repoNames[entry.Repo] {
+				return fmt.Errorf("environments[%s].frontend_entries[%d].repo references unknown repo: %s", env.ID, i, entry.Repo)
+			}
+		}
+	}
+	if err := validateResourceCatalog(c, envIDs, repoNames, sourceIDs); err != nil {
+		return err
+	}
 
 	for i := range c.Environments {
 		if err := validateDeploymentVerification(c.Environments[i], repoNames); err != nil {
@@ -160,16 +191,64 @@ func Validate(c *SystemConfig) error {
 		return err
 	}
 
-	validTargets := map[string]bool{"openclaw": true, "claude-code": true, "cursor": true, "codex": true}
 	targets := c.Generation.ResolvedTargets()
 	for _, t := range targets {
-		if !validTargets[t] {
-			return fmt.Errorf("generation.targets: %q not supported (valid: openclaw, claude-code, cursor)", t)
+		if !platform.Supported(t) {
+			return fmt.Errorf("generation.targets: %q not supported (valid: claude-code, cursor, codex, opencode)", t)
 		}
 	}
 
 	if c.Meta.SchemaVersion == "" {
 		return fmt.Errorf("meta.schema_version required")
+	}
+	return nil
+}
+
+func validateBrowserAuthOrigin(raw string) error {
+	if raw == "" || raw != strings.TrimSpace(raw) {
+		return fmt.Errorf("must be an absolute HTTP(S) origin")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.Hostname() == "" || parsed.Opaque != "" {
+		return fmt.Errorf("must be an absolute HTTP(S) origin")
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return fmt.Errorf("must use http or https")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("must not contain userinfo")
+	}
+	if parsed.Path != "" || parsed.RawPath != "" {
+		return fmt.Errorf("must not contain a path")
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return fmt.Errorf("must not contain a query")
+	}
+	if parsed.Fragment != "" || strings.Contains(raw, "#") {
+		return fmt.Errorf("must not contain a fragment")
+	}
+	return nil
+}
+
+func validateFrontendEntryURL(raw string) error {
+	if raw == "" || raw != strings.TrimSpace(raw) {
+		return fmt.Errorf("must be an absolute HTTP(S) URL")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" || parsed.Hostname() == "" || parsed.Opaque != "" {
+		return fmt.Errorf("must be an absolute HTTP(S) URL")
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return fmt.Errorf("must use http or https")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("must not contain userinfo")
+	}
+	if parsed.RawQuery != "" || parsed.ForceQuery {
+		return fmt.Errorf("must not contain a query")
+	}
+	if parsed.Fragment != "" || strings.Contains(raw, "#") {
+		return fmt.Errorf("must not contain a fragment")
 	}
 	return nil
 }
@@ -207,18 +286,6 @@ func validateDeploymentVerification(env Environment, repoNames map[string]bool) 
 	case DeploymentVerificationProviderK8s:
 		if !cfg.HTTP.IsZero() {
 			return fmt.Errorf("k8s provider must not include http block")
-		}
-		if strings.TrimSpace(cfg.K8s.Cluster) == "" {
-			return fmt.Errorf("k8s.cluster required")
-		}
-		if strings.TrimSpace(cfg.K8s.Namespace) == "" {
-			return fmt.Errorf("k8s.namespace required")
-		}
-		if len(cfg.K8s.DeploymentsByRepo) == 0 {
-			return fmt.Errorf("k8s.deployments_by_repo required")
-		}
-		if strings.TrimSpace(cfg.K8s.CommitAnnotation) == "" && strings.TrimSpace(cfg.K8s.ImageLabel) == "" {
-			return fmt.Errorf("k8s.commit_annotation or image_label required")
 		}
 		if strings.TrimSpace(cfg.K8s.CommitAnnotation) != "" && strings.TrimSpace(cfg.K8s.ImageLabel) != "" {
 			return fmt.Errorf("k8s.commit_annotation and image_label are mutually exclusive")
@@ -268,8 +335,24 @@ func validateServiceTopology(c *SystemConfig) error {
 		}
 
 		override.Protocol = strings.ToLower(override.Protocol)
+		override.Scope = strings.ToLower(strings.TrimSpace(override.Scope))
 		override.Method = strings.ToUpper(override.Method)
 		override.Path = topology.NormalizePath(override.Path)
+		if override.Scope == "service" {
+			if override.Protocol != "" || override.Method != "" || override.Path != "" || override.RPCMethod != "" {
+				return fmt.Errorf("%s: service scope only accepts from_service and to_service", field)
+			}
+			key := override.SemanticKey()
+			if semanticKeys[key] {
+				return fmt.Errorf("%s has duplicate semantic key", field)
+			}
+			semanticKeys[key] = true
+			c.ServiceTopology.Overrides[i] = override
+			continue
+		}
+		if override.Scope != "" {
+			return fmt.Errorf("%s.scope=%q invalid (valid: service)", field, override.Scope)
+		}
 		switch override.Protocol {
 		case "http":
 			if override.Method == "" || override.Path == "" || override.RPCMethod != "" {

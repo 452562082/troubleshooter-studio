@@ -19,6 +19,8 @@ import type {
 } from './yamlGenerator'
 import { emptyDeploymentVerification } from './yamlGenerator'
 import { VIA_GRAFANA_ELIGIBLE } from './yamlShared'
+import type { ConfigSourceInstance } from './configSourceInstances'
+import { supportsRuntimeServiceNames } from './repoServiceIdentity'
 
 /** yaml 字段值是否为模板占位符 "{{XYZ}}";占位符不应当作真值反填。 */
 export function isPlaceholder(v: unknown): boolean {
@@ -73,8 +75,36 @@ export interface ParsedEnv {
   id: string
   api_domain: string
   web_domain: string
+  frontend_entries: ParsedFrontendEntry[]
   is_prod: boolean
   deployment_verification?: DeploymentVerificationState
+}
+
+export interface ParsedFrontendEntry {
+  id: string
+  name: string
+  url: string
+  repo: string
+  device_profile: string
+  aliases: string
+  product_hints: string
+  module_hints: string
+  path_prefixes: string
+}
+
+function parseStringList(value: unknown): string {
+  return Array.isArray(value) ? value.filter(item => typeof item === 'string').join(', ') : ''
+}
+
+function parseFrontendEntry(value: unknown): ParsedFrontendEntry {
+  const entry = (value ?? {}) as Record<string, unknown>
+  const text = (key: string) => typeof entry[key] === 'string' ? entry[key] as string : ''
+  return {
+    id: text('id'), name: text('name'), url: text('url'), repo: text('repo'),
+    device_profile: text('device_profile'), aliases: parseStringList(entry.aliases),
+    product_hints: parseStringList(entry.product_hints), module_hints: parseStringList(entry.module_hints),
+    path_prefixes: parseStringList(entry.path_prefixes),
+  }
 }
 
 /** parsed.environments[i] → ParsedEnv,字段全 fallback 空串/false。 */
@@ -94,24 +124,42 @@ export function parseEnvironment(e: unknown): ParsedEnv {
         if (typeof deployment === 'string') mappings[repo] = deployment
       }
     }
-    deploymentVerification = emptyDeploymentVerification()
-    deploymentVerification.provider = provider
-    deploymentVerification.http.url = typeof http.url === 'string' ? http.url : ''
-    deploymentVerification.http.json_pointer = typeof http.json_pointer === 'string' ? http.json_pointer : ''
-    deploymentVerification.http.allow_private = http.allow_private === true
-    deploymentVerification.k8s.cluster = typeof k8s.cluster === 'string' ? k8s.cluster : ''
-    deploymentVerification.k8s.namespace = typeof k8s.namespace === 'string' ? k8s.namespace : ''
-    deploymentVerification.k8s.deployments_by_repo = mappings
-    deploymentVerification.k8s.commit_annotation = typeof k8s.commit_annotation === 'string' ? k8s.commit_annotation : ''
-    deploymentVerification.k8s.image_label = typeof k8s.image_label === 'string' ? k8s.image_label : ''
+    const candidate = emptyDeploymentVerification()
+    candidate.provider = provider
+    candidate.http.url = typeof http.url === 'string' ? http.url : ''
+    candidate.http.json_pointer = typeof http.json_pointer === 'string' ? http.json_pointer : ''
+    candidate.http.allow_private = http.allow_private === true
+    candidate.k8s.cluster = typeof k8s.cluster === 'string' ? k8s.cluster : ''
+    candidate.k8s.namespace = typeof k8s.namespace === 'string' ? k8s.namespace : ''
+    candidate.k8s.deployments_by_repo = mappings
+    candidate.k8s.commit_annotation = typeof k8s.commit_annotation === 'string' ? k8s.commit_annotation : ''
+    candidate.k8s.image_label = typeof k8s.image_label === 'string' ? k8s.image_label : ''
+    // 旧草稿可能保存了用户尚未填完、现在又已从创建向导移除的 HTTP 版本证明。
+    // 这种半成品不能继续污染仓库扫描所用的临时 YAML；完整配置仍原样保留。
+    if (provider === 'k8s' || (provider === 'http' && candidate.http.url.trim() && candidate.http.json_pointer.trim())) {
+      deploymentVerification = candidate
+    }
   }
   return {
     id: typeof o.id === 'string' ? o.id : '',
     api_domain: typeof o.api_domain === 'string' ? o.api_domain : '',
     web_domain: typeof o.web_domain === 'string' ? o.web_domain : '',
+    frontend_entries: Array.isArray(o.frontend_entries) ? o.frontend_entries.map(parseFrontendEntry) : [],
     is_prod: Boolean(o.is_prod),
     ...(deploymentVerification ? { deployment_verification: deploymentVerification } : {}),
   }
+}
+
+/**
+ * 新向导只接受明确分类的 frontend_entries，不再把旧 web_domain 猜成一个
+ * “Web 前端”。旧版向导已经合成过的同名入口也在恢复草稿时清掉，用户重新
+ * 选择 C 端、管理端、运营平台等真实业务类型。
+ */
+export function prepareEnvironmentForWizard(e: unknown): ParsedEnv {
+  const parsed = parseEnvironment(e)
+  parsed.web_domain = ''
+  parsed.frontend_entries = parsed.frontend_entries.filter(entry => entry.name.trim() !== 'Web 前端')
+  return parsed
 }
 
 /** parseRepoCore 提取 yaml repo 字段;_source / _localPath / env_branches 由调用方拼。 */
@@ -179,8 +227,11 @@ export interface ApplyImportContext {
   repos: any[]
   enabledSourceTypes: Record<string, boolean>
   enabledSourceOrder: string[]
+  sourceInstances: ConfigSourceInstance[]
   sourceCreds: Record<string, { creds: Record<string, Record<string, string>>; rawExtra?: Record<string, unknown> }>
   serviceSourceMap: Record<string, string>
+  serviceSourceByEnv: Record<string, string>
+  sourceEnvNamespaces: Record<string, string>
   ccCredInputs: Record<string, string>
   envNamespaces: Record<string, string>
   serviceConfigSel: Record<string, string>
@@ -193,6 +244,7 @@ export interface ApplyImportContext {
   k8sRuntimeEnvLoc: Record<string, { cluster?: string; cluster_id?: string; namespace?: string }>
   k8sRuntimeSvcMap: Record<string, { workload?: string; label_selector?: string }>
   scannedDS: Record<string, Record<string, Record<string, Record<string, string>>>>
+  dataStoreTypes: Record<string, string>
   enabledDataStores: Record<string, boolean>
   dsAutoFilled: Record<string, boolean>
   dsScanState: Record<string, { status: string; reason?: string }>
@@ -231,6 +283,17 @@ export function importServiceTopologyOverrides(rawOverrides: unknown): ServiceTo
     if (!raw || typeof raw !== 'object') return []
     const value = raw as Record<string, unknown>
     if (value.action !== 'confirm' && value.action !== 'reject' && value.action !== 'add') return []
+    const scope = typeof value.scope === 'string' ? value.scope.trim().toLowerCase() : ''
+    if (scope === 'service') {
+      if (typeof value.from_service !== 'string' || typeof value.to_service !== 'string') return []
+      return [{
+        action: value.action,
+        fromService: value.from_service,
+        toService: value.to_service,
+        scope: 'service',
+      }]
+    }
+    if (scope) return []
     const protocol = typeof value.protocol === 'string' ? value.protocol.trim().toLowerCase() : ''
     if (protocol !== 'http' && protocol !== 'grpc') return []
     if (typeof value.from_service !== 'string' || typeof value.to_service !== 'string') return []
@@ -274,13 +337,11 @@ export async function applyParsedYAMLToWizardState(
     ctx.agent.name = parsed.agent.name ?? ''
     ctx.agent.workspace_name = parsed.agent.workspace_name ?? ''
     ctx.agent.model = parsed.agent.model ?? ctx.agent.model
-    const tm = parsed.agent.target_models || {}
-    ctx.targetModels.openclaw = tm.openclaw || ctx.agent.model
   }
 
   // environments
   if (Array.isArray(parsed.environments) && parsed.environments.length) {
-    ctx.environments.splice(0, ctx.environments.length, ...parsed.environments.map(parseEnvironment))
+    ctx.environments.splice(0, ctx.environments.length, ...parsed.environments.map(prepareEnvironmentForWizard))
   }
 
   // repos:同步反填 + 后台 fire-and-forget 拉真实分支
@@ -332,14 +393,11 @@ export async function applyParsedYAMLToWizardState(
     //    commerce/api/... 的 umbrella),用户在 yaml 里显式写 service_names: [truss]
     //    → 必须尊重,不能 import 时就被清掉
     //
-    // **但**:role 跟 service_names 必须一致(syncServiceNamesWithRole 的 yaml-side
-    // 镜像)。非业务服务角色(common-lib / docs / infra / frontend / mobile)即便
-    // yaml 里有 service_names 也清掉 —— allServiceNames 就不会出 "frontend 仓的
-    // 名字当成服务" 这种噪音。常见场景:用户改 role=docs 后导出 yaml,但 service_names
-    // 残留(比如老版本 wizard 没自动清,或手编辑 yaml 漏)。
-    const NON_SERVICE_ROLES = new Set(['common-lib', 'docs', 'infra', 'frontend', 'mobile'])
+    // **但**:role 跟 service_names 必须一致。frontend 的显式值或显式空值都必须
+    // 原样保留；空值表示不参与运行时映射。common-lib/docs/infra/mobile 没有可编辑的
+    // 运行时服务名，导入时清理老版本残留。
     for (const r of ctx.repos as any[]) {
-      if (NON_SERVICE_ROLES.has((r.role || '').trim())) {
+      if (!supportsRuntimeServiceNames(r.role)) {
         r.service_names = ''
       }
     }
@@ -368,27 +426,30 @@ export async function applyParsedYAMLToWizardState(
   ctx.enabledSourceTypes['none'] = false
   for (const t of ctx.ALL_SOURCE_TYPES) ctx.sourceCreds[t] = { creds: {} }
   ctx.enabledSourceOrder.splice(0, ctx.enabledSourceOrder.length)
+  ctx.sourceInstances.splice(0, ctx.sourceInstances.length)
 
   const ingestSource = (s: any, sourceID: string) => {
     if (!s || typeof s.type !== 'string') return
     const t = s.type
+    const id = sourceID || t
     ctx.enabledSourceTypes[t] = true
     if (!ctx.enabledSourceOrder.includes(t)) ctx.enabledSourceOrder.push(t)
-    if (!ctx.sourceCreds[t]) ctx.sourceCreds[t] = { creds: {} }
+    if (!ctx.sourceInstances.some(item => item.id === id)) ctx.sourceInstances.push({ id, type: t })
+    if (!ctx.sourceCreds[id]) ctx.sourceCreds[id] = { creds: {} }
     const fields = ctx.CC_FIELDS_BY_TYPE[t] || []
     if (Array.isArray(s.endpoints)) {
       for (const ep of s.endpoints) {
         if (!ep || typeof ep !== 'object') continue
         const envID = endpointEnvID(t, ep as Record<string, unknown>)
         if (!envID) continue
-        const envCreds: Record<string, string> = ctx.sourceCreds[t].creds[envID] || {}
+        const envCreds: Record<string, string> = ctx.sourceCreds[id].creds[envID] || {}
         for (const f of fields) {
           const v = endpointFieldValue(t, ep as Record<string, unknown>, f.key)
           if (isLiveString(v)) envCreds[f.key] = v
         }
         const mode = inferAuthMode(fields.find(f => f.key === 'auth_mode'), ep)
         if (mode) envCreds['auth_mode'] = mode
-        if (Object.keys(envCreds).length > 0) ctx.sourceCreds[t].creds[envID] = envCreds
+        if (Object.keys(envCreds).length > 0) ctx.sourceCreds[id].creds[envID] = envCreds
       }
     }
     if (t === 'kuboard' && s.service_map && typeof s.service_map === 'object') {
@@ -425,8 +486,7 @@ export async function applyParsedYAMLToWizardState(
       if (k === 'service_map') continue
       rawExtra[k] = v
     }
-    if (Object.keys(rawExtra).length > 0) ctx.sourceCreds[t].rawExtra = rawExtra
-    void sourceID
+    if (Object.keys(rawExtra).length > 0) ctx.sourceCreds[id].rawExtra = rawExtra
   }
 
   let primarySource: any = null
@@ -436,7 +496,10 @@ export async function applyParsedYAMLToWizardState(
     const defaultEntry = ccArray.find((s: any) => s?.id === 'default')
     primarySource = defaultEntry || ccArray[0]
   } else if (parsed.infrastructure?.config_center) {
-    ingestSource(parsed.infrastructure.config_center, 'default')
+    const legacyType = typeof parsed.infrastructure.config_center?.type === 'string'
+      ? parsed.infrastructure.config_center.type
+      : 'default'
+    ingestSource(parsed.infrastructure.config_center, legacyType)
     primarySource = parsed.infrastructure.config_center
   }
 
@@ -450,6 +513,19 @@ export async function applyParsedYAMLToWizardState(
         : (typeof r?.name === 'string' ? [r.name] : [])
       for (const svc of svcNames) {
         if (svc) ctx.serviceSourceMap[svc] = target
+      }
+    }
+  }
+
+  // Formal catalog overrides legacy repository-wide bindings and keeps the
+  // concrete source instance ID. Multiple same-type sources must not collapse.
+  const catalogServices = parsed.resource_catalog?.services
+  if (Array.isArray(catalogServices)) {
+    for (const item of catalogServices) {
+      if (typeof item?.id !== 'string' || !item?.config_sources || typeof item.config_sources !== 'object') continue
+      for (const [envID, sourceID] of Object.entries(item.config_sources as Record<string, unknown>)) {
+        if (typeof sourceID !== 'string' || !sourceID) continue
+        ctx.serviceSourceByEnv[ctx.svcKey(envID, item.id)] = sourceID
       }
     }
   }
@@ -472,16 +548,31 @@ export async function applyParsedYAMLToWizardState(
     }
   }
 
-  // service_map(nacos/apollo/consul):envNamespaces + serviceConfigSel + serviceConfigGroup + 合成 ccHubStateByEnv
-  const svcMap = (cc !== 'kuboard') ? primarySource?.service_map : null
-  if (svcMap && typeof svcMap === 'object') {
+  // service_map(nacos/apollo/consul):每个实例独立恢复 namespace、dataId 和预加载状态。
+  const primarySourceID = ctx.sourceInstances[0]?.id || 'default'
+  const importedSources: Array<{ id: string; type: string; source: any }> = Array.isArray(ccArray)
+    ? ccArray.filter((s: any) => s && typeof s.type === 'string').map((s: any) => ({ id: s.id || s.type, type: s.type, source: s }))
+    : (primarySource && typeof cc === 'string' ? [{ id: primarySourceID, type: cc, source: primarySource }] : [])
+  for (const imported of importedSources) {
+    if (!['nacos', 'apollo', 'consul'].includes(imported.type)) continue
+    const svcMap = imported.source?.service_map
+    if (!svcMap || typeof svcMap !== 'object') continue
     const synthByEnv: Record<string, { ns: Map<string, string>; entries: Map<string, { locator: string; group?: string; tenant?: string }> }> = {}
     for (const [envID, svcs] of Object.entries(svcMap)) {
       if (!svcs || typeof svcs !== 'object') continue
       for (const [svc, rec] of Object.entries(svcs as Record<string, unknown>)) {
         if (!rec || typeof rec !== 'object') continue
+        const bindingKey = ctx.svcKey(envID, svc)
+        const explicitBinding = ctx.serviceSourceByEnv[bindingKey]
+        if (explicitBinding && explicitBinding !== imported.id) continue
+        const legacyBinding = ctx.serviceSourceMap[svc]
+        if (!explicitBinding && legacyBinding && legacyBinding !== imported.id && legacyBinding !== imported.type) continue
+        if (!explicitBinding) ctx.serviceSourceByEnv[bindingKey] = imported.id
         const r = rec as { namespace?: string; group?: string; data_id?: string }
-        if (typeof r.namespace === 'string' && r.namespace) ctx.envNamespaces[envID] = r.namespace
+        if (typeof r.namespace === 'string' && r.namespace) {
+          if (imported.id === primarySourceID) ctx.envNamespaces[envID] = r.namespace
+          ctx.sourceEnvNamespaces[`${imported.id}::${envID}`] = r.namespace
+        }
         if (typeof r.data_id === 'string' && r.data_id) ctx.serviceConfigSel[ctx.svcKey(envID, svc)] = r.data_id
         if (typeof r.group === 'string' && r.group) ctx.serviceConfigGroup[ctx.svcKey(envID, svc)] = r.group
         if (!synthByEnv[envID]) synthByEnv[envID] = { ns: new Map(), entries: new Map() }
@@ -500,7 +591,8 @@ export async function applyParsedYAMLToWizardState(
     }
     for (const [envID, bucket] of Object.entries(synthByEnv)) {
       if (bucket.ns.size === 0 && bucket.entries.size === 0) continue
-      ctx.ccHubStateByEnv[envID] = {
+      const stateKey = imported.id === primarySourceID ? envID : `${imported.id}::${envID}`
+      ctx.ccHubStateByEnv[stateKey] = {
         status: 'ok',
         namespaces: Array.from(bucket.ns.entries()).map(([id, show]) => ({ id, show_name: show })),
         entries: Array.from(bucket.entries.values()),
@@ -609,9 +701,12 @@ export async function applyParsedYAMLToWizardState(
   const ds = parsed.infrastructure?.data_stores
   if (Array.isArray(ds)) {
     for (const key of Object.keys(ctx.scannedDS)) delete ctx.scannedDS[key]
+    for (const key of Object.keys(ctx.dataStoreTypes)) delete ctx.dataStoreTypes[key]
     for (const entry of ds) {
       const t = entry?.type
       if (typeof t !== 'string' || entry?.enabled === false) continue
+      const id = typeof entry?.id === 'string' && entry.id ? entry.id : t
+      ctx.dataStoreTypes[id] = t
       const spec = ctx.toolSpecByKey('ds', t)
       const dsEndpoints = entry?.endpoints
       if (!spec || !Array.isArray(dsEndpoints)) continue
@@ -629,7 +724,7 @@ export async function applyParsedYAMLToWizardState(
           fields[f.key] = v
         }
         if (Object.keys(fields).length > 0) {
-          ctx.scannedDS[envID][svc][t] = fields
+          ctx.scannedDS[envID][svc][id] = fields
           ctx.dsAutoFilled[t] = true
         }
       }

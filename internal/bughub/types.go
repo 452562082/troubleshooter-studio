@@ -47,6 +47,9 @@ type Bug struct {
 	LastContext    string       `json:"last_context,omitempty"`
 	LastContextAt  time.Time    `json:"last_context_at,omitempty"`
 	RawPreview     string       `json:"raw_preview,omitempty"`
+	InboxState     string       `json:"inbox_state,omitempty"`
+	ArchivedAt     *time.Time   `json:"archived_at,omitempty"`
+	ArchiveReason  string       `json:"archive_reason,omitempty"`
 }
 
 type BotRef struct {

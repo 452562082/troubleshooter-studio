@@ -15,7 +15,7 @@ import { detectAITools, type AIToolResult } from './bridge'
 import { toast } from './toast'
 
 export function useAITools() {
-  const aitoolsResult = ref<{ claude_code: AIToolResult; cursor: AIToolResult; codex: AIToolResult } | null>(null)
+  const aitoolsResult = ref<{ claude_code: AIToolResult; cursor: AIToolResult; codex: AIToolResult; opencode: AIToolResult } | null>(null)
   const aitoolsRefreshing = ref(false)
 
   /**
@@ -33,13 +33,14 @@ export function useAITools() {
         // 应该一眼看到自己关心的那家是 ✓ 还是 ✗。
         const r = aitoolsResult.value
         const lines = [
+          `OpenCode ${r?.opencode?.installed ? '✓' : '✗'}`,
           `Claude Code ${r?.claude_code?.installed ? '✓' : '✗'}`,
           `Cursor ${r?.cursor?.installed ? '✓' : '✗'}`,
           `Codex ${r?.codex?.installed ? '✓' : '✗'}`,
         ]
-        const allMissing = !r?.claude_code?.installed && !r?.cursor?.installed && !r?.codex?.installed
+        const allMissing = !r?.claude_code?.installed && !r?.cursor?.installed && !r?.codex?.installed && !r?.opencode?.installed
         if (allMissing) {
-          toast.info('重新扫描完成 — 三家 AI 平台都未检测到。确认 IDE 装在 PATH 里(或 ~/.<target>/)')
+          toast.info('重新扫描完成 — 所有 AI 平台都未检测到。确认 IDE 装在 PATH 里(或 ~/.<target>/)')
         } else {
           toast.info(`重新扫描完成 — ${lines.join(' / ')}(✗ 的需要先装好)`)
         }

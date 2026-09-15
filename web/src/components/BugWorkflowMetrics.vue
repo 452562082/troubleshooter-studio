@@ -6,11 +6,9 @@ const props = defineProps<{ metrics: WorkflowMetrics | null }>()
 
 const visible = computed(() => (props.metrics?.completed_cases || 0) >= 5)
 const stages = computed(() => [
-  ['验证', 'validation'],
   ['排障', 'investigation'],
   ['修复', 'fix'],
-  ['人工部署等待', 'deployment_wait'],
-  ['回归', 'regression'],
+  ['提交', 'submission'],
 ] as const)
 
 function duration(value?: number): string {
@@ -25,14 +23,11 @@ function compact(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(1)
 }
 
-function percent(value?: number): string {
-  return `${Math.round(Math.max(0, Math.min(1, Number(value || 0))) * 100)}%`
-}
 
 const blockers = computed(() => [
   ['待补证', props.metrics?.blocker_distribution?.waiting_evidence || 0],
   ['合并冲突', props.metrics?.blocker_distribution?.merge_conflict || 0],
-  ['部署未确认', props.metrics?.blocker_distribution?.deployment_unverified || 0],
+  ['修复受阻', props.metrics?.blocker_distribution?.fix_failed || 0],
 ] as const)
 </script>
 
@@ -41,8 +36,7 @@ const blockers = computed(() => [
     <div class="metric-summary">
       <strong>闭环概览</strong>
       <span>进行中 {{ metrics?.open_cases || 0 }}</span>
-      <span>最长待部署 {{ duration(metrics?.oldest_waiting_deployment_age) }}</span>
-      <span>首次回归成功 {{ percent(metrics?.first_regression_success_rate) }}</span>
+      <span>已完成工作台处理 {{ metrics?.completed_cases || 0 }}</span>
     </div>
     <dl class="metric-grid">
       <div v-for="([label, key]) in stages" :key="key">

@@ -1,0 +1,5 @@
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "I'll read only `probe.txt` and return the YAML as specified."}]}}
+{"type": "tool_call", "subtype": "started", "tool_call": {"readToolCall": {"args": {"path": "probe.txt"}}, "hookAdditionalContexts": [], "toolCallId": "probe-read", "startedAtMs": 1000}}
+{"type": "tool_call", "subtype": "completed", "tool_call": {"readToolCall": {"args": {"path": "probe.txt"}}, "hookAdditionalContexts": [], "toolCallId": "probe-read", "startedAtMs": 1000, "completedAtMs": 1001}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "status: ok\ntoken: TSHOOT_CURSOR_READY_914"}]}}
+{"type": "result", "subtype": "success", "is_error": false, "result": "I'll read only `probe.txt` and return the YAML as specified.status: ok\ntoken: TSHOOT_CURSOR_READY_914"}

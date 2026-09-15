@@ -22,6 +22,7 @@ import type { K8sRtWorkloadState } from './useK8sRtWorkloads'
 import type { RepoScanItem } from './useRepoScan'
 import type { ObsAccessMode } from './useObsAccessMode'
 import type { CodeIntelligenceState, DeploymentVerificationState, ServiceTopologyState } from './yamlGenerator'
+import type { ConfigSourceInstance } from './configSourceInstances'
 
 export const INIT_WIZARD_KEY = 'tsf-init-wizard-v1'
 export const INIT_KUBOARD_STATE_KEY = 'tsf-init-wizard-kuboard-state-v1'
@@ -112,10 +113,16 @@ export interface WizardDraft {
   enabledSourceTypes?: Record<string, boolean>
   /** 多源排序(主源在 [0]) */
   enabledSourceOrder?: string[]
+  /** 稳定配置源实例。允许多个实例拥有相同 type。 */
+  sourceInstances?: ConfigSourceInstance[]
   /** 多源:每源每 env 的字段值 + rawExtra */
   sourceCreds?: Record<string, DraftSourceCredsEntry>
   /** 服务 → 源 type 映射(显式 '' 表示用户取消,getServiceSource 不再 fallback 主源) */
   serviceSourceMap?: Record<string, string>
+  /** (env::service) -> source instance id; serviceSourceMap remains legacy fallback. */
+  serviceSourceByEnv?: Record<string, string>
+  /** source instance + env -> namespace；旧 envNamespaces 仍作为主实例兼容回退。 */
+  sourceEnvNamespaces?: Record<string, string>
   /**
    * 老 single-source 凭证表;新 schema 走 sourceCreds 但保留迁移路径:
    * `if (saved?.ccCredInputs && !saved?.sourceCreds)` 时把老 draft 灌进新 sourceCreds。
@@ -158,15 +165,17 @@ export interface WizardDraft {
   /** Step 7 "从配置中心读取" 标记(重进后徽章仍显示) */
   dsAutoFilled?: Record<string, boolean>
   /** Step 7 每个服务识别出的数据层配置(env → service → dsKey → fields) */
+  manualDataStoreEntries?: Record<string, boolean>
   scannedDS?: Record<string, DSByService>
+  /** data store instance id -> type；旧草稿缺失时按 key 自身派生。 */
+  dataStoreTypes?: Record<string, string>
   /** Step 7 每个 (env, service) 的扫描状态(ok/empty/skipped/error) */
   dsScanState?: Record<string, DSScanState>
 
   // ── Step 2 / 9 / 10 部署目标 + 安装根目录 ──
   /** Step 2 勾哪些部署 target */
   enabledTargets?: Record<string, boolean>
-  /** Step 2 OpenClaw 自定义安装目录(覆盖 ~/.openclaw 探测路径) */
-  openclawInstallDir?: string
+
 
   // ── Step 10 部署后回写 ──
   /** runOneClickDeploy 部署成功时间戳;HomePage 用来判定"已部署"vs"继续部署" */

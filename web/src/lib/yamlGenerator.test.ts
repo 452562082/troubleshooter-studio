@@ -1,7 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import yaml from 'js-yaml'
-import { generateYAML, type ServiceTopologyState, type YAMLGenContext } from './yamlGenerator'
-import { importServiceTopologyOverrides, parseEnvironment } from './yamlImporter'
+import {
+  generateYAML,
+  unresolvedYAMLPlaceholders,
+  type ServiceTopologyState,
+  type YAMLGenContext,
+} from './yamlGenerator'
+import { importServiceTopologyOverrides, parseEnvironment, prepareEnvironmentForWizard } from './yamlImporter'
 
 // 最小可工作 ctx 工厂:测试用 stub。各测试按需 spread + 覆盖具体字段。
 function makeCtx(overrides: Partial<YAMLGenContext> = {}): YAMLGenContext {
@@ -10,7 +15,7 @@ function makeCtx(overrides: Partial<YAMLGenContext> = {}): YAMLGenContext {
     agent: { id: '', name: '', workspace_name: '', model: 'anthropic/claude-sonnet-4-6' },
     agentNameDefault: 'Shop 排障机器人',
     targetModels: { openclaw: 'anthropic/claude-sonnet-4-6' },
-    enabledTargets: { openclaw: true, 'claude-code': false, cursor: false, codex: false },
+    enabledTargets: { 'claude-code': true, cursor: false, codex: false },
     codeIntelligence: { enabled: false, provider: 'codegraph' },
     serviceTopology: { overrides: [] },
     enabledObservability: {},
@@ -34,8 +39,8 @@ function makeCtx(overrides: Partial<YAMLGenContext> = {}): YAMLGenContext {
     activeSourceTypes: ['nacos'],
     allServiceNames: ['order-service'],
     isMultiSource: false,
-    targetOptions: ['openclaw', 'claude-code', 'cursor', 'codex'],
-    modelConsumingTargets: ['openclaw'],
+    targetOptions: ['claude-code', 'cursor', 'codex'],
+    modelConsumingTargets: ['claude-code'],
     OBS_TOOL_SPECS: [],
     CC_FIELDS_BY_TYPE: {
       nacos: [
@@ -58,6 +63,57 @@ function makeCtx(overrides: Partial<YAMLGenContext> = {}): YAMLGenContext {
 }
 
 describe('generateYAML', () => {
+  it('emits named frontend applications and resolver hints', () => {
+    const parsed = yaml.load(generateYAML(makeCtx({ environments: [{
+      id: 'test', api_domain: 'https://api.test', web_domain: '', is_prod: false,
+      frontend_entries: [{ id: 'consumer-h5', name: 'C 端 H5', url: 'https://m.test/app', repo: 'web', device_profile: 'mobile', aliases: 'C端, 用户端', product_hints: '商城', module_hints: '搜索', path_prefixes: '/search, /user' }],
+    }] }))) as any
+    expect(parsed.environments[0].frontend_entries).toEqual([{
+      id: 'consumer-h5', name: 'C 端 H5', url: 'https://m.test/app', repo: 'web', device_profile: 'mobile',
+      aliases: ['C端', '用户端'], product_hints: ['商城'], module_hints: ['搜索'], path_prefixes: ['/search', '/user'],
+    }])
+  })
+  it('derives hidden frontend metadata and ignores obsolete web_domain', () => {
+    const parsed = yaml.load(generateYAML(makeCtx({ environments: [{
+      id: 'test', api_domain: 'https://api.test', web_domain: 'https://admin.test', is_prod: false,
+      frontend_entries: [
+        { id: '', name: '管理端', url: 'https://admin.test', repo: '', device_profile: '', aliases: '', product_hints: '', module_hints: '', path_prefixes: '' },
+        { id: '', name: '管理端', url: 'https://ops.test', repo: '', device_profile: '', aliases: '', product_hints: '', module_hints: '', path_prefixes: '' },
+      ],
+    }] }))) as any
+
+    expect(parsed.environments[0].web_domain).toBeUndefined()
+    expect(parsed.environments[0].frontend_entries).toEqual([
+      { id: 'admin', name: '管理端', url: 'https://admin.test', device_profile: 'desktop' },
+      { id: 'admin-2', name: '管理端', url: 'https://ops.test', device_profile: 'desktop' },
+    ])
+  })
+
+  it('drops obsolete web_domain and its previously synthesized Web frontend', () => {
+    expect(parseEnvironment({ id: 'test', web_domain: 'https://legacy.test' }).web_domain).toBe('https://legacy.test')
+    expect(prepareEnvironmentForWizard({ id: 'test', web_domain: 'https://legacy.test' })).toMatchObject({
+      web_domain: '',
+      frontend_entries: [],
+    })
+    expect(prepareEnvironmentForWizard({
+      id: 'test',
+      frontend_entries: [
+        { id: '', name: 'Web 前端', url: 'https://legacy.test' },
+        { id: 'consumer-h5', name: 'C端', url: 'https://consumer.test' },
+      ],
+    })).toMatchObject({
+      web_domain: '',
+      frontend_entries: [{ id: 'consumer-h5', name: 'C端', url: 'https://consumer.test' }],
+    })
+  })
+
+  it('never emits obsolete web_domain without an explicit frontend entry', () => {
+    const parsed = yaml.load(generateYAML(makeCtx({ environments: [{
+      id: 'test', api_domain: 'https://api.test', web_domain: 'https://legacy.test', is_prod: false,
+    }] }))) as any
+    expect(parsed.environments[0].web_domain).toBeUndefined()
+    expect(parsed.environments[0].frontend_entries).toBeUndefined()
+  })
   it('round-trips exact HTTP deployment verification values after import restoration', () => {
     const env = parseEnvironment({
       id: 'test', api_domain: '', web_domain: '', is_prod: false,
@@ -73,7 +129,7 @@ describe('generateYAML', () => {
     })
   })
 
-  it('round-trips exact K8s deployment verification values after import restoration', () => {
+  it('does not regenerate duplicate K8s location or version fields from legacy imports', () => {
     const env = parseEnvironment({
       id: 'test', api_domain: '', web_domain: '', is_prod: false,
       deployment_verification: {
@@ -86,14 +142,7 @@ describe('generateYAML', () => {
       },
     })
     const parsed = yaml.load(generateYAML(makeCtx({ environments: [env] }))) as any
-    expect(parsed.environments[0].deployment_verification).toEqual({
-      provider: 'k8s',
-      k8s: {
-        cluster: 'test-cluster', namespace: 'admin-test',
-        deployments_by_repo: { 'admin-web': 'admin-web' },
-        commit_annotation: 'app.example.com/git-commit',
-      },
-    })
+    expect(parsed.environments[0].deployment_verification).toEqual({ provider: 'k8s' })
   })
 
   it('keeps legacy and explicit manual environment YAML byte-semantically identical', () => {
@@ -103,6 +152,18 @@ describe('generateYAML', () => {
       deployment_verification: { provider: 'manual', http: { url: '', json_pointer: '', allow_private: false }, k8s: { cluster: '', namespace: '', deployments_by_repo: {}, commit_annotation: '', image_label: '' } },
     } as any] })
     expect(generateYAML(manual)).toBe(generateYAML(legacy))
+  })
+
+  it('does not emit an incomplete legacy HTTP deployment verification into scan YAML', () => {
+    const parsed = yaml.load(generateYAML(makeCtx({ environments: [{
+      id: 'dev', api_domain: '', web_domain: '', is_prod: false,
+      deployment_verification: {
+        provider: 'http',
+        http: { url: '', json_pointer: '/git/commit', allow_private: false },
+        k8s: { cluster: '', namespace: '', deployments_by_repo: {}, commit_annotation: '', image_label: '' },
+      },
+    }] }))) as any
+    expect(parsed.environments[0].deployment_verification).toBeUndefined()
   })
 
   it('omits code_intelligence by default', () => {
@@ -115,9 +176,30 @@ describe('generateYAML', () => {
     expect(generateYAML(ctx)).toContain('code_intelligence:\n  enabled: true\n  provider: codegraph')
   })
 
+  it('emits frontend runtime identity as a workload without config-service bindings', () => {
+    const parsed = yaml.load(generateYAML(makeCtx({
+      repos: [{
+        name: 'base-frontend', url: 'git@example.com:base-frontend.git', role: 'frontend',
+        stack: 'node', framework: 'react', service_names: 'funhub-web', env_branches: { dev: 'dev' },
+      }],
+      allServiceNames: [],
+      runtimeWorkloadNames: ['funhub-web'],
+      activeSourceTypes: ['none'],
+    }))) as any
+
+    expect(parsed.repos[0].service_names).toEqual(['funhub-web'])
+    expect(parsed.resource_catalog.services).toBeUndefined()
+    expect(parsed.resource_catalog.workloads).toEqual([{
+      id: 'funhub-web',
+      repository: 'base-frontend',
+      names: { dev: 'funhub-web' },
+    }])
+  })
+
   it('emits only service topology overrides and excludes scan candidates', () => {
     const serviceTopology: ServiceTopologyState = {
       overrides: [
+        { action: 'add', scope: 'service', fromService: 'web', toService: 'catalog' },
         { action: 'confirm', fromService: 'web', toService: 'bff', protocol: 'http', method: 'GET', path: '/api/orders' },
         { action: 'reject', fromService: 'bff', toService: 'legacy', protocol: 'grpc', rpcMethod: 'legacy.Order/Get' },
         { action: 'add', fromService: 'bff', toService: 'order', protocol: 'http', method: 'POST', path: '/internal/orders' },
@@ -131,6 +213,7 @@ describe('generateYAML', () => {
     const parsed = yaml.load(generateYAML(makeCtx({ serviceTopology }))) as Record<string, any>
     expect(parsed.service_topology).toEqual({
       overrides: [
+        { action: 'add', scope: 'service', from_service: 'web', to_service: 'catalog' },
         { action: 'confirm', from_service: 'web', to_service: 'bff', protocol: 'http', method: 'GET', path: '/api/orders' },
         { action: 'reject', from_service: 'bff', to_service: 'legacy', protocol: 'grpc', rpc_method: 'legacy.Order/Get' },
         { action: 'add', from_service: 'bff', to_service: 'order', protocol: 'http', method: 'POST', path: '/internal/orders' },
@@ -138,6 +221,33 @@ describe('generateYAML', () => {
     })
     expect(JSON.stringify(parsed.service_topology)).not.toContain('runtime-only-endpoint')
     expect(JSON.stringify(parsed.service_topology)).not.toContain('candidate')
+  })
+
+  it('omits stale topology overrides from repository scan input without dropping service identity', () => {
+    const serviceTopology: ServiceTopologyState = {
+      overrides: [{
+        action: 'confirm',
+        fromService: 'base-frontend',
+        toService: 'base-backend-base',
+        scope: 'service',
+      }],
+    }
+    const output = generateYAML(makeCtx({
+      serviceTopology,
+      repos: [{
+        name: 'base-backend',
+        url: 'git@example.com:base-backend.git',
+        stack: 'go',
+        framework: '',
+        role: 'backend',
+        service_names: 'base-backend-base',
+        env_branches: { test: 'test' },
+      }],
+    }), { omitServiceTopology: true })
+    const parsed = yaml.load(output) as Record<string, any>
+
+    expect(parsed.service_topology).toBeUndefined()
+    expect(parsed.repos[0].service_names).toEqual(['base-backend-base'])
   })
 
   it('round-trips uppercase HTTP and gRPC override semantics through imported state', () => {
@@ -174,8 +284,8 @@ describe('generateYAML', () => {
     expect(parsed.agent.id).toBe('shop-troubleshooter') // 派生
     expect(parsed.environments[0].id).toBe('dev')
     expect(parsed.repos[0].name).toBe('order-service')
-    expect(parsed.infrastructure.config_center.type).toBe('nacos')
-    expect(parsed.generation.targets).toEqual(['openclaw'])
+    expect(parsed.infrastructure.config_centers[0]).toMatchObject({ id: 'nacos', type: 'nacos' })
+    expect(parsed.generation.targets).toEqual(['claude-code'])
     // preserve_on_regenerate 已删除;SOUL/USER/CHECKLIST 是模板派生、必须跟模板走
     expect(parsed.generation.preserve_on_regenerate).toBeUndefined()
   })
@@ -200,11 +310,62 @@ describe('generateYAML', () => {
     expect(ids).toEqual(['nacos', 'apollo'])
   })
 
+  it('keeps two same-type config source instances distinct', () => {
+    const parsed = yaml.load(generateYAML(makeCtx({
+      activeSourceTypes: ['nacos'],
+      sourceInstances: [{ id: 'nacos', type: 'nacos' }, { id: 'nacos-2', type: 'nacos' }],
+      isMultiSource: true,
+      sourceCreds: {
+        nacos: { creds: { dev: { addr: 'nacos-a:8848' } } },
+        'nacos-2': { creds: { dev: { addr: 'nacos-b:8848' } } },
+      },
+      getServiceSource: () => 'nacos-2',
+    }))) as any
+    expect(parsed.infrastructure.config_centers.map((item: any) => item.id)).toEqual(['nacos', 'nacos-2'])
+    expect(parsed.infrastructure.config_centers.map((item: any) => item.endpoints[0].addr))
+      .toEqual(['nacos-a:8848', 'nacos-b:8848'])
+    expect(parsed.resource_catalog.services[0].config_sources.dev).toBe('nacos-2')
+  })
+
+  it('emits stable IDs for multiple datastore instances of the same type', () => {
+    const parsed = yaml.load(generateYAML(makeCtx({
+      dataStoreTypes: { redis: 'redis', 'redis-2': 'redis' },
+      scannedDS: {
+        dev: { 'order-service': { redis: { url: 'redis://a' }, 'redis-2': { url: 'redis://b' } } },
+      },
+      toolSpecByKey: (_cat, key) => key === 'redis'
+        ? { key: 'redis', fields: [{ key: 'url', label: 'URL', secret: false, envVar: () => 'REDIS_URL_DEV' }] } as any
+        : undefined,
+    }))) as any
+    expect(parsed.infrastructure.data_stores.map((item: any) => [item.id, item.type]))
+      .toEqual([['redis', 'redis'], ['redis-2', 'redis']])
+    expect(parsed.resource_catalog.services[0].data_stores.dev).toEqual(['redis', 'redis-2'])
+  })
+
+  it('emits environment-specific service bindings in the formal resource catalog', () => {
+    const parsed = yaml.load(generateYAML(makeCtx({
+      environments: [
+        { id: 'dev', api_domain: 'dev', web_domain: '', is_prod: false },
+        { id: 'prod', api_domain: 'prod', web_domain: '', is_prod: true },
+      ],
+      activeSourceTypes: ['nacos', 'kuboard'],
+      isMultiSource: true,
+      sourceCreds: { nacos: { creds: {} }, kuboard: { creds: {} } },
+      CC_FIELDS_BY_TYPE: { nacos: [], kuboard: [] },
+      getServiceSource: (_svc, envID) => envID === 'prod' ? 'kuboard' : 'nacos',
+    }))) as any
+
+    const service = parsed.resource_catalog.services.find((item: any) => item.id === 'order-service')
+    expect(service.config_sources).toEqual({ dev: 'nacos', prod: 'kuboard' })
+    expect(parsed.repos[0].config_source).toBeUndefined()
+    expect(parsed.meta.schema_version).toBe('0.2')
+  })
+
   it('never emits preserve_on_regenerate (field deleted; template-derived files always follow template)', () => {
     // preserve_on_regenerate 已彻底删除。SOUL/USER/CHECKLIST 是模板渲染产物,
     // 整文件 preserve 反而让模板更新被静默吞掉,改成始终按模板覆盖。
     const out = generateYAML(makeCtx({
-      enabledTargets: { openclaw: false, 'claude-code': true, cursor: false, codex: false },
+      enabledTargets: { 'claude-code': true, cursor: false, codex: false },
     }))
     const parsed = yaml.load(out) as any
     expect(parsed.generation.targets).toEqual(['claude-code'])
@@ -217,7 +378,7 @@ describe('generateYAML', () => {
     expect(parsed.infrastructure.config_center.type).toBe('none')
   })
 
-  it('emits target_models only when openclaw value differs from agent.model', () => {
+  it('does not emit retired runtime model settings from old drafts', () => {
     const ctxSame = makeCtx({
       agent: { id: '', name: '', workspace_name: '', model: 'anthropic/claude-opus-4' },
       targetModels: { openclaw: 'anthropic/claude-opus-4' },
@@ -230,7 +391,8 @@ describe('generateYAML', () => {
       targetModels: { openclaw: 'anthropic/claude-sonnet-4' },
     })
     const diffYaml = yaml.load(generateYAML(ctxDiff)) as any
-    expect(diffYaml.agent.target_models.openclaw).toBe('anthropic/claude-sonnet-4')
+    expect(diffYaml.agent.target_models).toBeUndefined()
+    expect(diffYaml.agent.model).toBeUndefined()
   })
 
   it('emits one2all k8s_runtime provider from tool inputs', () => {
@@ -261,9 +423,121 @@ describe('generateYAML', () => {
     const rt = parsed.infrastructure.observability.k8s_runtime
     expect(rt.provider).toBe('one2all')
     expect(rt.endpoints[0].url).toBe('http://one2all/mcp/hash')
-    expect(rt.endpoints[0].api_key).toBe('o2a_secret')
+    expect(rt.endpoints[0].api_key).toBe('{{ONE2ALL_TOKEN}}')
+    expect(out).not.toContain('o2a_secret')
     expect(rt.service_map[0].cluster_id).toBe('1')
     expect(rt.service_map[0].cluster).toBeUndefined()
+  })
+
+  it('exports a portable YAML with config-center, observability, and data-store credentials', () => {
+    const ctx = makeCtx({
+      activeSourceTypes: ['one2all'],
+      sourceCreds: {
+        one2all: { creds: { _shared_: { mcp_url: 'http://one2all/mcp/hash', token: 'source-token' } } },
+      },
+      CC_FIELDS_BY_TYPE: {
+        one2all: [
+          { key: 'mcp_url', label: 'MCP URL', secret: false, envVar: () => 'ONE2ALL_MCP_URL' },
+          { key: 'token', label: 'Token', secret: true, envVar: () => 'ONE2ALL_TOKEN' },
+        ],
+      },
+      enabledObservability: { k8s_runtime: true },
+      OBS_TOOL_SPECS: [{
+        key: 'k8s_runtime',
+        fields: [
+          { key: 'provider', label: 'Provider', secret: false, envVar: () => '', uiOnly: true },
+          { key: 'url', label: 'MCP URL', secret: false, envVar: () => 'ONE2ALL_MCP_URL' },
+          { key: 'api_key', label: 'Token', secret: true, envVar: () => 'ONE2ALL_TOKEN' },
+        ],
+      }],
+      toolInputs: {
+        'obs:k8s_runtime:dev:provider': 'one2all',
+        'obs:k8s_runtime:dev:url': 'http://one2all/mcp/hash',
+        'obs:k8s_runtime:dev:api_key': 'runtime-token',
+      },
+      scannedDS: {
+        dev: {
+          'order-service': {
+            doris: { dsn: 'user:pass@tcp(doris-fe:9030)/warehouse' },
+          },
+        },
+      },
+      toolSpecByKey: (_cat, key) => key === 'doris'
+        ? {
+            key: 'doris',
+            fields: [
+              { key: 'dsn', label: 'DSN', secret: true, envVar: () => 'DORIS_DSN_DEV' },
+            ],
+          }
+        : undefined,
+    })
+
+    const preview = generateYAML(ctx)
+    expect(preview).not.toContain('source-token')
+    expect(preview).not.toContain('runtime-token')
+    expect(preview).not.toContain('user:pass@tcp')
+
+    const portable = generateYAML(ctx, { includeSecrets: true })
+    const parsed = yaml.load(portable) as any
+    expect(parsed.infrastructure.config_centers[0].endpoints[0].token).toBe('source-token')
+    expect(parsed.infrastructure.observability.k8s_runtime.endpoints[0].api_key).toBe('runtime-token')
+    expect(parsed.infrastructure.data_stores[0].endpoints[0].dsn)
+      .toBe('user:pass@tcp(doris-fe:9030)/warehouse')
+    expect(portable).toContain('包含可直接部署的明文凭据')
+    expect(unresolvedYAMLPlaceholders(portable)).toEqual([])
+  })
+
+  it('reports unresolved values and omits empty optional fields from portable YAML', () => {
+    const portable = generateYAML(makeCtx({
+      sourceCreds: { nacos: { creds: { dev: { addr: '' } } } },
+      CC_FIELDS_BY_TYPE: {
+        nacos: [
+          { key: 'addr', label: 'Nacos 地址', secret: false, envVar: () => 'CC_ADDR_DEV' },
+          { key: 'pass', label: '密码', secret: true, optional: true, envVar: () => 'CC_PASS_DEV' },
+        ],
+      },
+    }), { includeSecrets: true })
+
+    expect(unresolvedYAMLPlaceholders(portable)).toEqual(['CC_ADDR_DEV_NACOS'])
+    expect(portable).not.toContain('CC_PASS_DEV')
+  })
+
+  it('emits the Kuboard config-source connection reused by K8s runtime', () => {
+    const out = generateYAML(makeCtx({
+      enabledObservability: { k8s_runtime: true },
+      deriveSkillsWhitelist: () => ['routing', 'k8s-runtime-query'],
+      activeSourceTypes: ['kuboard'],
+      sourceCreds: {
+        kuboard: { creds: { dev: { url: 'http://kuboard', access_key: 'shared-secret', mcp_url: 'http://kuboard/mcp' } } },
+      },
+      OBS_TOOL_SPECS: [{
+        key: 'k8s_runtime',
+        fields: [
+          { key: 'provider', label: 'Provider', secret: false, envVar: () => '', uiOnly: true },
+          { key: 'url', label: 'URL', secret: false, envVar: () => 'KUBOARD_URL' },
+          { key: 'mcp_url', label: 'MCP URL', secret: false, envVar: () => 'KUBOARD_MCP_URL', optional: true },
+          { key: 'access_key', label: 'Access key', secret: true, envVar: () => 'KUBOARD_ACCESS_KEY' },
+        ],
+      }],
+      k8sRuntimeEnvLoc: { dev: { cluster: 'dev', namespace: 'default' } },
+      k8sRuntimeSvcMap: { 'dev::order-service': { workload: 'order-service' } },
+    }))
+    const parsed = yaml.load(out) as any
+    const endpoint = parsed.infrastructure.observability.k8s_runtime.endpoints[0]
+    expect(endpoint).toMatchObject({ env: 'dev', url: 'http://kuboard', access_key: '{{KUBOARD_ACCESS_KEY}}', mcp_url: 'http://kuboard/mcp' })
+    expect(out).not.toContain('shared-secret')
+  })
+
+  it('keeps optional native Kuboard MCP URLs out of legacy YAML', () => {
+    const ctx = makeCtx({ activeSourceTypes: ['kuboard'], sourceCreds: { kuboard: { creds: { dev: { url: 'http://kuboard' } } } },
+      CC_FIELDS_BY_TYPE: { kuboard: [
+        { key: 'url', label: 'URL', secret: false, envVar: () => 'KUBOARD_URL' },
+        { key: 'mcp_url', label: 'MCP', secret: false, envVar: () => 'KUBOARD_MCP_URL', optional: true },
+      ] },
+    })
+    expect(generateYAML(ctx)).not.toContain('KUBOARD_MCP_URL')
+    ctx.sourceCreds.kuboard!.creds.dev!.mcp_url = 'http://kuboard/mcp'
+    expect(generateYAML(ctx)).toContain('mcp_url: "http://kuboard/mcp"')
   })
 
   it('emits Doris data store endpoints from scannedDS', () => {
@@ -289,7 +563,35 @@ describe('generateYAML', () => {
     const doris = parsed.infrastructure.data_stores.find((ds: any) => ds.type === 'doris')
     expect(doris.enabled).toBe(true)
     expect(doris.endpoints[0].service).toBe('order-service')
-    expect(doris.endpoints[0].dsn).toBe('user:pass@tcp(doris-fe:9030)/warehouse')
+    expect(doris.id).toBe('doris')
+    expect(doris.endpoints[0].dsn).toBe('{{DORIS_DSN_DEV}}')
+    expect(out).not.toContain('user:pass@tcp(doris-fe:9030)/warehouse')
     expect(parsed.generation.skills_whitelist).toContain('doris-runtime-query')
+  })
+})
+
+
+describe('SkyWalking authentication', () => {
+  it('keeps passwords out of previews and preserves them in explicit deploy exports', () => {
+    const ctx = makeCtx({
+      enabledObservability: { skywalking: true },
+      OBS_TOOL_SPECS: [{key: 'skywalking', fields: [
+        {key: 'url', label: 'OAP URL', secret: false, envVar: () => 'SKYWALKING_URL_DEV'},
+        {key: 'user', label: '用户名', secret: false, envVar: () => 'SKYWALKING_USER_DEV'},
+        {key: 'pass', label: '密码', secret: true, envVar: () => 'SKYWALKING_PASS_DEV'},
+      ]}],
+      toolInputs: {
+        'obs:skywalking:dev:url': 'https://oap.example',
+        'obs:skywalking:dev:user': 'audit',
+        'obs:skywalking:dev:pass': 'fixture-password',
+      },
+    })
+    const preview = generateYAML(ctx)
+    expect(preview).not.toContain('fixture-password')
+    expect(preview).toContain('{{SKYWALKING_PASS_DEV}}')
+    const exported = yaml.load(generateYAML(ctx, {includeSecrets: true})) as any
+    expect(exported.infrastructure.observability.skywalking.endpoints[0]).toMatchObject({
+      env: 'dev', url: 'https://oap.example', user: 'audit', pass: 'fixture-password',
+    })
   })
 })

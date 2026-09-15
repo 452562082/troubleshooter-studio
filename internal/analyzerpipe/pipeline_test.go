@@ -3,6 +3,7 @@ package analyzerpipe
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,6 +12,20 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 )
+
+func TestTopologyServiceHostsIncludesAllFrontendApplications(t *testing.T) {
+	hosts := topologyServiceHosts(config.RoleFrontend, []config.Environment{{
+		WebDomain: "legacy.test",
+		FrontendEntries: []config.FrontendEntry{
+			{ID: "consumer", Name: "C 端", URL: "https://m.test/app"},
+			{ID: "admin", Name: "管理端", URL: "https://admin.test/console"},
+		},
+	}})
+	want := []string{"https://admin.test/console", "https://m.test/app", "legacy.test"}
+	if !reflect.DeepEqual(hosts, want) {
+		t.Fatalf("hosts=%v want=%v", hosts, want)
+	}
+}
 
 func TestRun_ServiceTopologyBuildsThreeRepositoryChain(t *testing.T) {
 	repoPaths, cfg := serviceTopologyFixture(t)
@@ -170,6 +185,23 @@ func routes(r *Router) {
 	}
 }
 
+func TestAssignTopologyEndpointServicesUsesMonorepoEntryOwnership(t *testing.T) {
+	endpoints := []topology.Endpoint{
+		{Repo: "base-frontend", Direction: topology.DirectionOutbound, Protocol: "http", Method: "GET", Path: "/api/main", Location: "frontend/base/service.ts:12"},
+		{Repo: "base-frontend", Direction: topology.DirectionOutbound, Protocol: "http", Method: "POST", Path: "/api/docs", Location: "packages/document/src/search.ts:8"},
+	}
+	got := assignTopologyEndpointServices(endpoints,
+		[]string{"base-frontend", "base-frontend-document"},
+		map[string]string{"base-frontend": ".", "base-frontend-document": "packages/document"},
+	)
+	if len(got) != 2 {
+		t.Fatalf("assigned endpoints=%#v, want exactly one owner per source endpoint", got)
+	}
+	if got[0].Service != "base-frontend" || got[1].Service != "base-frontend-document" {
+		t.Fatalf("entry ownership=%#v", got)
+	}
+}
+
 func serviceTopologyFixture(t *testing.T) (map[string]string, *config.SystemConfig) {
 	t.Helper()
 	root := t.TempDir()
@@ -177,7 +209,7 @@ func serviceTopologyFixture(t *testing.T) (map[string]string, *config.SystemConf
 	bff := filepath.Join(root, "mall-bff")
 	order := filepath.Join(root, "mall-order")
 	writeTopologyFixtureFile(t, filepath.Join(web, "package.json"), `{"name":"mall-web","dependencies":{"axios":"1.0.0"}}`)
-	writeTopologyFixtureFile(t, filepath.Join(web, "src", "orders.ts"), `axios.get("https://mall-bff/api/orders")`)
+	writeTopologyFixtureFile(t, filepath.Join(web, "src", "orders.ts"), `httpClient.request({url: "/api/orders", method: "GET"})`)
 	writeTopologyFixtureFile(t, filepath.Join(bff, "composer.json"), `{}`)
 	writeTopologyFixtureFile(t, filepath.Join(bff, "routes.php"), `
 <?php
@@ -357,7 +389,7 @@ func main() {
 	if len(routes) != 1 {
 		t.Fatalf("APIRoutes = %#v", routes)
 	}
-	if routes[0].Path != "/api/orders/:id" || routes[0].Method != "GET" {
+	if routes[0].Path != "/api/orders/:id" || routes[0].Method != http.MethodGet {
 		t.Fatalf("route = %#v", routes[0])
 	}
 	if len(result.PerRepo) != 1 || result.PerRepo[0].Status != "analyzed" {

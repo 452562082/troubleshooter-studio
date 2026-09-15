@@ -122,6 +122,13 @@ go:test:
         - go.sum
     paths:
       - .cache/go-mod
+  # Go 拓扑集成测试会执行生成的 Python 查询脚本；其他 job 的依赖不共享。
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends python3 python3-venv
+    - /usr/bin/python3 -m venv "$CI_PROJECT_DIR/.cache/go-test-python"
+    - export PATH="$CI_PROJECT_DIR/.cache/go-test-python/bin:$PATH"
+    - python3 -m pip install --no-cache-dir -r scripts/requirements-test.txt
+    - python3 -c "import yaml, requests"
   script:
     - go build ./...
     - go install golang.org/x/vuln/cmd/govulncheck@v1.5.0

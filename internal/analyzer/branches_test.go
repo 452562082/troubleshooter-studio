@@ -16,7 +16,11 @@ func TestListBranchesPreservesSlashesAndOnlyStripsRemoteName(t *testing.T) {
 	runGitForBranchesTest(t, repo, "branch", "feature/xiaolong_v1.4")
 	runGitForBranchesTest(t, repo, "remote", "add", "origin", filepath.Join(t.TempDir(), "remote.git"))
 	runGitForBranchesTest(t, repo, "remote", "add", "team", filepath.Join(t.TempDir(), "team.git"))
-	runGitForBranchesTest(t, repo, "remote", "add", "team/upstream", filepath.Join(t.TempDir(), "upstream.git"))
+	// Newer Git rejects overlapping remote names in `remote add`. Older
+	// repositories can still contain them, so construct that legacy config
+	// directly and keep exercising longest-remote-prefix matching.
+	runGitForBranchesTest(t, repo, "config", "remote.team/upstream.url", filepath.Join(t.TempDir(), "upstream.git"))
+	runGitForBranchesTest(t, repo, "config", "remote.team/upstream.fetch", "+refs/heads/*:refs/remotes/team/upstream/*")
 	runGitForBranchesTest(t, repo, "update-ref", "refs/remotes/origin/feature/remote-only", "HEAD")
 	runGitForBranchesTest(t, repo, "update-ref", "refs/remotes/origin/main", "HEAD")
 	runGitForBranchesTest(t, repo, "update-ref", "refs/remotes/team/upstream/feature/nested-remote", "HEAD")

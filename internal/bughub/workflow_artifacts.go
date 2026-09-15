@@ -173,7 +173,7 @@ func registerArtifactWithHooks(ctx context.Context, store *CaseStore, input Arti
 	if err != nil {
 		return EvidenceArtifact{}, err
 	}
-	defer publication.Close()
+	defer func() { _ = publication.Close() }()
 	artifact := EvidenceArtifact{
 		ID:     deterministicWorkflowID("artifact:" + input.CaseID + ":" + input.AttemptID + ":" + input.Kind + ":" + captured.SHA256),
 		CaseID: input.CaseID, AttemptID: input.AttemptID, Kind: input.Kind,

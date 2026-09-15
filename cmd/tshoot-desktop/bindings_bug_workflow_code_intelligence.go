@@ -21,7 +21,7 @@ var invalidateIncidentCodeGraph = agent.InvalidateCodeGraphIndexCache
 func (r caseCodeIntelligenceResolver) ResolveCodeIntelligence(ctx context.Context, incident bughub.IncidentCase) (bughub.CodeIntelligenceManifest, error) {
 	manifest := bughub.CodeIntelligenceManifest{Version: 1, Provider: "codegraph", PreparedAt: time.Now().UTC()}
 	if r.app == nil {
-		return manifest, errors.New("Studio workflow is unavailable")
+		return manifest, errors.New("studio workflow is unavailable")
 	}
 	loader := r.app.workflowLoadDeploymentConfig
 	if loader == nil {
@@ -29,7 +29,7 @@ func (r caseCodeIntelligenceResolver) ResolveCodeIntelligence(ctx context.Contex
 	}
 	cfg, err := loader(ctx, incident)
 	if err != nil || cfg == nil || cfg.System.ID != incident.SystemID {
-		return manifest, errors.New("Case robot configuration is unavailable")
+		return manifest, errors.New("case robot configuration is unavailable")
 	}
 	if !cfg.CodeIntelligence.UsesCodeGraph() {
 		manifest.Provider = ""

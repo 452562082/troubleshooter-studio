@@ -16,8 +16,8 @@ func TestMaterializeCodeIntelligenceUsesHostPreparedManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer staging.Close()
-	defer staging.Cleanup()
+	defer func() { _ = staging.Close() }()
+	defer func() { _ = staging.Cleanup() }()
 
 	runner := NewAgentPhaseRunner(nil, nil, nil, root, nil)
 	manifest, prompt, err := runner.materializeCodeIntelligence(context.Background(), PhaseAttempt{Phase: PhaseInvestigation}, IncidentCase{Environment: "test"}, staging, CodeIntelligenceResolverFunc(func(context.Context, IncidentCase) (CodeIntelligenceManifest, error) {

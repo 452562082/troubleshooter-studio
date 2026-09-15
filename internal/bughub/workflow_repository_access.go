@@ -115,7 +115,7 @@ func (r *AgentPhaseRunner) materializeRepositoryAccess(ctx context.Context, atte
 func validateInvestigationRemediationRepositories(staging attemptEvidenceStaging, finalYAML string) ([]string, []string, error) {
 	result, err := ParseInvestigationResult([]byte(finalYAML))
 	if err != nil || result.InvestigationStatus != "root_cause_ready" || !result.UsesCodeFixWorkflow() {
-		return nil, nil, nil
+		return nil, nil, nil //nolint:nilerr // ParsePhaseResult reports malformed output as invalid_phase_result; this preflight only checks valid code-fix repositories.
 	}
 	data, err := os.ReadFile(filepath.Join(staging.Path(), repositoryAccessManifestName))
 	if err != nil {

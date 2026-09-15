@@ -1109,7 +1109,7 @@ func TestResetCaseWithReplacementRedactsStoredRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	count := 0
 	for rows.Next() {
 		count++
@@ -1249,7 +1249,7 @@ func snapshotRows(t *testing.T, store *CaseStore, query string, args ...any) [][
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	columns, err := rows.Columns()
 	if err != nil {
 		t.Fatal(err)

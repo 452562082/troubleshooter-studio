@@ -1,11 +1,12 @@
 package generator
 
 import (
-	"gopkg.in/yaml.v3"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestGenerateOpenCodeRoles(t *testing.T) {

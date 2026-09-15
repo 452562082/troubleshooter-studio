@@ -27,15 +27,9 @@ func targetResultStream(t *testing.T, target, report string) string {
 	default:
 		t.Fatal("unknown test target")
 	}
-	data, err := json.MarshalIndent(payload, "", "  ")
+	data, err := json.Marshal(payload)
 	if err != nil {
 		t.Fatal(err)
-	}
-	{
-		data, err = json.Marshal(payload)
-		if err != nil {
-			t.Fatal(err)
-		}
 	}
 	return string(data) + "\n"
 }

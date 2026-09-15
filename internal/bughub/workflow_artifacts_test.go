@@ -356,12 +356,12 @@ func TestRegisterArtifactContentAddressIgnoresExtensionAndConcurrentRoot(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Close()
+	defer func() { _ = first.Close() }()
 	second, err := OpenCaseStore(databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer second.Close()
+	defer func() { _ = second.Close() }()
 	createTestCase(t, first, "case-content-address")
 	attempt := validRunningAttempt("attempt-content-address", "case-content-address")
 	if err := first.CreateAttempt(ctx, attempt); err != nil {
@@ -483,12 +483,12 @@ func TestRegisterArtifactConcurrentDuplicateAcrossStoreHandles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Close()
+	defer func() { _ = first.Close() }()
 	second, err := OpenCaseStore(databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer second.Close()
+	defer func() { _ = second.Close() }()
 	createTestCase(t, first, "case-handles")
 	attempt := validRunningAttempt("attempt-handles", "case-handles")
 	if err := first.CreateAttempt(ctx, attempt); err != nil {

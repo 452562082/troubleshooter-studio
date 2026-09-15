@@ -116,11 +116,12 @@ func normalizeOverride(override Override) Override {
 		return override
 	}
 	override.Protocol = normalizedProtocol(override.Protocol)
-	if override.Protocol == "http" {
+	switch override.Protocol {
+	case "http":
 		override.Method = NormalizeHTTPMethod(override.Method)
 		override.Path = NormalizePath(override.Path)
 		override.RPCMethod = ""
-	} else if override.Protocol == "grpc" {
+	case "grpc":
 		override.Method = ""
 		override.Path = ""
 		override.RPCMethod = normalizeRPCMethod(override.RPCMethod)
@@ -162,9 +163,10 @@ func semanticEdgeKey(from, to, protocol, method, path, rpcMethod string) string 
 	method = NormalizeHTTPMethod(method)
 	path = NormalizePath(path)
 	rpcMethod = normalizeRPCMethod(rpcMethod)
-	if protocol == "http" {
+	switch protocol {
+	case "http":
 		rpcMethod = ""
-	} else if protocol == "grpc" {
+	case "grpc":
 		method = ""
 		path = ""
 	}

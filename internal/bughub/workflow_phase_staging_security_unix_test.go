@@ -16,8 +16,8 @@ func TestCaptureAttemptStagedArtifactRejectsOversizedDeclaredAndReadContent(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer staging.Close()
-	defer staging.Cleanup()
+	defer func() { _ = staging.Close() }()
+	defer func() { _ = staging.Cleanup() }()
 
 	oversized := filepath.Join(staging.Path(), "oversized.bin")
 	file, err := os.OpenFile(oversized, os.O_CREATE|os.O_WRONLY, 0o600)
@@ -118,7 +118,7 @@ func TestAttemptEvidenceStagingDescriptorSurvivesDirectoryReplacement(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer staging.Close()
+	defer func() { _ = staging.Close() }()
 	if err := os.WriteFile(filepath.Join(staging.Path(), "proof.txt"), []byte("owned"), 0o600); err != nil {
 		t.Fatal(err)
 	}

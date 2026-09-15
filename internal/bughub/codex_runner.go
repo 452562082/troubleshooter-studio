@@ -338,7 +338,7 @@ func ensureCodexAgentRuntimeHome(bot BotRef) (string, string, error) {
 		return "", "", nil
 	}
 	if strings.ContainsAny(agentID, "/\\\x00") || agentID == "." || agentID == ".." {
-		return "", "", errors.New("Codex agent id is invalid")
+		return "", "", errors.New("codex agent id is invalid")
 	}
 	codexHome := filepath.Dir(skillsDir)
 	runtimeHome := filepath.Join(codexHome, "tshoot-runtimes", agentID)
@@ -353,13 +353,13 @@ func ensureCodexAgentRuntimeHome(bot BotRef) (string, string, error) {
 	agentPath := filepath.Join(codexHome, "agents", agentID+".toml")
 	raw, err := os.ReadFile(agentPath)
 	if err != nil {
-		return "", "", fmt.Errorf("Codex runtime config source is missing; re-apply agent %q: %w", agentID, err)
+		return "", "", fmt.Errorf("codex runtime config source is missing; re-apply agent %q: %w", agentID, err)
 	}
 	text := string(raw)
 	begin := strings.Index(text, generator.CodexMCPRegionBegin)
 	end := strings.Index(text, generator.CodexMCPRegionEnd)
 	if begin < 0 || end < begin {
-		return "", "", fmt.Errorf("Codex runtime config source is invalid and agent %q has no managed MCP region; re-apply the robot", agentID)
+		return "", "", fmt.Errorf("codex runtime config source is invalid and agent %q has no managed MCP region; re-apply the robot", agentID)
 	}
 	bodyStart := begin + len(generator.CodexMCPRegionBegin)
 	body := strings.TrimSpace(text[bodyStart:end])
@@ -367,7 +367,7 @@ func ensureCodexAgentRuntimeHome(bot BotRef) (string, string, error) {
 	configPath := filepath.Join(runtimeHome, "config.toml")
 	if info, err := os.Lstat(configPath); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return "", "", fmt.Errorf("Codex runtime config %s is not a regular file", configPath)
+			return "", "", fmt.Errorf("codex runtime config %s is not a regular file", configPath)
 		}
 	} else if !os.IsNotExist(err) {
 		return "", "", err
@@ -398,7 +398,7 @@ func ensureCodexAgentRuntimeHome(bot BotRef) (string, string, error) {
 func ensureCodexRuntimeDirectory(path string) error {
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("Codex runtime home %s is not a directory", path)
+			return fmt.Errorf("codex runtime home %s is not a directory", path)
 		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect Codex runtime home %s: %w", path, err)
@@ -414,7 +414,7 @@ func ensureCodexRuntimeDirectory(path string) error {
 func ensureCodexRuntimeLink(path, target string) error {
 	if info, err := os.Lstat(path); err == nil {
 		if info.Mode()&os.ModeSymlink == 0 {
-			return fmt.Errorf("Codex runtime shared path %s is not a symlink", path)
+			return fmt.Errorf("codex runtime shared path %s is not a symlink", path)
 		}
 		linked, err := os.Readlink(path)
 		if err != nil {
@@ -424,7 +424,7 @@ func ensureCodexRuntimeLink(path, target string) error {
 			linked = filepath.Join(filepath.Dir(path), linked)
 		}
 		if filepath.Clean(linked) != filepath.Clean(target) {
-			return fmt.Errorf("Codex runtime link %s points outside the managed target", path)
+			return fmt.Errorf("codex runtime link %s points outside the managed target", path)
 		}
 		return nil
 	} else if !os.IsNotExist(err) {
@@ -650,12 +650,12 @@ func codexFilesystemPermissionConfig(workspace, prompt string, imagePaths []stri
 	staging := codexStagingPathFromPrompt(prompt)
 	if staging != "" {
 		if !filepath.IsAbs(staging) {
-			return "", errors.New("Studio evidence staging path must be absolute")
+			return "", errors.New("studio evidence staging path must be absolute")
 		}
 		staging = filepath.Clean(staging)
 		info, err := os.Stat(staging)
 		if err != nil || !info.IsDir() {
-			return "", fmt.Errorf("Studio evidence staging path is unavailable: %s", staging)
+			return "", fmt.Errorf("studio evidence staging path is unavailable: %s", staging)
 		}
 		roots[staging] = "write"
 		manifestPath := filepath.Join(staging, repositoryAccessManifestName)
@@ -699,7 +699,7 @@ func codexFilesystemPermissionConfig(workspace, prompt string, imagePaths []stri
 	for _, imagePath := range imagePaths {
 		path := filepath.Clean(strings.TrimSpace(imagePath))
 		if path == "." || !filepath.IsAbs(path) {
-			return "", errors.New("Codex attachment path must be absolute")
+			return "", errors.New("codex attachment path must be absolute")
 		}
 		roots[path] = "read"
 	}
@@ -1064,31 +1064,6 @@ func (i *CodexInvestigator) Wait(runID string) (InvestigationRun, error) {
 	return i.store.Get(runID)
 }
 
-func fieldFromLooseEnvLabel(text, key string) string {
-	lower := strings.ToLower(text)
-	key = strings.ToLower(key)
-	idx := strings.Index(lower, key)
-	if idx < 0 {
-		return ""
-	}
-	rest := strings.TrimSpace(text[idx+len(key):])
-	rest = strings.TrimLeft(rest, " :=：")
-	for _, sep := range []string{",", "，", "|", ";", "；"} {
-		if cut := strings.Index(rest, sep); cut >= 0 {
-			rest = rest[:cut]
-		}
-	}
-	return strings.TrimSpace(rest)
-}
-
-func nonDash(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" || value == "-" {
-		return ""
-	}
-	return value
-}
-
 func formatFixFinalReport(report string) string {
 	report = strings.TrimSpace(strings.ReplaceAll(report, `\n`, "\n"))
 	if report == "" {
@@ -1174,14 +1149,6 @@ func yamlScalar(report, key string) string {
 		return strings.Trim(value, "`\"'")
 	}
 	return ""
-}
-
-func yamlNestedScalar(report, parent, key string) string {
-	block := yamlRawBlock(report, parent)
-	if block == "" {
-		return ""
-	}
-	return yamlScalar(block, key)
 }
 
 func yamlBlockSummary(report, key string) string {
@@ -1279,11 +1246,11 @@ func applyPhaseStagingEnvironment(cmd *exec.Cmd, prompt string) error {
 		return nil
 	}
 	if !filepath.IsAbs(staging) {
-		return errors.New("Studio evidence staging path must be absolute")
+		return errors.New("studio evidence staging path must be absolute")
 	}
 	info, err := os.Stat(staging)
 	if err != nil || !info.IsDir() {
-		return errors.New("Studio evidence staging directory is unavailable")
+		return errors.New("studio evidence staging directory is unavailable")
 	}
 	if cmd.Env == nil {
 		cmd.Env = os.Environ()

@@ -43,7 +43,7 @@ func TestOpenCodeLocalProtocolLive(t *testing.T) {
 			Stream bool `json:"stream"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			http.Error(w, "invalid request", 400)
+			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
 		raw, _ := json.Marshal(request.Messages)
@@ -58,7 +58,7 @@ func TestOpenCodeLocalProtocolLive(t *testing.T) {
 		n := calls
 		mu.Unlock()
 		if n > 12 {
-			http.Error(w, "unexpected model loop", 500)
+			http.Error(w, "unexpected model loop", http.StatusInternalServerError)
 			return
 		}
 		toolCount := 0

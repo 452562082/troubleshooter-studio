@@ -41,12 +41,12 @@ func openAttemptEvidenceStaging(root, attemptID string) (attemptEvidenceStaging,
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(rootFD)
+	defer func() { _ = unix.Close(rootFD) }()
 	stagingFD, err := openOrCreateDirectoryAt(rootFD, ".staging")
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(stagingFD)
+	defer func() { _ = unix.Close(stagingFD) }()
 	if err := unix.Fchmod(stagingFD, 0o700); err != nil {
 		return nil, fmt.Errorf("secure evidence staging root: %w", err)
 	}
@@ -120,12 +120,12 @@ func openExistingAttemptEvidenceStaging(root, attemptID, locator string) (attemp
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(rootFD)
+	defer func() { _ = unix.Close(rootFD) }()
 	stagingFD, err := unix.Openat(rootFD, ".staging", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open fix checkpoint staging root: %w", err)
 	}
-	defer unix.Close(stagingFD)
+	defer func() { _ = unix.Close(stagingFD) }()
 	fd, err := unix.Openat(stagingFD, locator, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open fix checkpoint staging directory: %w", err)
@@ -150,7 +150,7 @@ func sweepTerminalFixStaging(root string, terminalAttemptIDs []string) error {
 	if err != nil {
 		return err
 	}
-	defer unix.Close(rootFD)
+	defer func() { _ = unix.Close(rootFD) }()
 	stagingFD, err := unix.Openat(rootFD, ".staging", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if errors.Is(err, unix.ENOENT) {
 		return nil
@@ -158,7 +158,7 @@ func sweepTerminalFixStaging(root string, terminalAttemptIDs []string) error {
 	if err != nil {
 		return err
 	}
-	defer unix.Close(stagingFD)
+	defer func() { _ = unix.Close(stagingFD) }()
 	duplicate, err := unix.Dup(stagingFD)
 	if err != nil {
 		return err

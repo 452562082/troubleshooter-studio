@@ -101,7 +101,7 @@ func (s *CaseStore) SaveCompletionIntentIfRunning(ctx context.Context, command C
 	if err != nil {
 		return fmt.Errorf("begin completion intent save: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var caseID, status, existing, inputJSON string
 	var phase Phase
 	if err := tx.QueryRowContext(ctx, `SELECT case_id,status,output_json,phase,input_json FROM phase_attempts WHERE id=?`, command.AttemptID).Scan(&caseID, &status, &existing, &phase, &inputJSON); err != nil {

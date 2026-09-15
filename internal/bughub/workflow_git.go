@@ -19,7 +19,7 @@ var (
 	ErrGitDetachedHEAD          = errors.New("repository is on a detached HEAD")
 	ErrGitRemoteNotSSH          = errors.New("push remote is not SSH")
 	ErrGitMergeConflict         = errors.New("git merge would conflict")
-	ErrStudioWorktree           = errors.New("Studio dedicated worktree is invalid")
+	ErrStudioWorktree           = errors.New("studio dedicated worktree is invalid")
 	ErrFixRemoteMismatch        = errors.New("remote fix branch does not match the checkpoint")
 	ErrFixInspectionUnavailable = errors.New("remote fix inspection is temporarily unavailable")
 )
@@ -292,9 +292,13 @@ func (s *GitIntegrationService) inspectRepo(ctx context.Context, caseID string, 
 	cmd.Env = gitEnvironment()
 	output, mergeErr := cmd.CombinedOutput()
 	if mergeErr != nil {
-		result.Conflict = true
 		result.Error = strings.TrimSpace(string(output))
-		return result, nil
+		var exitErr *exec.ExitError
+		if errors.As(mergeErr, &exitErr) && exitErr.ExitCode() == 1 {
+			result.Conflict = true
+			return result, nil //nolint:nilerr // merge-tree exit 1 is the inspected conflict result, not a failed inspection.
+		}
+		return result, fmt.Errorf("inspect merge tree: %w", mergeErr)
 	}
 	return result, nil
 }
@@ -343,7 +347,7 @@ func (s *GitIntegrationService) mergeRepo(ctx context.Context, req MergeRequest,
 	} else if statErr != nil {
 		return inspection, statErr
 	} else if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return inspection, errors.New("Studio worktree path is not a real directory")
+		return inspection, errors.New("studio worktree path is not a real directory")
 	} else if _, gitErr := os.Lstat(filepath.Join(worktree, ".git")); gitErr != nil {
 		return inspection, errors.New("existing Studio worktree is not registered with Git")
 	}
@@ -587,7 +591,7 @@ func isFullGitObjectID(value string) bool {
 		return false
 	}
 	for _, ch := range value {
-		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') && (ch < 'A' || ch > 'F') {
 			return false
 		}
 	}
@@ -604,7 +608,7 @@ func (s *GitIntegrationService) worktreePath(caseID, repo, targetHead, fixCommit
 
 func prepareStudioWorktreeRoot(root string) error {
 	if strings.TrimSpace(root) == "" {
-		return errors.New("Studio worktree root is required")
+		return errors.New("studio worktree root is required")
 	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return err
@@ -614,7 +618,7 @@ func prepareStudioWorktreeRoot(root string) error {
 		return err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return errors.New("Studio worktree root must be a real directory")
+		return errors.New("studio worktree root must be a real directory")
 	}
 	return os.Chmod(root, 0o700)
 }

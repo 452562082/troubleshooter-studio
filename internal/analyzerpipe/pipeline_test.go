@@ -3,6 +3,7 @@ package analyzerpipe
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -388,7 +389,7 @@ func main() {
 	if len(routes) != 1 {
 		t.Fatalf("APIRoutes = %#v", routes)
 	}
-	if routes[0].Path != "/api/orders/:id" || routes[0].Method != "GET" {
+	if routes[0].Path != "/api/orders/:id" || routes[0].Method != http.MethodGet {
 		t.Fatalf("route = %#v", routes[0])
 	}
 	if len(result.PerRepo) != 1 || result.PerRepo[0].Status != "analyzed" {

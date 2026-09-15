@@ -67,7 +67,7 @@ variables:
 #     ephemeral,被 GitLab 跨 image 打包/解包会出现"索引在但文件不在"导致 vet/build
 #     报 no such file or directory。让每个 job 本地新建)
 #   - lint / test 用不同 cache key 前缀:两 job image 不同(golangci-lint vs
-#     golang:1.25.11),理论上 go-mod 内容兼容,但隔离避免任何"并行 job 同 key 写同一份"
+#     golang:1.25.13),理论上 go-mod 内容兼容,但隔离避免任何"并行 job 同 key 写同一份"
 #     的潜在竞态。
 #   - go vet 那行删了 — golangci-lint 默认开 govet linter,重复且就是它在崩。
 go:lint:
@@ -110,9 +110,9 @@ go:lint:
 # ── Go test:build + test -race -cover ──────────────────────────────────
 go:test:
   stage: test
-  # 锁定 patch 版本(避免 cache 锁住老 patch + 跟 go.mod `go 1.25.11` 一致)。
-  # 1.25.11 修复当前 govulncheck 命中的 stdlib CVE,保持工具链审计干净。
-  image: golang:1.25.11
+  # 锁定 patch 版本(避免 cache 锁住老 patch + 跟 go.mod `go 1.25.13` 一致)。
+  # 1.25.13 修复当前 govulncheck 命中的 stdlib CVE,保持工具链审计干净。
+  image: golang:1.25.13
   interruptible: true
   cache:
     # cache 策略说明见 go:lint 上方注释。test job 独立 key 前缀,避免与 lint job 并行写竞态。
@@ -144,7 +144,7 @@ skill-scripts:
   image: python:3.12-slim
   interruptible: true
   before_script:
-    - python3 -m pip install --no-cache-dir pytest PyYAML uv
+    - python3 -m pip install --no-cache-dir -r scripts/requirements-test.txt
   script:
     - scripts/test-skill-scripts.sh
 

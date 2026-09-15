@@ -94,7 +94,8 @@ func installOneNativeAgent(stagingDir, root string, t IDETarget, ag stagingAgent
 	// codex 特殊:staging toml 里 [[skills.config]].path 用 generator.CodexPlaceholderSkillsRoot 占位,
 	// 装机时替换成 <root>/skills/<name>/ 的实际绝对路径(codex 不解析 ~ / $HOME)。
 	// MCP servers 段的 {{MCP_SERVERS}} 占位由 MergeMCPIntoIDESettingsAt 时填,这里保留原样。
-	if t == TargetOpenCode {
+	switch t {
+	case TargetOpenCode:
 		raw, err := os.ReadFile(ag.File)
 		if err != nil {
 			return err
@@ -103,7 +104,7 @@ func installOneNativeAgent(stagingDir, root string, t IDETarget, ag stagingAgent
 		if err := os.WriteFile(dstAgent, []byte(patched), 0644); err != nil {
 			return err
 		}
-	} else if t == TargetCodex {
+	case TargetCodex:
 		raw, rerr := os.ReadFile(ag.File)
 		if rerr != nil {
 			return fmt.Errorf("read staging codex toml: %w", rerr)
@@ -113,7 +114,7 @@ func installOneNativeAgent(stagingDir, root string, t IDETarget, ag stagingAgent
 		if err := os.WriteFile(dstAgent, []byte(patched), 0o644); err != nil {
 			return fmt.Errorf("install codex agent toml: %w", err)
 		}
-	} else {
+	default:
 		if err := copyFileSimple(ag.File, dstAgent); err != nil {
 			return fmt.Errorf("install agent file: %w", err)
 		}
@@ -265,22 +266,6 @@ func explicitStagingAgentRole(stagingDir, agentName string) (generator.AgentRole
 	}
 }
 
-// findStagingAgentFile 找 staging/agents/<NAME>.<ext> —— 取第一个匹配后缀的非 .bak 文件,
-// 返回完整路径 + name(不含后缀)。
-//
-//	claude-code / cursor: <NAME>.md
-//	codex            : <NAME>.toml
-func findStagingAgentFile(stagingDir string, t IDETarget) (file, name string, err error) {
-	matches, err := findStagingAgentFiles(stagingDir, t)
-	if err != nil {
-		return "", "", err
-	}
-	if len(matches) > 1 {
-		return "", "", fmt.Errorf("found %d agent files in staging %s (expected 1): %v", len(matches), filepath.Join(stagingDir, "agents"), agentFileNames(matches))
-	}
-	return matches[0].File, matches[0].Name, nil
-}
-
 func findStagingAgentFiles(stagingDir string, t IDETarget) ([]stagingAgentFile, error) {
 	dir := filepath.Join(stagingDir, "agents")
 	entries, err := os.ReadDir(dir)
@@ -310,14 +295,6 @@ func findStagingAgentFiles(stagingDir string, t IDETarget) ([]stagingAgentFile, 
 		return nil, fmt.Errorf("no agents/*%s in staging %s", ext, dir)
 	}
 	return matches, nil
-}
-
-func agentFileNames(files []stagingAgentFile) []string {
-	names := make([]string, 0, len(files))
-	for _, f := range files {
-		names = append(names, filepath.Base(f.File))
-	}
-	return names
 }
 
 // replaceDir:src 不存在 → 跳过(scripts 可能没有);存在 → 清掉 dst 后整目录拷过去。

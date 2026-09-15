@@ -39,7 +39,7 @@ func DeleteTerminalCaseHistoryForBug(ctx context.Context, store *CaseStore, arti
 	if err != nil {
 		return result, fmt.Errorf("begin incident history deletion: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	rows, err := tx.QueryContext(ctx, `SELECT id,status FROM incident_cases WHERE bug_id=? ORDER BY created_at,id`, result.BugID)
 	if err != nil {
@@ -49,17 +49,17 @@ func DeleteTerminalCaseHistoryForBug(ctx context.Context, store *CaseStore, arti
 		var caseID string
 		var status CaseStatus
 		if err := rows.Scan(&caseID, &status); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return result, fmt.Errorf("read incident history for Bug: %w", err)
 		}
 		if !IsTerminalCaseStatus(status) {
-			rows.Close()
+			_ = rows.Close()
 			return CaseHistoryDeleteResult{BugID: result.BugID, CaseIDs: []string{}}, fmt.Errorf("%w: Case %s is %s", ErrActiveCaseHistory, caseID, status)
 		}
 		result.CaseIDs = append(result.CaseIDs, caseID)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return result, fmt.Errorf("read incident history for Bug: %w", err)
 	}
 	if err := rows.Close(); err != nil {
@@ -162,7 +162,7 @@ func stageCaseArtifactDirectories(artifactsRoot string, caseIDs []string) (stage
 		}
 		if !sourceInfo.IsDir() && sourceInfo.Mode()&os.ModeSymlink == 0 {
 			_ = staged.restore()
-			return stagedCaseArtifacts{}, errors.New("Case artifact path is not a directory")
+			return stagedCaseArtifacts{}, errors.New("case artifact path is not a directory")
 		}
 		destination := filepath.Join(staging, component)
 		if err := os.Rename(source, destination); err != nil {

@@ -16,7 +16,7 @@ func (s *CaseStore) retireVerificationCases(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var marker string
 	err = tx.QueryRowContext(ctx, `SELECT key FROM schema_migrations WHERE key=?`, key).Scan(&marker)
 	if err == nil {
@@ -38,15 +38,18 @@ func (s *CaseStore) retireVerificationCases(ctx context.Context) error {
 	for rows.Next() {
 		var c retired
 		if err = rows.Scan(&c.id, &c.status, &c.version); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return err
 		}
 		cases = append(cases, c)
 	}
 	err = rows.Err()
-	rows.Close()
+	closeErr := rows.Close()
 	if err != nil {
 		return err
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	now := formatStoreTime(time.Now().UTC())
 	for _, c := range cases {

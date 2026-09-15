@@ -12,6 +12,16 @@ import (
 	"time"
 )
 
+func TestMaterializeInvestigationEvidenceRejectsMalformedInput(t *testing.T) {
+	runner := &AgentPhaseRunner{}
+	_, err := runner.materializeInvestigationEvidence(context.Background(), PhaseAttempt{
+		Phase: PhaseInvestigation, InputJSON: json.RawMessage(`{"evidence":`),
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "parse initial investigation evidence") {
+		t.Fatalf("expected malformed evidence input to fail, got %v", err)
+	}
+}
+
 func TestMaterializeInitialInvestigationEvidenceVerifiesAndStagesFrozenArtifacts(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)
@@ -42,8 +52,8 @@ func TestMaterializeInitialInvestigationEvidenceVerifiesAndStagesFrozenArtifacts
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer staging.Cleanup()
-	defer staging.Close()
+	defer func() { _ = staging.Cleanup() }()
+	defer func() { _ = staging.Close() }()
 	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, artifactsRoot, nil)
 	prompt, err := runner.materializeInvestigationEvidence(ctx, investigation, staging)
 	if err != nil {
@@ -137,8 +147,8 @@ func TestMaterializeInvestigationEvidenceStagesRootCauseCounterexampleAsPNG(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer staging.Cleanup()
-	defer staging.Close()
+	defer func() { _ = staging.Cleanup() }()
+	defer func() { _ = staging.Close() }()
 	runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, artifactsRoot, nil)
 	if _, err := runner.materializeInvestigationEvidence(ctx, investigation, staging); err != nil {
 		t.Fatal(err)
@@ -172,8 +182,8 @@ func TestMaterializeInitialInvestigationEvidenceRejectsDivergentBinding(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer staging.Cleanup()
-	defer staging.Close()
+	defer func() { _ = staging.Cleanup() }()
+	defer func() { _ = staging.Close() }()
 	_, err = runner.materializeInvestigationEvidence(context.Background(), PhaseAttempt{ID: "attempt-divergent", CaseID: "case-missing", Phase: PhaseInvestigation, InputJSON: encoded}, staging)
 	if err == nil {
 		t.Fatal("accepted missing durable validation artifact")
@@ -220,8 +230,8 @@ func TestSuppliedEvidenceIDsBindCaseCycleAncestorAndEnvironment(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer staging.Close()
-			defer staging.Cleanup()
+			defer func() { _ = staging.Close() }()
+			defer func() { _ = staging.Cleanup() }()
 			runner := NewAgentPhaseRunner(store, &phaseExecutorStub{}, nil, root, nil)
 			_, err = runner.materializeInvestigationEvidence(ctx, attempt, staging)
 			if (err != nil) != tc.wantError {

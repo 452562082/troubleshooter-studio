@@ -553,13 +553,13 @@ func (o *CaseOrchestrator) processResetRunnerCancellation(result CaseResetResult
 	if o.runner == nil {
 		operation, found, err := o.store.GetResetCancellationOperation(context.Background(), resetKey, fingerprint)
 		if err != nil || !found {
-			return resetCancellationStateUnavailableWarning(), nil
+			return resetCancellationStateUnavailableWarning(), nil //nolint:nilerr // Reset is already committed; cancellation uncertainty is returned as a structured warning.
 		}
 		return warningsForResetCancellation(operation), nil
 	}
 	claimToken, err := newAttemptRunClaimToken()
 	if err != nil {
-		return resetCancellationStateUnavailableWarning(), nil
+		return resetCancellationStateUnavailableWarning(), nil //nolint:nilerr // Reset is already committed; do not invite an unsafe retry of the completed reset.
 	}
 	durable, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	operation, acquired, err := o.store.ClaimResetCancellation(durable, resetKey, fingerprint, claimToken)
@@ -581,7 +581,7 @@ func (o *CaseOrchestrator) processResetRunnerCancellation(result CaseResetResult
 	completed, err := o.store.CompleteResetCancellation(durable, resetKey, fingerprint, claimToken, completionStatus)
 	cancel()
 	if err != nil {
-		return resetCancellationUnknownWarning(), nil
+		return resetCancellationUnknownWarning(), nil //nolint:nilerr // Cancellation may have happened; report the unknown outcome without repeating it.
 	}
 	return warningsForResetCancellation(completed), nil
 }
@@ -1652,9 +1652,10 @@ func (o *CaseOrchestrator) beginPhaseMutation(ctx context.Context, incident Inci
 	update.SelectedBotKey = workflowStringPtr(bot.Key)
 	request, _ := json.Marshal(map[string]any{"attempt": attempt, "to": to, "event_type": eventType, "actor": actor})
 	actorType := "user"
-	if actor == "recovery" {
+	switch actor {
+	case "recovery":
 		actorType = "recovery"
-	} else if actor == "studio" {
+	case "studio":
 		actorType = "studio"
 	}
 	if len(payload) == 0 {
@@ -1737,14 +1738,6 @@ func (e *phaseScheduleStartError) Unwrap() error { return e.cause }
 
 func mustJSON(value any) json.RawMessage { encoded, _ := json.Marshal(value); return encoded }
 
-func (o *CaseOrchestrator) externalFailure(ctx context.Context, incident IncidentCase, to CaseStatus, key, actor, eventType string, cause error) (IncidentCase, error) {
-	failed, _, err := o.transition(ctx, incident, to, key+":failed", actor, eventType, map[string]string{"error": cause.Error()}, CaseSnapshotUpdate{})
-	if err != nil {
-		return IncidentCase{}, errors.Join(cause, err)
-	}
-	return failed, cause
-}
-
 func (o *CaseOrchestrator) transition(ctx context.Context, incident IncidentCase, to CaseStatus, key, actor, eventType string, payload any, update CaseSnapshotUpdate) (IncidentCase, bool, error) {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -1807,24 +1800,6 @@ func (o *CaseOrchestrator) eventByKey(ctx context.Context, caseID, key string) (
 		}
 	}
 	return TransitionEvent{}, false, nil
-}
-
-func (o *CaseOrchestrator) ensureAttempt(ctx context.Context, attempt PhaseAttempt) error {
-	if err := o.store.CreateAttempt(ctx, attempt); err == nil {
-		return nil
-	}
-	stored, loadErr := o.store.GetAttempt(ctx, attempt.ID)
-	if loadErr != nil {
-		return loadErr
-	}
-	if !sameOrchestratedAttempt(stored, attempt) {
-		return fmt.Errorf("%w: attempt %s stored=%+v requested=%+v", ErrIdempotencyConflict, attempt.ID, stored, attempt)
-	}
-	return nil
-}
-
-func sameOrchestratedAttempt(left, right PhaseAttempt) bool {
-	return left.ID == right.ID && left.CaseID == right.CaseID && left.CycleNumber == right.CycleNumber && left.Phase == right.Phase && left.Mode == right.Mode && left.Status == right.Status && left.AgentTarget == right.AgentTarget && left.BotKey == right.BotKey && string(left.InputJSON) == string(right.InputJSON) && left.ParentAttemptID == right.ParentAttemptID
 }
 
 func newAttempt(incident IncidentCase, phase Phase, mode AttemptMode, key string, bot BotRef, input json.RawMessage, parent string) PhaseAttempt {

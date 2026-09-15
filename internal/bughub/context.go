@@ -8,7 +8,7 @@ import (
 func GenerateContext(b Bug, bot BotRef) string {
 	var sb strings.Builder
 	line := func(format string, args ...any) {
-		sb.WriteString(fmt.Sprintf(format, args...))
+		fmt.Fprintf(&sb, format, args...)
 		sb.WriteByte('\n')
 	}
 

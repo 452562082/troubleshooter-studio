@@ -5,10 +5,11 @@
 ## 提交前检查
 
 ```bash
-make test   # go test ./... -race
-make lint   # go vet + gofmt -l + vue-tsc
-make build  # 至少能编出 bin/tshoot
+python3 -m pip install -r scripts/requirements-test.txt
+make ci     # lint / tidy / build / audit / Go 和脚本测试 / 前端测试及构建
 ```
+
+使用 `go.mod` 指定的 Go 补丁版本、`.nvmrc` 的 Node 版本与 golangci-lint 2.12.2。`make lint` 会检查 linter 版本；非默认安装位置可用 `make ci GOLANGCI_LINT=/path/to/golangci-lint`。Go 审计还需要 `go install golang.org/x/vuln/cmd/govulncheck@v1.5.0`。两端 CI 和本地共享 Python 测试依赖清单。
 
 不要用 `git add -A`。`internal/webui/dist/.gitkeep` 是 `go:embed all:dist` 的占位文件，web build 会清理 dist；`git add -A` 容易把 `.gitkeep` 的删除误提交。改用：
 
@@ -107,7 +108,7 @@ go test ./internal/generator -run TestGenerate_Nacos_Shop
 make audit
 ```
 
-`scripts/test-skill-scripts.sh` 需要 `pytest`、`PyYAML` 和 `uv`。桌面包不再安装或捆绑 Chromium。工程测试及 MCP runtime probe 继续作为质量门禁。
+`scripts/test-skill-scripts.sh` 的依赖见 `scripts/requirements-test.txt`。桌面包不再安装或捆绑 Chromium。工程测试及 MCP runtime probe 继续作为质量门禁。
 
 覆盖率门槛：
 

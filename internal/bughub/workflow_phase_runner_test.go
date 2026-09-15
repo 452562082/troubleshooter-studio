@@ -113,21 +113,6 @@ func (s *phaseExecutorStub) ExecutePhaseWithAttachments(ctx context.Context, att
 	return s.ExecutePhase(ctx, attemptID, bot, prompt, emit)
 }
 
-func assertPersistedBaseBot(t *testing.T, store *CaseStore, caseID, attemptID, baseKey string) {
-	t.Helper()
-	incident, err := store.GetCase(context.Background(), caseID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	attempt, err := store.GetAttempt(context.Background(), attemptID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if incident.SelectedBotKey != baseKey || attempt.BotKey != baseKey {
-		t.Fatalf("persisted bot keys case=%q attempt=%q want=%q", incident.SelectedBotKey, attempt.BotKey, baseKey)
-	}
-}
-
 func installedPhaseRunnerBot(t *testing.T, key, target string) BotRef {
 	t.Helper()
 	root := t.TempDir()
@@ -587,27 +572,6 @@ func waitForAgentPhaseRunnerInactive(t *testing.T, runner *AgentPhaseRunner, att
 		}
 		time.Sleep(time.Millisecond)
 	}
-}
-
-func findAttemptStagingPath(t *testing.T, root, attemptID string) string {
-	t.Helper()
-	entries, err := os.ReadDir(filepath.Join(root, ".staging"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var found string
-	for _, entry := range entries {
-		if entry.IsDir() && strings.HasPrefix(entry.Name(), attemptID+"-") {
-			if found != "" {
-				t.Fatal("multiple staging directories found for one attempt")
-			}
-			found = filepath.Join(root, ".staging", entry.Name())
-		}
-	}
-	if found == "" {
-		t.Fatal("attempt staging directory not found")
-	}
-	return found
 }
 
 func TestAgentPhaseRunnerOwnsEvidenceStagingAndUsesFstatMetadata(t *testing.T) {

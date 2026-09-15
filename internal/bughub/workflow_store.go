@@ -218,7 +218,7 @@ func verifyReadOnlyWorkflowSchema(ctx context.Context, db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("begin read-only workflow schema verification: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var version int
 	if err := tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read workflow schema version: %w", err)
@@ -249,7 +249,7 @@ func (s *CaseStore) initialize(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("begin workflow schema initialization: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var version int
 	if err := tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read workflow schema version: %w", err)
@@ -662,20 +662,20 @@ func backfillV6ResetCancellations(ctx context.Context, tx *sql.Tx) error {
 		var reset legacyResetCancellation
 		var resultJSON string
 		if err := rows.Scan(&reset.ResetKey, &reset.CaseID, &reset.RequestFingerprint, &resultJSON, &reset.CreatedAt); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return err
 		}
 		var result CaseResetResult
 		if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return fmt.Errorf("decode committed reset %q: %w", reset.ResetKey, err)
 		}
 		if blank(reset.ResetKey) || result.Archived.ID != reset.CaseID || result.Replacement.ID == "" {
-			rows.Close()
+			_ = rows.Close()
 			return fmt.Errorf("committed reset %q has invalid cancellation identity", reset.ResetKey)
 		}
 		if err := validateCaseResetResult(result, reset.CaseID, result.Replacement.ID); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return fmt.Errorf("validate committed reset %q: %w", reset.ResetKey, err)
 		}
 		if result.CancelledAttemptID == "" {
@@ -683,11 +683,11 @@ func backfillV6ResetCancellations(ctx context.Context, tx *sql.Tx) error {
 		}
 		decodedFingerprint, decodeErr := hex.DecodeString(reset.RequestFingerprint)
 		if decodeErr != nil || len(decodedFingerprint) != sha256.Size || reset.RequestFingerprint != strings.ToLower(reset.RequestFingerprint) {
-			rows.Close()
+			_ = rows.Close()
 			return fmt.Errorf("committed reset %q has invalid request fingerprint", reset.ResetKey)
 		}
 		if _, err := parseStoreTime(reset.CreatedAt); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return fmt.Errorf("committed reset %q has invalid timestamp", reset.ResetKey)
 		}
 		reset.AttemptID = result.CancelledAttemptID
@@ -695,7 +695,7 @@ func backfillV6ResetCancellations(ctx context.Context, tx *sql.Tx) error {
 		resets = append(resets, reset)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return err
 	}
 	if err := rows.Close(); err != nil {
@@ -748,7 +748,8 @@ func legacyResetCancellationAuditOutcome(ctx context.Context, tx *sql.Tx, reset 
 	if json.Unmarshal([]byte(payloadJSON), &payload) != nil || payload.AttemptID != reset.AttemptID {
 		return unknown()
 	}
-	status, outcome := ResetCancellationClaimed, ""
+	var status ResetCancellationStatus
+	var outcome string
 	expectedPayload := map[string]string{"attempt_id": reset.AttemptID}
 	switch {
 	case auditType == "reset_runner_cancel_succeeded" && payload.Outcome == "succeeded" && payload.WarningCode == "":
@@ -1043,7 +1044,7 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 	if s == nil || s.db == nil || blank(reset.CaseID) || blank(reset.NewCaseID) ||
 		blank(reset.IdempotencyKey) || blank(reset.ActorID) || blank(reset.SelectedBotKey) ||
 		blank(reset.ReplacementBotTarget) || blank(reset.ReplacementEnvironment) || reset.ExpectedVersion < 1 {
-		return result, errors.New("Case reset requires store, old and new Case IDs, positive version, idempotency key, actor, and replacement Bot binding")
+		return result, errors.New("case reset requires store, old and new Case IDs, positive version, idempotency key, actor, and replacement Bot binding")
 	}
 	if reset.CaseID == reset.NewCaseID {
 		return result, errors.New("replacement Case ID must differ from archived Case ID")
@@ -1052,7 +1053,7 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 		return result, fmt.Errorf("replacement Case ID: %w", err)
 	}
 	if len(reset.RequestJSON) == 0 || !json.Valid(reset.RequestJSON) {
-		return result, errors.New("Case reset request must be valid JSON")
+		return result, errors.New("case reset request must be valid JSON")
 	}
 	fingerprint, err := caseResetFingerprint(reset)
 	if err != nil {
@@ -1066,7 +1067,7 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 	if err != nil {
 		return result, fmt.Errorf("begin Case reset: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var eventType, storedFingerprint, resultJSON string
 	queryErr := tx.QueryRowContext(ctx, `SELECT event_type,request_fingerprint,result_case_json FROM transition_events WHERE idempotency_key=?`, reset.IdempotencyKey).Scan(&eventType, &storedFingerprint, &resultJSON)
@@ -1531,7 +1532,7 @@ func (s *CaseStore) ListCases(ctx context.Context) ([]IncidentCase, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list incident cases: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var incidents []IncidentCase
 	for rows.Next() {
 		incident, err := scanCase(rows)
@@ -1574,7 +1575,7 @@ func (s *CaseStore) importLegacyBatch(ctx context.Context, batch legacyImportBat
 	if err != nil {
 		return LegacyImportResult{}, fmt.Errorf("begin legacy import: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var marker int
 	err = tx.QueryRowContext(ctx, `SELECT 1 FROM schema_migrations WHERE key = ?`, batch.MigrationKey).Scan(&marker)
 	if err == nil {
@@ -1727,7 +1728,7 @@ func (s *CaseStore) recordEvidenceArtifact(ctx context.Context, artifact Evidenc
 	if err != nil {
 		return EvidenceArtifact{}, false, fmt.Errorf("begin evidence registration: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	result, err := tx.ExecContext(ctx, `INSERT INTO evidence_artifacts (
 		id, case_id, attempt_id, kind, path_or_reference, sha256, captured_at,
 		environment, version, request_id, trace_id, redaction_status
@@ -1768,7 +1769,7 @@ func (s *CaseStore) ListEvidenceArtifacts(ctx context.Context, caseID string) ([
 	if err != nil {
 		return nil, fmt.Errorf("list evidence artifacts: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var artifacts []EvidenceArtifact
 	for rows.Next() {
 		artifact, err := scanEvidenceArtifact(rows)
@@ -1833,7 +1834,7 @@ func (s *CaseStore) ListAttempts(ctx context.Context, filter AttemptFilter) ([]P
 	if err != nil {
 		return nil, fmt.Errorf("list phase attempts: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var attempts []PhaseAttempt
 	for rows.Next() {
 		attempt, err := scanAttempt(rows)
@@ -1860,7 +1861,7 @@ func (s *CaseStore) ListApprovals(ctx context.Context, caseID string) ([]Approva
 	if err != nil {
 		return nil, fmt.Errorf("list approvals: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var approvals []Approval
 	for rows.Next() {
 		var approval Approval
@@ -1899,7 +1900,7 @@ func (s *CaseStore) ListCodeChanges(ctx context.Context, caseID string) ([]CodeC
 	if err != nil {
 		return nil, fmt.Errorf("list code changes: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var changes []CodeChange
 	for rows.Next() {
 		var change CodeChange
@@ -1930,7 +1931,7 @@ func (s *CaseStore) ListDeploymentObservations(ctx context.Context, caseID strin
 	if err != nil {
 		return nil, fmt.Errorf("list deployment observations: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var observations []DeploymentObservation
 	for rows.Next() {
 		var observation DeploymentObservation
@@ -2313,7 +2314,7 @@ func (s *CaseStore) ReleaseAttemptRunClaim(ctx context.Context, attemptID, caseI
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	result, err := tx.ExecContext(ctx, `UPDATE phase_attempts SET run_claim_token='' WHERE id=? AND case_id=? AND status IN (?,?) AND run_claim_token=?`, attemptID, caseID, AttemptStatusQueued, AttemptStatusRunning, claimToken)
 	if err != nil {
 		return err
@@ -3077,7 +3078,7 @@ func (s *CaseStore) ListEvents(ctx context.Context, caseID string) ([]Transition
 	if err != nil {
 		return nil, fmt.Errorf("list transition events: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var events []TransitionEvent
 	for rows.Next() {
 		var event TransitionEvent
@@ -3201,25 +3202,6 @@ func (s *CaseStore) GetAttemptCompletionIdentity(ctx context.Context, attemptID 
 		return "", false, errors.New("persisted completion identity is invalid")
 	}
 	return digest, true, nil
-}
-
-// latestDeploymentReservationEvent reads the reservation envelope without
-// validating actor identity. Recovery must be able to detect and audit a
-// legacy/corrupt empty actor instead of failing before the identity gate.
-func (s *CaseStore) latestDeploymentReservationEvent(ctx context.Context, caseID string) (TransitionEvent, bool, error) {
-	var event TransitionEvent
-	var payload string
-	err := s.db.QueryRowContext(ctx, `SELECT id,case_id,event_type,actor_type,actor_id,idempotency_key,payload_json
-		FROM transition_events WHERE case_id=? AND event_type IN ('deployment_verification_reserved','remediation_regression_reserved')
-		ORDER BY created_at DESC,id DESC LIMIT 1`, caseID).Scan(&event.ID, &event.CaseID, &event.EventType, &event.ActorType, &event.ActorID, &event.IdempotencyKey, &payload)
-	if errors.Is(err, sql.ErrNoRows) {
-		return TransitionEvent{}, false, nil
-	}
-	if err != nil {
-		return TransitionEvent{}, false, fmt.Errorf("load latest deployment reservation event: %w", err)
-	}
-	event.PayloadJSON = CloneRawMessage([]byte(payload))
-	return event, true, nil
 }
 
 func transitionRequestFingerprint(caseID string, expectedVersion int64, from, to CaseStatus, event TransitionEvent, requestedAt string, update CaseSnapshotUpdate) (string, error) {
@@ -3440,7 +3422,7 @@ func workflowTableColumns(ctx context.Context, query rowsQuery) (map[string][]st
 	for rows.Next() {
 		var table string
 		if err := rows.Scan(&table); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, fmt.Errorf("scan workflow schema table: %w", err)
 		}
 		tables = append(tables, table)
@@ -3460,7 +3442,7 @@ func workflowTableColumns(ctx context.Context, query rowsQuery) (map[string][]st
 			var name, columnType string
 			var defaultValue any
 			if err := columnRows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
-				columnRows.Close()
+				_ = columnRows.Close()
 				return nil, fmt.Errorf("scan workflow table %q: %w", table, err)
 			}
 			result[table] = append(result[table], name)
@@ -3507,7 +3489,7 @@ func verifyRequiredWorkflowIndexes(ctx context.Context, query rowsQuery) error {
 	if err != nil {
 		return fmt.Errorf("list workflow indexes: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	found := map[string]string{}
 	for rows.Next() {
 		var name, table string
@@ -3535,7 +3517,7 @@ func workflowSchemaFingerprint(ctx context.Context, query rowsQuery) (string, er
 	if err != nil {
 		return "", fmt.Errorf("read workflow schema definition: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	hash := sha256.New()
 	for rows.Next() {
 		var objectType, name, table, definition string

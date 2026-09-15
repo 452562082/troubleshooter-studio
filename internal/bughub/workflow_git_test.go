@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -312,6 +313,28 @@ func TestGitIntegrationRequiresSSHRemote(t *testing.T) {
 	_, err := f.service(t).Inspect(context.Background(), f.request(commit))
 	if !errors.Is(err, ErrGitRemoteNotSSH) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestGitInspectionDistinguishesCommandFailureFromMergeConflict(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses a POSIX git wrapper")
+	}
+	f := newGitFixture(t)
+	commit := f.makeFix(t, "fix\n")
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	script := "#!/bin/sh\nif [ \"$1\" = merge-tree ]; then echo 'merge-tree unavailable' >&2; exit 2; fi\nexec '" + strings.ReplaceAll(realGit, "'", "'\"'\"'") + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	inspection, err := f.service(t).Inspect(context.Background(), f.request(commit))
+	if err == nil || inspection.Conflict {
+		t.Fatalf("command failure must fail inspection without claiming a conflict: result=%+v err=%v", inspection, err)
 	}
 }
 

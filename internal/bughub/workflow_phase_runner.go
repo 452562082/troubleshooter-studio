@@ -359,36 +359,6 @@ func (r *AgentPhaseRunner) Start(ctx context.Context, attempt PhaseAttempt, bug 
 	return nil
 }
 
-// currentCycleAncestorAttemptIDs follows the durable parent chain only while
-// it remains inside the current cycle. A new cycle intentionally points to the
-// prior cycle's terminal regression, so that boundary is a normal stop rather
-// than corrupt ancestry. Cross-Case and future-cycle links remain invalid.
-func (r *AgentPhaseRunner) currentCycleAncestorAttemptIDs(ctx context.Context, attempt PhaseAttempt, evidenceKind string) (map[string]struct{}, error) {
-	ancestorIDs := make(map[string]struct{})
-	parentID := strings.TrimSpace(attempt.ParentAttemptID)
-	for parentID != "" {
-		if _, duplicate := ancestorIDs[parentID]; duplicate {
-			return nil, fmt.Errorf("%s ancestry contains a cycle", evidenceKind)
-		}
-		parent, err := r.store.GetAttempt(ctx, parentID)
-		if err != nil {
-			return nil, err
-		}
-		if parent.CaseID != attempt.CaseID {
-			return nil, fmt.Errorf("%s ancestor does not belong to the current Case", evidenceKind)
-		}
-		if parent.CycleNumber > attempt.CycleNumber {
-			return nil, fmt.Errorf("%s ancestor belongs to a future Case cycle", evidenceKind)
-		}
-		if parent.CycleNumber < attempt.CycleNumber {
-			break
-		}
-		ancestorIDs[parent.ID] = struct{}{}
-		parentID = strings.TrimSpace(parent.ParentAttemptID)
-	}
-	return ancestorIDs, nil
-}
-
 func newAttemptRunClaimToken() (string, error) {
 	var value [16]byte
 	if _, err := rand.Read(value[:]); err != nil {
@@ -843,21 +813,6 @@ func (r *AgentPhaseRunner) fixPromptHandoff(ctx context.Context, attempt PhaseAt
 	return encoded, nil
 }
 
-func formattedPromptJSON(raw json.RawMessage) (string, error) {
-	if len(raw) == 0 || string(raw) == "{}" {
-		return "", nil
-	}
-	var value any
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return "", err
-	}
-	encoded, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	return string(encoded), nil
-}
-
 func investigationInputRequiresDatastoreRead(input json.RawMessage) bool {
 	var envelope struct {
 		ValidationEvidence []InvestigationEvidenceReference `json:"validation_evidence"`
@@ -963,18 +918,6 @@ func artifactErrorCode(err error) string {
 		return "evidence_artifact_reused"
 	}
 	return "artifact_registration_failed"
-}
-
-func equalStringMap(left, right map[string]string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for key, value := range left {
-		if right[key] != value {
-			return false
-		}
-	}
-	return true
 }
 
 func ParseInvestigationResult(data []byte) (InvestigationResult, error) {

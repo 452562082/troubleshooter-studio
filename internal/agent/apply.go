@@ -4,7 +4,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -268,16 +267,4 @@ func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions
 	opts.NewYAML = yamlBytes
 	// Apply 内部会对 claude-code / cursor 自动跑 InstallNative,这里不再重复。
 	return Apply(fake, opts)
-}
-
-// countFilesUnder 数一个目录下的文件数（用于 Result.FilesWritten）。
-func countFilesUnder(root string) int {
-	n := 0
-	_ = filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
-		if err == nil && !d.IsDir() {
-			n++
-		}
-		return nil
-	})
-	return n
 }

@@ -105,7 +105,7 @@ jobs:
           python-version: '3.12'
 
       - name: install python test tools
-        run: python3 -m pip install pytest PyYAML uv
+        run: python3 -m pip install -r scripts/requirements-test.txt
 
       - name: skill script tests
         run: scripts/test-skill-scripts.sh

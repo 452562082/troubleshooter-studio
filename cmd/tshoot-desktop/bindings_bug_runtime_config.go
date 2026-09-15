@@ -94,17 +94,17 @@ func (a *App) newKuboardDeploymentReader(_ context.Context, cfg *config.SystemCo
 			return &kuboardDeploymentVersionReader{endpoint: endpoint}, nil
 		}
 	}
-	return nil, errors.New("Kuboard endpoint unavailable")
+	return nil, errors.New("kuboard endpoint unavailable")
 }
 func (r *kuboardDeploymentVersionReader) ReadDeployment(ctx context.Context, cluster, namespace, deployment string) (bughub.K8sDeploymentVersion, error) {
 	s, err := kuboardSetup(ctx, r.endpoint.URL, r.endpoint.AccessKey, r.endpoint.Username, r.endpoint.Password, cluster)
 	if err != nil {
-		return bughub.K8sDeploymentVersion{}, errors.New("Kuboard setup failed")
+		return bughub.K8sDeploymentVersion{}, errors.New("kuboard setup failed")
 	}
 	defer s.cancel()
 	objects, err := s.listK8sObjectsGroup("apis/apps/v1", "apps", "deployments", namespace, "")
 	if err != nil {
-		return bughub.K8sDeploymentVersion{}, errors.New("Deployment read failed")
+		return bughub.K8sDeploymentVersion{}, errors.New("deployment read failed")
 	}
 	for _, raw := range objects {
 		var value struct {
@@ -136,5 +136,5 @@ func (r *kuboardDeploymentVersionReader) ReadDeployment(ctx context.Context, clu
 		}
 		return out, nil
 	}
-	return bughub.K8sDeploymentVersion{}, errors.New("Deployment not found")
+	return bughub.K8sDeploymentVersion{}, errors.New("deployment not found")
 }

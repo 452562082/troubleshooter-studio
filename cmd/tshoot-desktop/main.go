@@ -81,8 +81,6 @@ type App struct {
 	// Bindings only adapt commands to this runtime; persistence and transitions
 	// remain inside bughub's CaseStore and CaseOrchestrator.
 	workflowMu                   sync.Mutex
-	workflowBugResolutionOnce    sync.Once
-	workflowBugResolutionMu      sync.Mutex
 	workflowRoot                 string
 	workflowStore                *bughub.CaseStore
 	workflowOrchestrator         *bughub.CaseOrchestrator
@@ -92,7 +90,6 @@ type App struct {
 	workflowLoadBug              func(string) (bughub.Bug, error)
 	workflowLoadBot              func(string) (bughub.BotRef, error)
 	workflowLoadDeploymentConfig func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error)
-	workflowResolveBug           func(context.Context, bughub.IncidentCase) error
 	workflowK8sReaderFactory     func(context.Context, *config.SystemConfig, config.Environment) (bughub.K8sDeploymentReader, error)
 	workflowPickEvidence         func(context.Context) ([]string, error)
 	workflowSaveArtifact         func(string, string, context.Context) (string, error)
@@ -102,7 +99,6 @@ type App struct {
 
 var startDesktopTray = startTray
 var startDesktopBugPoller = startBugPoller
-var desktopExecutablePath = os.Executable
 
 // startup 由 Wails 在窗口创建完成时调用，注入 runtime ctx。私有也能被 Wails 识别。
 func (a *App) startup(ctx context.Context) {

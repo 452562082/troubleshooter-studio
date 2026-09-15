@@ -31,6 +31,8 @@ LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
 BIN     ?= bin/tshoot
 WEB_SRC := web
 WEB_DIST := internal/webui/dist
+GOLANGCI_LINT ?= golangci-lint
+GOLANGCI_LINT_VERSION := 2.12.2
 
 # 多平台矩阵(可按需扩)。windows 编译时 release recipe 自动加 .exe 后缀。
 PLATFORMS := darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64
@@ -225,12 +227,27 @@ audit:
 .PHONY: lint
 lint:
 	go vet ./...
+	@version="$$($(GOLANGCI_LINT) version)" || exit $$?; \
+	case "$$version" in *"version $(GOLANGCI_LINT_VERSION) "*) ;; \
+	  *) echo "需要 golangci-lint $(GOLANGCI_LINT_VERSION)，与 CI 保持一致；可通过 GOLANGCI_LINT 指定路径"; exit 1 ;; esac
+	$(GOLANGCI_LINT) run --timeout=3m
 	@out="$$(git ls-files --cached --others --exclude-standard -z '*.go' | xargs -0 sh -c 'for f do if [ -f "$$f" ]; then gofmt -l "$$f" || exit; fi; done' sh)" || exit $$?; \
 	if [ -n "$$out" ]; then \
 	  echo "gofmt 未通过:"; echo "$$out"; exit 1; \
 	fi
 	@echo "✓ go vet + gofmt clean"
 	cd $(WEB_SRC) && npx vue-tsc --noEmit
+
+# 提交前运行完整 CI 门禁，防止只跑单测遗漏 lint / 依赖审计。
+.PHONY: ci
+ci:
+	@test "$$(node --version)" = "v$$(cat .nvmrc)" || { echo "请先切换到 .nvmrc 指定的 Node 版本（nvm use）"; exit 1; }
+	$(MAKE) lint
+	go mod tidy -diff
+	$(MAKE) build
+	$(MAKE) audit
+	$(MAKE) test
+	cd $(WEB_SRC) && npm test && npm run build
 
 # ── 清理 ────────────────────────────────────────────────────────
 .PHONY: clean

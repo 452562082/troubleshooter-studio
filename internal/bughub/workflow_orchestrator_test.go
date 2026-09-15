@@ -539,30 +539,6 @@ func createWorkflowCase(t *testing.T, store *CaseStore, id string, status CaseSt
 	return got
 }
 
-func addPushedWorkflowChange(t *testing.T, store *CaseStore, incident IncidentCase) IncidentCase {
-	t.Helper()
-	now := time.Now().UTC()
-	attempt := PhaseAttempt{ID: incident.ID + "-fix", CaseID: incident.ID, CycleNumber: incident.CycleNumber, Phase: PhaseFix, Status: AttemptStatusSucceeded, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`), FinishedAt: &now}
-	if err := store.CreateAttempt(context.Background(), attempt); err != nil {
-		t.Fatal(err)
-	}
-	change := CodeChange{ID: incident.ID + "-change", CaseID: incident.ID, AttemptID: attempt.ID, Repo: "repo", BaseBranch: "main", FixBranch: "fix/bug", FixCommit: "fix-1", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", MergeCommit: "merge-1", PushStatus: "pushed"}
-	if err := store.RecordCodeChange(context.Background(), change); err != nil {
-		t.Fatal(err)
-	}
-	bound, err := store.ApplyCaseMutation(context.Background(), CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: incident.ID + ":bind-fix", RequestJSON: []byte(`{}`), Snapshot: CaseSnapshotUpdate{CurrentAttemptID: workflowStringPointer(attempt.ID)}, Steps: []CaseMutationStep{{To: incident.Status, AuditOnly: true, Event: TransitionEvent{ID: incident.ID + "-bind-fix", EventType: "fix_bound", ActorType: "studio", ActorID: "test", PayloadJSON: []byte(`{}`)}}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	incident = bound.Case
-	scope := mustJSON(MergeApprovalScope{CycleNumber: incident.CycleNumber, FixAttemptID: attempt.ID, CodeChanges: []ApprovedCodeChange{{ID: change.ID, Repo: change.Repo, FixCommit: change.FixCommit, TargetBranch: change.TargetEnvironmentBranch}}})
-	approval := Approval{ID: incident.ID + "-merge-approval", CaseID: incident.ID, Kind: ApprovalMergeEnvironmentBranch, Actor: "alice", CaseVersion: incident.Version, ScopeJSON: scope, FixCommits: map[string]string{"repo": "fix-1"}, TargetBranches: map[string]string{"repo": "test"}}
-	if err := store.RecordApproval(context.Background(), approval, incident.ID+"-merge-approval-key"); err != nil {
-		t.Fatal(err)
-	}
-	return incident
-}
-
 func TestOrchestratorStartCaseCommitsBeforeSchedulingAndDuplicateDoesNotScheduleTwice(t *testing.T) {
 	ctx := context.Background()
 	store := newOrchestratorStore(t)

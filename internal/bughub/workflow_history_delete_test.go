@@ -92,7 +92,7 @@ func TestDeleteTerminalCaseHistoryForBugPurgesRecordsAndArtifacts(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	if cases, err := store.ListCases(ctx); err != nil || len(cases) != 1 || cases[0].ID != keptCase.ID {
 		t.Fatalf("reopened cases=%+v err=%v", cases, err)
 	}

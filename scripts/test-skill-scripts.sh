@@ -13,14 +13,14 @@ import importlib.util
 import sys
 
 missing = [
-    name for name in ("pytest", "yaml")
+    name for name in ("pytest", "yaml", "requests")
     if importlib.util.find_spec(name) is None
 ]
 if missing:
     print(
         "missing Python test dependencies: "
         + ", ".join(missing)
-        + "; install with: python3 -m pip install pytest PyYAML",
+        + "; install with: python3 -m pip install -r scripts/requirements-test.txt",
         file=sys.stderr,
     )
     sys.exit(1)

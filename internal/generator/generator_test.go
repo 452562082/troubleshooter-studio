@@ -2,6 +2,7 @@ package generator
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -903,7 +904,7 @@ func TestGenerate_FrontendEntryMapMatchesBackendRoutes(t *testing.T) {
 	}
 	orderCandidate := orderCandidates[0]
 	if orderCandidate.Service != "order-service" || orderCandidate.Match != "pattern" ||
-		orderCandidate.Route != "/api/orders/:id" || orderCandidate.Method != "GET" || orderCandidate.Source != "handler.go" {
+		orderCandidate.Route != "/api/orders/:id" || orderCandidate.Method != http.MethodGet || orderCandidate.Source != "handler.go" {
 		t.Fatalf("order route candidate = %#v", orderCandidate)
 	}
 	paymentCandidates := candidates["/api/payments/submit"].RouteCandidates
@@ -912,7 +913,7 @@ func TestGenerate_FrontendEntryMapMatchesBackendRoutes(t *testing.T) {
 	}
 	paymentCandidate := paymentCandidates[0]
 	if paymentCandidate.Service != "payment-service" || paymentCandidate.Match != "exact" ||
-		paymentCandidate.Route != "/api/payments/submit" || paymentCandidate.Method != "POST" || paymentCandidate.Source != "routes.ts" {
+		paymentCandidate.Route != "/api/payments/submit" || paymentCandidate.Method != http.MethodPost || paymentCandidate.Source != "routes.ts" {
 		t.Fatalf("payment route candidate = %#v", paymentCandidate)
 	}
 	searchCandidates := candidates["/api/search/items"].RouteCandidates
@@ -921,7 +922,7 @@ func TestGenerate_FrontendEntryMapMatchesBackendRoutes(t *testing.T) {
 	}
 	searchCandidate := searchCandidates[0]
 	if searchCandidate.Service != "search-service" || searchCandidate.Match != "prefix" ||
-		searchCandidate.Route != "/api/search" || searchCandidate.Method != "GET" || searchCandidate.Source != "search.go" {
+		searchCandidate.Route != "/api/search" || searchCandidate.Method != http.MethodGet || searchCandidate.Source != "search.go" {
 		t.Fatalf("search route candidate = %#v", searchCandidate)
 	}
 	noRouteCandidates := candidates["/api/no-route"].RouteCandidates
@@ -1507,34 +1508,6 @@ func assertTroubleshooterAgentDefinition(t *testing.T, path string) {
 	} {
 		if !strings.Contains(data, want) {
 			t.Fatalf("troubleshooter agent %s missing %q:\n%s", path, want, data)
-		}
-	}
-}
-
-func assertValidatorAgentDefinition(t *testing.T, path string) {
-	t.Helper()
-	data := readFile(t, path)
-	for _, want := range []string{
-		"bug-verifier",
-		"验证",
-		"主动复现",
-		"修复后复查",
-		"验证报告",
-		"不读取业务源码",
-		"原因判断交给排障 Agent",
-	} {
-		if !strings.Contains(data, want) {
-			t.Fatalf("validator agent %s missing %q:\n%s", path, want, data)
-		}
-	}
-	for _, forbidden := range []string{
-		"RCA",
-		"根因",
-		"incident-investigator",
-		"故障快报",
-	} {
-		if strings.Contains(data, forbidden) {
-			t.Fatalf("validator agent %s should not contain %q:\n%s", path, forbidden, data)
 		}
 	}
 }

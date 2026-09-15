@@ -16,8 +16,8 @@ func TestMaterializeFrontendRuntimeWritesAuditableCascadeManifest(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer staging.Cleanup()
-	defer staging.Close()
+	defer func() { _ = staging.Cleanup() }()
+	defer func() { _ = staging.Close() }()
 	resolver := FrontendRuntimeResolverFunc(func(context.Context, IncidentCase) (FrontendRuntimeManifest, error) {
 		return FrontendRuntimeManifest{
 			Environment: "test", Precision: FrontendPrecisionDeployedRevision, SourceMapStatus: "not_registered",
@@ -50,8 +50,8 @@ func TestMaterializeFrontendRuntimeDegradesResolverFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer staging.Cleanup()
-	defer staging.Close()
+	defer func() { _ = staging.Cleanup() }()
+	defer func() { _ = staging.Close() }()
 	resolver := FrontendRuntimeResolverFunc(func(context.Context, IncidentCase) (FrontendRuntimeManifest, error) {
 		return FrontendRuntimeManifest{}, errors.New("K8s temporarily unavailable")
 	})

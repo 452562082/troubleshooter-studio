@@ -40,4 +40,7 @@ TSHOOT_LIVE_WORKFLOW_TARGETS=opencode TSHOOT_LIVE_WORKFLOW_REPORT_DIR=/tmp/tshoo
 ## 尚未通过的检查
 
 - **免费模型入口尚未通过**：此前分别测试 `opencode/big-pickle` 和 `opencode/mimo-v2.5-free`，两者均在单阶段 8 分钟限制内没有返回最终排障结果；前者确有实际读取文件、运行命令。后续使用已配置的 DeepSeek 账号通过了在线完整闭环，但未据此认定这些免费入口已恢复。测试均未更改持久模型配置。
-- **依赖安全审计未通过**：前端 `npm audit` 报告 6 项（2 moderate、4 high），涉及 Vitest/mocker、brace-expansion、js-yaml、nanoid、PostCSS。Go 审计报告 8 项可达问题，涉及当前 Go 1.25.11 标准库及现有 `golang.org/x/text`、`golang.org/x/net`；未归因于新增的 hujson。此次未扩大到无关依赖或工具链升级。
+
+## 后续修复的审计问题
+
+2026-09-15 的 CI 修复已处理原先记录的依赖审计失败：更新前端锁文件后 `npm audit` 为 0 项漏洞；Go 升级到 1.25.13 并更新 `golang.org/x/text`、`golang.org/x/net` 后，`govulncheck` 不再报告可达漏洞。此次未关闭或跳过安全审计。详见 `docs/decisions.md` 的“对齐本地检查与双平台 CI 门禁”。

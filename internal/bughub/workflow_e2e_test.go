@@ -111,6 +111,9 @@ func TestWorkflowE2ESubmissionSurvivesSQLiteReopen(t *testing.T) {
 			}
 			runnerAfterRestart := &recordingPhaseRunner{}
 			orchestrator = NewCaseOrchestrator(store, runnerAfterRestart, git)
+			if err := orchestrator.RecoverInterrupted(ctx); err != nil {
+				t.Fatal(err)
+			}
 			approvals, _ := store.ListApprovals(ctx, incident.ID)
 			observations, _ := store.ListDeploymentObservations(ctx, incident.ID)
 			events, _ := store.ListEvents(ctx, incident.ID)

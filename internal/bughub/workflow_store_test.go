@@ -164,7 +164,7 @@ func TestResetRelationshipFieldsSurviveReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	gotOld, err := reopened.GetCase(context.Background(), old.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -249,7 +249,7 @@ func TestCaseStoreCreatesSecureSQLiteDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	info, err := os.Stat(path)
 	if err != nil {
@@ -302,7 +302,7 @@ func TestCaseStoreSecuresExistingParentDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	info, err := os.Stat(root)
 	if err != nil {
 		t.Fatal(err)
@@ -526,12 +526,12 @@ func TestCaseStoreConcurrentIdempotentReplayAcrossConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer firstStore.Close()
+	defer func() { _ = firstStore.Close() }()
 	secondStore, err := OpenCaseStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer secondStore.Close()
+	defer func() { _ = secondStore.Close() }()
 	createTestCase(t, firstStore, "case-idempotent-race")
 
 	start := make(chan struct{})
@@ -616,7 +616,7 @@ func TestCaseStoreReopenPreservesHistoryAndEventOutputsAreCloned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	events, err := reopened.ListEvents(ctx, "case-reopen")
 	if err != nil || len(events) != 1 || string(events[0].PayloadJSON) != `{"proof":"original"}` {
 		t.Fatalf("events=%+v err=%v", events, err)
@@ -876,7 +876,7 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer migrated.Close()
+		defer func() { _ = migrated.Close() }()
 		if _, err := migrated.GetAttempt(context.Background(), attempt.ID); err != nil {
 			t.Fatal(err)
 		}
@@ -936,7 +936,7 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer migrated.Close()
+		defer func() { _ = migrated.Close() }()
 		assertTableColumns(t, migrated.db, "validation_recipes", "autonomous_recipe_sha256", "autonomous_recipe_json")
 		var version int
 		if err := migrated.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != workflowStoreSchemaVersion {
@@ -999,7 +999,7 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer migrated.Close()
+		defer func() { _ = migrated.Close() }()
 		incident, err := migrated.GetCase(context.Background(), "case-v10-frontend")
 		if err != nil || !incident.FrontendEntry.IsZero() {
 			t.Fatalf("incident=%+v err=%v", incident, err)
@@ -1034,7 +1034,7 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 			t.Fatalf("error=%v", err)
 		}
 		db = openRawWorkflowDB(t, path)
-		defer db.Close()
+		defer func() { _ = db.Close() }()
 		var version int
 		if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 0 {
 			t.Fatalf("user_version=%d err=%v", version, err)
@@ -1132,7 +1132,7 @@ func TestCaseStoreRejectsViewOnlyUnversionedSchemaWithoutMutation(t *testing.T) 
 		t.Fatalf("error=%v", err)
 	}
 	db = openRawWorkflowDB(t, path)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var version int
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 0 {
 		t.Fatalf("user_version=%d err=%v", version, err)
@@ -1330,7 +1330,7 @@ func TestCaseStoreRepairsDatabaseAndSidecarPermissionsOnReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	for _, candidate := range []string{path, path + "-wal", path + "-shm"} {
 		info, err := os.Stat(candidate)
 		if err != nil {
@@ -1348,12 +1348,12 @@ func TestCaseStoreIndependentStoresDistinctTransitionsOnlyOneWins(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Close()
+	defer func() { _ = first.Close() }()
 	second, err := OpenCaseStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer second.Close()
+	defer func() { _ = second.Close() }()
 	createTestCase(t, first, "case-independent-writers")
 	start := make(chan struct{})
 	results := make(chan error, 2)
@@ -1409,7 +1409,7 @@ func tableColumnNames(t *testing.T, db *sql.DB, table string) map[string]bool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	found := map[string]bool{}
 	for rows.Next() {
 		var cid, notNull, pk int

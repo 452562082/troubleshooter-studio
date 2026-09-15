@@ -181,10 +181,11 @@ func routeReference(candidate CandidateEdge) RouteRef {
 		Protocol:     protocol,
 		EndpointEdge: endpointEdgeReference(candidate),
 	}
-	if protocol == "http" {
+	switch protocol {
+	case "http":
 		reference.Method = NormalizeHTTPMethod(candidate.Method)
 		reference.Path = NormalizePath(candidate.Path)
-	} else if protocol == "grpc" {
+	case "grpc":
 		reference.RPCMethod = normalizeRPCMethod(candidate.RPCMethod)
 	}
 	return reference

@@ -41,14 +41,14 @@ func FindCursorCLI() (string, error) {
 // supplies the authorized scope for both investigation and repair.
 func BuildCursorInvestigationCommand(binary, workspace, prompt string) (*exec.Cmd, error) {
 	if strings.TrimSpace(workspace) == "" {
-		return nil, errors.New("Cursor 机器人工作目录不能为空")
+		return nil, errors.New("cursor 机器人工作目录不能为空")
 	}
 	info, err := os.Stat(workspace)
 	if err != nil {
-		return nil, fmt.Errorf("Cursor 机器人工作目录不可用: %w", err)
+		return nil, fmt.Errorf("cursor 机器人工作目录不可用: %w", err)
 	}
 	if !info.IsDir() {
-		return nil, errors.New("Cursor 机器人工作目录必须是目录")
+		return nil, errors.New("cursor 机器人工作目录必须是目录")
 	}
 	if strings.TrimSpace(binary) == "" {
 		binary, err = FindCursorCLI()

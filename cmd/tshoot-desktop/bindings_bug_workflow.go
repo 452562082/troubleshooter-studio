@@ -22,8 +22,6 @@ const (
 	bugTicketResolutionEventPrefix = "bug-ticket-resolution:"
 )
 
-var incidentBugResolutionPollInterval = time.Minute
-
 type incidentWorkflowRuntime struct {
 	orchestrator *bughub.CaseOrchestrator
 	runner       *bughub.AgentPhaseRunner
@@ -365,32 +363,11 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 func (a *App) startIncidentWorkflow(ctx context.Context) error {
 	err := a.initializeIncidentWorkflow(workflowContext(ctx))
 	if err == nil {
-		if runtimeCtx := a.getRuntimeContext(); runtimeCtx != nil {
-		}
 		return nil
 	}
 	fmt.Fprintf(os.Stderr, "[warn] incident workflow startup failed: %v\n", err)
 	a.emitWorkflowEvent(IncidentCaseEventPayload{Kind: "startup_error", Error: &IncidentWorkflowStartupError{Message: err.Error(), Retryable: true}})
 	return err
-}
-
-func fetchZentaoBugWithSessionRecovery(platform bughub.PlatformConfig, sourceID string) (bughub.Bug, error) {
-	run := func(current bughub.PlatformConfig) (bughub.Bug, error) {
-		return (bughub.ZentaoClient{
-			BaseURL: current.BaseURL, Account: current.Account, AuthMode: current.AuthMode,
-			SessionHeader: current.SessionHeader, Password: current.Password, Token: current.Token,
-		}).FetchByID(sourceID)
-	}
-	current, err := run(platform)
-	if err != nil && shouldRecoverZentaoSession(platform, err) {
-		if refreshed, ok := refreshZentaoSession(platform); ok {
-			current, err = run(refreshed)
-		}
-	}
-	if err != nil && clearExpiredZentaoSession(platform, err) {
-		return bughub.Bug{}, zentaoSessionExpiredError(err)
-	}
-	return current, err
 }
 
 func zentaoTicketResolutionComplete(status string) bool {
@@ -408,9 +385,6 @@ func (a *App) resolveIncidentRecoveryContext(_ context.Context, incident bughub.
 		return bughub.Bug{}, bughub.BotRef{}, err
 	}
 	bot.Env = strings.TrimSpace(incident.Environment)
-	if incident.FrontendEntry.IsZero() {
-	} else {
-	}
 	return bug, bot, nil
 }
 
@@ -466,7 +440,7 @@ func (a *App) DeleteIncidentHistory(input DeleteIncidentHistoryInput) (bughub.Ca
 	incident, err := store.GetCase(a.workflowCommandContext(), caseID)
 	if err == nil {
 		if incident.BugID != bugID {
-			return bughub.CaseHistoryDeleteResult{}, errors.New("Case does not belong to the requested Bug")
+			return bughub.CaseHistoryDeleteResult{}, errors.New("case does not belong to the requested Bug")
 		}
 		if !bughub.IsTerminalCaseStatus(incident.Status) {
 			return bughub.CaseHistoryDeleteResult{}, bughub.ErrActiveCaseHistory
@@ -483,7 +457,7 @@ func (a *App) DeleteIncidentHistory(input DeleteIncidentHistoryInput) (bughub.Ca
 		}
 		for _, current := range cases {
 			if current.BugID == bugID {
-				return bughub.CaseHistoryDeleteResult{}, errors.New("Case was not found for the requested Bug")
+				return bughub.CaseHistoryDeleteResult{}, errors.New("case was not found for the requested Bug")
 			}
 		}
 	}
@@ -501,26 +475,6 @@ func (a *App) GetIncidentWorkflowMetrics() (bughub.WorkflowMetrics, error) {
 		return bughub.WorkflowMetrics{}, err
 	}
 	return store.WorkflowMetrics(a.workflowCommandContext(), time.Now().UTC())
-}
-
-func (a *App) resolveIncidentProductionEnvironment(ctx context.Context, incident bughub.IncidentCase) (bool, error) {
-	loader := a.workflowLoadDeploymentConfig
-	if loader == nil {
-		loader = a.loadInstalledIncidentConfig
-	}
-	cfg, err := loader(ctx, incident)
-	if err != nil || cfg == nil {
-		return false, errors.New("incident environment configuration unavailable")
-	}
-	if strings.TrimSpace(incident.SystemID) == "" || cfg.System.ID != incident.SystemID {
-		return false, errors.New("incident environment system does not match configuration")
-	}
-	for _, environment := range cfg.Environments {
-		if environment.ID == incident.Environment {
-			return environment.IsProd, nil
-		}
-	}
-	return false, errors.New("incident environment is absent from configuration")
 }
 
 func (a *App) GetIncidentCase(caseID string) (IncidentCaseDetail, error) {
@@ -1146,9 +1100,6 @@ func (a *App) loadIncidentContext(caseID string) (bughub.Bug, bughub.BotRef, err
 		return bughub.Bug{}, bughub.BotRef{}, err
 	}
 	bot.Env = strings.TrimSpace(incident.Environment)
-	if incident.FrontendEntry.IsZero() {
-	} else {
-	}
 	return bug, bot, nil
 }
 

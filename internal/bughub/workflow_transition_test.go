@@ -371,7 +371,7 @@ func TestValidateWorkflowAttemptContract(t *testing.T) {
 
 	for _, payload := range []json.RawMessage{
 		nil,
-		json.RawMessage{},
+		{},
 		json.RawMessage(`{`),
 		json.RawMessage(`null`),
 		json.RawMessage(`[]`),

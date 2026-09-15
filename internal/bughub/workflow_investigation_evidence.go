@@ -60,7 +60,7 @@ func (r *AgentPhaseRunner) materializeInvestigationEvidence(ctx context.Context,
 	}
 	var initial InitialInvestigationInput
 	if err := json.Unmarshal(attempt.InputJSON, &initial); err != nil {
-		return "", nil
+		return "", fmt.Errorf("parse initial investigation evidence: %w", err)
 	}
 	manifest := materializedInvestigationEvidence{Evidence: initial.Evidence}
 	incident, err := r.store.GetCase(ctx, attempt.CaseID)
@@ -124,9 +124,10 @@ func (r *AgentPhaseRunner) materializeInvestigationEvidence(ctx context.Context,
 			}
 			extension = "." + suffix
 		}
-		if artifact.Kind == "console" {
+		switch artifact.Kind {
+		case "console":
 			extension = ".jsonl"
-		} else if artifact.Kind == "screenshot" || artifact.Kind == "user_screenshot" {
+		case "screenshot", "user_screenshot":
 			extension = ".png"
 		}
 		name := fmt.Sprintf("%02d-%s-%s%s", index+1, safeEvidenceFilenamePart(artifact.Kind), artifact.SHA256[:12], extension)

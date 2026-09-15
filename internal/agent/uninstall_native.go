@@ -20,12 +20,6 @@ import (
 	"github.com/xiaolong/troubleshooter-studio/internal/discover"
 )
 
-// readSystemIDFromMeta 从 tshoot.json 读 system_id 字段。读不到返回空串(调用方 fallback)。
-func readSystemIDFromMeta(metaPath string) string {
-	m := readMetaFromPath(metaPath)
-	return m.SystemID
-}
-
 func readMetaFromPath(metaPath string) discover.Meta {
 	data, err := os.ReadFile(metaPath)
 	if err != nil {

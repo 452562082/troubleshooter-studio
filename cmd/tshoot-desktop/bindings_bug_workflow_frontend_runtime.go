@@ -27,7 +27,7 @@ func (r caseFrontendRuntimeResolver) ResolveFrontendRuntime(ctx context.Context,
 		SourceMapStatus: "not_registered",
 	}
 	if r.app == nil {
-		return manifest, errors.New("Studio workflow is unavailable")
+		return manifest, errors.New("studio workflow is unavailable")
 	}
 	loader := r.app.workflowLoadDeploymentConfig
 	if loader == nil {
@@ -35,7 +35,7 @@ func (r caseFrontendRuntimeResolver) ResolveFrontendRuntime(ctx context.Context,
 	}
 	cfg, err := loader(ctx, incident)
 	if err != nil || cfg == nil || cfg.System.ID != incident.SystemID {
-		return manifest, errors.New("Case robot configuration is unavailable")
+		return manifest, errors.New("case robot configuration is unavailable")
 	}
 	var environment *config.Environment
 	for index := range cfg.Environments {

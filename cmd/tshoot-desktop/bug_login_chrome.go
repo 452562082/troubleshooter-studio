@@ -194,7 +194,7 @@ func freeLocalPort() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	return ln.Addr().(*net.TCPAddr).Port, nil
 }
 
@@ -456,18 +456,6 @@ func cookieDomainMatchesHost(domain string, host string) bool {
 	domain = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(domain)), ".")
 	host = strings.ToLower(strings.TrimSpace(host))
 	return domain != "" && (host == domain || strings.HasSuffix(host, "."+domain))
-}
-
-func hasLikelyLoginCookie(cookies []chromeCookie) bool {
-	for _, c := range cookies {
-		name := strings.ToLower(c.Name)
-		if strings.Contains(name, "sid") || strings.Contains(name, "session") ||
-			strings.Contains(name, "token") || strings.Contains(name, "auth") ||
-			strings.Contains(name, "zentao") {
-			return true
-		}
-	}
-	return false
 }
 
 func controlledBrowserProfileRoot() string {

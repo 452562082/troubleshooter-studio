@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -38,13 +39,13 @@ func TestServiceTopologyOverridesValidateAndNormalize(t *testing.T) {
 	if got[0].Scope != "service" || got[0].Protocol != "" {
 		t.Fatalf("normalized service override = %#v", got[0])
 	}
-	if got[1].Protocol != "http" || got[1].Method != "GET" || got[1].Path != "/api/orders/{param}" {
+	if got[1].Protocol != "http" || got[1].Method != http.MethodGet || got[1].Path != "/api/orders/{param}" {
 		t.Fatalf("normalized confirm override = %#v", got[1])
 	}
 	if got[2].Protocol != "grpc" || got[2].RPCMethod != "orders.v1.OrderService/GetOrder" {
 		t.Fatalf("normalized reject override = %#v", got[2])
 	}
-	if got[3].Method != "POST" || got[3].Path != "/api/orders/{param}" {
+	if got[3].Method != http.MethodPost || got[3].Path != "/api/orders/{param}" {
 		t.Fatalf("normalized add override = %#v", got[3])
 	}
 }

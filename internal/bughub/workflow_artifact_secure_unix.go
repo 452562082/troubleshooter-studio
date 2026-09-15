@@ -73,12 +73,12 @@ func captureRegisteredArtifact(path, artifactsRoot, caseID, digest string) (capt
 	if err != nil {
 		return capturedArtifactSource{}, err
 	}
-	defer unix.Close(rootFD)
+	defer func() { _ = unix.Close(rootFD) }()
 	caseFD, err := unix.Openat(rootFD, caseComponent, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return capturedArtifactSource{}, fmt.Errorf("open registered artifact case directory without following links: %w", err)
 	}
-	defer unix.Close(caseFD)
+	defer func() { _ = unix.Close(caseFD) }()
 	fd, err := unix.Openat(caseFD, digest, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return capturedArtifactSource{}, fmt.Errorf("open registered artifact without following links: %w", err)
@@ -175,7 +175,7 @@ func publishArtifact(rootPath, caseID, digest string, content []byte) (artifactP
 	publication.path = filepath.Join(absRoot, caseComponent, digest)
 
 	if existingFD, openErr := unix.Openat(caseFD, digest, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0); openErr == nil {
-		defer unix.Close(existingFD)
+		defer func() { _ = unix.Close(existingFD) }()
 		info, err := verifyPublishedDescriptor(existingFD, digest, content)
 		if err != nil {
 			return fail(fmt.Errorf("verify existing artifact destination: %w", err))
@@ -260,12 +260,12 @@ func verifyRegisteredArtifact(path, digest string) error {
 	if err != nil {
 		return err
 	}
-	defer unix.Close(parentFD)
+	defer func() { _ = unix.Close(parentFD) }()
 	fd, err := unix.Openat(parentFD, filepath.Base(path), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return fmt.Errorf("open registered artifact: %w", err)
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	_, err = verifyPublishedDescriptor(fd, digest, nil)
 	return err
 }
@@ -278,7 +278,7 @@ func (p *unixArtifactPublication) Verify() error {
 	if err != nil {
 		return err
 	}
-	defer unix.Close(rootFD)
+	defer func() { _ = unix.Close(rootFD) }()
 	rootInfo, err := fileInfoFromFD(rootFD, p.rootPath)
 	if err != nil || !os.SameFile(rootInfo, p.rootInfo) {
 		return fmt.Errorf("artifact root changed during registration")
@@ -287,7 +287,7 @@ func (p *unixArtifactPublication) Verify() error {
 	if err != nil {
 		return fmt.Errorf("reopen artifact case directory: %w", err)
 	}
-	defer unix.Close(caseFD)
+	defer func() { _ = unix.Close(caseFD) }()
 	caseInfo, err := fileInfoFromFD(caseFD, p.caseID)
 	if err != nil || !os.SameFile(caseInfo, p.caseInfo) {
 		return fmt.Errorf("artifact case directory changed during registration")
@@ -296,7 +296,7 @@ func (p *unixArtifactPublication) Verify() error {
 	if err != nil {
 		return fmt.Errorf("reopen artifact destination: %w", err)
 	}
-	defer unix.Close(destFD)
+	defer func() { _ = unix.Close(destFD) }()
 	destInfo, err := verifyPublishedDescriptor(destFD, p.digest, nil)
 	if err != nil {
 		return err

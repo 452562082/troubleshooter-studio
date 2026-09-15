@@ -51,10 +51,10 @@ func TestBuildPlan_SkippedSkills(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.SkillsIncluded) != 8 {
-		t.Errorf("expected 8 included skills (2 whitelist + fixer + 4 validator baseline + observability evidence), got %d: %+v", len(plan.SkillsIncluded), plan.SkillsIncluded)
+	if len(plan.SkillsIncluded) != 5 {
+		t.Errorf("expected 5 included skills (2 whitelist + fixer + 4 validator baseline + observability evidence), got %d: %+v", len(plan.SkillsIncluded), plan.SkillsIncluded)
 	}
-	for _, want := range []string{"routing", "diagram-generator", "bug-fixer", "api-verifier", "attachment-evidence-verifier", "bug-verifier", "frontend-repro-investigator", "grafana-observability-query"} {
+	for _, want := range []string{"routing", "diagram-generator", "bug-fixer", "frontend-repro-investigator", "grafana-observability-query"} {
 		found := false
 		for _, got := range plan.SkillsIncluded {
 			if got.Name == want {

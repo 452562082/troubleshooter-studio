@@ -165,6 +165,7 @@ export interface WizardDraft {
   /** Step 7 "从配置中心读取" 标记(重进后徽章仍显示) */
   dsAutoFilled?: Record<string, boolean>
   /** Step 7 每个服务识别出的数据层配置(env → service → dsKey → fields) */
+  manualDataStoreEntries?: Record<string, boolean>
   scannedDS?: Record<string, DSByService>
   /** data store instance id -> type；旧草稿缺失时按 key 自身派生。 */
   dataStoreTypes?: Record<string, string>
@@ -174,8 +175,7 @@ export interface WizardDraft {
   // ── Step 2 / 9 / 10 部署目标 + 安装根目录 ──
   /** Step 2 勾哪些部署 target */
   enabledTargets?: Record<string, boolean>
-  /** Step 2 OpenClaw 自定义安装目录(覆盖 ~/.openclaw 探测路径) */
-  openclawInstallDir?: string
+
 
   // ── Step 10 部署后回写 ──
   /** runOneClickDeploy 部署成功时间戳;HomePage 用来判定"已部署"vs"继续部署" */

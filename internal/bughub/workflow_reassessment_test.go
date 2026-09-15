@@ -38,7 +38,7 @@ func TestReconsiderRemediationStartsReadOnlyInvestigationAndReplays(t *testing.T
 	store := newOrchestratorStore(t)
 	incident, root := readyCaseForRemediationReassessment(t, store, "case-reconsider")
 	runner := &recordingPhaseRunner{}
-	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	orchestrator := NewCaseOrchestrator(store, runner, nil)
 	command := ReconsiderRemediationCommand{
 		CaseID: incident.ID, ExpectedVersion: incident.Version,
 		IdempotencyKey: ReconsiderRemediationKey(incident.ID, root.ID, incident.Version),
@@ -107,7 +107,7 @@ func TestReconsiderCompletedFixCreatesReworkAssessmentAndFreshFixAuthorization(t
 		InvestigationStatus: "root_cause_ready", Environment: "test", RootCause: "backend maps signature to nickname",
 		Confidence: "high", RootCauseType: RootCauseCode,
 		Remediation: RemediationPlan{Mode: RemediationCodeChange, Repositories: []string{"backend"}, Target: "response mapper", Summary: "map signature independently", Verification: "rerun original search"},
-		CallChain:   []CallChainHop{}, Evidence: []ArtifactReference{}, ValidationGaps: []string{}, Gaps: []string{}, UncheckedScopes: []string{},
+		CallChain:   []CallChainHop{}, Evidence: []ArtifactReference{}, Gaps: []string{}, UncheckedScopes: []string{},
 	}
 	root := PhaseAttempt{
 		ID: incident.ID + "-root", CaseID: incident.ID, CycleNumber: incident.CycleNumber, Phase: PhaseInvestigation,
@@ -145,7 +145,7 @@ func TestReconsiderCompletedFixCreatesReworkAssessmentAndFreshFixAuthorization(t
 	}
 	incident = bound.Case
 	runner := &recordingPhaseRunner{}
-	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	orchestrator := NewCaseOrchestrator(store, runner, nil)
 	command := ReconsiderRemediationCommand{
 		CaseID: incident.ID, ExpectedVersion: incident.Version,
 		IdempotencyKey: ReconsiderRemediationKey(incident.ID, root.ID, incident.Version),
@@ -223,7 +223,7 @@ func TestReconsiderCompletedFixCreatesReworkAssessmentAndFreshFixAuthorization(t
 func TestReconsiderRemediationRejectsInvalidScopeAndProposal(t *testing.T) {
 	store := newOrchestratorStore(t)
 	incident, root := readyCaseForRemediationReassessment(t, store, "case-reconsider-invalid")
-	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil)
+	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil)
 	base := ReconsiderRemediationCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, ActorID: "alice", RootCauseAttemptID: root.ID, Proposal: "改由后端修复", Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "investigator", Target: "codex"}}
 	base.IdempotencyKey = "wrong"
 	if _, err := orchestrator.ReconsiderRemediation(context.Background(), base); !errors.Is(err, ErrApprovalScope) {
@@ -311,7 +311,6 @@ func TestParseRemediationReassessmentMergesOnlyRemediation(t *testing.T) {
 		Remediation:         RemediationPlan{Mode: RemediationCodeChange, Repositories: []string{"frontend"}, Target: "result card", Summary: "deduplicate labels", Verification: "rerun search"},
 		CallChain:           []CallChainHop{{Kind: "service", Name: "search adapter", Repo: "backend", Precision: "static_candidate", Evidence: "frozen response and source agree"}},
 		Evidence:            []ArtifactReference{{Kind: "response_facts", Path: "response-facts.json", Environment: "test"}},
-		ValidationGaps:      []string{},
 		Gaps:                []string{},
 		UncheckedScopes:     []string{},
 	}
@@ -384,7 +383,6 @@ func TestRemediationReassessmentRunnerSkipsInvestigationToolPreparation(t *testi
 			Remediation:         RemediationPlan{Mode: RemediationCodeChange, Repositories: []string{"frontend"}, Target: "result card", Summary: "deduplicate labels", Verification: "rerun search"},
 			CallChain:           []CallChainHop{},
 			Evidence:            []ArtifactReference{},
-			ValidationGaps:      []string{},
 			Gaps:                []string{},
 			UncheckedScopes:     []string{},
 		},

@@ -110,7 +110,7 @@ describe('IncidentBugSummary', () => {
     expect(selected.get('.incident-bug-summary').attributes('data-responsive-viewports')).toBe('375,768,1024,1440')
     expect(selected.get('.incident-bug-summary').attributes('data-overflow-safe')).toBe('true')
     expect(summarySource).toContain('grid-template-columns: repeat(2, minmax(0, 1fr))')
-    expect(summarySource).toContain('@container incident-bug-summary (max-width: 520px)')
+    expect(summarySource).toContain('@container incident-bug-summary (max-width: 240px)')
     expect(summarySource).toContain('grid-template-columns: minmax(0, 1fr)')
     expect(summarySource).toContain('overflow-wrap: anywhere')
   })

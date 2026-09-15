@@ -459,7 +459,8 @@ func TestStartBugInvestigationRunsClaudeBot(t *testing.T) {
 	}
 }
 
-func TestStartBugInvestigationRejectsCursorBot(t *testing.T) {
+func TestStartBugInvestigationRejectsMissingCursorCLI(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
 	root := t.TempDir()
 	t.Setenv("HOME", root)
 	if err := bugStore().Upsert(bughub.Bug{ID: "zentao-577", Source: "zentao", Title: "Bug 577"}); err != nil {
@@ -470,7 +471,7 @@ func TestStartBugInvestigationRejectsCursorBot(t *testing.T) {
 		BugID: "zentao-577",
 		Bot:   bughub.BotRef{Key: "repo|cursor", Target: "cursor", Path: root, SystemID: "base"},
 	})
-	if err == nil || !strings.Contains(err.Error(), "暂不支持 Cursor") {
+	if err == nil || !strings.Contains(err.Error(), "未检测到 Cursor Agent CLI") {
 		t.Fatalf("err = %v", err)
 	}
 }

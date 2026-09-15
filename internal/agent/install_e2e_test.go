@@ -2,7 +2,6 @@
 //
 // 此前测试格局:
 //   - install_native_test.go       只测"文件拷贝"那一步,用手搓的 3 文件 staging
-//   - install_native_openclaw_*    OpenClaw 单 target 装得很细
 //   - 三 IDE target 各自的 MCP merge / creds.json / 卸载链 没有任何端到端覆盖
 //
 // 此 E2E 真跑 generator(从 examples/shop-troubleshooter.yaml 起步),走完整链:
@@ -39,7 +38,7 @@ func projectRoot(t *testing.T) string {
 }
 
 // loadShopCfg 从 examples/shop-troubleshooter.yaml 读 cfg。yaml 里 generation.targets 写的是
-// openclaw,但 GenerateClaudeCode/Cursor/Codex 不读这个字段,我们直接调它们三个产出
+// claude-code；测试直接调用 GenerateClaudeCode/Cursor/Codex 产出
 // 三家 staging。yaml 选这份是因为:① workspace_name=shop-bot 是 ASCII,生成的 agent
 // 文件名干净;② nacos+grafana+loki 都开了,MCP merge 会真触发(不止派生一两条 server)。
 func loadShopCfg(t *testing.T) (*config.SystemConfig, []byte) {
@@ -162,7 +161,7 @@ func expectedMCPKeys() []string {
 }
 
 func expectedAgentNames(cfg *config.SystemConfig) []string {
-	return []string{cfg.ResolveID(), cfg.System.ID + "-validator", cfg.System.ID + "-fixer"}
+	return []string{cfg.ResolveID(), cfg.System.ID + "-fixer"}
 }
 
 // TestE2E_IDEInstallChain 把三家 IDE target 都跑一遍 init→gen→install→merge MCP→
@@ -302,7 +301,7 @@ func TestE2E_IDEInstallChain(t *testing.T) {
 			if agents[0].Meta.SystemID != cfg.System.ID || agents[0].Meta.Target != target {
 				t.Errorf("scan meta 不对:%+v", agents[0].Meta)
 			}
-			if len(agents[0].Meta.InternalAgents) != 3 {
+			if len(agents[0].Meta.InternalAgents) != 2 {
 				t.Errorf("scan meta should include internal agents, got %+v", agents[0].Meta.InternalAgents)
 			}
 			installedDir := agents[0].Path
@@ -501,7 +500,7 @@ func assertCodexAgentTOMLAbsent(t *testing.T, tomlPath string) {
 //	WriteIDECredsFile —— apollo / consul / env-vars / kuboard 才会写
 //	~/.tshoot/<agent_id>-creds.json,nacos-only(shop)直接 skip。
 //
-// 这条文件给 OpenClaw 那批"非 MCP 走脚本"的 skill 用(apollo_config.py /
+// 这条文件给"非 MCP 走脚本"的 skill 用(apollo_config.py /
 // consul_config.py / kuboard 配套),IDE 平台部署时也得镜像写一份,否则脚本报
 // "creds file missing"。
 //

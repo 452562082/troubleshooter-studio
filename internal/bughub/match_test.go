@@ -45,11 +45,12 @@ func TestMatchBotsExcludesTargetsThatCannotRunIncidentWorkflow(t *testing.T) {
 	bots := []BotRef{
 		{Key: "codex", SystemID: "shop", Target: "codex", Env: "test"},
 		{Key: "cursor", SystemID: "shop", Target: "cursor", Env: "test"},
+		{Key: "embedded", SystemID: "shop", Target: "embedded", Env: "test"},
 	}
 
 	got := MatchBots(bug, bots)
 
-	if len(got) != 1 || got[0].Bot.Key != "codex" {
+	if len(got) != 2 || got[0].Bot.Key != "codex" || got[1].Bot.Key != "cursor" {
 		t.Fatalf("want only incident-capable bot, got %+v", got)
 	}
 }

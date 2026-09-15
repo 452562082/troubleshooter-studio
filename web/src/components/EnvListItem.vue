@@ -85,7 +85,7 @@ function isSuggestedFrontendKind(name: string): boolean {
         />
       </div>
       <div class="form-group compact checkbox-group environment-production-field">
-        <label title="is_prod=true 时机器人更保守:执行写入/重启类动作前会二次确认;OpenClaw 客户端 UI 也会标红。">
+        <label title="is_prod=true 时机器人更保守:执行写入/重启类动作前会二次确认。">
           <input type="checkbox" v-model="env.is_prod" />
           生产环境
           <span class="help-icon">?</span>

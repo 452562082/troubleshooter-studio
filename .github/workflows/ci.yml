@@ -80,12 +80,6 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - name: cache pinned desktop Chromium runtime
-        uses: actions/cache@v4
-        with:
-          path: .cache/desktop-browser-runtime
-          key: desktop-browser-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('internal/browserverify/runtime.go', 'internal/browserverify/worker/*.mjs') }}
-
       - name: npm ci
         run: npm ci --ignore-scripts
 
@@ -115,29 +109,6 @@ jobs:
 
       - name: skill script tests
         run: scripts/test-skill-scripts.sh
-
-  browser-smoke:
-    name: Browser Collector Smoke (manual)
-    runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20.19.0'
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: install playwright chromium
-        run: |
-          npm install --no-save --no-package-lock playwright
-          npx playwright install --with-deps chromium
-
-      - name: real browser collector smoke
-        run: scripts/test-browser-smoke.sh
 
   desktop:
     name: Desktop (macOS .app build)
@@ -170,11 +141,6 @@ jobs:
           test -f dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio
           test -f dist/TroubleshooterStudio.app/Contents/Info.plist
           test -f dist/TroubleshooterStudio.app/Contents/Resources/icon.icns
-          runtime_root=dist/TroubleshooterStudio.app/Contents/Resources/browser-runtime
-          test "$(find "$runtime_root" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" = 1
-          runtime_dir="$(find "$runtime_root" -mindepth 1 -maxdepth 1 -type d)"
-          test -f "$runtime_dir/.runtime-ready.json"
-          test -d "$runtime_dir/browsers"
           file dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio
           echo "✓ .app bundle structure OK"
 

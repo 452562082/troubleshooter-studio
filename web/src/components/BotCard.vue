@@ -96,7 +96,7 @@ const agentRows = computed<AgentRow[]>(() => {
   return agents
     .filter(a => {
       const id = (a.id || '').trim()
-      if (!id || seen.has(id)) return false
+      if (!id || seen.has(id) || ((a.role || '').trim().toLowerCase() || roleFromAgentID(id)) === 'validator') return false
       seen.add(id)
       return true
     })
@@ -122,14 +122,12 @@ function roleFromAgentID(id: string): string {
 }
 
 function roleLabel(role: string): string {
-  if (role === 'validator') return '验证 Agent'
   if (role === 'fixer') return '修复 Agent'
   if (role === 'troubleshooter') return '排障 Agent'
   return `${role} Agent`
 }
 
 function roleSummary(role: string): string {
-  if (role === 'validator') return '复现、回归、采集证据'
   if (role === 'fixer') return '创建修复分支、修改代码、提交并推送'
   if (role === 'troubleshooter') return '定位根因、给出修复建议'
   return '独立执行入口'
@@ -254,7 +252,7 @@ function classForSeverity(s: string): string {
               <button
                 class="menu-item menu-item-danger"
                 :disabled="uninstallLoading"
-                :title="'卸载已部署的机器人:claude-code/cursor/codex 把 ~/.<target>/{agents,skills,scripts}/<name> 移到 ~/.Trash;openclaw 摘 agents.list + 清 creds.json'"
+                :title="'卸载此机器人的 Agent、Skills 和脚本，文件移入废纸篓'"
                 @click="emit('closeMenu'); emit('uninstall')"
               >
                 {{ uninstallLoading ? '卸载中…' : '🗑 卸载机器人' }}
@@ -368,9 +366,9 @@ function classForSeverity(s: string): string {
   font-size: 11px; padding: 2px 8px; border-radius: 3px; font-weight: 600;
   background: #e0e7ff; color: #3730a3;
 }
-.bot-target[data-target="openclaw"] { background: #fce7f3; color: #9f1239; }
 .bot-target[data-target="claude-code"] { background: #fef3c7; color: #92400e; }
 .bot-target[data-target="cursor"] { background: #dbeafe; color: #1e40af; }
+.bot-target[data-target="opencode"] { background: #ede9fe; color: #5b21b6; }
 .bot-target[data-target="codex"] { background: #d1fae5; color: #065f46; }
 .bot-ver { font-size: 11px; color: #94a3b8; font-family: monospace; }
 
@@ -412,7 +410,6 @@ function classForSeverity(s: string): string {
   flex: 0 0 auto; font-size: 10px; padding: 2px 7px; border-radius: 999px;
   background: #eef2ff; color: #3730a3; font-weight: 700;
 }
-.agent-role[data-role="validator"] { background: #ecfdf5; color: #047857; }
 .agent-summary { margin-top: 3px; font-size: 11px; color: #64748b; }
 .agent-actions { display: flex; gap: 6px; }
 .btn-agent {

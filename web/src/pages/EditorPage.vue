@@ -75,7 +75,7 @@ infrastructure:
   project_tracking: []
 
 generation:
-  targets: [openclaw]
+  targets: [claude-code]
   skills_whitelist: [routing, config-executor, redis-runtime-query, diagram-generator]
 
 meta:

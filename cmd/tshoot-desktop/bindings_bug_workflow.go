@@ -13,18 +13,15 @@ import (
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/analyzer"
-	"github.com/xiaolong/troubleshooter-studio/internal/browserverify"
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
 )
 
 const (
 	incidentCaseEvent              = "incident-case:event"
-	incidentWorkflowReminderEvent  = "incident-workflow:reminder"
 	bugTicketResolutionEventPrefix = "bug-ticket-resolution:"
 )
 
-var incidentWorkflowReminderPollInterval = time.Minute
 var incidentBugResolutionPollInterval = time.Minute
 
 type incidentWorkflowRuntime struct {
@@ -34,27 +31,15 @@ type incidentWorkflowRuntime struct {
 }
 
 type IncidentCaseDetail struct {
-	Case                       bughub.IncidentCase                 `json:"case"`
-	Attempts                   []IncidentPhaseAttempt              `json:"attempts"`
-	PhaseEvents                []bughub.InvestigationEvent         `json:"phase_events"`
-	Artifacts                  []IncidentArtifact                  `json:"artifacts"`
-	Approvals                  []IncidentApproval                  `json:"approvals"`
-	CodeChanges                []IncidentCodeChange                `json:"code_changes"`
-	DeploymentObservations     []bughub.DeploymentObservation      `json:"deployment_observations"`
-	Events                     []IncidentTransitionEvent           `json:"events"`
-	DeploymentVerification     IncidentDeploymentVerification      `json:"deployment_verification"`
-	BugTicketResolution        IncidentBugTicketResolution         `json:"bug_ticket_resolution"`
-	ManualReproductionSegments []IncidentManualReproductionSegment `json:"manual_reproduction_segments"`
-}
-
-type IncidentManualReproductionSegment struct {
-	FrontendEntryID   string    `json:"frontend_entry_id"`
-	FrontendEntryName string    `json:"frontend_entry_name"`
-	StartURL          string    `json:"start_url"`
-	FinalURL          string    `json:"final_url"`
-	Title             string    `json:"title"`
-	ActionCount       int       `json:"action_count"`
-	CapturedAt        time.Time `json:"captured_at"`
+	Case                   bughub.IncidentCase            `json:"case"`
+	Attempts               []IncidentPhaseAttempt         `json:"attempts"`
+	PhaseEvents            []bughub.InvestigationEvent    `json:"phase_events"`
+	Artifacts              []IncidentArtifact             `json:"artifacts"`
+	Approvals              []IncidentApproval             `json:"approvals"`
+	CodeChanges            []IncidentCodeChange           `json:"code_changes"`
+	DeploymentObservations []bughub.DeploymentObservation `json:"deployment_observations"`
+	Events                 []IncidentTransitionEvent      `json:"events"`
+	BugTicketResolution    IncidentBugTicketResolution    `json:"bug_ticket_resolution"`
 }
 
 type IncidentBugTicketResolution struct {
@@ -74,12 +59,6 @@ type IncidentArtifact struct {
 	Version     string    `json:"version"`
 	RequestID   string    `json:"request_id"`
 	TraceID     string    `json:"trace_id"`
-}
-
-type IncidentDeploymentVerification struct {
-	Provider  string `json:"provider"`
-	Available bool   `json:"available"`
-	Hint      string `json:"hint"`
 }
 
 type IncidentPhaseAttempt struct {
@@ -159,45 +138,30 @@ type IncidentWorkflowStartupError struct {
 }
 
 type StartIncidentCaseInput struct {
-	CaseID                 string         `json:"case_id"`
-	BugID                  string         `json:"bug_id,omitempty"`
-	BotKey                 string         `json:"bot_key,omitempty"`
-	BotEnvironment         string         `json:"bot_environment,omitempty"`
-	FrontendEntryID        string         `json:"frontend_entry_id,omitempty"`
-	FrontendEntryIDs       []string       `json:"frontend_entry_ids,omitempty"`
-	PrimaryFrontendEntryID string         `json:"primary_frontend_entry_id,omitempty"`
-	ExpectedVersion        int64          `json:"expected_version"`
-	IdempotencyKey         string         `json:"idempotency_key"`
-	ActorID                string         `json:"actor_id"`
-	InputJSON              map[string]any `json:"input_json,omitempty"`
+	CaseID          string         `json:"case_id"`
+	BugID           string         `json:"bug_id,omitempty"`
+	BotKey          string         `json:"bot_key,omitempty"`
+	BotEnvironment  string         `json:"bot_environment,omitempty"`
+	ExpectedVersion int64          `json:"expected_version"`
+	IdempotencyKey  string         `json:"idempotency_key"`
+	ActorID         string         `json:"actor_id"`
+	InputJSON       map[string]any `json:"input_json,omitempty"`
 }
 
 type ResetIncidentCaseInput struct {
-	CaseID                 string         `json:"case_id"`
-	NewCaseID              string         `json:"new_case_id"`
-	BotKey                 string         `json:"bot_key"`
-	BotEnvironment         string         `json:"bot_environment,omitempty"`
-	FrontendEntryID        string         `json:"frontend_entry_id,omitempty"`
-	FrontendEntryIDs       []string       `json:"frontend_entry_ids,omitempty"`
-	PrimaryFrontendEntryID string         `json:"primary_frontend_entry_id,omitempty"`
-	ExpectedVersion        int64          `json:"expected_version"`
-	IdempotencyKey         string         `json:"idempotency_key"`
-	ActorID                string         `json:"actor_id"`
-	InputJSON              map[string]any `json:"input_json,omitempty"`
+	CaseID          string         `json:"case_id"`
+	NewCaseID       string         `json:"new_case_id"`
+	BotKey          string         `json:"bot_key"`
+	BotEnvironment  string         `json:"bot_environment,omitempty"`
+	ExpectedVersion int64          `json:"expected_version"`
+	IdempotencyKey  string         `json:"idempotency_key"`
+	ActorID         string         `json:"actor_id"`
+	InputJSON       map[string]any `json:"input_json,omitempty"`
 }
 
 type DeleteIncidentHistoryInput struct {
 	CaseID string `json:"case_id"`
 	BugID  string `json:"bug_id"`
-}
-
-type ResolveIncidentFrontendEntryInput struct {
-	BugID                  string   `json:"bug_id"`
-	BotKey                 string   `json:"bot_key"`
-	BotEnvironment         string   `json:"bot_environment,omitempty"`
-	FrontendEntryID        string   `json:"frontend_entry_id,omitempty"`
-	FrontendEntryIDs       []string `json:"frontend_entry_ids,omitempty"`
-	PrimaryFrontendEntryID string   `json:"primary_frontend_entry_id,omitempty"`
 }
 
 type ContinueIncidentCaseInput struct {
@@ -207,14 +171,6 @@ type ContinueIncidentCaseInput struct {
 	ActorID         string         `json:"actor_id"`
 	Phase           bughub.Phase   `json:"phase"`
 	InputJSON       map[string]any `json:"input_json,omitempty"`
-}
-
-type ConfirmIncidentValidationInput struct {
-	CaseID              string `json:"case_id"`
-	ExpectedVersion     int64  `json:"expected_version"`
-	IdempotencyKey      string `json:"idempotency_key"`
-	ActorID             string `json:"actor_id"`
-	ValidationAttemptID string `json:"validation_attempt_id"`
 }
 
 type ApproveIncidentFixInput struct {
@@ -265,18 +221,6 @@ type ApproveIncidentMergeInput struct {
 	TargetHeads     map[string]string `json:"target_heads"`
 }
 
-type NotifyIncidentDeployedInput struct {
-	CaseID           string            `json:"case_id"`
-	ExpectedVersion  int64             `json:"expected_version"`
-	IdempotencyKey   string            `json:"idempotency_key"`
-	ActorID          string            `json:"actor_id"`
-	ObservedVersion  string            `json:"observed_version"`
-	ObservedCommits  map[string]string `json:"observed_commits,omitempty"`
-	VersionSource    string            `json:"version_source,omitempty"`
-	NotificationText string            `json:"notification_text,omitempty"`
-	InputJSON        map[string]any    `json:"input_json,omitempty"`
-}
-
 type CancelIncidentAttemptInput struct {
 	CaseID          string `json:"case_id"`
 	AttemptID       string `json:"attempt_id"`
@@ -303,9 +247,7 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 		if a.workflowInitErr == nil && !a.workflowRecoveryPending {
 			return nil
 		}
-		if a.workflowRecoveryPending && !a.incidentBrowserRecoveryMayRun() {
-			return nil
-		}
+
 		if recoverErr := a.workflowOrchestrator.RecoverInterrupted(workflowContext(ctx)); recoverErr != nil {
 			a.workflowInitErr = recoverErr
 			return recoverErr
@@ -317,11 +259,6 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 	// Initialization errors are observable but not sticky: a later command can
 	// retry after a transient filesystem or migration issue is corrected.
 	a.workflowInitErr = nil
-	browserDecisionPolicy, browserDecisionConfigured, err := loadBrowserDecisionRolloutPolicy()
-	if err != nil {
-		a.workflowInitErr = err
-		return err
-	}
 	root := strings.TrimSpace(a.workflowRoot)
 	if root == "" {
 		root = bughub.DefaultRoot()
@@ -344,7 +281,6 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 		_ = store.Close()
 		return statErr
 	}
-	a.initializeIncidentBrowser(root)
 	runtime := incidentWorkflowRuntime{}
 	if a.workflowRuntimeFactory != nil {
 		runtime = a.workflowRuntimeFactory(store, legacy)
@@ -374,26 +310,13 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 			}
 			return result, nil
 		}))
-		deploymentVerifier := &caseConfiguredDeploymentVerifier{app: a, store: store}
-		orchestrator := bughub.NewCaseOrchestrator(store, runner, gitService, deploymentVerifier)
+		orchestrator := bughub.NewCaseOrchestrator(store, runner, gitService)
 		runner.SetCompletionCallback(func(callbackCtx context.Context, command bughub.CompleteAttemptCommand) error {
 			incident, completeErr := orchestrator.CompleteAttempt(workflowContext(callbackCtx), command)
 			if incident.ID != "" {
 				a.emitIncidentCase(incident.ID)
 			}
-			if completeErr == nil && incident.Status == bughub.CaseFixedVerified {
-				syncCtx := a.getRuntimeContext()
-				if syncCtx == nil {
-					syncCtx = context.Background()
-				}
-				go func() {
-					if resolveErr := a.syncIncidentBugResolution(workflowContext(syncCtx), incident); resolveErr != nil {
-						fmt.Fprintf(os.Stderr, "[warn] Bug ticket status synchronization for Case %s failed; Studio will retry\n", incident.ID)
-						return
-					}
-					a.emitIncidentCase(incident.ID)
-				}()
-			}
+
 			if errors.Is(completeErr, bughub.ErrFixInspectionUnavailable) {
 				// Make the next workflow command run the same bounded durable recovery
 				// pass. This retries remote inspection without rerunning the fixer and
@@ -417,12 +340,6 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 		return runtimeErr
 	}
 	if runtime.runner != nil {
-		if err := runtime.runner.SetBrowserDecisionRolloutPolicy(browserDecisionPolicy); err != nil {
-			a.workflowInitErr = err
-			_ = store.Close()
-			return err
-		}
-		runtime.runner.SetBrowserVerifier(a.workflowBrowser, caseBrowserPolicyResolver{app: a})
 		runtime.runner.SetFrontendRuntimeResolver(caseFrontendRuntimeResolver{app: a})
 		runtime.runner.SetCodeIntelligenceResolver(caseCodeIntelligenceResolver{app: a})
 	}
@@ -430,18 +347,12 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 	a.workflowStore = store
 	a.workflowOrchestrator = runtime.orchestrator
 	a.workflowRunner = runtime.runner
-	a.workflowBrowserDecisionPolicy = browserDecisionPolicy
-	a.workflowBrowserDecisionConfigured = browserDecisionConfigured
 	if runtime.investigator != nil {
 		a.bugInvestigationMu.Lock()
 		a.bugInvestigator = runtime.investigator
 		a.bugInvestigationMu.Unlock()
 	}
-	if !a.incidentBrowserRecoveryMayRun() {
-		a.workflowRecoveryPending = true
-		a.workflowInitErr = nil
-		return nil
-	}
+
 	if recoverErr := runtime.orchestrator.RecoverInterrupted(workflowContext(ctx)); recoverErr != nil {
 		a.workflowInitErr = recoverErr
 		return recoverErr
@@ -451,223 +362,16 @@ func (a *App) initializeIncidentWorkflow(ctx context.Context) error {
 	return nil
 }
 
-// incidentBrowserRecoveryMayRun is called with workflowMu held. A valid
-// published runtime can recover immediately. Otherwise recovery waits until
-// the independent startup preparation has completed, so an interrupted Web
-// attempt cannot mistake a normal Chromium download for a phase failure.
-func (a *App) incidentBrowserRecoveryMayRun() bool {
-	if !a.workflowBrowserPreparationStarted || a.workflowBrowserPreparationFinished {
-		return true
-	}
-	return a.GetIncidentBrowserRuntimeStatus().State == browserverify.RuntimeReady
-}
-
 func (a *App) startIncidentWorkflow(ctx context.Context) error {
 	err := a.initializeIncidentWorkflow(workflowContext(ctx))
 	if err == nil {
 		if runtimeCtx := a.getRuntimeContext(); runtimeCtx != nil {
-			a.startWorkflowReminderPoller(runtimeCtx)
-			a.startIncidentBugResolutionReconciler(runtimeCtx)
 		}
 		return nil
 	}
 	fmt.Fprintf(os.Stderr, "[warn] incident workflow startup failed: %v\n", err)
 	a.emitWorkflowEvent(IncidentCaseEventPayload{Kind: "startup_error", Error: &IncidentWorkflowStartupError{Message: err.Error(), Retryable: true}})
 	return err
-}
-
-func (a *App) startIncidentBugResolutionReconciler(ctx context.Context) {
-	if ctx == nil {
-		return
-	}
-	a.workflowBugResolutionOnce.Do(func() {
-		go func() {
-			a.reconcileIncidentBugResolutions(ctx)
-			ticker := time.NewTicker(incidentBugResolutionPollInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					a.reconcileIncidentBugResolutions(ctx)
-				}
-			}
-		}()
-	})
-}
-
-func (a *App) reconcileIncidentBugResolutions(ctx context.Context) {
-	store, _, err := a.workflowComponents()
-	if err != nil {
-		return
-	}
-	items, err := store.ListCases(workflowContext(ctx))
-	if err != nil {
-		return
-	}
-	for _, incident := range items {
-		if incident.Status != bughub.CaseFixedVerified {
-			continue
-		}
-		if err := a.syncIncidentBugResolution(workflowContext(ctx), incident); err != nil {
-			fmt.Fprintf(os.Stderr, "[warn] Bug ticket status reconciliation for Case %s failed; Studio will retry\n", incident.ID)
-		}
-	}
-}
-
-func (a *App) syncIncidentBugResolution(ctx context.Context, incident bughub.IncidentCase) error {
-	if incident.Status != bughub.CaseFixedVerified {
-		return nil
-	}
-	a.workflowBugResolutionMu.Lock()
-	defer a.workflowBugResolutionMu.Unlock()
-	if recorded, err := a.incidentBugResolutionRecorded(ctx, incident.ID); err != nil {
-		return err
-	} else if recorded {
-		return nil
-	}
-	if a.workflowResolveBug != nil {
-		if err := a.workflowResolveBug(ctx, incident); err != nil {
-			return err
-		}
-		return a.recordIncidentBugResolution(ctx, incident.ID, "bug_ticket_resolution_synchronized", map[string]any{
-			"result": "resolved",
-		})
-	}
-
-	store := bugStore()
-	bug, found, err := store.Get(incident.BugID)
-	if err != nil || !found {
-		return err
-	}
-	if zentaoTicketResolutionComplete(bug.Status) {
-		if err := store.Archive(bug.ID, bughub.BugArchiveSourceResolved); err != nil {
-			return err
-		}
-		return a.recordIncidentBugResolution(ctx, incident.ID, "bug_ticket_resolution_synchronized", map[string]any{
-			"result": "already_resolved",
-		})
-	}
-	if !strings.EqualFold(strings.TrimSpace(bug.Source), "zentao") {
-		return nil
-	}
-	platform, ok := platformForBugAttachments(bug)
-	if !ok {
-		return fmt.Errorf("enabled Bug platform %q is unavailable", bug.PlatformID)
-	}
-	comment := fmt.Sprintf("Studio 故障闭环 Case %s 第 %d 轮回归通过，自动标记为已解决。", incident.ID, incident.CycleNumber)
-	sourceID := strings.TrimSpace(bug.SourceID)
-	if sourceID == "" {
-		sourceID = strings.TrimPrefix(strings.TrimSpace(bug.ID), "zentao-")
-	}
-	current, err := fetchZentaoBugWithSessionRecovery(platform, sourceID)
-	if err != nil {
-		return err
-	}
-	if zentaoTicketResolutionComplete(current.Status) {
-		bug.Status = current.Status
-		bug.UpdatedAt = current.UpdatedAt
-		if err := store.Upsert(bug); err != nil {
-			return err
-		}
-		if err := store.Archive(bug.ID, bughub.BugArchiveSourceResolved); err != nil {
-			return err
-		}
-		return a.recordIncidentBugResolution(ctx, incident.ID, "bug_ticket_resolution_synchronized", map[string]any{
-			"result": "already_resolved",
-		})
-	}
-	if incident.ClosedAt != nil && !current.UpdatedAt.IsZero() && current.UpdatedAt.After(incident.ClosedAt.UTC()) {
-		bug.Status = current.Status
-		bug.UpdatedAt = current.UpdatedAt
-		if err := store.Upsert(bug); err != nil {
-			return err
-		}
-		return a.recordIncidentBugResolution(ctx, incident.ID, "bug_ticket_resolution_skipped_source_changed", map[string]any{
-			"result":            "skipped",
-			"case_closed_at":    incident.ClosedAt.UTC().Format(time.RFC3339Nano),
-			"source_updated_at": current.UpdatedAt.UTC().Format(time.RFC3339Nano),
-			"source_status":     strings.TrimSpace(current.Status),
-		})
-	}
-	resolved, err := resolveZentaoBugWithSessionRecovery(platform, sourceID, comment)
-	if err != nil {
-		return err
-	}
-	bug.Status = resolved.Status
-	bug.UpdatedAt = time.Now().UTC()
-	if err := store.Upsert(bug); err != nil {
-		return err
-	}
-	if err := store.Archive(bug.ID, bughub.BugArchiveSourceResolved); err != nil {
-		return err
-	}
-	return a.recordIncidentBugResolution(ctx, incident.ID, "bug_ticket_resolution_synchronized", map[string]any{
-		"result":        "resolved",
-		"source_status": strings.TrimSpace(resolved.Status),
-	})
-}
-
-func (a *App) incidentBugResolutionRecorded(ctx context.Context, caseID string) (bool, error) {
-	a.workflowMu.Lock()
-	store := a.workflowStore
-	a.workflowMu.Unlock()
-	if store == nil {
-		return false, nil
-	}
-	_, found, err := store.GetEventByIdempotencyKey(ctx, bugTicketResolutionEventPrefix+strings.TrimSpace(caseID))
-	return found, err
-}
-
-func (a *App) recordIncidentBugResolution(ctx context.Context, caseID, eventType string, payload map[string]any) error {
-	a.workflowMu.Lock()
-	store := a.workflowStore
-	a.workflowMu.Unlock()
-	if store == nil {
-		return nil
-	}
-	key := bugTicketResolutionEventPrefix + strings.TrimSpace(caseID)
-	if _, found, err := store.GetEventByIdempotencyKey(ctx, key); err != nil || found {
-		return err
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	for attempt := 0; attempt < 2; attempt++ {
-		current, err := store.GetCase(ctx, caseID)
-		if err != nil {
-			return err
-		}
-		if current.Status != bughub.CaseFixedVerified {
-			return nil
-		}
-		_, err = store.ApplyCaseMutation(ctx, bughub.CaseMutation{
-			CaseID:          current.ID,
-			ExpectedVersion: current.Version,
-			IdempotencyKey:  key,
-			RequestJSON:     encoded,
-			Steps: []bughub.CaseMutationStep{{
-				To:        current.Status,
-				AuditOnly: true,
-				Event: bughub.TransitionEvent{
-					ID:          "event-" + key,
-					EventType:   eventType,
-					ActorType:   "studio",
-					ActorID:     "bug-ticket-reconciler",
-					PayloadJSON: encoded,
-				},
-			}},
-		})
-		if err == nil {
-			return nil
-		}
-		if !errors.Is(err, bughub.ErrCaseVersionConflict) {
-			return err
-		}
-	}
-	return bughub.ErrCaseVersionConflict
 }
 
 func fetchZentaoBugWithSessionRecovery(platform bughub.PlatformConfig, sourceID string) (bughub.Bug, error) {
@@ -689,25 +393,6 @@ func fetchZentaoBugWithSessionRecovery(platform bughub.PlatformConfig, sourceID 
 	return current, err
 }
 
-func resolveZentaoBugWithSessionRecovery(platform bughub.PlatformConfig, sourceID string, comment string) (bughub.Bug, error) {
-	run := func(current bughub.PlatformConfig) (bughub.Bug, error) {
-		return (bughub.ZentaoClient{
-			BaseURL: current.BaseURL, Account: current.Account, AuthMode: current.AuthMode,
-			SessionHeader: current.SessionHeader, Password: current.Password, Token: current.Token,
-		}).ResolveByID(sourceID, comment)
-	}
-	resolved, err := run(platform)
-	if err != nil && shouldRecoverZentaoSession(platform, err) {
-		if refreshed, ok := refreshZentaoSession(platform); ok {
-			resolved, err = run(refreshed)
-		}
-	}
-	if err != nil && clearExpiredZentaoSession(platform, err) {
-		return bughub.Bug{}, zentaoSessionExpiredError(err)
-	}
-	return resolved, err
-}
-
 func zentaoTicketResolutionComplete(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "resolved", "closed":
@@ -724,9 +409,7 @@ func (a *App) resolveIncidentRecoveryContext(_ context.Context, incident bughub.
 	}
 	bot.Env = strings.TrimSpace(incident.Environment)
 	if incident.FrontendEntry.IsZero() {
-		bug = a.hydrateIncidentBrowserContext(bug, bot)
 	} else {
-		bug = bindIncidentFrontendEntry(bug, incident.FrontendEntry)
 	}
 	return bug, bot, nil
 }
@@ -820,94 +503,6 @@ func (a *App) GetIncidentWorkflowMetrics() (bughub.WorkflowMetrics, error) {
 	return store.WorkflowMetrics(a.workflowCommandContext(), time.Now().UTC())
 }
 
-type SnoozeIncidentWorkflowReminderInput struct {
-	CaseID         string    `json:"case_id"`
-	Until          time.Time `json:"until"`
-	ActorID        string    `json:"actor_id"`
-	IdempotencyKey string    `json:"idempotency_key"`
-}
-
-func (a *App) SnoozeIncidentWorkflowReminder(input SnoozeIncidentWorkflowReminderInput) error {
-	store, _, err := a.workflowComponents()
-	if err != nil {
-		return err
-	}
-	service := bughub.NewWorkflowReminderService(store, nil, bughub.DefaultWorkflowReminderAfter, nil)
-	return service.Snooze(a.workflowCommandContext(), input.CaseID, input.Until, input.ActorID, input.IdempotencyKey)
-}
-
-type AckIncidentWorkflowReminderInput struct {
-	CaseID          string `json:"case_id"`
-	ReservationKey  string `json:"reservation_key"`
-	DeliveryAttempt int    `json:"delivery_attempt"`
-	ActorID         string `json:"actor_id"`
-}
-
-func (a *App) ListPendingIncidentWorkflowReminders() ([]bughub.WorkflowReminder, error) {
-	store, _, err := a.workflowComponents()
-	if err != nil {
-		return nil, err
-	}
-	items, err := bughub.NewWorkflowReminderService(store, nil, bughub.DefaultWorkflowReminderAfter, nil, a.resolveIncidentProductionEnvironment).Pending(a.workflowCommandContext())
-	if items == nil {
-		items = []bughub.WorkflowReminder{}
-	}
-	return items, err
-}
-
-func (a *App) AckIncidentWorkflowReminder(input AckIncidentWorkflowReminderInput) error {
-	store, _, err := a.workflowComponents()
-	if err != nil {
-		return err
-	}
-	service := bughub.NewWorkflowReminderService(store, nil, bughub.DefaultWorkflowReminderAfter, nil)
-	return service.Ack(a.workflowCommandContext(), input.CaseID, input.ReservationKey, input.DeliveryAttempt, input.ActorID)
-}
-
-func (a *App) startWorkflowReminderPoller(ctx context.Context) {
-	if ctx == nil {
-		return
-	}
-	a.workflowReminderOnce.Do(func() {
-		go func() {
-			ticker := time.NewTicker(incidentWorkflowReminderPollInterval)
-			defer ticker.Stop()
-			a.pollWorkflowReminders(ctx)
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					a.pollWorkflowReminders(ctx)
-				}
-			}
-		}()
-	})
-}
-
-func (a *App) pollWorkflowReminders(ctx context.Context) {
-	a.workflowMu.Lock()
-	store := a.workflowStore
-	a.workflowMu.Unlock()
-	if store == nil {
-		return
-	}
-	service := bughub.NewWorkflowReminderService(store, nil, bughub.DefaultWorkflowReminderAfter, func(_ context.Context, reminder bughub.WorkflowReminder) error {
-		if a.workflowEmit != nil {
-			a.workflowEmit(incidentWorkflowReminderEvent, reminder)
-			return nil
-		}
-		if runtimeCtx := a.getRuntimeContext(); runtimeCtx != nil {
-			wailsruntime.EventsEmit(runtimeCtx, incidentWorkflowReminderEvent, reminder)
-			return nil
-		}
-		return errors.New("incident workflow reminder has no desktop runtime receiver")
-	}, a.resolveIncidentProductionEnvironment)
-	if err := service.Poll(workflowContext(ctx)); err != nil && !errors.Is(err, context.Canceled) {
-		fmt.Fprintf(os.Stderr, "[warn] incident workflow reminder poll failed: %v\n", err)
-	}
-}
-
 func (a *App) resolveIncidentProductionEnvironment(ctx context.Context, incident bughub.IncidentCase) (bool, error) {
 	loader := a.workflowLoadDeploymentConfig
 	if loader == nil {
@@ -959,9 +554,7 @@ func (a *App) GetIncidentCase(caseID string) (IncidentCaseDetail, error) {
 	if detail.Artifacts, err = incidentArtifacts(ctx, store, filepath.Join(a.workflowRoot, "artifacts"), caseID, artifacts); err != nil {
 		return IncidentCaseDetail{}, err
 	}
-	if detail.ManualReproductionSegments, err = incidentManualReproductionSegments(ctx, store, filepath.Join(a.workflowRoot, "artifacts"), incident, incident.CurrentAttemptID); err != nil {
-		return IncidentCaseDetail{}, err
-	}
+
 	approvals, err := store.ListApprovals(ctx, caseID)
 	if err != nil {
 		return IncidentCaseDetail{}, err
@@ -979,7 +572,6 @@ func (a *App) GetIncidentCase(caseID string) (IncidentCaseDetail, error) {
 	if detail.DeploymentObservations, err = store.ListDeploymentObservations(ctx, caseID); err != nil {
 		return IncidentCaseDetail{}, err
 	}
-	detail.DeploymentVerification = a.deploymentVerificationPreview(ctx, caseID)
 	events, err := store.ListEvents(ctx, caseID)
 	if err != nil {
 		return IncidentCaseDetail{}, err
@@ -1176,7 +768,7 @@ func (a *App) StartIncidentCase(input StartIncidentCaseInput) (bughub.IncidentCa
 	if err := validateWorkflowStartScalars(input.CaseID, input.ExpectedVersion, input.IdempotencyKey, input.ActorID); err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	store, orchestrator, err := a.workflowComponents()
+	_, orchestrator, err := a.workflowComponents()
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
@@ -1184,34 +776,11 @@ func (a *App) StartIncidentCase(input StartIncidentCaseInput) (bughub.IncidentCa
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	frontendEntry := bughub.FrontendEntryBinding{}
-	var frontendEntries []bughub.FrontendEntryBinding
-	if existing, getErr := store.GetCase(a.workflowCommandContext(), strings.TrimSpace(input.CaseID)); getErr == nil && !existing.FrontendEntry.IsZero() {
-		frontendEntry = existing.FrontendEntry.Clone()
-		frontendEntries = existing.EffectiveFrontendEntries()
-		bug = bindIncidentFrontendEntry(bug, frontendEntry)
-	} else {
-		selectedIDs := input.FrontendEntryIDs
-		if len(selectedIDs) == 0 && strings.TrimSpace(input.FrontendEntryID) != "" {
-			selectedIDs = []string{input.FrontendEntryID}
-		}
-		frontendEntry, frontendEntries, bug, err = a.resolveIncidentFrontendBindings(bug, bot, selectedIDs, input.PrimaryFrontendEntryID)
-		if err != nil {
-			return bughub.IncidentCase{}, err
-		}
-	}
-	if err := a.requireIncidentBrowserRuntimeReady(bug); err != nil {
-		return bughub.IncidentCase{}, err
-	}
 	inputJSON, err := normalizeWorkflowInputEnvironment(input.InputJSON, bot.Env, strings.TrimSpace(input.BotEnvironment) != "")
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	inputJSON, err = bindWorkflowFrontendEntries(inputJSON, frontendEntries)
-	if err != nil {
-		return bughub.IncidentCase{}, err
-	}
-	incident, err := orchestrator.CreateAndStartCase(a.workflowCommandContext(), bughub.CreateAndStartCaseCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), Bug: bug, Bot: bot, FrontendEntry: frontendEntry, FrontendEntries: frontendEntries, InputJSON: inputJSON})
+	incident, err := orchestrator.CreateAndStartCase(a.workflowCommandContext(), bughub.CreateAndStartCaseCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), Bug: bug, Bot: bot, InputJSON: inputJSON})
 	a.emitIncidentResult(incident, err)
 	return incident, err
 }
@@ -1219,7 +788,7 @@ func (a *App) StartIncidentCase(input StartIncidentCaseInput) (bughub.IncidentCa
 func (a *App) ResetIncidentCase(input ResetIncidentCaseInput) (bughub.IncidentCase, error) {
 	result, err := a.resetIncidentCaseWithWarnings(input)
 	if err == nil && workflowWarningCodePresent(result.Warnings, "reset_replacement_start_failed") {
-		err = errors.New("replacement Case phase start failed; retry validation from the preserved Case")
+		err = errors.New("replacement Case phase start failed; retry investigation from the preserved Case")
 	}
 	return result.Case, err
 }
@@ -1264,29 +833,14 @@ func (a *App) resetIncidentCaseWithWarnings(input ResetIncidentCaseInput) (bughu
 	if err != nil {
 		return bughub.ResetCaseOutcome{}, err
 	}
-	selectedIDs := input.FrontendEntryIDs
-	if len(selectedIDs) == 0 && strings.TrimSpace(input.FrontendEntryID) != "" {
-		selectedIDs = []string{input.FrontendEntryID}
-	}
-	frontendEntry, frontendEntries, bug, err := a.resolveIncidentFrontendBindings(bug, bot, selectedIDs, input.PrimaryFrontendEntryID)
-	if err != nil {
-		return bughub.ResetCaseOutcome{}, err
-	}
-	if err := a.requireIncidentBrowserRuntimeReady(bug); err != nil {
-		return bughub.ResetCaseOutcome{}, err
-	}
 	inputJSON, err := normalizeWorkflowInputEnvironment(input.InputJSON, bot.Env, strings.TrimSpace(input.BotEnvironment) != "")
-	if err != nil {
-		return bughub.ResetCaseOutcome{}, err
-	}
-	inputJSON, err = bindWorkflowFrontendEntries(inputJSON, frontendEntries)
 	if err != nil {
 		return bughub.ResetCaseOutcome{}, err
 	}
 	result, err := orchestrator.ResetCaseWithOutcome(a.workflowCommandContext(), bughub.ResetCaseCommand{
 		CaseID: strings.TrimSpace(input.CaseID), NewCaseID: strings.TrimSpace(input.NewCaseID),
 		ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID),
-		Bug: bug, Bot: bot, FrontendEntry: frontendEntry, FrontendEntries: frontendEntries, InputJSON: inputJSON,
+		Bug: bug, Bot: bot, InputJSON: inputJSON,
 	})
 	if errors.Is(err, bughub.ErrCaseVersionConflict) {
 		err = fmt.Errorf("workflow_conflict:case_version_conflict: %w", err)
@@ -1312,45 +866,12 @@ func (a *App) ContinueIncidentCase(input ContinueIncidentCaseInput) (bughub.Inci
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	if (input.Phase == bughub.PhaseValidation || input.Phase == bughub.PhaseRegression) && bughub.SuggestsBrowserValidation(bug) {
-		if err := a.requireIncidentBrowserRuntimeReady(bug); err != nil {
-			return bughub.IncidentCase{}, err
-		}
-	}
+
 	inputJSON, err := normalizeWorkflowJSON(input.InputJSON)
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
 	incident, err := orchestrator.ContinueWithEvidence(a.workflowCommandContext(), bughub.ContinueWithEvidenceCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), Phase: input.Phase, Bug: bug, Bot: bot, InputJSON: inputJSON})
-	a.emitIncidentResult(incident, err)
-	return incident, err
-}
-
-func (a *App) ConfirmIncidentValidation(input ConfirmIncidentValidationInput) (bughub.IncidentCase, error) {
-	if err := validateWorkflowCommandScalars(input.CaseID, input.ExpectedVersion, input.IdempotencyKey, input.ActorID); err != nil {
-		return bughub.IncidentCase{}, err
-	}
-	caseID := strings.TrimSpace(input.CaseID)
-	attemptID := strings.TrimSpace(input.ValidationAttemptID)
-	if attemptID == "" {
-		return bughub.IncidentCase{}, errors.New("validation_attempt_id is required")
-	}
-	expectedKey := bughub.ConfirmValidationKey(caseID, attemptID, input.ExpectedVersion)
-	if strings.TrimSpace(input.IdempotencyKey) != expectedKey {
-		return bughub.IncidentCase{}, errors.New("validation confirmation key does not match the current result scope")
-	}
-	_, orchestrator, err := a.workflowComponents()
-	if err != nil {
-		return bughub.IncidentCase{}, err
-	}
-	bug, bot, err := a.loadIncidentContext(caseID)
-	if err != nil {
-		return bughub.IncidentCase{}, err
-	}
-	incident, err := orchestrator.ConfirmValidation(a.workflowCommandContext(), bughub.ConfirmValidationCommand{
-		CaseID: caseID, ExpectedVersion: input.ExpectedVersion, IdempotencyKey: expectedKey,
-		ActorID: strings.TrimSpace(input.ActorID), ValidationAttemptID: attemptID, Bug: bug, Bot: bot,
-	})
 	a.emitIncidentResult(incident, err)
 	return incident, err
 }
@@ -1515,9 +1036,7 @@ func (a *App) CompleteIncidentRemediation(input CompleteIncidentRemediationInput
 	if err != nil {
 		return bughub.IncidentCase{}, err
 	}
-	if err := a.requireIncidentBrowserRuntimeReady(bug); err != nil {
-		return bughub.IncidentCase{}, err
-	}
+
 	incident, err := orchestrator.CompleteRemediation(a.workflowCommandContext(), bughub.CompleteRemediationCommand{
 		CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID),
 		RootCauseAttemptID: strings.TrimSpace(input.RootCauseAttemptID), Summary: strings.TrimSpace(input.Summary), Evidence: strings.TrimSpace(input.Evidence), Bug: bug, Bot: bot,
@@ -1535,37 +1054,6 @@ func (a *App) ApproveIncidentMerge(input ApproveIncidentMergeInput) (bughub.Inci
 		return bughub.IncidentCase{}, err
 	}
 	incident, err := orchestrator.ApproveMerge(a.workflowCommandContext(), bughub.ApproveMergeCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), FixCommits: input.FixCommits, TargetBranches: input.TargetBranches, TargetHeads: input.TargetHeads})
-	a.emitIncidentResult(incident, err)
-	return incident, err
-}
-
-func (a *App) NotifyIncidentDeployed(input NotifyIncidentDeployedInput) (bughub.IncidentCase, error) {
-	if err := validateWorkflowCommandScalars(input.CaseID, input.ExpectedVersion, input.IdempotencyKey, input.ActorID); err != nil {
-		return bughub.IncidentCase{}, err
-	}
-	_, orchestrator, err := a.workflowComponents()
-	if err != nil {
-		return bughub.IncidentCase{}, err
-	}
-	bug, bot, err := a.loadIncidentContext(input.CaseID)
-	if err != nil {
-		return bughub.IncidentCase{}, err
-	}
-	if err := a.requireIncidentBrowserRuntimeReady(bug); err != nil {
-		return bughub.IncidentCase{}, err
-	}
-	inputJSON, err := normalizeWorkflowJSON(input.InputJSON)
-	if err != nil {
-		return bughub.IncidentCase{}, err
-	}
-	serverBinding := a.configuredDeploymentBinding(a.workflowCommandContext(), input.CaseID)
-	command := bughub.NotifyDeployedCommand{CaseID: strings.TrimSpace(input.CaseID), ExpectedVersion: input.ExpectedVersion, IdempotencyKey: strings.TrimSpace(input.IdempotencyKey), ActorID: strings.TrimSpace(input.ActorID), ObservedVersion: strings.TrimSpace(input.ObservedVersion), ObservedCommits: input.ObservedCommits, Source: serverBinding.Provider, VerifierConfigFingerprint: serverBinding.Fingerprint, VerifierConfigSnapshot: serverBinding.Snapshot, Bug: bug, Bot: bot, InputJSON: inputJSON}
-	var incident bughub.IncidentCase
-	if strings.TrimSpace(input.NotificationText) != "" {
-		incident, err = orchestrator.NotifyDeployedFromText(a.workflowCommandContext(), input.NotificationText, command)
-	} else {
-		incident, err = orchestrator.NotifyDeployed(a.workflowCommandContext(), command)
-	}
 	a.emitIncidentResult(incident, err)
 	return incident, err
 }
@@ -1644,19 +1132,6 @@ func normalizeWorkflowInputEnvironment(value map[string]any, environment string,
 	return normalizeWorkflowJSON(cloned)
 }
 
-func bindWorkflowFrontendEntries(input json.RawMessage, entries []bughub.FrontendEntryBinding) (json.RawMessage, error) {
-	if len(entries) == 0 {
-		return input, nil
-	}
-	var fields map[string]any
-	if err := json.Unmarshal(input, &fields); err != nil || fields == nil {
-		return nil, errors.Join(errors.New("input_json must be an object"), err)
-	}
-	fields["primary_frontend_entry_id"] = entries[0].ID
-	fields["frontend_entries"] = entries
-	return json.Marshal(fields)
-}
-
 func (a *App) loadIncidentContext(caseID string) (bughub.Bug, bughub.BotRef, error) {
 	store, _, err := a.workflowComponents()
 	if err != nil {
@@ -1672,9 +1147,7 @@ func (a *App) loadIncidentContext(caseID string) (bughub.Bug, bughub.BotRef, err
 	}
 	bot.Env = strings.TrimSpace(incident.Environment)
 	if incident.FrontendEntry.IsZero() {
-		bug = a.hydrateIncidentBrowserContext(bug, bot)
 	} else {
-		bug = bindIncidentFrontendEntry(bug, incident.FrontendEntry)
 	}
 	return bug, bot, nil
 }
@@ -1716,7 +1189,6 @@ func (a *App) loadIncidentStartContext(input StartIncidentCaseInput) (bughub.Bug
 	}
 	if usePersistedEnvironment {
 		bot.Env = persistedEnvironment
-		bug = a.hydrateIncidentBrowserContext(bug, bot)
 		return bug, bot, nil
 	}
 	return a.applyFreshIncidentBotEnvironment(bug, bot, input.BotEnvironment)
@@ -1806,146 +1278,7 @@ func (a *App) applyFreshIncidentBotEnvironment(bug bughub.Bug, bot bughub.BotRef
 		}
 		bot = resolved[0]
 	}
-	bug = a.hydrateIncidentBrowserContext(bug, bot)
 	return bug, bot, nil
-}
-
-func (a *App) hydrateIncidentBrowserContext(bug bughub.Bug, bot bughub.BotRef) bughub.Bug {
-	if strings.TrimSpace(bug.SystemID) == "" {
-		bug.SystemID = strings.TrimSpace(bot.SystemID)
-	}
-	if strings.TrimSpace(bug.FrontendURL) != "" || !bughub.SuggestsBrowserValidation(bug) {
-		return bug
-	}
-	environment := strings.TrimSpace(bot.Env)
-	if environment == "" {
-		environment = strings.TrimSpace(bug.BotEnv)
-	}
-	if environment == "" {
-		environment = strings.TrimSpace(bug.Env)
-	}
-	incident := bughub.IncidentCase{
-		SystemID: bug.SystemID, Environment: environment, SelectedBotKey: bot.Key,
-	}
-	loader := a.workflowLoadDeploymentConfig
-	if loader == nil {
-		loader = a.loadInstalledIncidentConfig
-	}
-	cfg, err := loader(a.workflowCommandContext(), incident)
-	if err != nil || cfg == nil || strings.TrimSpace(cfg.System.ID) != strings.TrimSpace(bug.SystemID) {
-		return bug
-	}
-	for _, candidate := range cfg.Environments {
-		if strings.TrimSpace(candidate.ID) != environment {
-			continue
-		}
-		entries := candidate.EffectiveFrontendEntries()
-		if len(entries) != 1 {
-			return bug
-		}
-		frontendURL := strings.TrimSpace(entries[0].URL)
-		if !strings.Contains(frontendURL, "://") {
-			frontendURL = "https://" + frontendURL
-		}
-		canonical, _, canonicalErr := canonicalIncidentBrowserApplicationURL(frontendURL)
-		if canonicalErr == nil {
-			bug.FrontendURL = canonical
-		}
-		return bug
-	}
-	return bug
-}
-
-func (a *App) ResolveIncidentFrontendEntry(input ResolveIncidentFrontendEntryInput) (bughub.FrontendEntryResolution, error) {
-	if strings.TrimSpace(input.BugID) == "" || strings.TrimSpace(input.BotKey) == "" {
-		return bughub.FrontendEntryResolution{}, errors.New("bug_id and bot_key are required")
-	}
-	bug, bot, err := a.loadFreshBugAndBot(strings.TrimSpace(input.BugID), strings.TrimSpace(input.BotKey), input.BotEnvironment)
-	if err != nil {
-		return bughub.FrontendEntryResolution{}, err
-	}
-	selectedIDs := input.FrontendEntryIDs
-	if len(selectedIDs) == 0 && strings.TrimSpace(input.FrontendEntryID) != "" {
-		selectedIDs = []string{input.FrontendEntryID}
-	}
-	return a.resolveIncidentFrontendEntriesForContext(bug, bot, selectedIDs, input.PrimaryFrontendEntryID)
-}
-
-func (a *App) resolveIncidentFrontendBinding(bug bughub.Bug, bot bughub.BotRef, selectedID string) (bughub.FrontendEntryBinding, bughub.Bug, error) {
-	binding, _, boundBug, err := a.resolveIncidentFrontendBindings(bug, bot, []string{selectedID}, selectedID)
-	return binding, boundBug, err
-}
-
-func (a *App) resolveIncidentFrontendBindings(bug bughub.Bug, bot bughub.BotRef, selectedIDs []string, primaryID string) (bughub.FrontendEntryBinding, []bughub.FrontendEntryBinding, bughub.Bug, error) {
-	resolution, err := a.resolveIncidentFrontendEntriesForContext(bug, bot, selectedIDs, primaryID)
-	if err != nil {
-		if len(selectedIDs) == 0 && !bughub.SuggestsBrowserValidation(bug) {
-			return bughub.FrontendEntryBinding{}, nil, bug, nil
-		}
-		return bughub.FrontendEntryBinding{}, nil, bug, err
-	}
-	if !resolution.Required {
-		return bughub.FrontendEntryBinding{}, nil, bug, nil
-	}
-	if resolution.Status == bughub.FrontendResolutionAmbiguous {
-		return bughub.FrontendEntryBinding{}, nil, bug, errors.New("frontend_entry_selection_required: 工单证据无法唯一确定前端入口")
-	}
-	if resolution.Status != bughub.FrontendResolutionSelected || resolution.Selected == nil {
-		return bughub.FrontendEntryBinding{}, nil, bug, errors.New("frontend_entry_unavailable: 当前环境没有可用的前端入口")
-	}
-	binding := resolution.Selected.Clone()
-	entries := resolution.SelectedEntries
-	if len(entries) == 0 {
-		entries = []bughub.FrontendEntryBinding{binding}
-	}
-	return binding, entries, bindIncidentFrontendEntry(bug, binding), nil
-}
-
-func (a *App) resolveIncidentFrontendEntryForContext(bug bughub.Bug, bot bughub.BotRef, selectedID string) (bughub.FrontendEntryResolution, error) {
-	selectedIDs := []string(nil)
-	if strings.TrimSpace(selectedID) != "" {
-		selectedIDs = []string{selectedID}
-	}
-	return a.resolveIncidentFrontendEntriesForContext(bug, bot, selectedIDs, selectedID)
-}
-
-func (a *App) resolveIncidentFrontendEntriesForContext(bug bughub.Bug, bot bughub.BotRef, selectedIDs []string, primaryID string) (bughub.FrontendEntryResolution, error) {
-	environment := strings.TrimSpace(bot.Env)
-	incident := bughub.IncidentCase{SystemID: strings.TrimSpace(bug.SystemID), Environment: environment, SelectedBotKey: bot.Key}
-	loader := a.workflowLoadDeploymentConfig
-	if loader == nil {
-		loader = a.loadInstalledIncidentConfig
-	}
-	cfg, err := loader(a.workflowCommandContext(), incident)
-	if err != nil || cfg == nil || strings.TrimSpace(cfg.System.ID) != strings.TrimSpace(bug.SystemID) {
-		return bughub.FrontendEntryResolution{}, errors.New("incident frontend configuration is unavailable")
-	}
-	for _, candidate := range cfg.Environments {
-		if strings.TrimSpace(candidate.ID) == environment {
-			entries := candidate.EffectiveFrontendEntries()
-			resolution, resolveErr := bughub.ResolveFrontendEntries(entries, bug, selectedIDs, primaryID)
-			if resolveErr != nil {
-				return bughub.FrontendEntryResolution{}, resolveErr
-			}
-			if len(entries) == 0 && bughub.SuggestsBrowserValidation(bug) {
-				resolution.Required = true
-				resolution.Message = "当前环境未配置前端入口，无法将工单映射到受管应用"
-			}
-			return resolution, nil
-		}
-	}
-	return bughub.FrontendEntryResolution{}, errors.New("incident frontend environment is unavailable")
-}
-
-func bindIncidentFrontendEntry(bug bughub.Bug, binding bughub.FrontendEntryBinding) bughub.Bug {
-	if binding.IsZero() {
-		return bug
-	}
-	bug.FrontendURL = strings.TrimSpace(binding.URL)
-	if strings.TrimSpace(binding.Repo) != "" {
-		bug.FrontendRepo = strings.TrimSpace(binding.Repo)
-	}
-	return bug
 }
 
 func validateIncidentBotEnvironment(bot bughub.BotRef, environment string) error {
@@ -1994,7 +1327,7 @@ func (a *App) emitIncidentPhaseEvent(caseID string, event bughub.InvestigationEv
 }
 
 var incidentPublicPhaseEventTypes = map[string]bool{
-	"browser_progress": true, "thread_started": true, "turn_started": true,
+	"thread_started": true, "turn_started": true,
 	"turn_completed": true, "command_execution": true, "mcp_tool_call": true,
 	"agent_message": true, "phase_step": true, "code_intelligence": true, "retry": true, "error": true,
 	"turn_failed": true, "result": true,
@@ -2064,7 +1397,7 @@ func incidentPublicPhaseEventMeta(meta map[string]any) map[string]any {
 	}
 	allowed := map[string]struct{}{
 		"case_id": {}, "attempt_id": {}, "cycle_number": {}, "phase": {},
-		"browser_code": {}, "current": {}, "total": {},
+
 		"state": {}, "status": {}, "exit_code": {}, "ready": {},
 		"step_key": {}, "step_index": {}, "step_total": {},
 	}

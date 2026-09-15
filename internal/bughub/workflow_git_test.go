@@ -543,7 +543,7 @@ func TestGitIntegrationOrchestratorRejectsMissingInspectionScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	git := &recordingGitIntegration{inspection: MergeInspection{Repositories: map[string]MergeRepositoryResult{"api": {}}}}
-	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git, &recordingDeploymentVerifier{})
+	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git)
 	if _, err := orchestrator.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: 1, IdempotencyKey: "missing", ActorID: "alice"}); !errors.Is(err, ErrApprovalScope) {
 		t.Fatalf("err=%v", err)
 	}
@@ -596,7 +596,7 @@ func TestGitIntegrationTwoRepoConflictPersistsEveryRepositoryResult(t *testing.T
 		t.Fatal(err)
 	}
 	heads := map[string]string{"a": inspection.Repositories["a"].TargetHead, "b": inspection.Repositories["b"].TargetHead}
-	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, service, &recordingDeploymentVerifier{})
+	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, service)
 	got, err := orchestrator.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: 1, IdempotencyKey: "conflict-two", ActorID: "alice", TargetHeads: heads})
 	if err == nil || got.Status != CaseMergeConflict {
 		t.Fatalf("case=%+v err=%v", got, err)
@@ -657,7 +657,7 @@ func TestGitIntegrationOrchestratorRefreshesStaleApprovalScope(t *testing.T) {
 	if err := store.RecordCodeChange(ctx, change); err != nil {
 		t.Fatal(err)
 	}
-	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, f.service(t), &recordingDeploymentVerifier{})
+	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, f.service(t))
 
 	stale, err := orchestrator.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: "approve-stale", ActorID: "alice", TargetHeads: map[string]string{"api": "old"}})
 	if !errors.Is(err, ErrMergeApprovalStale) || stale.Status != CaseWaitingMergeApproval || stale.Version <= incident.Version {
@@ -672,7 +672,7 @@ func TestGitIntegrationOrchestratorRefreshesStaleApprovalScope(t *testing.T) {
 	}
 
 	merged, err := orchestrator.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: stale.Version, IdempotencyKey: "approve-current", ActorID: "alice", TargetHeads: map[string]string{"api": changes[0].MergeBaseHead}})
-	if err != nil || merged.Status != CaseWaitingDeployment {
+	if err != nil || merged.Status != CaseSubmitted {
 		t.Fatalf("merged=%+v err=%v", merged, err)
 	}
 	approvals, err := store.ListApprovals(ctx, incident.ID)
@@ -703,9 +703,9 @@ func TestGitIntegrationFreshApprovalRetainsPreviouslyBlockedRepository(t *testin
 		}
 	}
 	git := &recordingGitIntegration{result: MergeResult{Repositories: map[string]MergeRepositoryResult{"a": {MergeCommit: "merge-a", Pushed: true}, "b": {MergeCommit: "merge-b", Pushed: true}}}}
-	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git, &recordingDeploymentVerifier{})
+	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, git)
 	merged, err := orchestrator.ApproveMerge(ctx, ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: 1, IdempotencyKey: "fresh-partial", ActorID: "alice", TargetHeads: map[string]string{"a": "head-a", "b": "head-b"}})
-	if err != nil || merged.Status != CaseWaitingDeployment || len(git.merges) != 1 || len(git.merges[0].FixCommits) != 2 {
+	if err != nil || merged.Status != CaseSubmitted || len(git.merges) != 1 || len(git.merges[0].FixCommits) != 2 {
 		t.Fatalf("merged=%+v request=%+v err=%v", merged, git.merges, err)
 	}
 }
@@ -723,7 +723,7 @@ func TestGitIntegrationUnavailableRejectsApprovalWithoutMutationAndReplay(t *tes
 	if err := store.RecordCodeChange(ctx, CodeChange{ID: "change", CaseID: incident.ID, AttemptID: "fix", Repo: "api", BaseBranch: "test", FixBranch: "fix", FixCommit: "abc", TestEvidence: []byte(`{}`), TargetEnvironmentBranch: "test", PushStatus: "pushed"}); err != nil {
 		t.Fatal(err)
 	}
-	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, &recordingDeploymentVerifier{})
+	o := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil)
 	cmd := ApproveMergeCommand{CaseID: incident.ID, ExpectedVersion: 1, IdempotencyKey: "no-git", ActorID: "alice", TargetHeads: map[string]string{"api": "head"}}
 	for attempt := 0; attempt < 2; attempt++ {
 		if _, err := o.ApproveMerge(ctx, cmd); err == nil {

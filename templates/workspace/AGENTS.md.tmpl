@@ -2,11 +2,11 @@
 
 ## 工作区
 
-根目录：`~/.openclaw/workspace/{{.AgentID}}/`
+根目录：`~/.tshoot/workspace/{{.AgentID}}/`
 
 | 文件/目录 | 用途 |
 |---|---|
-| `SOUL.md` / `IDENTITY.md` / `USER.md` / `AGENTS.md` / `CHECKLIST.md` / `TOOLS.md` | OpenClaw 启动提示词 |
+| `SOUL.md` / `IDENTITY.md` / `USER.md` / `AGENTS.md` / `CHECKLIST.md` / `TOOLS.md` | AI 客户端 启动提示词 |
 | `skills/<name>/SKILL.md` | 专项能力说明 |
 | `skills/<name>/scripts/` | 专项脚本 |
 | `skills/<name>/references/` | 映射表和参考资料 |
@@ -14,7 +14,7 @@
 cwd 不一定是工作区根。读引用文件、跑脚本时用绝对路径：
 
 ```bash
-python3 ~/.openclaw/workspace/{{.AgentID}}/skills/<skill>/scripts/<file>.py ...
+python3 ~/.tshoot/workspace/{{.AgentID}}/skills/<skill>/scripts/<file>.py ...
 ```
 
 ## 调用入口

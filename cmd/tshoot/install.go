@@ -1,13 +1,11 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/agent"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
@@ -18,7 +16,6 @@ import (
 // runInstall 把 staging 包装到本机最终位置(原生 Go,无 bash 依赖)。
 //
 // 四种 target:
-//   - openclaw     → ~/.openclaw/workspace/<name>/ + ~/.openclaw/openclaw.json 注入
 //   - claude-code  → ~/.claude/agents/<name>.md + ~/.claude/{skills,scripts}/<name>/...
 //   - cursor       → ~/.cursor/agents/<name>.md  + ~/.cursor/{skills,scripts}/<name>/...
 //   - codex        → ~/.codex/agents/<name>.toml(TOML subagent 定义,
@@ -27,7 +24,6 @@ import (
 //     ~/.codex/tshoot-runtimes/<name>/config.toml；后者作为 Studio 后台隔离 CODEX_HOME 使用。
 //
 // 凭证收集策略:
-//   - openclaw   :走 InstallNativeOpenclaw,凭证写到 ~/.openclaw/<id>-creds.json + 注入 MCP env
 //   - IDE 三家   :--env-file 非空时,凭证一并注入到对应 IDE 的 mcpServers env(claude-code 写
 //     settings.json;cursor 写 mcp.json;codex 写到 agent toml 的 [mcp_servers.*.env]),
 //     同时镜像写 ~/.tshoot/<id>-creds.json 给 kuboard / apollo / consul / 静态环境变量
@@ -35,9 +31,8 @@ import (
 func runInstall(args []string) error {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	stagingDir := fs.String("path", "", "staging 产物目录(必填,tshoot gen 的 -o 输出)")
-	target := fs.String("target", "", "openclaw | claude-code | cursor | codex(必填)")
+	target := fs.String("target", "", "claude-code | cursor | codex | opencode(必填)")
 	envFile := fs.String("env-file", "", "凭证 .env 文件;默认从 <staging>/scripts/.env 读")
-	skipGateway := fs.Bool("skip-gateway-restart", false, "跳过 openclaw gateway restart(本机没装 openclaw CLI 时用)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -85,33 +80,12 @@ func runInstall(args []string) error {
 	}
 
 	switch *target {
-	case "openclaw":
-		creds, err := loadInstallCreds(abs, *envFile)
-		if err != nil {
-			return err
-		}
-		opts := agent.InstallOpenclawOptions{
-			Creds:              creds,
-			SkipGatewayRestart: *skipGateway,
-			OnLog: func(line string) {
-				fmt.Println("[install]", line)
-			},
-		}
-		if err := agent.InstallNativeOpenclaw(context.Background(), abs, opts); err != nil {
-			return err
-		}
-		fmt.Println("[ok] openclaw agent 已部署。下一步:")
-		fmt.Println("  · 打开 OpenClaw 客户端 → 选刚装好的 agent")
-		fmt.Println("  · 自检:tshoot self-test --path '" + abs + "'")
-		fmt.Println("  · 卸载:tshoot uninstall --path '" + abs + "'")
-		return nil
-
 	default:
-		return fmt.Errorf("unknown target: %s(支持 openclaw / claude-code / cursor / codex)", *target)
+		return fmt.Errorf("unknown target: %s(支持 claude-code / cursor / codex / opencode)", *target)
 	}
 }
 
-// loadIDECredsBestEffort 给 claude-code / cursor / codex 三家 install 走的凭证读取。
+// loadIDECredsBestEffort 给 claude-code / cursor / codex / opencode 三家 install 走的凭证读取。
 // --env-file 优先,否则尝试 staging/scripts/.env。读不到返回 nil(让上层调用方据此跳过
 // MergeMCPIntoIDESettings/WriteIDECredsFile,避免空覆盖凭证)。失败也返回 nil:IDE 装机
 // 主流程已成功(agent.md / skills 文件已落盘),凭证 best-effort 不阻塞主流程。
@@ -143,9 +117,8 @@ func installIDESideEffects(target, stagingDir string, creds map[string]string) e
 
 // loadStagingSystemConfig 从 staging 目录的 tshoot.json 读出 troubleshooter_yaml 段,parse 成
 // SystemConfig。CLI install 在 IDE 平台分支调它,把 cfg 喂给 MergeMCPIntoIDESettings 派生 MCP。
-// 两个候选位置(谁先存在用谁,跟桌面 app bindings_deploy.go::loadStagingConfig 同款逻辑):
+// 优先读取平台 staging，兼容共享生成目录：
 //   - <staging>/tshoot.json                              ← claude-code/cursor/codex staging
-//   - <staging>/templates/workspace-template/tshoot.json ← openclaw staging(本路径不会走到这,IDE 装机不读)
 func loadStagingSystemConfig(stagingDir string) (*config.SystemConfig, error) {
 	candidates := []string{
 		filepath.Join(stagingDir, discover.MetaFilename),
@@ -175,63 +148,11 @@ func loadStagingSystemConfig(stagingDir string) (*config.SystemConfig, error) {
 	return cfg, nil
 }
 
-// runSelfTest 跑 openclaw 自检(claude-code/cursor 没自检概念,装完即用)。
-func runSelfTest(args []string) error {
-	fs := flag.NewFlagSet("self-test", flag.ExitOnError)
-	stagingDir := fs.String("path", "", "staging 产物目录或已部署的 workspace 目录(必填)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *stagingDir == "" {
-		fs.Usage()
-		return fmt.Errorf("--path required")
-	}
-	abs, _ := filepath.Abs(*stagingDir)
-	res, err := agent.SelfTestOpenclaw(context.Background(), abs)
-	if err != nil {
-		return err
-	}
-	for _, c := range res.Checks {
-		fmt.Printf("  [%s] %s — %s\n", c.Status, c.Name, c.Detail)
-	}
-	if !res.OK {
-		return fmt.Errorf("self-test failed")
-	}
-	fmt.Println("[ok] self-test passed")
-	return nil
-}
-
-// runUninstall 卸载 openclaw agent(claude-code/cursor 直接 rm ~/.<dir>/agents/<name>.md
-// 即可,不在 CLI 范围;后续要补再加)。
-func runUninstall(args []string) error {
-	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
-	stagingDir := fs.String("path", "", "staging 产物目录或已部署的 workspace(必填,用来反读 agent 名)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *stagingDir == "" {
-		fs.Usage()
-		return fmt.Errorf("--path required")
-	}
-	abs, _ := filepath.Abs(*stagingDir)
-	res, err := agent.UninstallNativeOpenclaw(abs)
-	if err != nil {
-		return err
-	}
-	for _, line := range res.Log {
-		fmt.Println(" ", line)
-	}
-	return nil
-}
-
 // loadInstallCreds 凭证读取的 fallback 链:
 //  1. --env-file <path>(显式)
 //  2. <staging>/scripts/.env(deploy.ReadEnvFile 标准位置)
-//  3. ~/.tshoot/openclaw/<system_id>/scripts/.env(IDE staging 不写 .env,跨 target 共享
-//     openclaw 那份,wizard 已经在 openclaw 流程收过一次的 creds 不重收)
-//  4. 空 map(不阻塞 install,产物结构正确,MCP env 字段空)
+//  3. 空 map(不阻塞 install,产物结构正确,MCP env 字段空)
 //
-// IDE staging(claude-code/cursor/codex)默认不写 scripts/.env,只有 openclaw staging 写。
 // 没这条 fallback 时,跑 `tshoot install -target claude-code` 不传 -env-file → creds 空 →
 // grafana/loki/nacos/elasticsearch 等 mcp env 段全空 → mcp 启动失败。
 func loadInstallCreds(stagingDir, envFile string) (map[string]string, error) {
@@ -257,47 +178,5 @@ func loadInstallCreds(stagingDir, envFile string) (map[string]string, error) {
 	if len(m) > 0 {
 		return m, nil
 	}
-	// fallback:从 staging 的 tshoot.json 读 system_id,试 ~/.tshoot/openclaw/<id>/scripts/.env
-	if creds, srcPath, mtime := tryLoadOpenclawCredsWithSource(stagingDir); creds != nil {
-		// 显式打印 system_id + .env mtime,让用户识别"是不是另一个同名 system 的 .env" — 避免
-		// 用户复制 yaml 没改 system.id 导致 fallback 拿错 system 的凭证、mcp 静默连错环境的事故。
-		fmt.Printf("    · creds fallback 自 %s(%d 个变量,文件 mtime=%s)\n",
-			srcPath, len(creds), mtime.Format("2006-01-02 15:04:05"))
-		return creds, nil
-	}
 	return map[string]string{}, nil
-}
-
-// tryLoadOpenclawCredsWithSource 从 staging 的 tshoot.json 读 system_id,试
-// ~/.tshoot/openclaw/<id>/scripts/.env;返回 creds + 源路径 + 文件 mtime,失败返 nil/空/零值。
-// 调用方用 srcPath/mtime 打印让用户识别"是不是同名 system 的错配"。
-func tryLoadOpenclawCredsWithSource(stagingDir string) (map[string]string, string, time.Time) {
-	id := openclawSystemIDOf(stagingDir)
-	if id == "" {
-		return nil, "", time.Time{}
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, "", time.Time{}
-	}
-	openclawStaging := filepath.Join(home, ".tshoot", "openclaw", id)
-	envPath := filepath.Join(openclawStaging, "scripts", ".env")
-	stat, err := os.Stat(envPath)
-	if err != nil {
-		return nil, "", time.Time{}
-	}
-	m, err := deploy.ReadEnvFile(openclawStaging)
-	if err != nil || len(m) == 0 {
-		return nil, "", time.Time{}
-	}
-	return m, envPath, stat.ModTime()
-}
-
-// openclawSystemIDOf 解 staging/tshoot.json 取 system.id;失败返 ""。
-func openclawSystemIDOf(stagingDir string) string {
-	cfg, err := loadStagingSystemConfig(stagingDir)
-	if err != nil || cfg == nil {
-		return ""
-	}
-	return cfg.System.ID
 }

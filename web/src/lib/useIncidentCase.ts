@@ -1,6 +1,6 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
-import { getIncidentCase, incidentBrowserProgressCodes, listIncidentCases, normalizeIncidentCaseEvent, type CaseStatus, type IncidentCase, type IncidentCaseDetail, type IncidentCaseEventPayload, type IncidentPhaseEvent, type Phase } from './bridge/bugWorkflow'
+import { getIncidentCase, listIncidentCases, normalizeIncidentCaseEvent, type CaseStatus, type IncidentCase, type IncidentCaseDetail, type IncidentCaseEventPayload, type IncidentPhaseEvent } from './bridge/bugWorkflow'
 
 type Dependencies = {
   listCases?: () => Promise<IncidentCase[]>
@@ -10,16 +10,14 @@ type Dependencies = {
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error)
 
-export const terminalCaseStatuses = new Set<CaseStatus>(['fixed_verified', 'legacy_archived', 'reset_archived'])
-const phaseRunningCaseStatuses = new Set<CaseStatus>(['validating', 'investigating', 'fixing', 'regression_validating'])
-const browserProgressCodeAllowlist = new Set<string>(incidentBrowserProgressCodes)
+export const terminalCaseStatuses = new Set<CaseStatus>(['submitted', 'remediation_recorded', 'fixed_verified', 'legacy_archived', 'reset_archived'])
+const phaseRunningCaseStatuses = new Set<CaseStatus>(['investigating', 'fixing'])
 const agentProgressTypeAllowlist = new Set(['thread_started', 'turn_started', 'turn_completed', 'command_execution', 'mcp_tool_call', 'agent_message', 'phase_step', 'code_intelligence', 'retry', 'error', 'turn_failed', 'result'])
 const maxPhaseEventsPerAttempt = 100
-const maxBrowserProgressStep = 100
 const maxAgentProgressMessageLength = 2000
 const investigationStepKeys = ['evidence_handoff', 'timeline', 'runtime_scope', 'dependency_chain', 'evidence_correlation', 'root_cause', 'knowledge_sink'] as const
 const investigationStepLabels: Record<(typeof investigationStepKeys)[number], string> = {
-  evidence_handoff: '接收验证证据',
+  evidence_handoff: '工单与证据',
   timeline: '时间轴与最近变更',
   runtime_scope: '横向运行时检查',
   dependency_chain: '依赖与调用链',
@@ -46,26 +44,11 @@ export function activeCaseForBug(cases: IncidentCase[], bugID: string): Incident
   return casesForBug(cases, bugID).find(item => !terminalCaseStatuses.has(item.status))
 }
 
-export function continuationForDetail(detail: IncidentCaseDetail, evidence: string): { phase: Exclude<Phase, 'legacy'>; input_json: Record<string, unknown> } {
-  const latest = detail.attempts.find(attempt => attempt.id === detail.case.current_attempt_id && attempt.phase !== 'legacy')
-  if (!latest || !['validation', 'investigation', 'fix', 'regression'].includes(latest.phase)) {
-    throw new Error('未找到可继续的最近阶段，请刷新 Case 后重试')
-  }
-  const phase = latest.phase as Exclude<Phase, 'legacy'>
-  const input: Record<string, unknown> = { ...(latest.input_json || {}), user_input: evidence }
-  if (phase === 'validation') input.mode = 'reproduce'
-  if (phase === 'regression') input.mode = 'regression'
-  if ((phase === 'validation' || phase === 'regression') && evidence.trim()) {
-    input.force_browser_replan = true
-    input.scenario_contract_revision = {
-      reason: 'user_feedback',
-      source_attempt_id: latest.id,
-    }
-  } else if (phase === 'validation' && latest.error_code === 'browser_locator_failed') {
-    input.force_browser_replan = true
-  }
-  if (phase === 'investigation' || phase === 'fix') delete input.mode
-  return { phase, input_json: input }
+export function continuationForDetail(detail: IncidentCaseDetail, evidence: string): { phase: 'investigation' | 'fix'; input_json: Record<string, unknown> } {
+  const latest = detail.attempts.find(attempt => attempt.id === detail.case.current_attempt_id)
+  if (!latest || (latest.phase !== 'investigation' && latest.phase !== 'fix')) throw new Error('该历史阶段已停用，请开启新一轮排障')
+  const input = { ...(latest.input_json || {}), user_input: evidence }
+  return { phase: latest.phase, input_json: input }
 }
 
 export function botKeyForLegacyContinuation(detail: IncidentCaseDetail, selectedBugID: string, selectedBotKey: string): string {
@@ -189,28 +172,9 @@ export function createIncidentCaseController(dependencies: Dependencies = {}) {
         meta,
       }
       identity = [type, String(meta.state ?? ''), String(meta.step_key ?? ''), safeMessage, String(event.at ?? '')].join('\u001f')
-    } else {
-      const code = typeof event.meta.browser_code === 'string' ? event.meta.browser_code : ''
-      if (!browserProgressCodeAllowlist.has(code)) return
-      const hasCurrent = event.meta.current !== undefined
-      const hasTotal = event.meta.total !== undefined
-      const validStep = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= maxBrowserProgressStep
-      if (hasCurrent !== hasTotal || hasCurrent && (!validStep(event.meta.current) || !validStep(event.meta.total) || Number(event.meta.current) > Number(event.meta.total))) return
-      safeEvent = {
-        type: 'browser_progress',
-        meta: {
-          case_id: current.case.id,
-          attempt_id: attemptID,
-          browser_code: code,
-          ...(hasCurrent ? { current: event.meta.current as number, total: event.meta.total as number } : {}),
-        },
-      }
-      identity = [code, String(safeEvent.meta.current ?? ''), String(safeEvent.meta.total ?? '')].join('\u001f')
-    }
+    } else { return }
     const existing = phaseEvents.value[attemptID] || []
-    const duplicate = existing.some(item => item.type === 'browser_progress'
-      ? [String(item.meta.browser_code ?? ''), String(item.meta.current ?? ''), String(item.meta.total ?? '')].join('\u001f') === identity
-      : [String(item.type ?? ''), String(item.meta.state ?? ''), String(item.meta.step_key ?? ''), String(item.message ?? ''), String(item.at ?? '')].join('\u001f') === identity)
+    const duplicate = existing.some(item => [String(item.type ?? ''), String(item.meta.state ?? ''), String(item.meta.step_key ?? ''), String(item.message ?? ''), String(item.at ?? '')].join('\u001f') === identity)
     if (duplicate) return
     phaseEvents.value = {
       ...phaseEvents.value,

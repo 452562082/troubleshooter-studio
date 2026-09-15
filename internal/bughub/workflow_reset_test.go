@@ -17,7 +17,7 @@ func TestResetCaseSwitchesBotAndEnvironmentWhileCancellingOldRunner(t *testing.T
 	store := newOrchestratorStore(t)
 	old, oldAttempt := prepareResetCase(t, store, "case-reset-orchestrated")
 	runner := &recordingPhaseRunner{}
-	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	orchestrator := NewCaseOrchestrator(store, runner, nil)
 	cmd := resetOrchestratorCommand(old, "case-reset-orchestrated-next", "reset-orchestrated")
 	cmd.Bug.BotEnv = "stage"
 	cmd.Bot = BotRef{Key: "replacement|claude-code", Target: "claude-code", Path: "/workspace/replacement", Env: "prod"}
@@ -26,7 +26,7 @@ func TestResetCaseSwitchesBotAndEnvironmentWhileCancellingOldRunner(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if replacement.ID != cmd.NewCaseID || replacement.Status != CaseValidating || replacement.ResetFromCaseID != old.ID {
+	if replacement.ID != cmd.NewCaseID || replacement.Status != CaseInvestigating || replacement.ResetFromCaseID != old.ID {
 		t.Fatalf("replacement=%+v", replacement)
 	}
 	runner.mu.Lock()
@@ -34,7 +34,7 @@ func TestResetCaseSwitchesBotAndEnvironmentWhileCancellingOldRunner(t *testing.T
 	if !reflect.DeepEqual(runner.cancels, []string{oldAttempt.ID}) {
 		t.Fatalf("cancels=%v", runner.cancels)
 	}
-	if len(runner.starts) != 1 || runner.starts[0].CaseID != cmd.NewCaseID || runner.starts[0].Phase != PhaseValidation || !reflect.DeepEqual(runner.bots, []BotRef{cmd.Bot}) {
+	if len(runner.starts) != 1 || runner.starts[0].CaseID != cmd.NewCaseID || runner.starts[0].Phase != PhaseInvestigation || !reflect.DeepEqual(runner.bots, []BotRef{cmd.Bot}) {
 		t.Fatalf("starts=%+v bots=%+v", runner.starts, runner.bots)
 	}
 	archived, err := store.GetCase(context.Background(), old.ID)
@@ -50,7 +50,7 @@ func TestResetCaseAuditsSuccessfulExternalRunnerCancellation(t *testing.T) {
 	store := newOrchestratorStore(t)
 	old, oldAttempt := prepareResetCase(t, store, "case-reset-cancel-audit-success")
 	runner := &recordingPhaseRunner{}
-	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	orchestrator := NewCaseOrchestrator(store, runner, nil)
 	cmd := resetOrchestratorCommand(old, "case-reset-cancel-audit-success-next", "reset-cancel-audit-success")
 
 	outcome, err := orchestrator.ResetCaseWithOutcome(context.Background(), cmd)
@@ -136,7 +136,7 @@ func TestResetCancellationClaimAcrossTwoStoresAllowsOneRunnerCall(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = second.Close() })
 	runnerA, runnerB := &recordingPhaseRunner{}, &recordingPhaseRunner{}
-	orchestrators := []*CaseOrchestrator{NewCaseOrchestrator(first, runnerA, nil, nil), NewCaseOrchestrator(second, runnerB, nil, nil)}
+	orchestrators := []*CaseOrchestrator{NewCaseOrchestrator(first, runnerA, nil), NewCaseOrchestrator(second, runnerB, nil)}
 	warnings := make([][]WorkflowWarning, 2)
 	errs := make([]error, 2)
 	start := make(chan struct{})
@@ -185,7 +185,7 @@ func TestResetCancellationClaimedReplayReturnsUnknownWithoutCallingRunner(t *tes
 		t.Fatalf("acquired=%v err=%v", acquired, err)
 	}
 	runner := &recordingPhaseRunner{}
-	outcome, err := NewCaseOrchestrator(store, runner, nil, nil).ResetCaseWithOutcome(context.Background(), command)
+	outcome, err := NewCaseOrchestrator(store, runner, nil).ResetCaseWithOutcome(context.Background(), command)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestResetCancellationStateReadFailureReturnsStructuredWarning(t *testing.T)
 		t.Fatal(err)
 	}
 	runner := &recordingPhaseRunner{}
-	warnings, processErr := NewCaseOrchestrator(store, runner, nil, nil).processResetRunnerCancellation(result, command.IdempotencyKey, fingerprint)
+	warnings, processErr := NewCaseOrchestrator(store, runner, nil).processResetRunnerCancellation(result, command.IdempotencyKey, fingerprint)
 	if processErr != nil {
 		t.Fatal(processErr)
 	}
@@ -241,7 +241,7 @@ func TestResetCancellationCompletionPersistenceFailureReturnsUnknownWithoutLeaki
 		t.Fatal(err)
 	}
 	runner := &recordingPhaseRunner{}
-	warnings, processErr := NewCaseOrchestrator(store, runner, nil, nil).processResetRunnerCancellation(result, command.IdempotencyKey, fingerprint)
+	warnings, processErr := NewCaseOrchestrator(store, runner, nil).processResetRunnerCancellation(result, command.IdempotencyKey, fingerprint)
 	if processErr != nil {
 		t.Fatal(processErr)
 	}
@@ -270,7 +270,7 @@ func TestResetCaseReplayDoesNotCancelOrStartTwice(t *testing.T) {
 	store := newOrchestratorStore(t)
 	old, _ := prepareResetCase(t, store, "case-reset-orchestrated-replay")
 	runner := &recordingPhaseRunner{}
-	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	orchestrator := NewCaseOrchestrator(store, runner, nil)
 	cmd := resetOrchestratorCommand(old, "case-reset-orchestrated-replay-next", "reset-orchestrated-replay")
 
 	first, err := orchestrator.ResetCase(context.Background(), cmd)
@@ -295,7 +295,7 @@ func TestResetCaseStartFailureArchivesOldAndRecoversReplacementState(t *testing.
 	store := newOrchestratorStore(t)
 	old, _ := prepareResetCase(t, store, "case-reset-schedule-failure")
 	runner := &recordingPhaseRunner{startErr: errors.New("runner unavailable")}
-	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	orchestrator := NewCaseOrchestrator(store, runner, nil)
 	cmd := resetOrchestratorCommand(old, "case-reset-schedule-failure-next", "reset-schedule-failure")
 
 	if _, err := orchestrator.ResetCase(context.Background(), cmd); err == nil {
@@ -331,7 +331,7 @@ func TestResetCaseCancelFailureStillReturnsStartedReplacement(t *testing.T) {
 	store := newOrchestratorStore(t)
 	old, oldAttempt := prepareResetCase(t, store, "case-reset-cancel-failure")
 	runner := &resetCancelFailureRunner{cancelErr: errors.New("old runner unavailable")}
-	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	orchestrator := NewCaseOrchestrator(store, runner, nil)
 	cmd := resetOrchestratorCommand(old, "case-reset-cancel-failure-next", "reset-cancel-failure")
 
 	outcome, err := orchestrator.ResetCaseWithOutcome(context.Background(), cmd)
@@ -339,7 +339,7 @@ func TestResetCaseCancelFailureStillReturnsStartedReplacement(t *testing.T) {
 		t.Fatalf("durable reset and replacement start must succeed despite cancel failure: %v", err)
 	}
 	replacement := outcome.Case
-	if replacement.Status != CaseValidating {
+	if replacement.Status != CaseInvestigating {
 		t.Fatalf("replacement=%+v", replacement)
 	}
 	if !reflect.DeepEqual(outcome.Warnings, []WorkflowWarning{{Code: "reset_runner_cancel_failed", Message: "旧阶段 Agent 未能确认停止，请人工检查其运行状态。"}}) {
@@ -376,11 +376,11 @@ func TestResetCaseCancelAndReplacementStartFailureReturnsTwoWarningsAndReplays(t
 		recordingPhaseRunner: recordingPhaseRunner{startErr: errors.New("secret replacement runner failure")},
 		cancelErr:            errors.New("secret old runner failure"),
 	}
-	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	orchestrator := NewCaseOrchestrator(store, runner, nil)
 	cmd := resetOrchestratorCommand(old, "case-reset-double-warning-next", "reset-double-warning")
 	wantWarnings := []WorkflowWarning{
 		{Code: "reset_runner_cancel_failed", Message: "旧阶段 Agent 未能确认停止，请人工检查其运行状态。"},
-		{Code: "reset_replacement_start_failed", Message: "接替 Case 的新阶段未能启动，已保留为可恢复状态；请刷新 Case 或重试开始验证。"},
+		{Code: "reset_replacement_start_failed", Message: "接替 Case 的新阶段未能启动，已保留为可恢复状态；请刷新 Case 或重试开始排障。"},
 	}
 
 	first, err := orchestrator.ResetCaseWithOutcome(context.Background(), cmd)
@@ -404,9 +404,9 @@ func TestResetCaseCancelAndReplacementStartFailureReturnsTwoWarningsAndReplays(t
 
 func TestResetCaseRacingCompletionHasOneWinningState(t *testing.T) {
 	store := newOrchestratorStore(t)
-	old, attempt := createRunningPhase(t, store, "case-reset-completion-race", CasePendingValidation, CaseValidating, PhaseValidation, AttemptReproduce, []byte(`{}`))
+	old, attempt := createRunningPhase(t, store, "case-reset-completion-race", CasePendingInvestigation, CaseInvestigating, PhaseInvestigation, "", []byte(`{}`))
 	runner := &recordingPhaseRunner{}
-	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	orchestrator := NewCaseOrchestrator(store, runner, nil)
 	reset := resetOrchestratorCommand(old, "case-reset-completion-race-next", "reset-completion-race")
 	complete := CompleteAttemptCommand{CaseID: old.ID, AttemptID: attempt.ID, ExpectedVersion: old.Version, IdempotencyKey: "complete-reset-race", ActorID: "agent", Outcome: PhaseOutcomeNeedsEvidence, OutputJSON: []byte(`{"gaps":["proof"]}`)}
 
@@ -436,7 +436,7 @@ func TestResetCaseRacingCompletionHasOneWinningState(t *testing.T) {
 		t.Fatal(err)
 	}
 	if resetErr == nil {
-		if storedOld.Status != CaseResetArchived || resetResult.Status != CaseValidating {
+		if storedOld.Status != CaseResetArchived || resetResult.Status != CaseInvestigating {
 			t.Fatalf("reset winner old=%+v replacement=%+v", storedOld, resetResult)
 		}
 		if _, err := store.GetCase(context.Background(), reset.NewCaseID); err != nil {
@@ -457,7 +457,7 @@ func TestResetCaseLateCompletionCannotRewriteArchivedCase(t *testing.T) {
 	store := newOrchestratorStore(t)
 	old, attempt := prepareResetCase(t, store, "case-reset-late-completion")
 	runner := &recordingPhaseRunner{}
-	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	orchestrator := NewCaseOrchestrator(store, runner, nil)
 	cmd := resetOrchestratorCommand(old, "case-reset-late-completion-next", "reset-late-completion")
 
 	replacement, err := orchestrator.ResetCase(ctx, cmd)
@@ -500,7 +500,7 @@ func TestResetCaseLateCompletionCannotRewriteArchivedCase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(replacementBeforeCallback, replacementAfterCallback) || replacementAfterCallback.Status != CaseValidating || replacementAfterCallback.ResetFromCaseID != old.ID || replacementAfterCallback.CurrentAttemptID == "" {
+	if !reflect.DeepEqual(replacementBeforeCallback, replacementAfterCallback) || replacementAfterCallback.Status != CaseInvestigating || replacementAfterCallback.ResetFromCaseID != old.ID || replacementAfterCallback.CurrentAttemptID == "" {
 		t.Fatalf("late completion changed replacement:\nbefore=%+v\nafter=%+v", replacementBeforeCallback, replacementAfterCallback)
 	}
 }
@@ -508,7 +508,7 @@ func TestResetCaseLateCompletionCannotRewriteArchivedCase(t *testing.T) {
 func TestResetCaseValidatesCommand(t *testing.T) {
 	store := newOrchestratorStore(t)
 	old, _ := prepareResetCase(t, store, "case-reset-validation")
-	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil)
+	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil)
 	valid := resetOrchestratorCommand(old, "case-reset-validation-next", "reset-validation")
 	tests := []struct {
 		name string
@@ -539,8 +539,8 @@ func TestResetCaseRejectsInvalidReplacementBeforeMutation(t *testing.T) {
 		mutateCmd func(*ResetCaseCommand)
 		wantError string
 	}{
-		{name: "unsupported cursor target", mutateCmd: func(cmd *ResetCaseCommand) {
-			cmd.Bot = BotRef{Key: "replacement|cursor", Target: "cursor", Env: "prod"}
+		{name: "unsupported embedded target", mutateCmd: func(cmd *ResetCaseCommand) {
+			cmd.Bot = BotRef{Key: "replacement|embedded", Target: "embedded", Env: "prod"}
 		}, wantError: "unsupported incident workflow target"},
 		{name: "blank resolved environment", mutateCmd: func(cmd *ResetCaseCommand) {
 			cmd.Bug.Env = ""
@@ -556,7 +556,7 @@ func TestResetCaseRejectsInvalidReplacementBeforeMutation(t *testing.T) {
 			store := newOrchestratorStore(t)
 			old, _ := prepareResetCase(t, store, "case-reset-binding-"+strings.ReplaceAll(test.name, " ", "-"))
 			runner := &recordingPhaseRunner{}
-			orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+			orchestrator := NewCaseOrchestrator(store, runner, nil)
 			cmd := resetOrchestratorCommand(old, old.ID+"-next", "reset-binding-"+test.name)
 			cmd.Bug.Source = old.Source
 			cmd.Bug.SystemID = old.SystemID
@@ -606,7 +606,7 @@ func TestResetCaseWithReplacementIsAtomic(t *testing.T) {
 	if result.Replacement.SelectedBotKey != "replacement|claude-code" || result.Replacement.Environment != "prod" {
 		t.Fatalf("replacement binding = %+v", result.Replacement)
 	}
-	if result.Replacement.Status != CasePendingValidation || result.Replacement.Version != 1 || result.Replacement.ResetFromCaseID != incident.ID || result.Replacement.CurrentAttemptID != "" || result.Replacement.ClosedAt != nil {
+	if result.Replacement.Status != CasePendingInvestigation || result.Replacement.Version != 1 || result.Replacement.ResetFromCaseID != incident.ID || result.Replacement.CurrentAttemptID != "" || result.Replacement.ClosedAt != nil {
 		t.Fatalf("replacement=%+v", result.Replacement)
 	}
 	storedOld, err := store.GetCase(context.Background(), incident.ID)
@@ -620,7 +620,7 @@ func TestResetCaseWithReplacementIsAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if storedNew.Status != CasePendingValidation || storedNew.CycleNumber != 1 || storedNew.Version != 1 || storedNew.CurrentAttemptID != "" || storedNew.ClosedAt != nil || storedNew.ResetFromCaseID != incident.ID || storedNew.SupersededByCaseID != "" {
+	if storedNew.Status != CasePendingInvestigation || storedNew.CycleNumber != 1 || storedNew.Version != 1 || storedNew.CurrentAttemptID != "" || storedNew.ClosedAt != nil || storedNew.ResetFromCaseID != incident.ID || storedNew.SupersededByCaseID != "" {
 		t.Fatalf("persisted replacement Case=%+v", storedNew)
 	}
 	if !reflect.DeepEqual(result.Archived, storedOld) || !reflect.DeepEqual(result.Replacement, storedNew) {
@@ -647,127 +647,6 @@ func TestResetCaseWithReplacementIsAtomic(t *testing.T) {
 	}
 	if len(oldEvents) != 1 || oldEvents[0].EventType != "case_reset" || len(newEvents) != 1 || newEvents[0].EventType != "case_created_from_reset" {
 		t.Fatalf("old events=%+v new events=%+v", oldEvents, newEvents)
-	}
-}
-
-func TestResetCaseWithReplacementSupersedesUnconsumedBrowserRecovery(t *testing.T) {
-	for _, status := range []BrowserRecoveryOperationStatus{
-		BrowserRecoveryClaimed,
-		BrowserRecoveryEffectSucceeded,
-		BrowserRecoveryOutcomeUncertain,
-	} {
-		t.Run(string(status), func(t *testing.T) {
-			store := openTestCaseStore(t)
-			ctx := context.Background()
-			incident, attempt, request := eligibleBrowserRecoveryOperationFixture(t, store, "reset-"+string(status), BrowserRecoveryLogin)
-			if _, err := store.db.Exec(`UPDATE incident_cases SET system_id='base',environment='test',selected_bot_key='validator|codex' WHERE id=?`, incident.ID); err != nil {
-				t.Fatal(err)
-			}
-			operation, acquired, err := store.ClaimBrowserRecoveryOperation(ctx, request, "claim-reset-"+string(status))
-			if err != nil || !acquired {
-				t.Fatalf("operation=%+v acquired=%v err=%v", operation, acquired, err)
-			}
-			if status != BrowserRecoveryClaimed {
-				operation, err = store.RecordBrowserRecoveryOutcome(ctx, request, operation.ClaimToken, status)
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			incident, err = store.GetCase(ctx, incident.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			result, err := store.ResetCaseWithReplacement(ctx, resetCommand(incident, incident.ID+"-next", "reset-browser-"+string(status)))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if result.Archived.Status != CaseResetArchived || result.Replacement.Status != CasePendingValidation || result.Replacement.ResetFromCaseID != incident.ID {
-				t.Fatalf("result=%+v", result)
-			}
-			if persisted, found, err := store.GetBrowserRecoveryOperation(ctx, request); err != nil || found {
-				t.Fatalf("persisted=%+v found=%v err=%v", persisted, found, err)
-			}
-			storedAttempt, err := store.GetAttempt(ctx, attempt.ID)
-			if err != nil || storedAttempt.Status != AttemptStatusFailed {
-				t.Fatalf("attempt=%+v err=%v", storedAttempt, err)
-			}
-		})
-	}
-}
-
-func TestLateBrowserRecoveryOutcomeCannotReviveResetCase(t *testing.T) {
-	store := openTestCaseStore(t)
-	ctx := context.Background()
-	incident, _, request := eligibleBrowserRecoveryOperationFixture(t, store, "late-reset-outcome", BrowserRecoveryRepair)
-	if _, err := store.db.Exec(`UPDATE incident_cases SET system_id='base',environment='test',selected_bot_key='validator|codex' WHERE id=?`, incident.ID); err != nil {
-		t.Fatal(err)
-	}
-	operation, acquired, err := store.ClaimBrowserRecoveryOperation(ctx, request, "claim-late-reset-outcome")
-	if err != nil || !acquired {
-		t.Fatalf("operation=%+v acquired=%v err=%v", operation, acquired, err)
-	}
-	incident, err = store.GetCase(ctx, incident.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := store.ResetCaseWithReplacement(ctx, resetCommand(incident, incident.ID+"-next", "reset-late-browser-outcome"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := store.RecordBrowserRecoveryOutcome(ctx, request, operation.ClaimToken, BrowserRecoveryEffectSucceeded); err == nil {
-		t.Fatal("late browser recovery outcome was accepted after reset")
-	}
-	archived, err := store.GetCase(ctx, incident.ID)
-	if err != nil || archived.Status != CaseResetArchived || archived.Version != result.Archived.Version {
-		t.Fatalf("archived=%+v err=%v", archived, err)
-	}
-	replacement, err := store.GetCase(ctx, result.Replacement.ID)
-	if err != nil || replacement.Status != CasePendingValidation || replacement.Version != result.Replacement.Version {
-		t.Fatalf("replacement=%+v err=%v", replacement, err)
-	}
-	if persisted, found, err := store.GetBrowserRecoveryOperation(ctx, request); err != nil || found {
-		t.Fatalf("persisted=%+v found=%v err=%v", persisted, found, err)
-	}
-}
-
-func TestResetFailureRollsBackBrowserRecoverySupersession(t *testing.T) {
-	store := openTestCaseStore(t)
-	ctx := context.Background()
-	incident, _, request := eligibleBrowserRecoveryOperationFixture(t, store, "reset-browser-rollback", BrowserRecoveryLogin)
-	if _, err := store.db.Exec(`UPDATE incident_cases SET system_id='base',environment='test',selected_bot_key='validator|codex' WHERE id=?`, incident.ID); err != nil {
-		t.Fatal(err)
-	}
-	operation, acquired, err := store.ClaimBrowserRecoveryOperation(ctx, request, "claim-reset-browser-rollback")
-	if err != nil || !acquired {
-		t.Fatalf("operation=%+v acquired=%v err=%v", operation, acquired, err)
-	}
-	operation, err = store.RecordBrowserRecoveryOutcome(ctx, request, operation.ClaimToken, BrowserRecoveryEffectSucceeded)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.db.Exec(`CREATE TRIGGER fail_reset_with_browser_recovery BEFORE INSERT ON incident_cases WHEN NEW.reset_from_case_id<>'' BEGIN SELECT RAISE(FAIL, 'injected replacement failure'); END`); err != nil {
-		t.Fatal(err)
-	}
-	incident, err = store.GetCase(ctx, incident.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := store.ResetCaseWithReplacement(ctx, resetCommand(incident, incident.ID+"-next", "reset-browser-rollback")); err == nil {
-		t.Fatal("expected reset failure")
-	}
-	persisted, found, err := store.GetBrowserRecoveryOperation(ctx, request)
-	if err != nil || !found || persisted.Status != BrowserRecoveryEffectSucceeded || persisted.ClaimToken != operation.ClaimToken {
-		t.Fatalf("persisted=%+v found=%v err=%v", persisted, found, err)
-	}
-	current, err := store.GetCase(ctx, incident.ID)
-	if err != nil || current.Status != CaseWaitingEvidence || current.Version != incident.Version || current.CurrentAttemptID != incident.CurrentAttemptID {
-		t.Fatalf("current=%+v err=%v", current, err)
-	}
-	if _, err := store.GetCase(ctx, incident.ID+"-next"); !errors.Is(err, ErrCaseNotFound) {
-		t.Fatalf("replacement err=%v", err)
 	}
 }
 
@@ -893,7 +772,7 @@ func TestResetCaseWithReplacementRejectsTerminalAndStaleCases(t *testing.T) {
 	t.Run("duplicate replacement", func(t *testing.T) {
 		store := openTestCaseStore(t)
 		incident := createWorkflowCase(t, store, "case-reset-duplicate", CaseWaitingEvidence)
-		if err := store.CreateCase(context.Background(), IncidentCase{ID: "replacement-exists", BugID: "other-bug", Status: CasePendingValidation, CycleNumber: 1, Version: 1}); err != nil {
+		if err := store.CreateCase(context.Background(), IncidentCase{ID: "replacement-exists", BugID: "other-bug", Status: CasePendingInvestigation, CycleNumber: 1, Version: 1}); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := store.ResetCaseWithReplacement(context.Background(), resetCommand(incident, "replacement-exists", "reset-duplicate")); err == nil {
@@ -923,43 +802,6 @@ func TestResetCaseWithReplacementPreservesRelatedRecords(t *testing.T) {
 	allEvents := snapshotRows(t, store, `SELECT * FROM transition_events WHERE case_id IN (?,?) ORDER BY id`, incident.ID, "case-reset-records-next")
 	if len(allEvents) != len(beforeEvents)+2 {
 		t.Fatalf("events before=%d after=%d rows=%v", len(beforeEvents), len(allEvents), allEvents)
-	}
-}
-
-func TestResetCaseWithReplacementInheritsFrozenValidationRecipe(t *testing.T) {
-	store := openTestCaseStore(t)
-	incident, _ := prepareResetCase(t, store, "case-reset-recipe")
-	finishedAt := time.Now().UTC()
-	sourceAttempt := PhaseAttempt{
-		ID: "case-reset-recipe-validation", CaseID: incident.ID, CycleNumber: incident.CycleNumber,
-		Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusSucceeded,
-		AgentTarget: "codex", BotKey: "original|codex", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
-		StartedAt: finishedAt, FinishedAt: &finishedAt,
-	}
-	if err := store.CreateAttempt(context.Background(), sourceAttempt); err != nil {
-		t.Fatal(err)
-	}
-	plan, err := ParseBrowserPlan([]byte(validBrowserPlanYAML()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	planSHA, err := durableBrowserPlanSHA256(plan)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.StoreValidationRecipe(context.Background(), ValidationRecipe{
-		CaseID: incident.ID, ScenarioSHA256: strings.Repeat("c", 64), PlanSHA256: planSHA,
-		Plan: plan, SourceAttemptID: sourceAttempt.ID,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	result, err := store.ResetCaseWithReplacement(context.Background(), resetCommand(incident, "case-reset-recipe-next", "reset-recipe"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	inherited, found, err := store.GetValidationRecipe(context.Background(), result.Replacement.ID)
-	if err != nil || !found || inherited.PlanSHA256 != planSHA || inherited.SourceAttemptID != sourceAttempt.ID {
-		t.Fatalf("inherited=%+v found=%v err=%v", inherited, found, err)
 	}
 }
 
@@ -1078,7 +920,7 @@ func TestResetCaseWithReplacementReplaysLegacyFingerprintWithoutCancellationSide
 		t.Fatalf("replayed=%+v err=%v", replayed, err)
 	}
 	runner := &recordingPhaseRunner{}
-	warnings, err := NewCaseOrchestrator(store, runner, nil, nil).processResetRunnerCancellation(replayed, reset.IdempotencyKey, newFingerprint)
+	warnings, err := NewCaseOrchestrator(store, runner, nil).processResetRunnerCancellation(replayed, reset.IdempotencyKey, newFingerprint)
 	if err != nil || len(warnings) != 0 {
 		t.Fatalf("warnings=%+v err=%v", warnings, err)
 	}
@@ -1194,7 +1036,7 @@ func prepareOldEnvironmentResetReplay(t *testing.T, variant string) (*CaseStore,
 	store := newOrchestratorStore(t)
 	old, _ := prepareResetCase(t, store, "case-reset-old-environment-"+variant)
 	runner := &recordingPhaseRunner{}
-	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	orchestrator := NewCaseOrchestrator(store, runner, nil)
 	command := resetOrchestratorCommand(old, old.ID+"-next", "reset-old-environment-"+variant)
 	command.Bot = BotRef{Key: "replacement|claude-code", Target: "claude-code", Path: "/workspace/replacement", Env: "prod"}
 	command.Bug.Env = "test"
@@ -1218,7 +1060,7 @@ func prepareOldEnvironmentResetReplay(t *testing.T, variant string) (*CaseStore,
 		CaseID: result.Replacement.ID, ExpectedVersion: result.Replacement.Version, IdempotencyKey: command.IdempotencyKey + ":start",
 		ActorID: command.ActorID, Bug: command.Bug, Bot: command.Bot, InputJSON: command.InputJSON,
 	})
-	if err != nil || started.Status != CaseValidating || started.Environment != "test" {
+	if err != nil || started.Status != CaseInvestigating || started.Environment != "test" {
 		t.Fatalf("started=%+v err=%v", started, err)
 	}
 	currentReset := reset

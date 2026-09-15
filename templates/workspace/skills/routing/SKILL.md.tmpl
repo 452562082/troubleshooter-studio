@@ -24,7 +24,7 @@ config-map.yaml 里每条服务定位都带**两类指针之一**:
 
 凭据位置:
 - nacos:install 阶段写进 MCP env(`NACOS_HOST/PORT/USERNAME/PASSWORD`),MCP 工具调用不碰凭据。HTTP fallback 才读 `<workspace>/scripts/.env`(`CC_ADDR_<ENV>` 等,需先 `source scripts/.env`)
-- apollo / consul / kuboard:`~/.openclaw/<agent-id>-creds.json` — 脚本按 `--agent-id --env` 自己读
+- apollo / consul / kuboard:`~/.tshoot/<agent-id>-creds.json` — 脚本按 `--agent-id --env` 自己读
 - one2all:Bearer token 在 MCP server 的 `headers.Authorization` 里,LLM 调 MCP 工具不碰凭据
 
 ## datasource 排他契约(grafana mcp 工具调用必看)

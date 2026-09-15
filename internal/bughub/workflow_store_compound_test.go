@@ -13,12 +13,12 @@ func TestCaseStoreCompoundMutationCommitsAttemptsMultiEdgeAndAuditAtomically(t *
 	ctx := context.Background()
 	store := openTestCaseStore(t)
 	createTestCase(t, store, "case-compound")
-	validation := PhaseAttempt{ID: "compound-validation", CaseID: "case-compound", CycleNumber: 1, Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusRunning, InputJSON: json.RawMessage(`{"x":1}`), OutputJSON: json.RawMessage(`{}`)}
+	validation := PhaseAttempt{ID: "compound-validation", CaseID: "case-compound", CycleNumber: 1, Phase: PhaseInvestigation, Mode: "", Status: AttemptStatusRunning, InputJSON: json.RawMessage(`{"x":1}`), OutputJSON: json.RawMessage(`{}`)}
 	if err := store.CreateAttempt(ctx, validation); err != nil {
 		t.Fatal(err)
 	}
 	current := "compound-validation"
-	started, _, err := store.TransitionWithUpdate(ctx, "case-compound", 1, CaseValidating, CaseSnapshotUpdate{CurrentAttemptID: &current}, TransitionEvent{ID: "compound-start", IdempotencyKey: "compound-start", EventType: "start", ActorType: "user", ActorID: "alice", PayloadJSON: []byte(`{}`)})
+	started, _, err := store.TransitionWithUpdate(ctx, "case-compound", 1, CaseInvestigating, CaseSnapshotUpdate{CurrentAttemptID: &current}, TransitionEvent{ID: "compound-start", IdempotencyKey: "compound-start", EventType: "start", ActorType: "user", ActorID: "alice", PayloadJSON: []byte(`{}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestCaseStoreCompoundMutationCommitsAttemptsMultiEdgeAndAuditAtomically(t *
 		CaseID: "case-compound", ExpectedVersion: started.Version, IdempotencyKey: "complete-validation", RequestJSON: json.RawMessage(`{"outcome":"reproduced"}`),
 		FinishAttempts: []PhaseAttempt{finished}, CreateAttempts: []PhaseAttempt{next}, Snapshot: CaseSnapshotUpdate{CurrentAttemptID: workflowStringPointer(next.ID)},
 		Steps: []CaseMutationStep{
-			{To: CaseReproduced, Event: TransitionEvent{ID: "compound-reproduced", EventType: "validation_reproduced", ActorType: "agent", ActorID: "validator", PayloadJSON: []byte(`{}`)}},
+			{To: CaseWaitingEvidence, Event: TransitionEvent{ID: "compound-reproduced", EventType: "validation_reproduced", ActorType: "agent", ActorID: "validator", PayloadJSON: []byte(`{}`)}},
 			{To: CaseInvestigating, Event: TransitionEvent{ID: "compound-investigating", EventType: "investigation_started", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: []byte(`{}`)}},
 			{To: CaseInvestigating, AuditOnly: true, Event: TransitionEvent{ID: "compound-audit", EventType: "runner_reserved", ActorType: "studio", ActorID: "orchestrator", PayloadJSON: []byte(`{}`)}},
 		},
@@ -71,7 +71,7 @@ func TestCaseStoreCompoundMutationCommitsAttemptsMultiEdgeAndAuditAtomically(t *
 		CaseID: "case-compound", ExpectedVersion: started.Version, IdempotencyKey: "complete-validation",
 		RequestJSON: json.RawMessage(`{"outcome":"different"}`),
 		Steps: []CaseMutationStep{{
-			To:    CaseReproduced,
+			To:    CaseWaitingEvidence,
 			Event: TransitionEvent{ID: "compound-reproduced", EventType: "validation_reproduced", ActorType: "agent", ActorID: "validator", PayloadJSON: []byte(`{}`)},
 		}},
 	}
@@ -87,7 +87,7 @@ func TestAtomicRunClaimAndCancelRaceLeavesNoRunnableFixSideEffect(t *testing.T) 
 		incident := createWorkflowCase(t, store, caseID, CaseFixing)
 		attempt := createPhaseRunnerAttempt(t, store, incident, PhaseFix, "")
 		checkpoint := FixCheckpoint{AttemptID: attempt.ID, CaseID: attempt.CaseID, StagingLocator: attempt.ID + "-race"}
-		orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil)
+		orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil)
 		start := make(chan struct{})
 		errs := make(chan error, 2)
 		go func() {
@@ -123,12 +123,12 @@ func TestCaseStoreCompoundMutationCancelVsCompleteHasOneExactWinner(t *testing.T
 	ctx := context.Background()
 	store := openTestCaseStore(t)
 	createTestCase(t, store, "case-attempt-race")
-	attempt := PhaseAttempt{ID: "attempt-race", CaseID: "case-attempt-race", CycleNumber: 1, Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusRunning, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}
+	attempt := PhaseAttempt{ID: "attempt-race", CaseID: "case-attempt-race", CycleNumber: 1, Phase: PhaseInvestigation, Mode: "", Status: AttemptStatusRunning, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}
 	if err := store.CreateAttempt(ctx, attempt); err != nil {
 		t.Fatal(err)
 	}
 	id := attempt.ID
-	active, _, err := store.TransitionWithUpdate(ctx, attempt.CaseID, 1, CaseValidating, CaseSnapshotUpdate{CurrentAttemptID: &id}, TransitionEvent{ID: "race-start", IdempotencyKey: "race-start", EventType: "start", ActorType: "user", ActorID: "alice", PayloadJSON: []byte(`{}`)})
+	active, _, err := store.TransitionWithUpdate(ctx, attempt.CaseID, 1, CaseInvestigating, CaseSnapshotUpdate{CurrentAttemptID: &id}, TransitionEvent{ID: "race-start", IdempotencyKey: "race-start", EventType: "start", ActorType: "user", ActorID: "alice", PayloadJSON: []byte(`{}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestCaseStoreCompoundMutationCancelVsCompleteHasOneExactWinner(t *testing.T
 	cancel.Status = AttemptStatusCancelled
 	cancel.OutputJSON = []byte(`{"winner":"cancel"}`)
 	mutations := []CaseMutation{
-		{CaseID: attempt.CaseID, ExpectedVersion: active.Version, IdempotencyKey: "race-complete", RequestJSON: []byte(`{"kind":"complete"}`), FinishAttempts: []PhaseAttempt{complete}, Steps: []CaseMutationStep{{To: CaseReproduced, Event: TransitionEvent{ID: "race-complete", EventType: "complete", ActorType: "agent", ActorID: "validator", PayloadJSON: []byte(`{}`)}}}},
+		{CaseID: attempt.CaseID, ExpectedVersion: active.Version, IdempotencyKey: "race-complete", RequestJSON: []byte(`{"kind":"complete"}`), FinishAttempts: []PhaseAttempt{complete}, Steps: []CaseMutationStep{{To: CaseWaitingEvidence, Event: TransitionEvent{ID: "race-complete", EventType: "complete", ActorType: "agent", ActorID: "validator", PayloadJSON: []byte(`{}`)}}}},
 		{CaseID: attempt.CaseID, ExpectedVersion: active.Version, IdempotencyKey: "race-cancel", RequestJSON: []byte(`{"kind":"cancel"}`), FinishAttempts: []PhaseAttempt{cancel}, Steps: []CaseMutationStep{{To: CaseWaitingEvidence, Event: TransitionEvent{ID: "race-cancel", EventType: "cancel", ActorType: "user", ActorID: "alice", PayloadJSON: []byte(`{}`)}}}},
 	}
 	start := make(chan struct{})
@@ -187,7 +187,7 @@ func TestCaseStoreCompoundMutationRecordsApprovalCodeAndObservationOrRollsBack(t
 	if err := store.CreateAttempt(ctx, attempt); err != nil {
 		t.Fatal(err)
 	}
-	active, _, err := store.TransitionWithUpdate(ctx, "case-records", 1, CaseValidating, CaseSnapshotUpdate{CurrentAttemptID: workflowStringPointer(attempt.ID)}, validEvent(999, "case-records"))
+	active, _, err := store.TransitionWithUpdate(ctx, "case-records", 1, CaseInvestigating, CaseSnapshotUpdate{CurrentAttemptID: workflowStringPointer(attempt.ID)}, validEvent(999, "case-records"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func TestCaseStoreCompoundMutationRejectsCrossOwnershipBeforeWrite(t *testing.T)
 				t.Fatal(err)
 			}
 			id := attemptA.ID
-			active, _, err := store.TransitionWithUpdate(ctx, "owner-a", 1, CaseValidating, CaseSnapshotUpdate{CurrentAttemptID: &id}, validEvent(777, "owner-a"))
+			active, _, err := store.TransitionWithUpdate(ctx, "owner-a", 1, CaseInvestigating, CaseSnapshotUpdate{CurrentAttemptID: &id}, validEvent(777, "owner-a"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -247,7 +247,7 @@ func TestCaseStoreCompoundMutationRejectsCrossOwnershipBeforeWrite(t *testing.T)
 				t.Fatal("cross ownership accepted")
 			}
 			got, _ := store.GetCase(ctx, "owner-a")
-			if got.Version != active.Version || got.Status != CaseValidating {
+			if got.Version != active.Version || got.Status != CaseInvestigating {
 				t.Fatalf("partial write: %+v", got)
 			}
 		})

@@ -177,7 +177,7 @@ infrastructure:
         user_token_placeholder: "{{MCP_USER_TOKEN}}"
 
 generation:
-  targets: [openclaw]
+  targets: [claude-code, opencode]
   skills_whitelist:
     - routing
     - incident-investigator

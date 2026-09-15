@@ -497,14 +497,14 @@ func TestWriteTshootMetaIncludesAgentRole(t *testing.T) {
 	g.Ctx.RepoLocalPaths = map[string]string{cfg.Repos[0].Name: repoPath}
 
 	dir := filepath.Join(out, "meta")
-	if err := g.writeTshootMetaForRole(dir, "codex", AgentRoleValidator); err != nil {
+	if err := g.writeTshootMetaForRole(dir, "codex", AgentRoleFixer); err != nil {
 		t.Fatalf("writeTshootMetaForRole: %v", err)
 	}
 	data := readFile(t, filepath.Join(dir, "tshoot.json"))
-	if !strings.Contains(data, `"agent_id": "shop-validator"`) {
+	if !strings.Contains(data, `"agent_id": "shop-fixer"`) {
 		t.Fatalf("agent_id missing from meta:\n%s", data)
 	}
-	if !strings.Contains(data, `"role": "validator"`) {
+	if !strings.Contains(data, `"role": "fixer"`) {
 		t.Fatalf("role missing from meta:\n%s", data)
 	}
 	if !strings.Contains(data, `"project_repositories"`) || !strings.Contains(data, repoPath) {
@@ -1040,7 +1040,7 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 	}
 
 	// scripts/ 目录已不再生成 —— install / self-test / uninstall 全部由原生 Go
-	// 实现(agent.InstallNativeOpenclaw / SelfTestOpenclaw / UninstallNativeOpenclaw)
+	// 实现(agent.InstallNative / ProbeMCPServersFromConfig / UninstallNative)
 	if _, err := os.Stat(filepath.Join(out, "scripts")); err == nil {
 		t.Errorf("scripts/ 目录不应存在(install/self-test/uninstall 已 port 到 Go)")
 	}
@@ -1087,8 +1087,8 @@ func TestGenerate_Nacos_Shop(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "console_analyzer.py")); err != nil {
 		t.Errorf("console_analyzer.py should be generated: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "browser_collect.mjs")); err != nil {
-		t.Errorf("browser_collect.mjs should be generated: %v", err)
+	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "browser_collect.mjs")); !os.IsNotExist(err) {
+		t.Errorf("retired browser collector must not be generated: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(frontendSkill, "scripts", "sentry_fetch.py")); err != nil {
 		t.Errorf("sentry_fetch.py should be generated: %v", err)
@@ -1148,8 +1148,8 @@ func TestGenerate_Apollo(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(out, "templates/workspace-template/skills/config-executor/scripts/apollo_config.py")); err != nil {
 		t.Errorf("apollo_config.py should exist: %v", err)
 	}
-	// install.sh 已被 InstallNativeOpenclaw 替换;Apollo 的 prompt / creds.json
-	// 写入由 install_prompts_test.go 和 install_native_openclaw_test.go 覆盖。
+	// install.sh 已被 InstallNative 替换;Apollo 的 prompt / creds.json
+	// 写入由 install_prompts_test.go 和 install_native_test.go 覆盖。
 	// SKILL.md 必须指向脚本
 	skillMD := readFile(t, filepath.Join(out, "templates/workspace-template/skills/config-executor/SKILL.md"))
 	if !strings.Contains(skillMD, "apollo_config.py") {
@@ -1211,111 +1211,6 @@ func TestGenerate_Consul(t *testing.T) {
 	}
 }
 
-func TestGenerate_ClawhubLock(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
-	out := t.TempDir()
-	tr := filepath.Join(projectRoot(t), "templates")
-	if err := New(cfg, tr, out).Generate(); err != nil {
-		t.Fatal(err)
-	}
-
-	lockPath := filepath.Join(out, "templates/workspace-template/.clawhub/lock.json")
-	data, err := os.ReadFile(lockPath)
-	if err != nil {
-		t.Fatalf("lock.json missing: %v", err)
-	}
-	var lock struct {
-		Version int `json:"version"`
-		Skills  map[string]struct {
-			Version     string `json:"version"`
-			InstalledAt int64  `json:"installedAt"`
-		} `json:"skills"`
-	}
-	if err := json.Unmarshal(data, &lock); err != nil {
-		t.Fatalf("parse lock.json: %v", err)
-	}
-	if lock.Version != 1 {
-		t.Errorf("lock.version expected 1, got %d", lock.Version)
-	}
-	// shop-troubleshooter.yaml 的 skills_whitelist 应完整写入 lock.json。
-	wantSkills := []string{
-		"routing",
-		"incident-investigator",
-		"config-executor",
-		"redis-runtime-query",
-		"mongodb-runtime-query",
-		"es-runtime-query",
-		"mysql-runtime-query",
-		"kafka-runtime-query",
-		"tracing-query",
-		"elk-log-query",
-		"frontend-repro-investigator",
-		"diagram-generator",
-	}
-	for _, s := range wantSkills {
-		entry, ok := lock.Skills[s]
-		if !ok {
-			t.Errorf("lock.json missing skill %q", s)
-			continue
-		}
-		if entry.InstalledAt == 0 {
-			t.Errorf("%s.installedAt should be non-zero", s)
-		}
-		if entry.Version == "" {
-			t.Errorf("%s.version should be non-empty", s)
-		}
-	}
-	// 不在白名单里的 skill 不应出现
-	for _, s := range []string{"nonexistent-skill"} {
-		if _, ok := lock.Skills[s]; ok {
-			t.Errorf("lock.json should not contain disabled skill %q", s)
-		}
-	}
-}
-
-func TestGenerate_ClawhubLock_EmptySkills(t *testing.T) {
-	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
-	// 清空白名单 + 禁用所有 data stores，还要清掉 config center；
-	// 验证必备 skill 仍应生成,避免 validator agent 指向不存在的入口。
-	cfg.Generation.SkillsWhitelist = []string{"__none__"}
-	out := t.TempDir()
-	tr := filepath.Join(projectRoot(t), "templates")
-	if err := New(cfg, tr, out).Generate(); err != nil {
-		t.Fatal(err)
-	}
-	lockPath := filepath.Join(out, "templates/workspace-template/.clawhub/lock.json")
-	data, err := os.ReadFile(lockPath)
-	if err != nil {
-		t.Fatalf("lock.json should exist even with no skills: %v", err)
-	}
-	var lock struct {
-		Version int                    `json:"version"`
-		Skills  map[string]interface{} `json:"skills"`
-	}
-	if err := json.Unmarshal(data, &lock); err != nil {
-		t.Fatal(err)
-	}
-	if lock.Version != 1 {
-		t.Errorf("version expected 1, got %d", lock.Version)
-	}
-	want := map[string]bool{
-		"api-verifier":                 true,
-		"attachment-evidence-verifier": true,
-		"bug-fixer":                    true,
-		"bug-verifier":                 true,
-		"frontend-repro-investigator":  true,
-		"grafana-observability-query":  true,
-	}
-	if len(lock.Skills) != len(want) {
-		t.Fatalf("expected validator baseline and observability skills, got %v", lock.Skills)
-	}
-	for skill := range want {
-		if _, ok := lock.Skills[skill]; !ok {
-			t.Errorf("lock.json missing validator baseline skill %q: %v", skill, lock.Skills)
-		}
-	}
-}
-
 func TestGenerate_FrontendReproArtifacts(t *testing.T) {
 	cfg := loadCfg(t, "examples/three-tier-troubleshooter.yaml")
 	out := t.TempDir()
@@ -1346,53 +1241,8 @@ func TestGenerateIncludesBugVerifierSkill(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	root := filepath.Join(out, "templates/workspace-template")
-	assertExists(t, root, []string{
-		"skills/api-verifier/SKILL.md",
-		"skills/attachment-evidence-verifier/SKILL.md",
-		"skills/attachment-evidence-verifier/scripts/attachment_manifest.py",
-		"skills/bug-fixer/SKILL.md",
-		"skills/bug-verifier/SKILL.md",
-		"skills/frontend-repro-investigator/SKILL.md",
-	})
-
-	data := readFile(t, filepath.Join(root, "skills/bug-verifier/SKILL.md"))
-	for _, want := range []string{
-		"verification_status",
-		"environment",
-		"observed_behavior",
-		"expected_behavior",
-		"evidence",
-		"screenshots",
-		"network",
-		"reproduced",
-		"not_reproduced",
-		"insufficient_info",
-		"fixed_verified",
-		"still_reproduces",
-		"gaps",
-		"entry:",
-		"frontend_url",
-		"api_url",
-		"console_errors",
-		"trace_ids",
-		"request_ids",
-		"attachments",
-		"attachment-evidence-verifier",
-		"api-verifier",
-		"frontend-repro-investigator",
-		"handoff_to_troubleshooter",
-		"不读取业务源码",
-		"建议改动",
-	} {
-		if !strings.Contains(data, want) {
-			t.Fatalf("bug-verifier skill missing %q:\n%s", want, data)
-		}
-	}
-	for _, forbidden := range []string{"最可能根因", "RCA", "inconclusive"} {
-		if strings.Contains(data, forbidden) {
-			t.Fatalf("bug-verifier skill should not contain %q:\n%s", forbidden, data)
-		}
-	}
+	assertExists(t, root, []string{"skills/bug-fixer/SKILL.md", "skills/frontend-repro-investigator/SKILL.md"})
+	assertNotExists(t, root, []string{"skills/api-verifier", "skills/attachment-evidence-verifier", "skills/bug-verifier", "skills/frontend-repro-investigator/scripts/browser_collect.mjs"})
 }
 
 func TestGenerateIncludesValidatorSkillsEvenWhenWhitelistOmitsThem(t *testing.T) {
@@ -1407,10 +1257,7 @@ func TestGenerateIncludesValidatorSkillsEvenWhenWhitelistOmitsThem(t *testing.T)
 	}
 	root := filepath.Join(out, "templates/workspace-template")
 	assertExists(t, root, []string{
-		"skills/api-verifier/SKILL.md",
-		"skills/attachment-evidence-verifier/SKILL.md",
 		"skills/bug-fixer/SKILL.md",
-		"skills/bug-verifier/SKILL.md",
 		"skills/frontend-repro-investigator/SKILL.md",
 		"skills/grafana-observability-query/SKILL.md",
 	})
@@ -1428,8 +1275,8 @@ func TestSkillAllowedForAgentRoleScopesValidatorAndTroubleshooter(t *testing.T) 
 		"tracing-query",
 	}
 	for _, skill := range validatorAllowed {
-		if !SkillAllowedForAgentRole(skill, AgentRoleValidator) {
-			t.Fatalf("validator should allow %s", skill)
+		if SkillAllowedForAgentRole(skill, AgentRoleValidator) {
+			t.Fatalf("retired validator should not allow %s", skill)
 		}
 	}
 	validatorDenied := []string{
@@ -1512,8 +1359,8 @@ func assertNotExists(t *testing.T, base string, rels []string) {
 	}
 }
 
-// TestGenerate_MultiTargets_All 覆盖 4 target 全开的共享 staging 路径：
-// openclaw 跑完后，其产物目录被复用为 SharedStaging，后续 target 不再重复渲染 workspace。
+// TestGenerate_MultiTargets_All 覆盖三平台共用 staging 的路径：
+// 共享 workspace 渲染完成后，各平台复用 SharedStaging。
 // 对每个 target 目录断言关键产物存在。
 func TestGenerate_MultiTargets_All(t *testing.T) {
 	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
@@ -1522,13 +1369,13 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 
 	g := New(cfg, tr, out)
 
-	// openclaw
+	// 共享 workspace
 	if err := g.Generate(); err != nil {
-		t.Fatalf("openclaw: %v", err)
+		t.Fatalf("workspace: %v", err)
 	}
 	g.SharedStaging = g.OutputDir
 
-	// non-openclaw targets 复用 staging
+	// 三平台复用 staging
 	if err := g.GenerateClaudeCode(); err != nil {
 		t.Fatalf("claude-code: %v", err)
 	}
@@ -1547,43 +1394,33 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 	// install.sh 已删除 —— 装到 ~/.claude|cursor/ 现在由 agent.InstallNative 完成
 	assertExists(t, out+"-claude-code", []string{
 		"agents/shop-bot.md",
-		"agents/shop-validator.md",
 		"agents/shop-fixer.md",
 		"agents-meta/shop-bot/tshoot.json",
-		"agents-meta/shop-validator/tshoot.json",
 		"agents-meta/shop-fixer/tshoot.json",
 		"skills/routing/SKILL.md",
 	})
 	assertExists(t, out+"-cursor", []string{
 		"agents/shop-bot.md",
-		"agents/shop-validator.md",
 		"agents/shop-fixer.md",
 		"agents-meta/shop-bot/tshoot.json",
-		"agents-meta/shop-validator/tshoot.json",
 		"agents-meta/shop-fixer/tshoot.json",
 		"skills/routing/SKILL.md",
 	})
 	assertExists(t, out+"-codex", []string{
 		"agents/shop-bot.toml",
-		"agents/shop-validator.toml",
 		"agents/shop-fixer.toml",
 		"agents-meta/shop-bot/tshoot.json",
-		"agents-meta/shop-validator/tshoot.json",
 		"agents-meta/shop-fixer/tshoot.json",
 		"skills/routing/SKILL.md",
 	})
 	assertAgentMetaRole(t, filepath.Join(out+"-claude-code", "agents-meta/shop-bot/tshoot.json"), "shop-bot", "troubleshooter")
-	assertAgentMetaRole(t, filepath.Join(out+"-claude-code", "agents-meta/shop-validator/tshoot.json"), "shop-validator", "validator")
 	assertAgentMetaRole(t, filepath.Join(out+"-claude-code", "agents-meta/shop-fixer/tshoot.json"), "shop-fixer", "fixer")
 
 	assertTroubleshooterAgentDefinition(t, filepath.Join(out+"-claude-code", "agents/shop-bot.md"))
-	assertValidatorAgentDefinition(t, filepath.Join(out+"-claude-code", "agents/shop-validator.md"))
 	assertFixerAgentDefinition(t, filepath.Join(out+"-claude-code", "agents/shop-fixer.md"))
 	assertTroubleshooterAgentDefinition(t, filepath.Join(out+"-cursor", "agents/shop-bot.md"))
-	assertValidatorAgentDefinition(t, filepath.Join(out+"-cursor", "agents/shop-validator.md"))
 	assertFixerAgentDefinition(t, filepath.Join(out+"-cursor", "agents/shop-fixer.md"))
 	assertTroubleshooterAgentDefinition(t, filepath.Join(out+"-codex", "agents/shop-bot.toml"))
-	assertValidatorAgentDefinition(t, filepath.Join(out+"-codex", "agents/shop-validator.toml"))
 	assertFixerAgentDefinition(t, filepath.Join(out+"-codex", "agents/shop-fixer.toml"))
 
 	// copyDirRecursive (claude-code / cursor 路径) 也必须过滤 test_*.py。脚本被复制两份:
@@ -1600,10 +1437,10 @@ func TestGenerate_MultiTargets_All(t *testing.T) {
 	}
 }
 
-// TestGenerate_MultiTargets_NoOpenclaw 覆盖"非 openclaw 独占"路径：
+// TestGenerate_MultiTargets_TemporaryStaging 覆盖独立临时 staging 路径：
 // 调用方先把 workspace 渲染到一个临时 staging，再跑各 target。
-// openclaw 产物目录不会被创建。
-func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
+// 基础输出目录不会作为可部署平台创建。
+func TestGenerate_MultiTargets_TemporaryStaging(t *testing.T) {
 	cfg := loadCfg(t, "examples/shop-troubleshooter.yaml")
 	out := filepath.Join(t.TempDir(), "sys")
 	tr := filepath.Join(projectRoot(t), "templates")
@@ -1627,26 +1464,22 @@ func TestGenerate_MultiTargets_NoOpenclaw(t *testing.T) {
 		t.Fatalf("codex: %v", err)
 	}
 
-	// openclaw 目录不应存在
+	// 基础输出目录不应存在
 	if _, err := os.Stat(out); err == nil {
-		t.Errorf("openclaw output dir %s should NOT exist when openclaw not in targets", out)
+		t.Errorf("base output dir %s should NOT exist when staging is temporary", out)
 	}
 
 	// 其它 target 产物存在(install.sh 已挪到 InstallNative,产物里只剩纯素材)
 	assertExists(t, out+"-claude-code", []string{
 		"agents/shop-bot.md",
-		"agents/shop-validator.md",
 		"agents/shop-fixer.md",
 		"agents-meta/shop-bot/tshoot.json",
-		"agents-meta/shop-validator/tshoot.json",
 		"agents-meta/shop-fixer/tshoot.json",
 	})
 	assertExists(t, out+"-codex", []string{
 		"agents/shop-bot.toml",
-		"agents/shop-validator.toml",
 		"agents/shop-fixer.toml",
 		"agents-meta/shop-bot/tshoot.json",
-		"agents-meta/shop-validator/tshoot.json",
 		"agents-meta/shop-fixer/tshoot.json",
 	})
 }

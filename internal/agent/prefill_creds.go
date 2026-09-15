@@ -1,7 +1,6 @@
 // prefill_creds.go —— 从 troubleshooter.yaml 抽 install 阶段需要的凭证 / URL 默认值。
 //
 // 背景:GUI wizard 把用户在 Step 7 填的 URL / 账密 / token 直接写进 yaml 的 endpoints[]。
-// 但 install 阶段(InstallNativeOpenclaw / RunInstall)只认 .env 里的环境变量(KUBOARD_URL_DEV
 // 这种)。如果用户:
 //   - 走 BotsPage 的"导入 yaml 一键部署"  → 没经过 wizard Step 7 表单,creds 是空的
 //   - 走 Editor 的"修改 yaml 后部署"      → 同上
@@ -151,9 +150,6 @@ func PrefillCredsFromYAML(cfg *config.SystemConfig) map[string]string {
 	}
 
 	// ── 模型 ──
-	if m := cfg.Agent.ModelForTarget("openclaw"); m != "" {
-		put("MODEL", m)
-	}
 
 	return out
 }
@@ -166,7 +162,6 @@ func PrefillCredsFromYAML(cfg *config.SystemConfig) map[string]string {
 //
 //	userCreds := <来自 UI 表单>
 //	final := agent.MergeCredsWithPrefill(userCreds, agent.PrefillCredsFromYAML(cfg))
-//	pass final to RunInstall / InstallNativeOpenclaw
 func MergeCredsWithPrefill(user, prefill map[string]string) map[string]string {
 	out := make(map[string]string, len(user)+len(prefill))
 	maps.Copy(out, prefill)

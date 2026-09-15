@@ -1,504 +1,95 @@
-import { flushPromises, mount } from '@vue/test-utils'
-import { reactive } from 'vue'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getIncidentArtifactPreview, saveIncidentArtifact, type IncidentArtifact, type IncidentCaseDetail } from '../lib/bridge/bugWorkflow'
+import { mount } from '@vue/test-utils'
+import { describe, expect, it, vi } from 'vitest'
+import type { IncidentCaseDetail, PhaseAttempt } from '../lib/bridge/bugWorkflow'
 import BugCaseArtifacts from './BugCaseArtifacts.vue'
-import artifactSource from './BugCaseArtifacts.vue?raw'
 
-const originalShowModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'showModal')
-const originalDialogClose = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, 'close')
-
-function installDialogStubs() {
-  const showModal = vi.fn(function (this: HTMLDialogElement) { this.setAttribute('open', '') })
-  const close = vi.fn(function (this: HTMLDialogElement) {
-    this.removeAttribute('open')
-    this.dispatchEvent(new Event('close'))
-  })
-  Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value: showModal })
-  Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, value: close })
-  return { showModal, close }
+const preview = vi.hoisted(() => vi.fn())
+vi.mock('../lib/bridge/bugWorkflow', async original => ({ ...(await original<object>()), getIncidentArtifactPreview: preview }))
+function attempt(id: string, phase: PhaseAttempt['phase'] = 'investigation', output: Record<string, unknown> = {}): PhaseAttempt {
+  return { id, phase, case_id: 'case-1', cycle_number: 1, mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'bot', input_json: {}, output_json: output, parent_attempt_id: '', started_at: '2026-09-14T10:00:00Z', error_code: '', error_message: '', usage: {} }
 }
-
-function restoreDialogMethods() {
-  if (originalShowModal) Object.defineProperty(HTMLDialogElement.prototype, 'showModal', originalShowModal)
-  else delete (HTMLDialogElement.prototype as Partial<HTMLDialogElement>).showModal
-  if (originalDialogClose) Object.defineProperty(HTMLDialogElement.prototype, 'close', originalDialogClose)
-  else delete (HTMLDialogElement.prototype as Partial<HTMLDialogElement>).close
+function detail(attempts: PhaseAttempt[] = []): IncidentCaseDetail {
+  return { case: { id: 'case-1', bug_id: 'bug', source: 'zentao', system_id: 'base', environment: 'test', status: 'investigating', cycle_number: 1, current_attempt_id: attempts[attempts.length - 1]?.id || '', selected_bot_key: 'bot', version: 1, created_at: '', updated_at: '' }, attempts, artifacts: [], approvals: [], code_changes: [], deployment_observations: [], events: [] }
 }
+const rootOutput = { investigation_status: 'root_cause_ready', root_cause: '缓存键未包含用户 ID', remediation: { mode: 'code_change', summary: '将用户 ID 加入缓存键' }, evidence: [] }
 
-vi.mock('../lib/bridge/bugWorkflow', async importOriginal => ({
-  ...(await importOriginal<typeof import('../lib/bridge/bugWorkflow')>()),
-  getIncidentArtifactPreview: vi.fn(),
-  saveIncidentArtifact: vi.fn(),
-}))
-
-beforeEach(() => {
-  vi.mocked(getIncidentArtifactPreview).mockReset().mockResolvedValue({ artifact_id: 'evidence-1', mime_type: 'image/png', base64_data: 'iVBORw0KGgo=', size: 8 })
-  vi.mocked(saveIncidentArtifact).mockReset().mockResolvedValue(true)
-})
-afterEach(() => {
-  restoreDialogMethods()
-  vi.restoreAllMocks()
-})
-
-const detail: IncidentCaseDetail = {
-  case: { id: 'case-1', bug_id: 'bug-1', source: 'zentao', system_id: 'base', environment: 'test', status: 'waiting_deployment', cycle_number: 1, current_attempt_id: 'fix-1', selected_bot_key: 'base|codex', version: 9, created_at: '', updated_at: '' },
-  attempts: [{ id: 'investigate-1', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'succeeded', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { summary: '根因是空指针' }, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
-  artifacts: [{ id: 'evidence-1', case_id: 'case-1', attempt_id: 'investigate-1', kind: 'screenshot', sha256: 'abc', size: 8, captured_at: '2026-07-11T11:00:00Z', environment: 'test', version: 'build-1', request_id: 'req-1', trace_id: 'trace-1' }],
-  approvals: [{ id: 'approval-1', case_id: 'case-1', kind: 'merge_environment_branch', actor: 'alice', approved_at: '2026-07-11T12:00:00Z', case_version: 8, scope_json: {}, fix_commits: { api: 'abc' }, target_branches: { api: 'test' } }],
-  code_changes: [{ id: 'change-1', case_id: 'case-1', attempt_id: 'fix-1', repo: 'api', base_branch: 'main', fix_branch: 'fix/bug-1', fix_commit: 'abc', test_evidence: ['go test ./...'], target_environment_branch: 'test', merge_base_head: 'base', merge_commit: 'merge', push_remote: 'origin', push_status: 'pushed' }],
-  deployment_observations: [{ id: 'deploy-1', case_id: 'case-1', environment: 'test', expected_commits: { api: 'merge' }, observed_version: 'build-1', observed_images: { api: 'api:build-1' }, observed_commits: { api: 'merge' }, observed_at: '2026-07-11T12:05:00Z', diagnostic_code: 'commit_mismatch', diagnostic_message: '运行版本与期望提交不一致', verification_source: 'version endpoint', result: 'matched' }],
-  events: [],
-}
-
-describe('BugCaseArtifacts', () => {
-  it('renders evidence, root cause, code tests, approvals and deployment observations', () => {
-    const wrapper = mount(BugCaseArtifacts, { props: { detail } })
-
-    expect(wrapper.text()).toContain('验证证据')
-    expect(wrapper.text()).toContain('根因结论')
-    expect(wrapper.text()).toContain('代码变更与测试')
-    expect(wrapper.text()).toContain('授权记录')
-    expect(wrapper.text()).toContain('部署观察')
-    expect(wrapper.text()).toContain('trace-1')
-    expect(wrapper.text()).toContain('go test ./...')
-    expect(wrapper.text()).toContain('build-1')
-    expect(wrapper.text()).toContain('2026-07-11T12:05:00Z')
-    expect(wrapper.text()).toContain('commit_mismatch')
-    const evidence = wrapper.get('details.evidence-card')
-    expect(evidence.attributes('open')).toBeUndefined()
-    expect(evidence.get('summary').text()).toContain('1 条')
+describe('incident result workspace', () => {
+  it('removes verification and deployment cards without fetching screenshot previews', () => {
+    const data = detail()
+    data.artifacts = [{ id: 'old-image', case_id: 'case-1', attempt_id: 'old-validation', kind: 'screenshot', sha256: '', size: 1, captured_at: '', environment: '', version: '', request_id: '', trace_id: '' }]
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: data } })
+    expect(wrapper.text()).toBe('')
+    expect(wrapper.findAll('section, details')).toHaveLength(0)
+    expect(preview).not.toHaveBeenCalled()
   })
-
-  it('separates authoritative, active, and failed-attempt evidence without treating failure artifacts as business proof', () => {
-    const succeeded = {
-      ...detail.attempts[0],
-      id: 'validation-succeeded',
-      phase: 'validation' as const,
-      mode: 'reproduce' as const,
-      status: 'succeeded' as const,
-    }
-    const running = {
-      ...succeeded,
-      id: 'validation-running',
-      status: 'running' as const,
-      parent_attempt_id: succeeded.id,
-    }
-    const failed = {
-      ...succeeded,
-      id: 'validation-failed',
-      status: 'failed' as const,
-      error_code: 'browser_locator_failed',
-      parent_attempt_id: running.id,
-    }
-    const artifacts = [
-      { ...detail.artifacts[0], id: 'authoritative-evidence', attempt_id: succeeded.id },
-      { ...detail.artifacts[0], id: 'active-evidence', attempt_id: running.id },
-      { ...detail.artifacts[0], id: 'failed-evidence', attempt_id: failed.id },
-    ]
-    const wrapper = mount(BugCaseArtifacts, {
-      props: { detail: { ...detail, attempts: [succeeded, running, failed], artifacts } },
-    })
-
-    const evidence = wrapper.get('details.evidence-card')
-    expect(evidence.get(':scope > summary').text()).toContain('1 条有效 · 1 条执行中 · 1 条失败历史')
-    expect(evidence.get('[data-evidence-group="authoritative"]').attributes()).toHaveProperty('open')
-    expect(evidence.get('[data-evidence-group="active"]').attributes()).toHaveProperty('open')
-    const failureHistory = evidence.get('[data-evidence-group="failed"]')
-    expect(failureHistory.attributes('open')).toBeUndefined()
-    expect(failureHistory.text()).toContain('不作为业务结论依据')
-    expect(failureHistory.find('[data-artifact-id="failed-evidence"]').exists()).toBe(true)
+  it('shows one root cause and remediation report without empty result panels', () => {
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: detail([attempt('root', 'investigation', rootOutput)]) } })
+    expect(wrapper.findAll('.stage-attempt')).toHaveLength(1)
+    expect(wrapper.text().match(/缓存键未包含用户 ID/g)).toHaveLength(1)
+    expect(wrapper.text()).toContain('将用户 ID 加入缓存键')
+    for (const label of ['验证证据', '尚无', '部署观察', '阶段输出', '调用链定位', '授权记录']) expect(wrapper.text()).not.toContain(label)
   })
-
-  it('shows the structured remediation plan next to the root cause', () => {
-    const attempts = [{ ...detail.attempts[0], output_json: {
-      root_cause: '前端将 text 和 nick_name 同时渲染',
-      remediation: { mode: 'code_change', target: 'src/user-card.tsx', summary: '标题只渲染 nick_name', verification: '回归搜索结果同名次数' },
-    } }]
-    const wrapper = mount(BugCaseArtifacts, { props: { detail: { ...detail, attempts } } })
-
-    const card = wrapper.get('[aria-labelledby="cause-title"]')
-    expect(card.classes()).toContain('root-cause-card')
-    expect(card.get('.root-cause-copy').element.tagName).toBe('P')
-    expect(card.text()).toContain('建议修复方向')
-    expect(card.text()).toContain('代码修复')
-    expect(card.text()).toContain('src/user-card.tsx')
-    expect(card.text()).toContain('标题只渲染 nick_name')
-    expect(card.text()).toContain('回归搜索结果同名次数')
-    expect(artifactSource).toContain('.root-cause-card h3, .remediation-plan h4')
-    expect(artifactSource).toMatch(/\.root-cause-copy \{[^}]*font-size: var\(--fs-base\);[^}]*line-height: 1\.7;/)
-    expect(artifactSource).toMatch(/\.remediation-plan dt \{[^}]*font-size: var\(--fs-sm\);[^}]*font-weight: 600;/)
-    expect(artifactSource).toMatch(/\.remediation-plan dd \{[^}]*font-size: var\(--fs-base\);[^}]*font-weight: 400;/)
+  it('shows call-chain locations inside the report only when provided', () => {
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: detail([attempt('root', 'investigation', { ...rootOutput, call_chain: [{ name: '加载用户', service: 'api', repo: 'api', file: 'user.go', line: 42, revision: 'abc', evidence: '请求日志与源码一致' }] })]) } })
+    expect(wrapper.text()).toContain('调用链定位')
+    expect(wrapper.text()).toContain('api/user.go:42')
+    expect(wrapper.text()).toContain('请求日志与源码一致')
   })
-
-  it('keeps the disputed root cause visible for audit while a new investigation is running', () => {
-    const previousRoot = {
-      ...detail.attempts[0],
-      id: 'root-old',
-      output_json: {
-        investigation_status: 'root_cause_ready',
-        root_cause: '旧根因：前端重复渲染用户名',
-      },
-    }
-    const reopenedInvestigation = {
-      ...detail.attempts[0],
-      id: 'investigate-new',
-      status: 'running' as const,
-      input_json: {
-        root_cause_dispute: {
-          kind: 'user_root_cause_dispute',
-          source_root_cause_attempt_id: 'root-old',
-        },
-      },
-      output_json: {},
-      parent_attempt_id: 'root-old',
-    }
-    const disputedEvent = {
-      id: 'event-disputed',
-      case_id: detail.case.id,
-      from_status: 'waiting_fix_approval' as const,
-      to_status: 'waiting_fix_approval' as const,
-      event_type: 'root_cause_disputed',
-      actor_type: 'user',
-      actor_id: 'alice',
-      idempotency_key: 'dispute-root',
-      payload_json: { source_root_cause_attempt_id: 'root-old' },
-      created_at: '2026-07-11T13:00:00Z',
-    }
-    const wrapper = mount(BugCaseArtifacts, {
-      props: {
-        detail: {
-          ...detail,
-          case: { ...detail.case, status: 'investigating', current_attempt_id: 'investigate-new' },
-          attempts: [previousRoot, reopenedInvestigation],
-          events: [disputedEvent],
-        },
-      },
-    })
-
-    const card = wrapper.get('[aria-labelledby="cause-title"]')
-    expect(card.text()).toContain('旧根因：前端重复渲染用户名')
-    expect(card.text()).toContain('该结论已被用户质疑')
-    expect(wrapper.findAll('.stage-attempt')).toHaveLength(2)
+  it('does not create an empty report while the Agent is running', () => {
+    const running = { ...attempt('running'), status: 'running' as const }
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: detail([running]) } })
+    expect(wrapper.find('.current-reports').exists()).toBe(false)
+    expect(wrapper.text()).toBe('')
   })
-
-  it('renders an ordered structured call chain with explicit location precision', () => {
-    const attempts = [{ ...detail.attempts[0], output_json: {
-      root_cause: '前端请求命中错误后端分支',
-      call_chain: [
-        { kind: 'frontend', name: '用户搜索', service: 'admin-web', repo: 'admin-web', revision: 'abc123', operation: 'GET /api/users', file: 'src/search.ts', line: 42, precision: 'source_mapped', evidence: 'initiator stack + matching map' },
-        { kind: 'service', name: 'user-api', service: 'user-api', repo: 'backend', operation: 'GET /users', precision: 'runtime_verified', evidence: 'trace trace-1' },
-      ],
-    } }]
-    const wrapper = mount(BugCaseArtifacts, { props: { detail: { ...detail, attempts } } })
-
-    const hops = wrapper.findAll('.call-chain-hop')
-    expect(hops).toHaveLength(2)
-    expect(hops[0].text()).toContain('Source Map 精确定位')
-    expect(hops[0].text()).toContain('admin-web/src/search.ts:42')
-    expect(hops[0].text()).toContain('revision abc123')
-    expect(hops[1].text()).toContain('运行时已验证')
+  it('keeps errors visible even if an attempt has no structured result', () => {
+    const failed = { ...attempt('failed'), status: 'failed' as const, error_message: '日志服务暂时不可用' }
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: detail([failed]) } })
+    expect(wrapper.get('[data-attempt-error]').text()).toBe('日志服务暂时不可用')
   })
-
-  it('previews screenshots from safe bytes and never exposes artifact paths in text or DOM URLs', async () => {
-    const dialogMethods = installDialogStubs()
-    const privatePath = '/Users/alice/.troubleshooter/artifacts/case-1/private-screenshot.png'
-    const hostileArtifact = { ...detail.artifacts[0], path_or_reference: privatePath } as unknown as IncidentArtifact
-    const wrapper = mount(BugCaseArtifacts, { props: { detail: { ...detail, artifacts: [hostileArtifact] } } })
-    await flushPromises()
-
-    const image = wrapper.get<HTMLImageElement>('img[data-artifact-id="evidence-1"]')
-    expect(image.attributes('src')).toBe('data:image/png;base64,iVBORw0KGgo=')
-    expect(image.attributes('src')).not.toContain(privatePath)
-    expect(wrapper.text()).not.toContain(privatePath)
-    expect(wrapper.html()).not.toContain(privatePath)
-
-    await wrapper.get('[data-artifact-preview="evidence-1"]').trigger('click')
-    const dialog = wrapper.get('dialog[open]')
-    expect(dialogMethods.showModal).toHaveBeenCalledTimes(1)
-    expect(dialog.attributes('aria-modal')).toBe('true')
-    expect(dialog.attributes('aria-labelledby')).toBeTruthy()
-    expect(dialog.get('img').attributes('src')).toBe('data:image/png;base64,iVBORw0KGgo=')
+  it('moves superseded root causes and fixes into closed history when investigation restarts', () => {
+    const old = attempt('old-root', 'investigation', rootOutput)
+    const fix = attempt('old-fix', 'fix', { fix_status: 'fixed_pushed' })
+    const running = { ...attempt('new-root'), status: 'running' as const }
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: detail([old, fix, running]) } })
+    expect(wrapper.find('.current-reports').exists()).toBe(false)
+    expect(wrapper.get('.result-history').attributes('open')).toBeUndefined()
+    expect(wrapper.findAll('.result-history .stage-attempt')).toHaveLength(2)
   })
-
-  it('opens screenshots in the modal top layer, handles cancel, and restores thumbnail focus', async () => {
-    const dialogMethods = installDialogStubs()
-    const wrapper = mount(BugCaseArtifacts, { attachTo: document.body, props: { detail } })
-    await flushPromises()
-    const thumbnail = wrapper.get<HTMLButtonElement>('[data-artifact-preview="evidence-1"]')
-
-    await thumbnail.trigger('click')
-    await wrapper.vm.$nextTick()
-    const dialog = wrapper.get<HTMLDialogElement>('dialog')
-    expect(dialogMethods.showModal).toHaveBeenCalledWith()
-    expect(dialog.element.open).toBe(true)
-    expect(document.activeElement).toBe(dialog.get<HTMLButtonElement>('[data-dialog-close]').element)
-
-    await dialog.trigger('cancel')
-    await wrapper.vm.$nextTick()
-    expect(dialogMethods.close).toHaveBeenCalledTimes(1)
-    expect(wrapper.find('dialog').exists()).toBe(false)
-    expect(document.activeElement).toBe(thumbnail.element)
-    wrapper.unmount()
+  it('does not promote a disputed or previous-cycle conclusion to current', () => {
+    const root = attempt('root', 'investigation', rootOutput)
+    const data = detail([root])
+    data.events = [{ id: 'event', case_id: 'case-1', from_status: 'waiting_fix_approval', to_status: 'investigating', event_type: 'root_cause_disputed', actor_type: 'human', actor_id: 'me', idempotency_key: 'dispute', payload_json: { source_root_cause_attempt_id: 'root' }, created_at: '' }]
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: data } })
+    expect(wrapper.find('.current-reports').exists()).toBe(false)
+    expect(wrapper.text()).toContain('此结论已被质疑')
+    const priorCycle = detail([{ ...root, cycle_number: 0 }])
+    expect(mount(BugCaseArtifacts, { props: { detail: priorCycle } }).find('.current-reports').exists()).toBe(false)
   })
-
-  it('fails locally when the runtime has no modal dialog support', async () => {
-    delete (HTMLDialogElement.prototype as Partial<HTMLDialogElement>).showModal
-    const wrapper = mount(BugCaseArtifacts, { attachTo: document.body, props: { detail } })
-    await flushPromises()
-    const thumbnail = wrapper.get<HTMLButtonElement>('[data-artifact-preview="evidence-1"]')
-
-    await thumbnail.trigger('click')
-    await wrapper.vm.$nextTick()
-
-    expect(wrapper.find('dialog').exists()).toBe(false)
-    expect(wrapper.get('[data-artifact-id="evidence-1"]').text()).toContain('当前环境无法打开截图预览')
-    expect(document.activeElement).toBe(thumbnail.element)
-    wrapper.unmount()
+  it('keeps investigation context alongside the latest fix and archives earlier fixes', () => {
+    const data = detail([attempt('root', 'investigation', rootOutput), attempt('fix-old', 'fix', { fix_status: 'blocked' }), attempt('fix-new', 'fix', { fix_status: 'fixed_pushed', tests: [{ command: 'go test ./...', result: 'passed' }] })])
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: data } })
+    expect(wrapper.findAll('.current-reports .stage-attempt')).toHaveLength(2)
+    expect(wrapper.get('.current-reports').text()).toContain('go test ./...')
+    expect(wrapper.get('.result-history').text()).toContain('修复受阻')
   })
-
-  it('closes an open modal through the dialog API when Case detail changes', async () => {
-    const dialogMethods = installDialogStubs()
-    const wrapper = mount(BugCaseArtifacts, { attachTo: document.body, props: { detail } })
-    await flushPromises()
-    await wrapper.get('[data-artifact-preview="evidence-1"]').trigger('click')
-    await wrapper.vm.$nextTick()
-    expect(wrapper.get<HTMLDialogElement>('dialog').element.open).toBe(true)
-
-    await wrapper.setProps({ detail: { ...detail, case: { ...detail.case, id: 'case-2' } } })
-    await wrapper.vm.$nextTick()
-
-    expect(dialogMethods.close).toHaveBeenCalledTimes(1)
-    expect(wrapper.find('dialog').exists()).toBe(false)
-    wrapper.unmount()
+  it('only shows current submission records and preserves uncertain push outcomes', async () => {
+    const data = detail([attempt('fix', 'fix', { fix_status: 'fixed_pushed' })])
+    const change = { id: 'change', case_id: 'case-1', attempt_id: 'fix', repo: 'api', base_branch: 'main', fix_branch: 'fix/bug', fix_commit: 'fix-sha', test_evidence: [{ command: 'go test ./...', result: 'passed' }], target_environment_branch: 'test', merge_base_head: '', merge_commit: 'merge-sha', push_remote: 'origin', push_status: 'pushed' }
+    data.code_changes = [change, { ...change, id: 'old', attempt_id: 'old-fix', repo: 'obsolete' }]
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: data } })
+    expect(wrapper.text()).toContain('merge-sha')
+    expect(wrapper.text()).toContain('go test ./... · passed')
+    expect(wrapper.text()).not.toContain('obsolete')
+    await wrapper.setProps({ detail: { ...data, code_changes: [{ ...change, push_status: 'push_unknown' }] } })
+    expect(wrapper.get('.submission-card').text()).toContain('推送结果待确认')
+    expect(wrapper.get('.submission-card').text()).not.toContain('已推送')
   })
-
-  it('keeps screenshot preview failures local to their card', async () => {
-    vi.mocked(getIncidentArtifactPreview).mockRejectedValueOnce(new Error('/private/artifacts/shot.png is unreadable'))
-    const wrapper = mount(BugCaseArtifacts, { props: { detail } })
-    await flushPromises()
-
-    const card = wrapper.get('[data-artifact-id="evidence-1"]')
-    expect(card.text()).toContain('无法预览截图')
-    expect(card.text()).not.toContain('/private/artifacts/shot.png')
-    expect(wrapper.emitted()).toEqual({})
-  })
-
-  it('safely saves every artifact type without exposing the chosen destination', async () => {
-    const artifacts = [
-      detail.artifacts[0],
-      { ...detail.artifacts[0], id: 'network-1', kind: 'network' },
-      { ...detail.artifacts[0], id: 'console-1', kind: 'console' },
-      { ...detail.artifacts[0], id: 'actions-1', kind: 'browser_actions' },
-      { ...detail.artifacts[0], id: 'other-1', kind: 'log' },
-    ]
-    const wrapper = mount(BugCaseArtifacts, { props: { detail: { ...detail, artifacts } } })
-    await flushPromises()
-
-    const buttons = wrapper.findAll('[data-artifact-save]')
-    expect(buttons).toHaveLength(artifacts.length)
-    for (const button of buttons) await button.trigger('click')
-    await flushPromises()
-
-    expect(vi.mocked(saveIncidentArtifact).mock.calls).toEqual(artifacts.map(artifact => ['case-1', artifact.id]))
-    expect(wrapper.text()).not.toContain('/private/')
-    expect(wrapper.text()).toContain('已保存副本')
-  })
-
-  it('reports save failures only on the affected artifact card', async () => {
-    vi.mocked(saveIncidentArtifact).mockRejectedValueOnce(new Error('/Users/alice/Desktop denied'))
-    const wrapper = mount(BugCaseArtifacts, { props: { detail } })
-    await flushPromises()
-    await wrapper.get('[data-artifact-save="evidence-1"]').trigger('click')
-    await flushPromises()
-
-    const card = wrapper.get('[data-artifact-id="evidence-1"]')
-    expect(card.text()).toContain('保存副本失败')
-    expect(card.text()).not.toContain('/Users/alice/Desktop')
-  })
-
-  it('keeps the stage title outside a responsive keyboard-scrollable output region', () => {
-    const wrapper = mount(BugCaseArtifacts, { props: { detail } })
-    const card = wrapper.get('.attempt-output-card')
-    const scroll = card.get('.attempt-output-scroll')
-
-    expect(card.get(':scope > h3').text()).toBe('阶段输出')
-    expect(scroll.attributes('role')).toBe('region')
-    expect(scroll.attributes('aria-label')).toBe('阶段输出内容')
-    expect(scroll.attributes('tabindex')).toBe('0')
-    expect(scroll.findAll('.stage-attempt, .legacy-attempt')).toHaveLength(detail.attempts.length)
-    expect(artifactSource).toMatch(/\.artifact-sections \{[^}]*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/)
-    expect(artifactSource).toMatch(/\.attempt-output-card \{[^}]*grid-column: 1 \/ -1;/)
-    expect(artifactSource).toMatch(/\.attempt-output-scroll \{[^}]*height: clamp\(320px, 45vh, 640px\);/)
-    expect(artifactSource).toMatch(/\.attempt-output-scroll \{[^}]*overflow-y: auto;/)
-    expect(artifactSource).toMatch(/\.attempt-output-scroll \{[^}]*overflow-x: hidden;/)
-    expect(artifactSource).toMatch(/\.attempt-output-scroll \{[^}]*scrollbar-gutter: stable;/)
-    expect(artifactSource).toMatch(/\.attempt-output-scroll \{[^}]*overscroll-behavior: contain;/)
-    expect(artifactSource).toContain('.attempt-output-scroll:focus-visible')
-  })
-
-  it('scrolls the stage viewport to the bottom initially and after nested attempt updates', async () => {
-    vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockReturnValue(640)
-    const pageScroll = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
-    const scrollIntoView = vi.spyOn(HTMLElement.prototype, 'scrollIntoView').mockImplementation(() => undefined)
-
-    const wrapper = mount(BugCaseArtifacts, { props: { detail } })
-    await wrapper.vm.$nextTick()
-    await wrapper.vm.$nextTick()
-    const viewport = wrapper.get<HTMLElement>('.attempt-output-scroll').element
-    expect(viewport.scrollTop).toBe(640)
-
-    viewport.scrollTop = 120
-    const appended = { ...detail.attempts[0], id: 'investigate-2', status: 'failed' as const, output_json: { summary: '新的阶段结论' }, error_message: '新错误' }
-    await wrapper.setProps({ detail: { ...detail, attempts: [...detail.attempts, appended] } })
-    await wrapper.vm.$nextTick()
-    await wrapper.vm.$nextTick()
-    expect(viewport.scrollTop).toBe(640)
-    expect(scrollIntoView).not.toHaveBeenCalled()
-    expect(pageScroll).not.toHaveBeenCalled()
-  })
-
-  it('scrolls after output, status and error mutate in place inside an existing attempt', async () => {
-    vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockReturnValue(720)
-    const mutableDetail = reactive(structuredClone(detail))
-    const wrapper = mount(BugCaseArtifacts, { props: { detail: mutableDetail } })
-    await wrapper.vm.$nextTick()
-    await wrapper.vm.$nextTick()
-    const viewport = wrapper.get<HTMLElement>('.attempt-output-scroll').element
-
-    viewport.scrollTop = 100
-    mutableDetail.attempts[0].output_json.summary = '原地更新的阶段结论'
-    await wrapper.vm.$nextTick()
-    await wrapper.vm.$nextTick()
-    expect(viewport.scrollTop).toBe(720)
-
-    viewport.scrollTop = 110
-    mutableDetail.attempts[0].status = 'failed'
-    await wrapper.vm.$nextTick()
-    await wrapper.vm.$nextTick()
-    expect(viewport.scrollTop).toBe(720)
-
-    viewport.scrollTop = 120
-    mutableDetail.attempts[0].error_message = '原地更新的错误'
-    await wrapper.vm.$nextTick()
-    await wrapper.vm.$nextTick()
-    expect(viewport.scrollTop).toBe(720)
-  })
-
-  it('follows a switched Case and does not reset scrolling without a data change', async () => {
-    vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockReturnValue(480)
-    const wrapper = mount(BugCaseArtifacts, { props: { detail } })
-    await wrapper.vm.$nextTick()
-    await wrapper.vm.$nextTick()
-    const viewport = wrapper.get<HTMLElement>('.attempt-output-scroll').element
-
-    viewport.scrollTop = 90
-    await wrapper.vm.$nextTick()
-    expect(viewport.scrollTop).toBe(90)
-
-    await wrapper.setProps({ detail: { ...detail, case: { ...detail.case, id: 'case-2' } } })
-    await wrapper.vm.$nextTick()
-    await wrapper.vm.$nextTick()
-    expect(viewport.scrollTop).toBe(480)
-  })
-
-  it('renders current attempts as semantic history with only the latest expanded', () => {
-    const first = { ...detail.attempts[0], id: 'validation-old', phase: 'validation' as const, mode: 'reproduce' as const, output_json: { verification_status: 'not_reproduced', environment: 'test', evidence: [], gaps: [] } }
-    const latest = { ...first, id: 'validation-latest', status: 'failed' as const, output_json: { verification_status: 'insufficient_info', environment: 'test', expected_behavior: '显示两名用户', observed_behavior: '只显示一名用户', evidence: [], gaps: ['缺少 Network 导出'] } }
-    const wrapper = mount(BugCaseArtifacts, { props: { detail: { ...detail, attempts: [first, latest] } } })
-    const attempts = wrapper.findAll('.stage-attempt')
-    expect(attempts).toHaveLength(2)
-    expect(attempts[0].attributes('open')).toBeUndefined()
-    expect(attempts[1].attributes()).toHaveProperty('open')
-    expect(wrapper.text()).not.toContain('verification_status')
-    expect(wrapper.find('[data-raw-output]').exists()).toBe(false)
-  })
-
-  it('keeps an investigation without a root cause semantic in the root-cause card', () => {
-    const investigation = {
-      ...detail.attempts[0],
-      output_json: {
-        investigation_status: 'insufficient_info',
-        environment: 'test',
-        evidence: [],
-        gaps: ['缺少 trace'],
-      },
-    }
-    const wrapper = mount(BugCaseArtifacts, { props: { detail: { ...detail, attempts: [investigation] } } })
-
-    expect(wrapper.get('[aria-labelledby="cause-title"]').text()).toContain('尚无根因结论')
-    expect(wrapper.text()).not.toContain('investigation_status')
-    expect(wrapper.text()).not.toContain('{')
-  })
-
-  it('keeps imported legacy attempt output readable', () => {
-    const archived = {
-      ...detail,
-      case: { ...detail.case, status: 'legacy_archived' as const },
-      attempts: [{ ...detail.attempts[0], id: 'legacy-1', phase: 'legacy' as const, output_json: { final_message: '**旧排障结论**：缓存击穿', events: [{ type: 'message', message: '检查 Redis 命中率' }] } }],
-    }
-    const wrapper = mount(BugCaseArtifacts, { props: { detail: archived } })
-    expect(wrapper.text()).toContain('阶段输出')
-    expect(wrapper.find('.legacy-final strong').text()).toBe('旧排障结论')
-    expect(wrapper.text()).toContain('检查 Redis 命中率')
-    expect(wrapper.find('.legacy-attempt > pre').exists()).toBe(false)
-    expect(wrapper.get('.attempt-output-scroll').find('.legacy-attempt').exists()).toBe(true)
-    expect(wrapper.get('.attempt-output-card > h3').text()).toBe('阶段输出')
-  })
-
-  it('stacks artifact cards and scales the output viewport on narrow screens', () => {
-    expect(artifactSource).toMatch(/@media \(max-width: 899px\)[\s\S]*?\.artifact-sections \{ grid-template-columns: minmax\(0, 1fr\); \}/)
-    expect(artifactSource).toMatch(/@media \(max-width: 899px\)[\s\S]*?\.attempt-output-card \{ grid-column: auto; \}/)
-    expect(artifactSource).toMatch(/@media \(max-width: 899px\)[\s\S]*?\.attempt-output-scroll \{ height: clamp\(280px, 42vh, 480px\); \}/)
-  })
-
-  it('renders hostile legacy Markdown as inert readable text without HTML or executable URLs', () => {
-    const hostile = [
-      '**结论可读**',
-      '<IMG SRC=x ONERROR=alert(1)>',
-      '[危险链接](JaVaScRiPt:alert(2))',
-      '<svg/onload=alert(3)>',
-      '&lt;img src=x onerror=alert(4)&gt;',
-      '<ScRiPt>alert(5)</sCrIpT>',
-      '[实体链接](jav&#x61;script:alert(6))',
-    ].join('\n')
-    const archived = {
-      ...detail,
-      case: { ...detail.case, status: 'legacy_archived' as const },
-      attempts: [{ ...detail.attempts[0], id: 'legacy-hostile', phase: 'legacy' as const, output_json: { final_message: hostile } }],
-    }
-
-    const wrapper = mount(BugCaseArtifacts, { props: { detail: archived } })
-
-    expect(wrapper.find('.legacy-final strong').text()).toBe('结论可读')
-    expect(wrapper.findAll('.legacy-final img, .legacy-final script, .legacy-final svg, .legacy-final a')).toHaveLength(0)
-    for (const element of wrapper.findAll('.legacy-final *')) {
-      expect(Object.keys(element.attributes()).some(name => name.toLowerCase().startsWith('on'))).toBe(false)
-      expect(`${element.attributes('href') || ''}${element.attributes('src') || ''}`.toLowerCase()).not.toContain('javascript:')
-    }
-    expect(wrapper.find('.legacy-final').text()).toContain('<IMG SRC=x ONERROR=alert(1)>')
-    expect(wrapper.find('.legacy-final').text()).toContain('JaVaScRiPt:alert(2)')
-    expect(wrapper.find('.legacy-final').text()).toContain('<svg/onload=alert(3)>')
-    expect(wrapper.find('.legacy-final').text()).toContain('&lt;img src=x onerror=alert(4)&gt;')
-    expect(wrapper.find('.legacy-final').text()).toContain('jav&#x61;script:alert(6)')
-  })
-
-  it('does not expose reset archives even when persisted relations are present', () => {
-    const resetDetail = {
-      ...detail,
-      case: {
-        ...detail.case,
-        reset_from_case_id: 'case-before-reset',
-        superseded_by_case_id: 'case-after-reset',
-      },
-    }
-    const wrapper = mount(BugCaseArtifacts, { props: { detail: resetDetail } })
-
-    expect(wrapper.find('[aria-labelledby="reset-relations-title"]').exists()).toBe(false)
-    expect(wrapper.find('[data-case-reference]').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('重置关系')
-    expect(wrapper.text()).not.toContain('case-before-reset')
-    expect(wrapper.text()).not.toContain('case-after-reset')
-    expect(wrapper.emitted('select-case')).toBeUndefined()
+  it('retains historical output as inert text and suppresses old browser errors', () => {
+    const data = detail([attempt('legacy', 'legacy', { final_message: '<img src=x onerror=alert(1)>' }), { ...attempt('old-validation', 'validation', { notes: 'sensitive' }), error_code: 'browser_failed', error_message: 'secret password' }])
+    const wrapper = mount(BugCaseArtifacts, { props: { detail: data } })
+    expect(wrapper.find('img').exists()).toBe(false)
+    expect(wrapper.text()).toContain('<img src=x onerror=alert(1)>')
+    expect(wrapper.text()).not.toContain('secret password')
+    expect(wrapper.text()).not.toContain('sensitive')
   })
 })

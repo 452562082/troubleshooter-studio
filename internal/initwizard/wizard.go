@@ -68,22 +68,7 @@ func (w *Wizard) Run() (*Answers, error) {
 	if err != nil {
 		return nil, err
 	}
-	wsDef := a.AgentName
-	if d != nil {
-		wsDef = defaultOr(d.WorkspaceName, wsDef)
-	}
-	a.WorkspaceName, err = w.ask("工作区名称", wsDef)
-	if err != nil {
-		return nil, err
-	}
-	modelDef := "anthropic/claude-sonnet-4-6"
-	if d != nil {
-		modelDef = defaultOr(d.AgentModel, modelDef)
-	}
-	a.AgentModel, err = w.askModel(modelDef)
-	if err != nil {
-		return nil, err
-	}
+	a.WorkspaceName = a.SystemID + "-troubleshooter"
 	w.setCurrent(a)
 
 	// 3) 环境
@@ -286,22 +271,24 @@ reposDone:
 		tgtDef = strings.Join(d.Targets, " ")
 	}
 	targetsRaw, err := w.ask(
-		"输出目标 [openclaw/claude-code/cursor,空格分隔,回车=全部]",
+		"输出目标 [claude-code/cursor/codex/opencode,空格分隔,回车=全部]",
 		tgtDef)
 	if err != nil {
 		return nil, err
 	}
 	a.Targets = parseTargets(targetsRaw)
+	if len(a.Targets) == 0 {
+		return nil, fmt.Errorf("请选择 claude-code、cursor、codex 或 opencode")
+	}
 	w.setCurrent(a)
 
 	return a, nil
 }
 
-// parseTargets 把用户输入的 "openclaw claude-code" / "openclaw, cursor" / ""
 // 解析成合法 target 列表；空输入 = 全部 3 种；未知 token 忽略并在 UI 层由 ask 流程已打印提示。
 func parseTargets(raw string) []string {
-	valid := map[string]bool{"openclaw": true, "claude-code": true, "cursor": true}
-	order := []string{"openclaw", "claude-code", "cursor"}
+	valid := map[string]bool{"claude-code": true, "cursor": true, "codex": true, "opencode": true}
+	order := []string{"claude-code", "cursor", "codex", "opencode"}
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return append([]string{}, order...)
@@ -316,7 +303,7 @@ func parseTargets(raw string) []string {
 		}
 	}
 	if len(out) == 0 {
-		return []string{"openclaw"}
+		return nil
 	}
 	return out
 }

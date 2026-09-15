@@ -94,8 +94,18 @@ func ParseClaudeStreamJSONEvent(line []byte) (InvestigationEvent, string, string
 	case "system", "user":
 		event.Type = eventType
 		event.Message = ""
+		if eventType == "user" {
+			if tool, ok := claudeToolEvent(payload, "tool_result"); ok {
+				return tool, "", ""
+			}
+		}
 	case "assistant":
 		text := claudeMessageText(payload)
+		if strings.TrimSpace(text) == "" {
+			if tool, ok := claudeToolEvent(payload, "tool_use"); ok {
+				return tool, "", ""
+			}
+		}
 		if step, ok := parsePhaseStepMessage(text); ok {
 			step.Raw = payload
 			return step, "", ""
@@ -107,7 +117,8 @@ func ParseClaudeStreamJSONEvent(line []byte) (InvestigationEvent, string, string
 		subtype := stringFromAny(payload["subtype"])
 		event.Type = "result"
 		event.Message = firstNonEmpty(final, subtype, "Claude Code 完成")
-		if strings.Contains(strings.ToLower(subtype), "error") || strings.Contains(strings.ToLower(subtype), "fail") {
+		isError, _ := payload["is_error"].(bool)
+		if isError || strings.Contains(strings.ToLower(subtype), "error") || strings.Contains(strings.ToLower(subtype), "fail") {
 			return event, "", event.Message
 		}
 		return event, final, ""
@@ -163,34 +174,6 @@ func parsePhaseStepMessage(message string) (InvestigationEvent, bool) {
 	}, true
 }
 
-func ParseOpenClawJSONEvent(line []byte) (InvestigationEvent, string, string) {
-	rawLine := strings.TrimSpace(string(line))
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(rawLine), &payload); err != nil {
-		return InvestigationEvent{Type: "raw", Message: rawLine}, "", ""
-	}
-
-	final := firstNonEmpty(
-		stringFromAny(payload["reply"]),
-		stringFromAny(payload["result"]),
-		stringFromAny(payload["message"]),
-		stringFromAny(payload["output"]),
-		stringFromAny(payload["text"]),
-	)
-	event := InvestigationEvent{
-		Type:    "result",
-		Message: firstNonEmpty(final, "OpenClaw 完成"),
-		Raw:     payload,
-	}
-	if ok, hasOK := payload["ok"].(bool); hasOK && !ok {
-		msg := firstNonEmpty(stringFromAny(payload["error"]), final, "OpenClaw 运行失败")
-		event.Type = "error"
-		event.Message = msg
-		return event, "", msg
-	}
-	return event, final, ""
-}
-
 func claudeMessageText(payload map[string]any) string {
 	message, _ := payload["message"].(map[string]any)
 	content, _ := message["content"].([]any)
@@ -213,4 +196,46 @@ func codexErrorMessage(payload map[string]any) string {
 		stringFromAny(payload["code"]),
 		"Codex 运行失败",
 	)
+}
+
+// Codex agent_message is also used for intermediate text. Only a completed turn
+// can authorize its last message as a final result.
+func newCodexStreamJSONParser() investigationEventParser {
+	var lastMessage string
+	return func(line []byte) (InvestigationEvent, string, string) {
+		event, message, failed := ParseCodexJSONLEvent(line)
+		if event.Type == "agent_message" && event.Meta["state"] == "completed" && message != "" {
+			lastMessage = message
+		}
+		if event.Type == "turn_started" {
+			lastMessage = ""
+		}
+		if event.Type == "turn_completed" && failed == "" {
+			return event, lastMessage, ""
+		}
+		return event, "", failed
+	}
+}
+
+// Surface tool lifecycle without copying arguments, results or tool output to
+// progress events. The phase runner separately validates all evidence artifacts.
+func claudeToolEvent(payload map[string]any, blockType string) (InvestigationEvent, bool) {
+	message, _ := payload["message"].(map[string]any)
+	content, _ := message["content"].([]any)
+	for _, block := range content {
+		item, _ := block.(map[string]any)
+		if stringFromAny(item["type"]) != blockType {
+			continue
+		}
+		event := InvestigationEvent{Type: "mcp_tool_call", Message: "Claude 工具", Meta: map[string]any{"state": "completed"}}
+		if blockType == "tool_use" {
+			event.Message = firstNonEmpty(stringFromAny(item["name"]), event.Message)
+			event.Meta["state"] = "started"
+			if event.Message == "Bash" {
+				event.Type = "command_execution"
+			}
+		}
+		return event, true
+	}
+	return InvestigationEvent{}, false
 }

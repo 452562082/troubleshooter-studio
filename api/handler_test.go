@@ -47,7 +47,7 @@ infrastructure:
     - type: nacos
       id: default
 generation:
-  targets: [openclaw]
+  targets: [claude-code]
 `
 
 func newTestServer(t *testing.T) *httptest.Server {

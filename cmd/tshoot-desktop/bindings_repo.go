@@ -69,7 +69,6 @@ func (a *App) CancelAnalyze() bool {
 
 // DiscoverBots 扫描本机已安装的排障机器人(tshoot.json 锚点)。
 // 默认根:
-//   - ~/.openclaw/workspace/                — OpenClaw workspace
 //   - ~/.claude/skills/, ~/.cursor/skills/, ~/.codex/skills/ — IDE 平台 skills
 //
 // 桌面 app 不扫 CWD(CLI 才有意义)。extraRoots 是 UI 侧让用户追加的项目根。
@@ -86,12 +85,7 @@ func (a *App) DiscoverBots(extraRoots []string) ([]discover.DiscoveredAgent, err
 	// 部署的),新版 discover 扫不到。MigrateLegacyAnchors 把 staging 的 tshoot.json
 	// 拷一份到真实位置,迁移完老机器人重新出现在 BotsPage。幂等。
 	_ = agent.MigrateLegacyAnchors()
-	roots := []string{
-		"~/.openclaw/workspace",
-		"~/.claude/skills",
-		"~/.cursor/skills",
-		"~/.codex/skills",
-	}
+	roots := discover.DefaultRoots()
 	roots = append(roots, extraRoots...)
 	bots, err := discover.Scan(roots)
 	if err != nil {
@@ -99,12 +93,11 @@ func (a *App) DiscoverBots(extraRoots []string) ([]discover.DiscoveredAgent, err
 	}
 
 	// Step 1: enrich IDEAvailable —— 一次性探测三家 IDE,for 每个 bot 按 target 查表。
-	// openclaw 直接 true(产品自带,不靠探测三方 IDE)。cache 在本次调用内,避免 N×detect。
 	ideInstalled := map[string]bool{
-		"openclaw":    true,
 		"claude-code": aitools.DetectClaudeCode().Installed,
 		"cursor":      aitools.DetectCursor().Installed,
 		"codex":       aitools.DetectCodex().Installed,
+		"opencode":    aitools.DetectOpenCode().Installed,
 	}
 	for i := range bots {
 		bots[i].IDEAvailable = ideInstalled[bots[i].Meta.Target]
@@ -117,6 +110,9 @@ func (a *App) DiscoverBots(extraRoots []string) ([]discover.DiscoveredAgent, err
 		seen[userconfig.DeployedBotKey(b.Meta.SystemID, b.Meta.Target)] = true
 	}
 	for key, entry := range userconfig.ListDeployedBots() {
+		if _, err := agent.ParseIDETarget(entry.Target); err != nil {
+			continue
+		}
 		if seen[key] {
 			continue
 		}

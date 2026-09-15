@@ -1,12 +1,14 @@
 package bughub
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 )
 
@@ -161,7 +163,7 @@ func validateReassessmentRoot(incident IncidentCase, root PhaseAttempt) (Investi
 	}
 	previous, err := ParseInvestigationResult(root.OutputJSON)
 	if err != nil || previous.InvestigationStatus != "root_cause_ready" || previous.Confidence != "high" ||
-		previous.Environment != incident.Environment || len(previous.ValidationGaps) != 0 || len(previous.Gaps) != 0 {
+		previous.Environment != incident.Environment || len(previous.Gaps) != 0 {
 		return InvestigationResult{}, ErrApprovalScope
 	}
 	return previous, nil
@@ -457,7 +459,7 @@ func parseRemediationReassessmentResult(attempt PhaseAttempt, data []byte) (Phas
 	previous := input.PreviousResult
 	if previous.InvestigationStatus != "root_cause_ready" || previous.Confidence != "high" ||
 		strings.TrimSpace(previous.Environment) == "" || strings.TrimSpace(previous.RootCause) == "" ||
-		len(previous.ValidationGaps) != 0 || len(previous.Gaps) != 0 {
+		len(previous.Gaps) != 0 {
 		return PhaseResult{}, errors.New("remediation reassessment requires an immutable, high-confidence root cause")
 	}
 	if err := validateRemediationPlan(previous.RootCauseType, previous.Remediation); err != nil {
@@ -476,4 +478,21 @@ func parseRemediationReassessmentResult(attempt PhaseAttempt, data []byte) (Phas
 		return PhaseResult{}, fmt.Errorf("encode reassessed remediation: %w", err)
 	}
 	return PhaseResult{Outcome: PhaseOutcomeRootCauseReady, OutputJSON: encoded}, nil
+}
+
+func canonicalJSONObject(raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 {
+		raw = []byte(`{}`)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var object map[string]any
+	if err := decoder.Decode(&object); err != nil || object == nil {
+		return nil, errors.New("continuation input must be one JSON object")
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("continuation input must be one JSON object")
+	}
+	return json.Marshal(object)
 }

@@ -116,7 +116,7 @@ class KuboardConfigTest(unittest.TestCase):
         self.base_url = f"http://127.0.0.1:{self.server.server_port}"
         self.tmp = tempfile.TemporaryDirectory()
         self.home = Path(self.tmp.name)
-        (self.home / ".openclaw").mkdir()
+        (self.home / ".tshoot").mkdir()
 
     def tearDown(self):
         self.server.shutdown()
@@ -136,7 +136,7 @@ class KuboardConfigTest(unittest.TestCase):
             check=False,
         )
 
-    def test_get_reads_kuboard_configmap_data_from_openclaw_creds(self):
+    def test_get_reads_kuboard_configmap_data_from_studio_creds(self):
         creds = {
             "kuboard": {
                 "default": {
@@ -147,7 +147,7 @@ class KuboardConfigTest(unittest.TestCase):
                 },
             },
         }
-        (self.home / ".openclaw" / "shop-creds.json").write_text(
+        (self.home / ".tshoot" / "shop-creds.json").write_text(
             json.dumps(creds), encoding="utf-8"
         )
 
@@ -176,7 +176,7 @@ class KuboardConfigTest(unittest.TestCase):
         self.assertTrue(any("cluster-cache/direct" in p for p in MockKuboard.calls))
 
     def test_missing_env_credentials_returns_json_error(self):
-        (self.home / ".openclaw" / "shop-creds.json").write_text(
+        (self.home / ".tshoot" / "shop-creds.json").write_text(
             json.dumps({"kuboard": {"default": {}}}), encoding="utf-8"
         )
 
@@ -218,7 +218,7 @@ class KuboardConfigTest(unittest.TestCase):
                 },
             },
         }
-        (self.home / ".openclaw" / "shop-creds.json").write_text(
+        (self.home / ".tshoot" / "shop-creds.json").write_text(
             json.dumps(creds), encoding="utf-8"
         )
 
@@ -335,7 +335,7 @@ class KuboardConfigTest(unittest.TestCase):
                 },
             },
         }
-        (self.home / ".openclaw" / "shop-creds.json").write_text(
+        (self.home / ".tshoot" / "shop-creds.json").write_text(
             json.dumps(creds), encoding="utf-8"
         )
 

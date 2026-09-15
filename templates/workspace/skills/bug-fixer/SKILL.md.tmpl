@@ -1,6 +1,6 @@
 ---
 name: bug-fixer
-description: Bug 修复 Agent 统一入口。用于基于已验证证据和排障结论，从用户确认的开发基线创建修复分支，完成最小改动、测试、提交和推送。
+description: Bug 修复 Agent 统一入口。用于基于工单证据和排障结论，从用户确认的开发基线创建修复分支，完成最小改动、工程测试、提交和推送。
 ---
 
 # Bug 修复
@@ -11,7 +11,7 @@ description: Bug 修复 Agent 统一入口。用于基于已验证证据和排�
 
 只有排障结果同时满足 `root_cause_type: code` 与 `remediation.mode: code_change` 时才能进入本 skill。`data`、`configuration`、`infrastructure`、`network`、`external_dependency` 和 `transient` 根因必须返回 Studio 的非代码处置流程；不得创建空修复分支、伪造 commit，也不得用代码改动替代数据库修正、配置发布、运行时恢复或外部依赖恢复。
 
-本 skill 不负责首次复现，也不负责只读根因分析。它接收验证 Agent 的证据和排障 Agent 的结论，执行代码修复闭环：
+本 skill 接收工单证据和排障结论，执行代码修复与工程测试。提交完成后由人工验收业务结果：
 
 - 确认用户批准的开发基线和目标环境分支。
 - 从 Studio 锁定的开发基线创建修复分支。
@@ -24,7 +24,7 @@ description: Bug 修复 Agent 统一入口。用于基于已验证证据和排�
 
 开始前必须已经有：
 
-- Bug ID、标题、环境和复现/验证证据。
+- Bug ID、标题、环境和已有证据。
 - 排障 Agent 输出的根因结论、受影响服务/模块/仓库。
 - 结构化根因必须是 `root_cause_type: code` 且 `remediation.mode: code_change`。
 - 用户在修复授权中批准的仓库 → 开发基线映射。
@@ -67,7 +67,7 @@ test "$(git merge-base <locked-source-baseline-commit> HEAD)" = "<locked-source-
 
 ## 修复流程
 
-1. 读取上一轮验证证据和排障结论，提取：
+1. 读取工单证据和排障结论，提取：
    - 失败入口。
    - 实际行为和期望行为。
    - 相关接口、页面、服务、表或配置。
@@ -167,7 +167,7 @@ tests:
     result: passed | failed | skipped
     note: "<short evidence>"
     skipped_reason: "<required only when result=skipped>"
-deployment_notice: "修复分支已推送；等待 Studio 将修复提交合入开发基线和环境分支，再部署环境分支并触发回归。"
+deployment_notice: "修复分支已推送；等待用户独立授权，由 Studio 将修复提交合入开发基线和环境分支，之后由用户人工验收。"
 risks:
   - "<remaining-risk-or-empty>"
 blocked_reason: "<only when blocked/failed>"

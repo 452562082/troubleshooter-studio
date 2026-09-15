@@ -146,7 +146,7 @@ infrastructure:
   project_tracking: []
 
 generation:
-  targets: [openclaw]
+  targets: [claude-code]
   skills_whitelist:
     - routing
     - incident-investigator

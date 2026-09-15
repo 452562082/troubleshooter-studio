@@ -87,7 +87,8 @@ func runUpgrade(args []string) error {
 	if res.FilesChanged == 0 && res.ConfigMapChanges == 0 {
 		fmt.Println("下一步：产物已同步，无需部署动作")
 	} else {
-		fmt.Printf("下一步：tshoot install --path '%s' --target openclaw   # 部署新版\n", outDir)
+		fmt.Printf("下一步：tshoot gen -i '%s' -o '%s'   # 生成配置中各平台的部署包\n", *input, outDir)
+		fmt.Printf("   部署示例：tshoot install --path '%s-claude-code' --target claude-code\n", outDir)
 		fmt.Printf("   回滚：rm -rf '%s' && mv '%s' '%s'\n", outDir, res.BackupPath, outDir)
 	}
 	return nil

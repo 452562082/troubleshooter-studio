@@ -2,27 +2,7 @@ import { readFileSync } from 'node:fs'
 import { mount } from '@vue/test-utils'
 import { defineComponent, nextTick, ref } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import {
-  approveIncidentFix,
-  approveIncidentMerge,
-  cancelBugInvestigation,
-  clearBugPlatformLogin,
-  continueIncidentCase,
-  deleteBugHistory,
-  deleteBugPlatform,
-  discoverBots,
-  fetchBugByID,
-  listBugInvestigationRuns,
-  listBugPlatforms,
-  listBugs,
-  loginBugPlatform,
-  notifyIncidentDeployed,
-  previewBugAttachment,
-  saveBugPlatform,
-  startBugInvestigation,
-  startIncidentCase,
-  syncBugPlatform,
-} from '../lib/bridge'
+import { approveIncidentFix, approveIncidentMerge, cancelBugInvestigation, clearBugPlatformLogin, continueIncidentCase, deleteBugHistory, deleteBugPlatform, discoverBots, fetchBugByID, listBugInvestigationRuns, listBugPlatforms, listBugs, loginBugPlatform, previewBugAttachment, saveBugPlatform, startBugInvestigation, startIncidentCase, syncBugPlatform } from '../lib/bridge'
 import { copyToClipboard } from '../lib/clipboard'
 import { confirmDialog } from '../lib/confirm'
 import { toast } from '../lib/toast'
@@ -47,7 +27,6 @@ vi.mock('../lib/bridge', () => ({
   listBugPlatforms: vi.fn().mockResolvedValue([]),
   listBugs: vi.fn().mockResolvedValue([]),
   loginBugPlatform: vi.fn(),
-  notifyIncidentDeployed: vi.fn(),
   previewBugAttachment: vi.fn(),
   saveBugPlatform: vi.fn(),
   startBugInvestigation: vi.fn(),
@@ -107,7 +86,6 @@ afterEach(() => {
   vi.mocked(continueIncidentCase).mockReset()
   vi.mocked(approveIncidentFix).mockReset()
   vi.mocked(approveIncidentMerge).mockReset()
-  vi.mocked(notifyIncidentDeployed).mockReset()
   vi.mocked(copyToClipboard).mockReset().mockResolvedValue(true)
   vi.mocked(confirmDialog).mockReset().mockResolvedValue(true)
 })
@@ -225,31 +203,6 @@ describe('BugInboxPage', () => {
     expect(disabledRule).toContain('color: #64748b;')
     expect(disabledRule).toContain('cursor: not-allowed;')
     expect(source).toContain('.danger-icon-button:hover, .danger-icon-button:focus-visible { background: var(--c-danger-bg); color: var(--c-danger); }')
-  })
-
-  it('is a browse-only inbox and opens the selected ticket in the incident route', async () => {
-    vi.mocked(listBugs).mockResolvedValue([bug])
-    const wrapper = await mountedInbox()
-
-    expect(wrapper.text()).toContain('Bug 工单')
-    expect(wrapper.text()).toContain('复现步骤')
-    expect(wrapper.text()).toContain('打开结算页')
-    expect(wrapper.findComponent({ name: 'BugTicketList' }).exists()).toBe(true)
-    expect(wrapper.findComponent({ name: 'BugTicketDetail' }).props('mode')).toBe('full')
-    expect(wrapper.text()).not.toContain('开始故障闭环')
-    expect(wrapper.text()).not.toContain('允许修复')
-    expect(wrapper.find('.workbench-view-tabs').exists()).toBe(false)
-
-    await wrapper.get('[data-action="open-incident"]').trigger('click')
-
-    expect(router.push).toHaveBeenCalledWith({ path: '/incidents', query: { bug_id: 'zentao-840' } })
-    expect(startBugInvestigation).not.toHaveBeenCalled()
-    expect(cancelBugInvestigation).not.toHaveBeenCalled()
-    expect(startIncidentCase).not.toHaveBeenCalled()
-    expect(continueIncidentCase).not.toHaveBeenCalled()
-    expect(approveIncidentFix).not.toHaveBeenCalled()
-    expect(approveIncidentMerge).not.toHaveBeenCalled()
-    expect(notifyIncidentDeployed).not.toHaveBeenCalled()
   })
 
   it('filters shared ticket rows and selects another full detail', async () => {
@@ -375,7 +328,7 @@ describe('BugInboxPage', () => {
     }))
   })
 
-  it('does not expose Cursor as a configurable incident workflow bot', async () => {
+  it('retains Cursor as a configurable incident workflow bot', async () => {
     vi.mocked(discoverBots).mockResolvedValue([
       {
         path: '/repo/base-codex', ghost: false,
@@ -396,10 +349,47 @@ describe('BugInboxPage', () => {
     const wrapper = await mountedInbox()
     await wrapper.get('[data-action="toggle-platform-config"]').trigger('click')
 
-    expect(wrapper.findAll('.bot-config-row')).toHaveLength(0)
+    expect(wrapper.findAll('.bot-config-row')).toHaveLength(1)
+    expect(wrapper.get('.bot-config-row').text()).toContain('Base Cursor')
     await wrapper.get('[data-action="toggle-bot-picker"]').trigger('click')
     expect(wrapper.find('[data-bot-key="/repo/base-cursor|cursor"]').exists()).toBe(false)
     expect(wrapper.find('[data-bot-key="/repo/base-codex|codex"]').exists()).toBe(true)
+    await wrapper.get('[aria-label="移除机器人"]').trigger('click')
+    expect(wrapper.find('[data-bot-key="/repo/base-cursor|cursor"]').exists()).toBe(true)
+    await wrapper.get('[data-bot-key="/repo/base-cursor|cursor"]').trigger('click')
+    expect(wrapper.get('.bot-config-row').text()).toContain('Base Cursor')
+  })
+
+  it('retains OpenCode as a configurable incident workflow bot', async () => {
+    vi.mocked(discoverBots).mockResolvedValue([
+      {
+        path: '/repo/base-codex', ghost: false,
+        meta: { system_id: 'base', system_name: 'Base Codex', target: 'codex', agent_id: 'base-troubleshooter' },
+        environments: ['test'],
+      } as any,
+      {
+        path: '/repo/base-opencode', ghost: false,
+        meta: { system_id: 'base', system_name: 'Base OpenCode', target: 'opencode', agent_id: 'base-troubleshooter' },
+        environments: ['test'],
+      } as any,
+    ])
+    vi.mocked(listBugPlatforms).mockResolvedValue([{
+      id: 'zentao-main', name: '测试环境', type: 'zentao', auth_mode: 'feishu_sso',
+      bot_mappings: [{ bot_key: '/repo/base-opencode|opencode', env: 'test' }], enabled: true,
+    }])
+
+    const wrapper = await mountedInbox()
+    await wrapper.get('[data-action="toggle-platform-config"]').trigger('click')
+
+    expect(wrapper.findAll('.bot-config-row')).toHaveLength(1)
+    expect(wrapper.get('.bot-config-row').text()).toContain('Base OpenCode')
+    await wrapper.get('[data-action="toggle-bot-picker"]').trigger('click')
+    expect(wrapper.find('[data-bot-key="/repo/base-opencode|opencode"]').exists()).toBe(false)
+    expect(wrapper.find('[data-bot-key="/repo/base-codex|codex"]').exists()).toBe(true)
+    await wrapper.get('[aria-label="移除机器人"]').trigger('click')
+    expect(wrapper.find('[data-bot-key="/repo/base-opencode|opencode"]').exists()).toBe(true)
+    await wrapper.get('[data-bot-key="/repo/base-opencode|opencode"]').trigger('click')
+    expect(wrapper.get('.bot-config-row').text()).toContain('Base OpenCode')
   })
 
   it('presents platform configuration as labelled compact sections with a readable disclosure state', async () => {

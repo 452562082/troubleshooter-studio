@@ -11,7 +11,6 @@
 
 | 任务 | skill |
 |---|---|
-| 验证与回归 | `bug-verifier`、`attachment-evidence-verifier`、`api-verifier` |
 | 前端证据 | `frontend-repro-investigator` |
 | 代码与拓扑 | `code-intelligence-query`、`service-topology-query` |
 | 变更与运行时 | `recent-changes`、`k8s-runtime-query`、`tracing-query`、`elk-log-query` |

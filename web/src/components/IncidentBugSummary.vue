@@ -140,14 +140,14 @@ function formatTime(value?: string): DisplayTime {
 }
 .incident-bug-heading { min-width: 0; margin-bottom: var(--sp-3); }
 .incident-bug-source { margin: 0 0 var(--sp-1); color: var(--c-accent-hover); font-size: var(--fs-sm); font-weight: 700; overflow-wrap: anywhere; }
-.incident-bug-heading h2 { margin: 0; color: var(--c-ink); font-size: 20px; line-height: 1.35; overflow-wrap: anywhere; }
+.incident-bug-heading h2 { margin: 0; color: var(--c-ink); font-size: 16px; line-height: 1.35; overflow-wrap: anywhere; }
 .incident-bug-metadata { min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2); margin: 0; }
-.incident-bug-metadata > div { min-width: 0; padding: var(--sp-2); border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); }
+.incident-bug-metadata > div { min-width: 0; padding: 4px 0; }
 .incident-bug-metadata dt { margin-bottom: 4px; color: var(--c-muted); font-size: var(--fs-xs); }
 .incident-bug-metadata dd { min-width: 0; margin: 0; color: var(--c-ink); font-size: var(--fs-base); overflow-wrap: anywhere; }
 .incident-bug-status { display: inline-flex; max-width: 100%; padding: 2px 8px; overflow-wrap: anywhere; border: 1px solid #c7d2fe; border-radius: 999px; background: #eef2ff; color: #3730a3; font-size: var(--fs-xs); }
 .incident-bug-summary-empty { min-height: 160px; margin: 0; display: grid; place-items: center; color: var(--c-muted); font-size: var(--fs-sm); }
-@container incident-bug-summary (max-width: 520px) {
+@container incident-bug-summary (max-width: 240px) {
   .incident-bug-metadata { grid-template-columns: minmax(0, 1fr); }
 }
 </style>

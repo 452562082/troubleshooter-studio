@@ -33,6 +33,7 @@ export interface UseDataStoreStateInitial {
   scannedDS?: Record<string, DSByService>
   /** saved.dsScanState 反填,加载时按特征字符串清掉旧版本的 stale "未映射 dataId" reason */
   dsScanState?: Record<string, DSScanState>
+  manualEntries?: Record<string, boolean>
 }
 
 export function useDataStoreState(
@@ -45,6 +46,7 @@ export function useDataStoreState(
 ) {
   const dsImportStatus = ref<'idle' | 'loading' | 'ok' | 'error'>('idle')
   const dsImportStats = reactive<{ scanned: number; matched: number }>({ scanned: 0, matched: 0 })
+  const manualEntries = reactive<Record<string, boolean>>({ ...initial.manualEntries })
   const dsAutoFilled = reactive<Record<string, boolean>>({}) // dsType → 是否本次自动识别过
 
   const scannedDS = reactive<Record<string, DSByService>>(initial.scannedDS ?? {})
@@ -112,6 +114,7 @@ export function useDataStoreState(
       delete scannedDS[envID][svc][dsKey]
     }
     delete dsProbeResults[probeKey(envID, svc, dsKey)]
+    delete manualEntries[probeKey(envID, svc, dsKey)]
     // 同步 enabledDataStores —— 删掉的可能是该 type 的最后一条,enabledDataStores 得跟着关。
     recomputeEnabledDataStoresFromScanned()
   }
@@ -138,9 +141,11 @@ export function useDataStoreState(
     for (const field of fieldKeys) {
       if (!(field in scannedDS[envID][svc][dsKey])) scannedDS[envID][svc][dsKey][field] = ''
     }
-    dsScanState[scanStateKey(envID, svc)] = { status: 'ok', reason: '包含人工补录的数据组件' }
+    manualEntries[probeKey(envID, svc, dsKey)] = true
+    dsScanState[scanStateKey(envID, svc)] = { status: 'ok', reason: '包含手动添加的连接' }
     delete dsProbeResults[probeKey(envID, svc, dsKey)]
     recomputeEnabledDataStoresFromScanned()
+    return dsKey
   }
 
   return {
@@ -148,7 +153,7 @@ export function useDataStoreState(
     scannedDS, dataStoreTypes, dataStoreType, dsScanState, dsProbeResults,
     scanStateKey, scanStateOf,
     removeScannedDS,
-    addManualDataStore,
+    addManualDataStore, manualEntries,
     recomputeEnabledDataStoresFromScanned,
   }
 }

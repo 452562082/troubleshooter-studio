@@ -103,7 +103,7 @@ func (a *App) UploadIncidentEvidenceImages(input UploadIncidentEvidenceImagesInp
 	}
 	switch incident.Status {
 	case bughub.CaseWaitingEvidence, bughub.CaseNotReproduced:
-		if attempt.Phase != bughub.PhaseValidation && attempt.Phase != bughub.PhaseRegression {
+		if attempt.Phase != bughub.PhaseInvestigation {
 			return nil, errors.New("evidence attempt is not a validation attempt for the current Case cycle")
 		}
 	case bughub.CaseWaitingFixApproval, bughub.CaseWaitingRemediation:
@@ -222,7 +222,7 @@ func (a *App) UploadIncidentEvidenceFiles(input UploadIncidentEvidenceFilesInput
 	if err != nil {
 		return nil, err
 	}
-	if attempt.CaseID != incident.ID || attempt.CycleNumber != incident.CycleNumber || (attempt.Phase != bughub.PhaseValidation && attempt.Phase != bughub.PhaseRegression) {
+	if attempt.CaseID != incident.ID || attempt.CycleNumber != incident.CycleNumber || (attempt.Phase != bughub.PhaseInvestigation) {
 		return nil, errors.New("evidence attempt is not a validation attempt for the current Case cycle")
 	}
 
@@ -233,7 +233,7 @@ func (a *App) UploadIncidentEvidenceFiles(input UploadIncidentEvidenceFilesInput
 	}
 	prepared := make([]preparedFile, 0, len(input.Files))
 	for _, item := range input.Files {
-		name, err := bughub.NormalizeBrowserUploadFileName(item.Name, item.MIMEType)
+		name, err := bughub.NormalizeEvidenceFileName(item.Name, item.MIMEType)
 		if err != nil {
 			return nil, fmt.Errorf("prepare evidence file %q: %w", strings.TrimSpace(item.Name), err)
 		}
@@ -251,7 +251,7 @@ func (a *App) UploadIncidentEvidenceFiles(input UploadIncidentEvidenceFilesInput
 			ArtifactsRoot:   filepath.Join(a.workflowRoot, "artifacts"),
 			CaseID:          incident.ID,
 			AttemptID:       attempt.ID,
-			Kind:            "user_browser_file_" + extension,
+			Kind:            "user_file_" + extension,
 			CapturedAt:      time.Now().UTC(),
 			Environment:     incident.Environment,
 			RedactionStatus: bughub.RedactionStatusNotRequired,
@@ -268,7 +268,7 @@ func (a *App) UploadIncidentEvidenceFiles(input UploadIncidentEvidenceFilesInput
 }
 
 func decodeIncidentEvidenceFile(input IncidentEvidenceFileInput) ([]byte, error) {
-	if _, err := bughub.NormalizeBrowserUploadFileName(input.Name, input.MIMEType); err != nil {
+	if _, err := bughub.NormalizeEvidenceFileName(input.Name, input.MIMEType); err != nil {
 		return nil, err
 	}
 	encoded := strings.TrimSpace(input.Base64Data)

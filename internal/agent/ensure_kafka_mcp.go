@@ -66,7 +66,6 @@ func CfgUsesKafkaMCP(cfg *config.SystemConfig) bool {
 // 跟 install 时跑的 shell PATH 不一样 —— mac 桌面 app 启动子进程的 PATH 来自 launchd GUI 默认,
 // 只有 /usr/bin:/bin:/usr/sbin:/sbin,brew prefix(/opt/homebrew/bin)被 strip。install 看到
 // PATH 有 binary 写字面 "kafka-mcp-server",Claude Code 启动时同名找不到 ENOENT 静默挂掉。
-// 这跟 findOpenclawCLI(install_native_openclaw.go,commit e44c74d)修过的是同一个坑。
 //
 // 返回 (binPath, err):
 //   - PATH 命中 → (LookPath 的绝对路径, nil)
@@ -112,7 +111,6 @@ func EnsureKafkaMCPInstalled(onLog func(string)) (string, error) {
 }
 
 // kafkaMCPCachePath 返回固定 cache 路径 ~/.tshoot/bin/kafka-mcp-server-<ver>[.exe]。
-// 跟 ~/.openclaw 平级,跨 IDE 共享一份 binary,卸载 IDE 不会误删。
 // 文件名带版本号:升级 kafkaMCPVersion 后旧文件 cache miss 自动重下,避免静默用旧版。
 func kafkaMCPCachePath() (string, error) {
 	home, err := os.UserHomeDir()

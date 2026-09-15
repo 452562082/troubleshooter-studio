@@ -16,7 +16,7 @@ description: 从前端复现证据开始排障。读取 HAR、console、RUM/Sent
 
 不要一开始就查后端 trace。先确认浏览器实际看到了什么。
 
-如果由 `bug-verifier` 调用，归一化证据和 `backend_handoff` 字段后就停止，不继续做根因分析或原因排序。
+读取用户已提供的证据，归一化 `backend_handoff` 字段后继续排障。
 
 ## 必要输入
 
@@ -39,32 +39,9 @@ description: 从前端复现证据开始排障。读取 HAR、console、RUM/Sent
 
 优先使用 `backend_handoff.trace_ids`。没有 trace id 时，用 `backend_handoff.candidate_endpoints` 结合 `routing/references/frontend-entry-map.yaml` 选择候选后端服务，再查日志。
 
-## Studio Case 与手动兼容浏览器采集
+## 已有证据
 
-Studio 故障闭环中的 Web validation / regression 由 **Studio BrowserVerifier** 在宿主进程执行 BrowserPlan，生成渲染截图、脱敏 Network / console 和 action trace，并把精确 artifact 引用注入 validator。此时本 skill 只归一化 Studio 已冻结的证据，不得运行本目录的采集器替代宿主结果。
-
-`browser_collect.mjs` 只是脱离 Studio Case 时的**手动兼容路径**，不属于持久化 Case 证据协议：它不具备 HostVerifier 的 URL/生产动作策略、加密登录 session、attempt staging journal、artifact 冻结与截图成功 gate，产物不能冒充 Studio 的权威浏览器证据。只有用户明确要求手动兼容采集、提供可复现 URL，且生成工作区有 Node.js 时，才先展示采集计划，不立即启动浏览器：
-
-```bash
-node skills/frontend-repro-investigator/scripts/browser_collect.mjs --url <page-url> --out /tmp/tshoot-artifacts --plan
-```
-
-确认适合做浏览器自动化后再运行：
-
-```bash
-node skills/frontend-repro-investigator/scripts/browser_collect.mjs --url <page-url> --out /tmp/tshoot-artifacts
-```
-
-采集器会写出：
-
-- `network.har`
-- `console.jsonl`
-- `screenshot.png`
-- `trace.zip`
-
-Playwright 是可选依赖，默认不内置。缺失时脚本会返回 error code `3`、`install_hint` 和计划产物路径。用户已有 HAR、console、RUM/Sentry、trace id 或 request id 证据时，不要把缺少 Playwright 当成阻塞。
-
-手动兼容采集的 `trace.zip` 可能包含 DOM、Cookie 或请求体，不得登记到持久化 Case；进入 Studio 闭环时仍以 HostVerifier 生成并二次扫描的脱敏 artifact 为准。
+Studio 不再执行浏览器复现或回归。本 skill 读取用户提供的截图、HAR、console、RUM/Sentry、trace id 和 request id，结合只读运行时查询分析根因。证据不足时说明缺口，不把截图存在或请求成功当作业务验收通过。
 
 ## HAR 流程
 
@@ -154,7 +131,7 @@ GET /api/0/projects/{org}/{project}/events/{event_id}/
 - `backend_handoff.candidate_endpoints`：仅保留 `/api`、`/api/...` 和 `/graphql` path。
 - `redacted_event_preview`：隐藏敏感 query 值和 bearer token 后的事件预览。
 
-排障模式下才用归一化的 `backend_handoff` 继续后端排查。验证模式下，把归一化证据返回给 `bug-verifier`。归一化输出已经足够时，不要粘贴原始 Sentry event JSON。
+用归一化的 `backend_handoff` 继续后端排查。归一化输出已经足够时，不要粘贴原始 Sentry event JSON。
 
 ## 证据合并
 
@@ -193,7 +170,7 @@ python3 skills/service-topology-query/scripts/query.py \
 5. 如果没有 trace id，用 endpoint path、user id、session id 和发生时间查日志。
 6. 如果后端没有收到请求，排障模式下才保留 frontend / CDN / network / CORS / auth 方向候选。
 
-验证模式下，本节只作为证据收集指南。返回 `backend_handoff` 和浏览器实际表现，不要声称后端、前端、CDN、鉴权或网络根因。
+证据不足时只返回已观测事实和 `backend_handoff`，不猜测根因。
 
 ## 输出契约
 
@@ -223,4 +200,4 @@ next_skills:
 - 只读取本地证据和观测数据。
 - 引用前必须脱敏 token、cookie、password、authorization header 和个人标识。
 - 浏览器证据没有关联到后端 trace / log / runtime 证据前，不能声称后端根因。
-- 验证 Agent 使用时，完全不能输出根因判断。
+- 不得将页面截图或 HTTP 成功响应当作业务已恢复的证明。

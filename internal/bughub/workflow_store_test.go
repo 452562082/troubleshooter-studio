@@ -35,7 +35,7 @@ func TestIncidentCaseFrontendEntrySurvivesStoreReopen(t *testing.T) {
 	want := IncidentCase{
 		ID: "case-frontend-binding", BugID: "bug-frontend-binding", Source: "zentao", SystemID: "base", Environment: "test",
 		FrontendEntry: FrontendEntryBinding{ID: "admin", Name: "管理端", URL: "https://admin.test/users", ConfigURL: "https://admin.test/", Repo: "admin-web", ResolutionSource: "ticket_signals", ConfigSHA256: strings.Repeat("a", 64)},
-		Status:        CasePendingValidation, CycleNumber: 1, SelectedBotKey: "base|codex", Version: 1,
+		Status:        CasePendingInvestigation, CycleNumber: 1, SelectedBotKey: "base|codex", Version: 1,
 	}
 	if err := store.CreateCase(context.Background(), want); err != nil {
 		t.Fatal(err)
@@ -71,7 +71,7 @@ func TestIncidentCaseFrontendEntriesSurviveStoreReopen(t *testing.T) {
 	want := IncidentCase{
 		ID: "case-multi-frontend-binding", BugID: "bug-multi-frontend-binding", Source: "zentao", SystemID: "base", Environment: "test",
 		FrontendEntry: entries[0], FrontendEntries: newFrontendEntryBindings(entries),
-		Status: CasePendingValidation, CycleNumber: 1, SelectedBotKey: "base|codex", Version: 1,
+		Status: CasePendingInvestigation, CycleNumber: 1, SelectedBotKey: "base|codex", Version: 1,
 	}
 	if err := store.CreateCase(context.Background(), want); err != nil {
 		t.Fatal(err)
@@ -98,7 +98,7 @@ func TestCreateCaseWithIdentityReturnsExistingOpenCaseForBug(t *testing.T) {
 	ctx := context.Background()
 	store := openTestCaseStore(t)
 	runner := &recordingPhaseRunner{}
-	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	orchestrator := NewCaseOrchestrator(store, runner, nil)
 	firstCommand := CreateAndStartCaseCommand{
 		CaseID: "case-a", IdempotencyKey: "create:case-a", ActorID: "alice",
 		Bug: Bug{ID: "bug-840", Source: "zentao", SystemID: "base", Env: "test"},
@@ -108,7 +108,7 @@ func TestCreateCaseWithIdentityReturnsExistingOpenCaseForBug(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requested := IncidentCase{ID: "case-b", BugID: first.BugID, Source: first.Source, SystemID: first.SystemID, Environment: first.Environment, Status: CasePendingValidation, CycleNumber: 1, SelectedBotKey: first.SelectedBotKey}
+	requested := IncidentCase{ID: "case-b", BugID: first.BugID, Source: first.Source, SystemID: first.SystemID, Environment: first.Environment, Status: CasePendingInvestigation, CycleNumber: 1, SelectedBotKey: first.SelectedBotKey}
 	creation := CaseCreation{Case: requested, IdempotencyKey: "create:case-b", ActorID: "bob", RequestJSON: json.RawMessage(`{"case_id":"case-b"}`)}
 	result, err := store.CreateCaseWithIdentity(ctx, creation)
 	if err != nil {
@@ -150,7 +150,7 @@ func TestResetRelationshipFieldsSurviveReopen(t *testing.T) {
 	}
 	closed := time.Now().UTC()
 	old := IncidentCase{ID: "case-old", BugID: "bug-840", Status: CaseResetArchived, CycleNumber: 1, Version: 2, SupersededByCaseID: "case-new", ClosedAt: &closed}
-	next := IncidentCase{ID: "case-new", BugID: "bug-840", Status: CasePendingValidation, CycleNumber: 1, Version: 1, ResetFromCaseID: "case-old"}
+	next := IncidentCase{ID: "case-new", BugID: "bug-840", Status: CasePendingInvestigation, CycleNumber: 1, Version: 1, ResetFromCaseID: "case-old"}
 	if err := store.CreateCase(context.Background(), old); err != nil {
 		t.Fatal(err)
 	}
@@ -181,16 +181,16 @@ func TestResetRelationshipFieldsSurviveReopen(t *testing.T) {
 func TestCaseStoreTransitionIsTransactionalAndIdempotent(t *testing.T) {
 	store := openTestCaseStore(t)
 	ctx := context.Background()
-	c := IncidentCase{ID: "case-1", BugID: "zentao-909", Status: CasePendingValidation, CycleNumber: 1, Version: 1}
+	c := IncidentCase{ID: "case-1", BugID: "zentao-909", Status: CasePendingInvestigation, CycleNumber: 1, Version: 1}
 	if err := store.CreateCase(ctx, c); err != nil {
 		t.Fatal(err)
 	}
 	e := TransitionEvent{ID: "event-1", CaseID: c.ID, IdempotencyKey: "validate:case-1:1"}
-	updated, replay, err := store.Transition(ctx, c.ID, 1, CaseValidating, e)
+	updated, replay, err := store.Transition(ctx, c.ID, 1, CaseInvestigating, e)
 	if err != nil || replay || updated.Version != 2 {
 		t.Fatalf("updated=%+v replay=%v err=%v", updated, replay, err)
 	}
-	replayed, replay, err := store.Transition(ctx, c.ID, 1, CaseValidating, e)
+	replayed, replay, err := store.Transition(ctx, c.ID, 1, CaseInvestigating, e)
 	if err != nil || !replay || replayed.Version != 2 {
 		t.Fatalf("replayed=%+v replay=%v err=%v", replayed, replay, err)
 	}
@@ -199,12 +199,12 @@ func TestCaseStoreTransitionIsTransactionalAndIdempotent(t *testing.T) {
 	}
 	conflicting := e.Clone()
 	conflicting.ID = "event-different"
-	if _, _, err := store.Transition(ctx, c.ID, 1, CaseValidating, conflicting); !errors.Is(err, ErrIdempotencyConflict) {
+	if _, _, err := store.Transition(ctx, c.ID, 1, CaseInvestigating, conflicting); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("conflicting replay error = %v", err)
 	}
 	conflicting = e.Clone()
 	conflicting.PayloadJSON = json.RawMessage(`{"different":true}`)
-	if _, _, err := store.Transition(ctx, c.ID, 1, CaseValidating, conflicting); !errors.Is(err, ErrIdempotencyConflict) {
+	if _, _, err := store.Transition(ctx, c.ID, 1, CaseInvestigating, conflicting); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("conflicting payload replay error = %v", err)
 	}
 }
@@ -214,8 +214,8 @@ func TestCaseStoreSortsFixedWidthTimestampsChronologically(t *testing.T) {
 	ctx := context.Background()
 	second := time.Date(2026, 7, 11, 12, 0, 0, 0, time.UTC)
 	for _, incident := range []IncidentCase{
-		{ID: "case-zero", BugID: "bug-zero", Status: CasePendingValidation, CycleNumber: 1, Version: 1, UpdatedAt: second},
-		{ID: "case-later", BugID: "bug-later", Status: CasePendingValidation, CycleNumber: 1, Version: 1, UpdatedAt: second.Add(time.Nanosecond)},
+		{ID: "case-zero", BugID: "bug-zero", Status: CasePendingInvestigation, CycleNumber: 1, Version: 1, UpdatedAt: second},
+		{ID: "case-later", BugID: "bug-later", Status: CasePendingInvestigation, CycleNumber: 1, Version: 1, UpdatedAt: second.Add(time.Nanosecond)},
 	} {
 		if err := store.CreateCase(ctx, incident); err != nil {
 			t.Fatal(err)
@@ -228,12 +228,12 @@ func TestCaseStoreSortsFixedWidthTimestampsChronologically(t *testing.T) {
 
 	first := validEvent(1, "case-zero")
 	first.CreatedAt = second
-	if _, _, err := store.Transition(ctx, "case-zero", 1, CaseValidating, first); err != nil {
+	if _, _, err := store.Transition(ctx, "case-zero", 1, CaseInvestigating, first); err != nil {
 		t.Fatal(err)
 	}
 	next := validEvent(2, "case-zero")
 	next.CreatedAt = second.Add(time.Nanosecond)
-	if _, _, err := store.Transition(ctx, "case-zero", 2, CaseReproduced, next); err != nil {
+	if _, _, err := store.Transition(ctx, "case-zero", 2, CaseRootCauseReady, next); err != nil {
 		t.Fatal(err)
 	}
 	events, err := store.ListEvents(ctx, "case-zero")
@@ -358,8 +358,8 @@ func TestCaseStoreAttemptLifecycleAndCloning(t *testing.T) {
 	createTestCase(t, store, "case-attempt")
 	started := time.Date(2026, 7, 11, 11, 0, 0, 0, time.UTC)
 	attempt := PhaseAttempt{
-		ID: "attempt-1", CaseID: "case-attempt", CycleNumber: 1, Phase: PhaseValidation,
-		Mode: AttemptReproduce, Status: AttemptStatusRunning, AgentTarget: "codex", BotKey: "bot-a",
+		ID: "attempt-1", CaseID: "case-attempt", CycleNumber: 1, Phase: PhaseInvestigation,
+		Mode: "", Status: AttemptStatusRunning, AgentTarget: "codex", BotKey: "bot-a",
 		InputJSON: json.RawMessage(`{"prompt":"original"}`), OutputJSON: json.RawMessage(`{}`), StartedAt: started,
 	}
 	if err := store.CreateAttempt(ctx, attempt); err != nil {
@@ -423,61 +423,6 @@ func TestCaseStoreAttemptLifecycleAndCloning(t *testing.T) {
 	attempt.Status = AttemptStatusRunning
 	if err := store.FinishAttempt(ctx, attempt); err == nil {
 		t.Fatal("FinishAttempt accepted non-terminal status")
-	}
-}
-
-func TestCaseStorePersistsAndReplacesValidationRecipe(t *testing.T) {
-	store := openTestCaseStore(t)
-	ctx := context.Background()
-	createTestCase(t, store, "case-recipe")
-	attempt := PhaseAttempt{
-		ID: "attempt-recipe", CaseID: "case-recipe", CycleNumber: 1, Phase: PhaseValidation,
-		Mode: AttemptReproduce, Status: AttemptStatusRunning, AgentTarget: "codex", BotKey: "bot-a",
-		InputJSON: json.RawMessage(`{}`), OutputJSON: json.RawMessage(`{}`), StartedAt: time.Now().UTC(),
-	}
-	if err := store.CreateAttempt(ctx, attempt); err != nil {
-		t.Fatal(err)
-	}
-	plan, err := ParseBrowserPlan([]byte(validBrowserPlanYAML()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	planSHA, err := durableBrowserPlanSHA256(plan)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scenarioOne := strings.Repeat("a", 64)
-	stored, err := store.StoreValidationRecipe(ctx, ValidationRecipe{
-		CaseID: attempt.CaseID, ScenarioSHA256: scenarioOne, PlanSHA256: planSHA,
-		Plan: plan, SourceAttemptID: attempt.ID,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored.CaseID != attempt.CaseID || stored.ScenarioSHA256 != scenarioOne || stored.PlanSHA256 != planSHA || stored.CreatedAt.IsZero() || stored.UpdatedAt.IsZero() {
-		t.Fatalf("stored recipe=%+v", stored)
-	}
-
-	loaded, found, err := store.GetValidationRecipe(ctx, attempt.CaseID)
-	if err != nil || !found || loaded.PlanSHA256 != planSHA || loaded.Plan.StartURL != plan.StartURL {
-		t.Fatalf("loaded=%+v found=%v err=%v", loaded, found, err)
-	}
-	scenarioTwo := strings.Repeat("b", 64)
-	stored.ScenarioSHA256 = scenarioTwo
-	stored.UpdatedAt = stored.UpdatedAt.Add(time.Second)
-	replaced, err := store.StoreValidationRecipe(ctx, stored)
-	if err != nil || replaced.ScenarioSHA256 != scenarioTwo || !replaced.CreatedAt.Equal(stored.CreatedAt) {
-		t.Fatalf("replaced=%+v err=%v", replaced, err)
-	}
-	if _, err := store.StoreValidationRecipe(ctx, ValidationRecipe{CaseID: attempt.CaseID, ScenarioSHA256: "bad", PlanSHA256: planSHA, Plan: plan, SourceAttemptID: attempt.ID}); err == nil {
-		t.Fatal("StoreValidationRecipe accepted an invalid scenario digest")
-	}
-	createTestCase(t, store, "case-recipe-other")
-	if _, err := store.StoreValidationRecipe(ctx, ValidationRecipe{
-		CaseID: "case-recipe-other", ScenarioSHA256: scenarioOne, PlanSHA256: planSHA,
-		Plan: plan, SourceAttemptID: attempt.ID,
-	}); err == nil || !strings.Contains(err.Error(), "same case") {
-		t.Fatalf("StoreValidationRecipe cross-case source error=%v", err)
 	}
 }
 
@@ -600,7 +545,7 @@ func TestCaseStoreConcurrentIdempotentReplayAcrossConnections(t *testing.T) {
 	for _, store := range stores {
 		go func(store *CaseStore) {
 			<-start
-			updated, replay, err := store.Transition(context.Background(), "case-idempotent-race", 1, CaseValidating, validEvent(1, "case-idempotent-race"))
+			updated, replay, err := store.Transition(context.Background(), "case-idempotent-race", 1, CaseInvestigating, validEvent(1, "case-idempotent-race"))
 			results <- result{version: updated.Version, replay: replay, err: err}
 		}(store)
 	}
@@ -629,19 +574,19 @@ func TestCaseStoreTransitionRollsBackSnapshotWhenEventInsertFails(t *testing.T) 
 	createTestCase(t, store, "case-rollback")
 	first := validEvent(1, "case-first")
 	first.ID = "duplicate-event-id"
-	if _, _, err := store.Transition(ctx, "case-first", 1, CaseValidating, first); err != nil {
+	if _, _, err := store.Transition(ctx, "case-first", 1, CaseInvestigating, first); err != nil {
 		t.Fatal(err)
 	}
 	second := validEvent(2, "case-rollback")
 	second.ID = first.ID
-	if _, _, err := store.Transition(ctx, "case-rollback", 1, CaseValidating, second); err == nil {
+	if _, _, err := store.Transition(ctx, "case-rollback", 1, CaseInvestigating, second); err == nil {
 		t.Fatal("Transition succeeded with duplicate event ID")
 	}
 	got, err := store.GetCase(ctx, "case-rollback")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != CasePendingValidation || got.Version != 1 {
+	if got.Status != CasePendingInvestigation || got.Version != 1 {
 		t.Fatalf("snapshot diverged after rollback: %+v", got)
 	}
 	if events, err := store.ListEvents(ctx, "case-rollback"); err != nil || len(events) != 0 {
@@ -659,7 +604,7 @@ func TestCaseStoreReopenPreservesHistoryAndEventOutputsAreCloned(t *testing.T) {
 	createTestCase(t, store, "case-reopen")
 	event := validEvent(1, "case-reopen")
 	event.PayloadJSON = json.RawMessage(`{"proof":"original"}`)
-	if _, _, err := store.Transition(ctx, "case-reopen", 1, CaseValidating, event); err != nil {
+	if _, _, err := store.Transition(ctx, "case-reopen", 1, CaseInvestigating, event); err != nil {
 		t.Fatal(err)
 	}
 	event.PayloadJSON[10] = 'X'
@@ -689,17 +634,17 @@ func TestCaseStoreTransitionReplayBindsFullRequestAndReturnsCommittedSnapshot(t 
 	createTestCase(t, store, "case-exact-replay")
 	firstEvent := validEvent(1, "case-exact-replay")
 	firstEvent.PayloadJSON = json.RawMessage(`{"attempt_id":"attempt-1"}`)
-	first, replay, err := store.Transition(ctx, "case-exact-replay", 1, CaseValidating, firstEvent)
+	first, replay, err := store.Transition(ctx, "case-exact-replay", 1, CaseInvestigating, firstEvent)
 	if err != nil || replay || first.Version != 2 {
 		t.Fatalf("first=%+v replay=%v err=%v", first, replay, err)
 	}
 	secondEvent := validEvent(2, "case-exact-replay")
-	if _, _, err := store.Transition(ctx, "case-exact-replay", 2, CaseReproduced, secondEvent); err != nil {
+	if _, _, err := store.Transition(ctx, "case-exact-replay", 2, CaseRootCauseReady, secondEvent); err != nil {
 		t.Fatal(err)
 	}
 
-	replayed, replay, err := store.Transition(ctx, "case-exact-replay", 1, CaseValidating, firstEvent)
-	if err != nil || !replay || replayed.Status != CaseValidating || replayed.Version != 2 {
+	replayed, replay, err := store.Transition(ctx, "case-exact-replay", 1, CaseInvestigating, firstEvent)
+	if err != nil || !replay || replayed.Status != CaseInvestigating || replayed.Version != 2 {
 		t.Fatalf("replayed=%+v replay=%v err=%v", replayed, replay, err)
 	}
 	for name, tc := range map[string]struct {
@@ -719,7 +664,7 @@ func TestCaseStoreTransitionReplayBindsFullRequestAndReturnsCommittedSnapshot(t 
 			if tc.mutate != nil {
 				tc.mutate(&event)
 			}
-			if _, _, err := store.Transition(ctx, "case-exact-replay", tc.expectedVersion, CaseValidating, event); !errors.Is(err, ErrIdempotencyConflict) {
+			if _, _, err := store.Transition(ctx, "case-exact-replay", tc.expectedVersion, CaseInvestigating, event); !errors.Is(err, ErrIdempotencyConflict) {
 				t.Fatalf("error = %v", err)
 			}
 		})
@@ -732,15 +677,15 @@ func TestCaseStoreTransitionFingerprintPreservesExactPayloadBytes(t *testing.T) 
 	createTestCase(t, store, "case-payload-bytes")
 	event := validEvent(1, "case-payload-bytes")
 	event.PayloadJSON = json.RawMessage(`{"value":1}`)
-	if _, replay, err := store.Transition(ctx, "case-payload-bytes", 1, CaseValidating, event); err != nil || replay {
+	if _, replay, err := store.Transition(ctx, "case-payload-bytes", 1, CaseInvestigating, event); err != nil || replay {
 		t.Fatalf("first replay=%v err=%v", replay, err)
 	}
-	if _, replay, err := store.Transition(ctx, "case-payload-bytes", 1, CaseValidating, event); err != nil || !replay {
+	if _, replay, err := store.Transition(ctx, "case-payload-bytes", 1, CaseInvestigating, event); err != nil || !replay {
 		t.Fatalf("identical replay=%v err=%v", replay, err)
 	}
 	whitespaceDistinct := event.Clone()
 	whitespaceDistinct.PayloadJSON = json.RawMessage(`{ "value": 1 }`)
-	if _, _, err := store.Transition(ctx, "case-payload-bytes", 1, CaseValidating, whitespaceDistinct); !errors.Is(err, ErrIdempotencyConflict) {
+	if _, _, err := store.Transition(ctx, "case-payload-bytes", 1, CaseInvestigating, whitespaceDistinct); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("whitespace-distinct payload error=%v", err)
 	}
 }
@@ -759,19 +704,19 @@ func TestCaseStoreTransitionWithUpdateIsAtomicAndIdempotent(t *testing.T) {
 		ClosedAt:         &closedAt,
 	}
 	event := validEvent(1, "case-patch")
-	updated, replay, err := store.TransitionWithUpdate(ctx, "case-patch", 1, CaseValidating, update, event)
+	updated, replay, err := store.TransitionWithUpdate(ctx, "case-patch", 1, CaseInvestigating, update, event)
 	if err != nil || replay || updated.CurrentAttemptID != attemptID || updated.CycleNumber != cycle ||
 		updated.ClosedAt == nil || !updated.ClosedAt.Equal(closedAt) {
 		t.Fatalf("updated=%+v replay=%v err=%v", updated, replay, err)
 	}
-	replayed, replay, err := store.TransitionWithUpdate(ctx, "case-patch", 1, CaseValidating, update, event)
+	replayed, replay, err := store.TransitionWithUpdate(ctx, "case-patch", 1, CaseInvestigating, update, event)
 	if err != nil || !replay || replayed.Version != updated.Version || replayed.CurrentAttemptID != attemptID {
 		t.Fatalf("replayed=%+v replay=%v err=%v", replayed, replay, err)
 	}
 	differentCycle := 3
 	conflictingUpdate := update
 	conflictingUpdate.CycleNumber = &differentCycle
-	if _, _, err := store.TransitionWithUpdate(ctx, "case-patch", 1, CaseValidating, conflictingUpdate, event); !errors.Is(err, ErrIdempotencyConflict) {
+	if _, _, err := store.TransitionWithUpdate(ctx, "case-patch", 1, CaseInvestigating, conflictingUpdate, event); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("conflicting update error = %v", err)
 	}
 	stored, err := store.GetCase(ctx, "case-patch")
@@ -797,12 +742,12 @@ func TestCaseStoreTransitionWithUpdateSelectedBotSetClearAndNoChange(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			caseID := "case-bot-" + strings.ReplaceAll(tc.name, " ", "-")
 			if err := store.CreateCase(ctx, IncidentCase{ID: caseID, BugID: "bug-" + caseID,
-				Status: CasePendingValidation, CycleNumber: 1, Version: 1, SelectedBotKey: tc.initial}); err != nil {
+				Status: CasePendingInvestigation, CycleNumber: 1, Version: 1, SelectedBotKey: tc.initial}); err != nil {
 				t.Fatal(err)
 			}
 			update := CaseSnapshotUpdate{SelectedBotKey: tc.update}
 			event := validEvent(index+20, caseID)
-			updated, replay, err := store.TransitionWithUpdate(ctx, caseID, 1, CaseValidating, update, event)
+			updated, replay, err := store.TransitionWithUpdate(ctx, caseID, 1, CaseInvestigating, update, event)
 			if err != nil || replay || updated.SelectedBotKey != tc.want {
 				t.Fatalf("updated=%+v replay=%v err=%v", updated, replay, err)
 			}
@@ -811,7 +756,7 @@ func TestCaseStoreTransitionWithUpdateSelectedBotSetClearAndNoChange(t *testing.
 				t.Fatalf("stored=%+v err=%v", stored, err)
 			}
 			if tc.conflictNoChange {
-				if _, _, err := store.TransitionWithUpdate(ctx, caseID, 1, CaseValidating, CaseSnapshotUpdate{}, event); !errors.Is(err, ErrIdempotencyConflict) {
+				if _, _, err := store.TransitionWithUpdate(ctx, caseID, 1, CaseInvestigating, CaseSnapshotUpdate{}, event); !errors.Is(err, ErrIdempotencyConflict) {
 					t.Fatalf("clear vs no-change error=%v", err)
 				}
 			}
@@ -887,7 +832,7 @@ func TestCaseStoreInitializesAndMigratesVersionedSchema(t *testing.T) {
 			Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusRunning,
 			AgentTarget: "codex", BotKey: "validator", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`), StartedAt: time.Now().UTC(),
 		}
-		if err := store.CreateAttempt(context.Background(), attempt); err != nil {
+		if err := store.createAttempt(context.Background(), attempt, AttemptValidationOptions{AllowLegacyMigration: true}); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.Close(); err != nil {
@@ -1342,7 +1287,7 @@ func TestCaseStoreRejectsNonNilZeroOptionalTimestamps(t *testing.T) {
 	store := openTestCaseStore(t)
 	ctx := context.Background()
 	zero := time.Time{}
-	incident := IncidentCase{ID: "case-zero-time", BugID: "bug", Status: CasePendingValidation, CycleNumber: 1, ClosedAt: &zero}
+	incident := IncidentCase{ID: "case-zero-time", BugID: "bug", Status: CasePendingInvestigation, CycleNumber: 1, ClosedAt: &zero}
 	if err := store.CreateCase(ctx, incident); err == nil {
 		t.Fatal("CreateCase accepted non-nil zero ClosedAt")
 	}
@@ -1415,7 +1360,7 @@ func TestCaseStoreIndependentStoresDistinctTransitionsOnlyOneWins(t *testing.T) 
 	for index, store := range []*CaseStore{first, second} {
 		go func(index int, store *CaseStore) {
 			<-start
-			_, _, err := store.Transition(context.Background(), "case-independent-writers", 1, CaseValidating, validEvent(index+10, "case-independent-writers"))
+			_, _, err := store.Transition(context.Background(), "case-independent-writers", 1, CaseInvestigating, validEvent(index+10, "case-independent-writers"))
 			results <- err
 		}(index, store)
 	}
@@ -1485,7 +1430,7 @@ func stringPointer(value string) *string {
 func createTestCase(t *testing.T, store *CaseStore, id string) {
 	t.Helper()
 	if err := store.CreateCase(context.Background(), IncidentCase{
-		ID: id, BugID: "bug-" + id, Status: CasePendingValidation, CycleNumber: 1, Version: 1,
+		ID: id, BugID: "bug-" + id, Status: CasePendingInvestigation, CycleNumber: 1, Version: 1,
 	}); err != nil {
 		t.Fatalf("CreateCase: %v", err)
 	}
@@ -1551,7 +1496,7 @@ func TestCaseStoreSaveCompletionIntentIfRunningIsCASAndIdempotent(t *testing.T) 
 	if err := store.CreateAttempt(ctx, attempt); err != nil {
 		t.Fatal(err)
 	}
-	command := CompleteAttemptCommand{CaseID: attempt.CaseID, AttemptID: attempt.ID, ExpectedVersion: 1, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: "validator", Outcome: PhaseOutcomeNotReproduced, OutputJSON: []byte(`{"result":"not-reproduced"}`)}
+	command := CompleteAttemptCommand{CaseID: attempt.CaseID, AttemptID: attempt.ID, ExpectedVersion: 1, IdempotencyKey: "agent-phase:" + attempt.ID, ActorID: "validator", Outcome: PhaseOutcomeNeedsEvidence, OutputJSON: []byte(`{"result":"not-reproduced"}`)}
 	if err := store.SaveCompletionIntentIfRunning(ctx, command); err != nil {
 		t.Fatal(err)
 	}
@@ -1567,7 +1512,7 @@ func TestCaseStoreSaveCompletionIntentIfRunningIsCASAndIdempotent(t *testing.T) 
 		t.Fatalf("intent=%+v found=%v err=%v raw=%s", got, found, err, stored.OutputJSON)
 	}
 	divergent := command
-	divergent.Outcome = PhaseOutcomeReproduced
+	divergent.Outcome = PhaseOutcomeRootCauseReady
 	if err := store.SaveCompletionIntentIfRunning(ctx, divergent); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("divergent save error = %v", err)
 	}

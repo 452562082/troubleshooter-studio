@@ -40,10 +40,7 @@ type Answers struct {
 	LarkAttachment bool
 
 	FeishuProjectEnabled bool
-
-	// Targets 是 generation.targets 的显式列表：openclaw / claude-code / cursor / embedded
-	// 空表示 fallback 到 [openclaw]
-	Targets []string
+	Targets              []string
 }
 
 // WriteYAML 手写 YAML，避免引入 yaml.Encoder 的字段顺序与 omitempty 复杂度
@@ -62,8 +59,6 @@ func (a *Answers) WriteYAML(out io.Writer) error {
 	}
 	p("\nagent:\n")
 	p("  name: %q\n", a.AgentName)
-	p("  workspace_name: %q    # OpenClaw 工作区目录名（~/.openclaw/workspace/<这里>）\n", a.WorkspaceName)
-	p("  model: %s              # LLM model id;前缀决定 provider(anthropic/openai/deepseek/qwen/minimax/moonshot/zhipu/ollama)\n", a.AgentModel)
 
 	p("\n# environments：声明系统的所有环境。每个 env 会注册一套独立的 MCP 实例\n")
 	p("# （如 nacos-mcp-server-dev / -prod），机器人按 is_prod 调整谨慎度。\n")
@@ -115,13 +110,13 @@ func (a *Answers) WriteYAML(out io.Writer) error {
 		p("      - url: \"{{ONE2ALL_MCP_URL}}\"    # MCP server 完整 URL(含路径 hash)\n")
 	default:
 		p("    type: %s\n", a.ConfigCenterType)
-		p("    endpoints:            # 每 env 的配置中心地址（{{...}} 会在 install.sh 交互时替换）\n")
+		p("    endpoints:            # 每 env 的配置中心地址（{{...}} 会在 部署时替换）\n")
 		for _, e := range a.Envs {
 			p("      - env: %s\n", e.ID)
 			p("        addr: \"{{CONFIG_CENTER_ADDR_%s}}\"\n", strings.ToUpper(e.ID))
 			p("        namespace_hint: %s\n", e.ID)
 		}
-		p("    auth:                 # 用户名/密码占位，install.sh 会让用户输入并写入 MCP env\n")
+		p("    auth:                 # 用户名/密码占位，部署时填写并写入 MCP env\n")
 		p("      username_placeholder: \"{{CONFIG_CENTER_USERNAME}}\"\n")
 		p("      password_placeholder: \"{{CONFIG_CENTER_PASSWORD}}\"\n")
 	}
@@ -154,7 +149,7 @@ func (a *Answers) WriteYAML(out io.Writer) error {
 			if a.ConfigCenterType != "" && a.ConfigCenterType != "none" {
 				p("      discovery: from_config_center   # 运行时通过配置中心拿连接串\n")
 			} else {
-				p("      discovery: static               # install.sh 交互时直接收集连接串\n")
+				p("      discovery: static               # 部署时直接收集连接串\n")
 			}
 			p("      readonly_enforced: true           # 强制只读；generator 拒绝写操作\n")
 		}
@@ -192,7 +187,7 @@ func (a *Answers) WriteYAML(out io.Writer) error {
 	// 真要 CLI 跑 gen 时手动加这一行覆盖默认即可。
 	targets := a.Targets
 	if len(targets) == 0 {
-		targets = []string{"openclaw"}
+		targets = []string{"claude-code"}
 	}
 	p("  targets:                             # 每个 target 产出一份机器人产物（同一份 troubleshooter.yaml）\n")
 	for _, t := range targets {

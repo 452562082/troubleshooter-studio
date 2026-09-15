@@ -63,7 +63,6 @@ func runDiscover(args []string) error {
 }
 
 // enrichBotsWithIDEStatus 跟桌面 bindings_repo.go DiscoverBots 同款逻辑:一次性 detect
-// 三家 IDE,for 每个 bot 按 target 查表填 IDEAvailable。openclaw 始终视为 available。
 //
 // 不抽到 internal/discover 是因为 discover 不依赖 aitools(单向依赖,纯 Scan 不掺探测);
 // 这层 enrichment 由调用方(CLI / 桌面 binding)各自做。
@@ -109,15 +108,14 @@ func appendGhostBots(bots []discover.DiscoveredAgent) []discover.DiscoveredAgent
 }
 
 // detectIDEInstalled 一次性探测三家 IDE 安装状态,返回 target → bool 表。
-// openclaw 始终 true(产品自带,不靠探测)。enrichBotsWithIDEStatus + appendGhostBots
 // 各自调一次（共两次）—— 一次 discover 内 ~6 进程 spawn,可接受;cache 化留给后续真有
 // 性能需求再做。
 func detectIDEInstalled() map[string]bool {
 	return map[string]bool{
-		"openclaw":    true,
 		"claude-code": aitools.DetectClaudeCode().Installed,
 		"cursor":      aitools.DetectCursor().Installed,
 		"codex":       aitools.DetectCodex().Installed,
+		"opencode":    aitools.DetectOpenCode().Installed,
 	}
 }
 

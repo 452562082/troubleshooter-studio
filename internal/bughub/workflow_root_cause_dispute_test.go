@@ -13,7 +13,7 @@ func TestDisputeRootCauseReopensInvestigationWithoutRestartingValidation(t *test
 	store := newOrchestratorStore(t)
 	incident, root := readyCaseForRemediationReassessment(t, store, "case-dispute-root")
 	runner := &recordingPhaseRunner{}
-	orchestrator := NewCaseOrchestrator(store, runner, nil, nil)
+	orchestrator := NewCaseOrchestrator(store, runner, nil)
 	command := DisputeRootCauseCommand{
 		CaseID: incident.ID, ExpectedVersion: incident.Version,
 		IdempotencyKey:     DisputeRootCauseKey(incident.ID, root.ID, incident.Version),
@@ -105,7 +105,7 @@ func TestDisputeRootCauseSupportsNonCodeRemediationAndRejectsInvalidScope(t *tes
 		t.Fatal(err)
 	}
 	incident = bound.Case
-	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil, nil)
+	orchestrator := NewCaseOrchestrator(store, &recordingPhaseRunner{}, nil)
 	command := DisputeRootCauseCommand{
 		CaseID: incident.ID, ExpectedVersion: incident.Version,
 		IdempotencyKey: DisputeRootCauseKey(incident.ID, root.ID, incident.Version),
@@ -140,42 +140,12 @@ func TestRootCauseDisputePromptTreatsPreviousConclusionAsHypothesis(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"待验证假设", "CodeGraph", "定向补证", "不得修改代码"} {
+	for _, required := range []string{"待验证假设", "CodeGraph", "精确缺口", "不得修改代码"} {
 		if !strings.Contains(prompt, required) {
 			t.Fatalf("prompt missing %q: %s", required, prompt)
 		}
 	}
 	if strings.Contains(prompt, "previous_result 中除 remediation 外的所有字段均由 Studio 锁定") {
 		t.Fatalf("disputed root cause must not remain locked: %s", prompt)
-	}
-}
-
-func TestValidationRefreshCarriesRootCauseDisputeContext(t *testing.T) {
-	ctx := context.Background()
-	store := newOrchestratorStore(t)
-	incident := createWorkflowCase(t, store, "case-dispute-refresh", CaseValidating)
-	now := time.Now().UTC()
-	source := PhaseAttempt{
-		ID: incident.ID + "-dispute", CaseID: incident.ID, CycleNumber: incident.CycleNumber,
-		Phase: PhaseInvestigation, Status: AttemptStatusSucceeded, AgentTarget: "codex", BotKey: "investigator",
-		InputJSON:  []byte(`{"validation_attempt_id":"validation-old","validation_evidence":[{"artifact_id":"artifact-old"}],"root_cause_dispute":{"kind":"user_root_cause_dispute","reason":"旧结论忽略运行证据","source_root_cause_attempt_id":"root-old","previous_result":{"investigation_status":"root_cause_ready","root_cause":"old cause"}}}`),
-		OutputJSON: []byte(`{}`), StartedAt: now.Add(-time.Minute), FinishedAt: &now,
-	}
-	if err := store.CreateAttempt(ctx, source); err != nil {
-		t.Fatal(err)
-	}
-	validation := PhaseAttempt{
-		ID: incident.ID + "-refresh", CaseID: incident.ID, CycleNumber: incident.CycleNumber,
-		Phase: PhaseValidation, Mode: AttemptReproduce, Status: AttemptStatusSucceeded, AgentTarget: "codex", BotKey: "investigator",
-		InputJSON: []byte(`{"source_investigation_attempt_id":"` + source.ID + `"}`), OutputJSON: []byte(`{}`),
-	}
-	orchestrator := NewCaseOrchestrator(store, nil, nil, nil)
-	carried, err := orchestrator.carryRootCauseDisputeAfterValidationRefresh(ctx, validation, []byte(`{"validation_attempt_id":"validation-new","validation_evidence":[{"artifact_id":"artifact-new"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	dispute, ok := rootCauseDisputeFromInput(carried)
-	if !ok || dispute.Reason != "旧结论忽略运行证据" || !strings.Contains(string(carried), `"validation_attempt_id":"validation-new"`) {
-		t.Fatalf("carried=%s dispute=%+v ok=%v", carried, dispute, ok)
 	}
 }

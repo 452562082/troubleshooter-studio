@@ -421,7 +421,7 @@ function discoveredBotToRef(bot: DiscoveredBot): BotRef {
 }
 
 function supportsIncidentWorkflowTarget(target: string): boolean {
-  return ['codex', 'claude-code', 'openclaw'].includes(target.trim().toLowerCase())
+  return ['codex', 'claude-code', 'cursor', 'opencode'].includes(target.trim().toLowerCase())
 }
 
 function botTargetFromKey(key: string): string {

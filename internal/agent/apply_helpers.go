@@ -21,16 +21,15 @@ import (
 // resolveApplySource 按 target 算出"应用源"(staging 里对应的产物子树)和重启提示。
 func resolveApplySource(baseOut, target string) (src, hint string) {
 	switch target {
-	case "openclaw":
-		// agent.Path 是 ~/.openclaw/workspace/<name>/;对应产物根下的 templates/workspace-template/
-		src = filepath.Join(baseOut, "templates", "workspace-template")
-		hint = "若新增了 env / 切了配置中心类型,回 BotsPage 重跑一次部署(走 InstallNativeOpenclaw 重新注册 MCP + 收凭证),再 `openclaw gateway restart`;只改映射不用动。"
 	case "claude-code":
 		src = baseOut + "-claude-code"
 		hint = "Claude Code 下次启动会自动加载用户级 ~/.claude/agents/<name>.md;正在开的 session 需要 `/clear` 或重启 `claude` CLI 才能吃到新版 subagent。"
 	case "cursor":
 		src = baseOut + "-cursor"
 		hint = "Cursor 下次打开 AI 侧栏时会重新扫 ~/.cursor/agents/<name>.md;新建对话即可选到更新后的 Custom Agent。"
+	case "opencode":
+		src = baseOut + "-opencode"
+		hint = "OpenCode 新会话会加载更新后的机器人。"
 	case "codex":
 		src = baseOut + "-codex"
 		hint = "Codex CLI 下次启动会重读 ~/.codex/agents/<name>.toml、专属 tshoot-runtimes/<name>/config.toml 和共享 tshoot-router；正在开的 session 需要 `/clear` 或重启才能吃到新版项目路由与 Agent 门禁。"
@@ -75,10 +74,7 @@ func looksLikeFactoryArtifact(rel, target string) bool {
 	common := []string{"skills/", "scripts/"}
 	var prefixes []string
 	switch target {
-	case "openclaw":
-		prefixes = append(prefixes, "SOUL.md", "IDENTITY.md", "AGENTS.md", "USER.md",
-			"CHECKLIST.md", "TOOLS.md", ".clawhub/")
-	case "claude-code", "cursor":
+	case "claude-code", "cursor", "opencode":
 		prefixes = append(prefixes, "agents/")
 	case "codex":
 		// codex staging 顶层是平铺的 AGENTS.md(不再有 agents/<name>.md)
@@ -155,7 +151,6 @@ func internalAgentsForTSFMeta(cfg *config.SystemConfig) []discover.InternalAgent
 	}
 	return []discover.InternalAgent{
 		{ID: cfg.ResolveID(), Role: discover.RoleTroubleshooter},
-		{ID: base + "-" + discover.RoleValidator, Role: discover.RoleValidator},
 		{ID: base + "-" + discover.RoleFixer, Role: discover.RoleFixer},
 	}
 }

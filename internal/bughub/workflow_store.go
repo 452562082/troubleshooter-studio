@@ -173,6 +173,10 @@ func OpenCaseStore(path string) (*CaseStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := store.retireVerificationCases(context.Background()); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return store, nil
 }
 
@@ -886,7 +890,7 @@ func (s *CaseStore) CreateCaseWithIdentity(ctx context.Context, creation CaseCre
 	if err := validateNewWorkflowCaseID(creation.Case.ID); err != nil {
 		return result, fmt.Errorf("durable Case creation: %w", err)
 	}
-	if creation.Case.Status != CasePendingValidation || creation.Case.CurrentAttemptID != "" || creation.Case.ClosedAt != nil {
+	if creation.Case.Status != CasePendingInvestigation || creation.Case.CurrentAttemptID != "" || creation.Case.ClosedAt != nil {
 		return result, errors.New("durable Case creation requires an open pending_validation Case without an attempt")
 	}
 	if blank(creation.IdempotencyKey) || blank(creation.ActorID) || len(creation.RequestJSON) == 0 || !json.Valid(creation.RequestJSON) {
@@ -931,8 +935,8 @@ func (s *CaseStore) CreateCaseWithIdentity(ctx context.Context, creation CaseCre
 	openCase, openErr := scanCase(tx.QueryRowContext(ctx, `SELECT id, bug_id, source, system_id,
 		environment, status, cycle_number, current_attempt_id, selected_bot_key,
 		reset_from_case_id, superseded_by_case_id, frontend_entry_json, version, created_at, updated_at, closed_at
-		FROM incident_cases WHERE bug_id = ? AND status NOT IN (?, ?, ?)
-		ORDER BY updated_at DESC, id DESC LIMIT 1`, creation.Case.BugID, CaseFixedVerified, CaseLegacyArchived, CaseResetArchived))
+		FROM incident_cases WHERE bug_id = ? AND status NOT IN (?, ?, ?, ?, ?)
+		ORDER BY updated_at DESC, id DESC LIMIT 1`, creation.Case.BugID, CaseFixedVerified, CaseLegacyArchived, CaseResetArchived, CaseSubmitted, CaseRemediationRecorded))
 	if openErr == nil {
 		result.Case = openCase.Clone()
 		result.ExistingOpen = true
@@ -1145,7 +1149,7 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 	// effect returns later, its compare-and-set outcome write finds no claim and
 	// therefore cannot continue the archived Case.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM browser_recovery_operations WHERE case_id=? AND status IN (?,?,?)`,
-		reset.CaseID, BrowserRecoveryClaimed, BrowserRecoveryEffectSucceeded, BrowserRecoveryOutcomeUncertain); err != nil {
+		reset.CaseID, "claimed", "effect_succeeded", "outcome_uncertain"); err != nil {
 		return result, fmt.Errorf("supersede reset Case browser recovery: %w", err)
 	}
 
@@ -1223,7 +1227,7 @@ func (s *CaseStore) ResetCaseWithReplacement(ctx context.Context, reset CaseRese
 		Environment:     reset.ReplacementEnvironment,
 		FrontendEntry:   reset.ReplacementFrontendEntry.Clone(),
 		FrontendEntries: newFrontendEntryBindings(reset.ReplacementFrontendEntries),
-		Status:          CasePendingValidation,
+		Status:          CasePendingInvestigation,
 		CycleNumber:     1,
 		SelectedBotKey:  reset.SelectedBotKey,
 		ResetFromCaseID: incident.ID,
@@ -1499,7 +1503,7 @@ func validateCaseResetResult(result CaseResetResult, oldCaseID, newCaseID string
 	if result.Archived.ID != oldCaseID || result.Archived.Status != CaseResetArchived || result.Archived.SupersededByCaseID != newCaseID || result.Archived.ClosedAt == nil {
 		return errors.New("stored Case reset archive result is invalid")
 	}
-	if result.Replacement.ID != newCaseID || result.Replacement.Status != CasePendingValidation || result.Replacement.ResetFromCaseID != oldCaseID {
+	if result.Replacement.ID != newCaseID || (result.Replacement.Status != CasePendingInvestigation && result.Replacement.Status != CasePendingValidation) || result.Replacement.ResetFromCaseID != oldCaseID {
 		return errors.New("stored Case reset replacement result is invalid")
 	}
 	if err := result.Archived.Validate(); err != nil {
@@ -2464,18 +2468,10 @@ func (m CaseMutation) clone() CaseMutation {
 }
 
 func (s *CaseStore) ApplyCaseMutation(ctx context.Context, mutation CaseMutation) (CaseMutationResult, error) {
-	return s.applyCaseMutation(ctx, mutation, nil)
+	return s.applyCaseMutation(ctx, mutation)
 }
 
-func (s *CaseStore) ApplyBrowserRecoveryCaseMutation(ctx context.Context, mutation CaseMutation, request BrowserRecoveryOperationRequest, claimToken string) (CaseMutationResult, error) {
-	consume, err := newBrowserRecoveryMutationConsume(mutation, request, claimToken)
-	if err != nil {
-		return CaseMutationResult{}, err
-	}
-	return s.applyCaseMutation(ctx, mutation, consume)
-}
-
-func (s *CaseStore) applyCaseMutation(ctx context.Context, mutation CaseMutation, consume *browserRecoveryMutationConsume) (result CaseMutationResult, err error) {
+func (s *CaseStore) applyCaseMutation(ctx context.Context, mutation CaseMutation) (result CaseMutationResult, err error) {
 	mutation = mutation.clone()
 	if blank(mutation.CaseID) || mutation.ExpectedVersion < 1 || blank(mutation.IdempotencyKey) {
 		return result, errors.New("compound Case mutation requires case ID, positive expected version, and idempotency key")
@@ -2524,30 +2520,7 @@ func (s *CaseStore) applyCaseMutation(ctx context.Context, mutation CaseMutation
 		if err = json.Unmarshal([]byte(resultJSON), &result.Case); err != nil {
 			return result, fmt.Errorf("decode compound replay: %w", err)
 		}
-		if consume != nil {
-			operation, consumeErr := loadBrowserRecoveryMutationConsume(ctx, tx, consume)
-			if consumeErr != nil {
-				return result, consumeErr
-			}
-			blocked, blockedErr := getAttempt(ctx, tx, consume.Request.AttemptID)
-			if blockedErr != nil || validateBrowserRecoveryContinuationMutation(mutation, consume.Request, blocked) != nil {
-				return result, ErrIdempotencyConflict
-			}
-			switch operation.Status {
-			case BrowserRecoveryEffectSucceeded:
-				if consumeErr = consumeBrowserRecoveryOperationTx(ctx, tx, consume, result.Case); consumeErr != nil {
-					return result, consumeErr
-				}
-			case BrowserRecoveryContinued:
-				if operation.ResultCase.ID != result.Case.ID || operation.ResultCase.Version != result.Case.Version || operation.ResultCase.CurrentAttemptID != result.Case.CurrentAttemptID {
-					return result, ErrIdempotencyConflict
-				}
-			case BrowserRecoveryClaimed, BrowserRecoveryOutcomeUncertain:
-				return result, ErrBrowserRecoveryOutcomeUncertain
-			default:
-				return result, ErrIdempotencyConflict
-			}
-		}
+
 		result.Replay = true
 		if err = tx.Commit(); err != nil {
 			return result, err
@@ -2557,24 +2530,6 @@ func (s *CaseStore) applyCaseMutation(ctx context.Context, mutation CaseMutation
 	if !errors.Is(queryErr, sql.ErrNoRows) {
 		return result, queryErr
 	}
-	var recoveryOperation BrowserRecoveryOperation
-	if consume == nil {
-		if err = rejectUnresolvedBrowserRecovery(ctx, tx, mutation.CaseID); err != nil {
-			return result, err
-		}
-	} else {
-		recoveryOperation, err = loadBrowserRecoveryMutationConsume(ctx, tx, consume)
-		if err != nil {
-			return result, err
-		}
-		switch recoveryOperation.Status {
-		case BrowserRecoveryEffectSucceeded:
-		case BrowserRecoveryClaimed, BrowserRecoveryOutcomeUncertain:
-			return result, ErrBrowserRecoveryOutcomeUncertain
-		default:
-			return result, ErrIdempotencyConflict
-		}
-	}
 	incident, err := getCase(ctx, tx, mutation.CaseID)
 	if err != nil {
 		return result, err
@@ -2582,12 +2537,7 @@ func (s *CaseStore) applyCaseMutation(ctx context.Context, mutation CaseMutation
 	if incident.Version != mutation.ExpectedVersion {
 		return result, fmt.Errorf("%w: expected %d, current %d", ErrCaseVersionConflict, mutation.ExpectedVersion, incident.Version)
 	}
-	if consume != nil {
-		blocked, blockedErr := getAttempt(ctx, tx, consume.Request.AttemptID)
-		if blockedErr != nil || incident.Status != CaseWaitingEvidence || incident.CurrentAttemptID != consume.Request.AttemptID || incident.CycleNumber != consume.Request.CycleNumber || validateBrowserRecoveryContinuationMutation(mutation, consume.Request, blocked) != nil {
-			return result, ErrIdempotencyConflict
-		}
-	}
+
 	finishedIDs := map[string]struct{}{}
 	for _, attempt := range mutation.FinishAttempts {
 		finishedIDs[attempt.ID] = struct{}{}
@@ -2767,6 +2717,11 @@ func (s *CaseStore) applyCaseMutation(ctx context.Context, mutation CaseMutation
 		}
 	}
 	incident.Status = status
+	if IsTerminalCaseStatus(status) && mutation.Snapshot.ClosedAt == nil {
+		now := time.Now().UTC()
+		mutation.Snapshot.ClosedAtSet = true
+		mutation.Snapshot.ClosedAt = &now
+	}
 	applyCaseSnapshot(&incident, mutation.Snapshot)
 	incident.Version++
 	now := time.Now().UTC()
@@ -2775,11 +2730,7 @@ func (s *CaseStore) applyCaseMutation(ctx context.Context, mutation CaseMutation
 		return result, err
 	}
 	resultJSONBytes, _ := json.Marshal(incident.Clone())
-	if consume != nil {
-		if err = consumeBrowserRecoveryOperationTx(ctx, tx, consume, incident); err != nil {
-			return result, err
-		}
-	}
+
 	updateResult, execErr := tx.ExecContext(ctx, `UPDATE incident_cases SET status=?,cycle_number=?,current_attempt_id=?,selected_bot_key=?,version=?,updated_at=?,closed_at=? WHERE id=? AND version=?`, incident.Status, incident.CycleNumber, incident.CurrentAttemptID, incident.SelectedBotKey, incident.Version, formatStoreTime(now), formatOptionalStoreTime(incident.ClosedAt), incident.ID, mutation.ExpectedVersion)
 	if execErr != nil {
 		return result, execErr
@@ -2888,6 +2839,16 @@ func validateAuditEvent(e TransitionEvent) error {
 		return errors.New("invalid audit event")
 	}
 	return nil
+}
+
+// Historical event records are validated structurally, independently of the
+// current executable transition graph. Writes still use TransitionEvent.Validate.
+func validateStoredTransitionEvent(e TransitionEvent) error {
+	if !e.ToStatus.valid() {
+		return errors.New("stored event has an unknown target status")
+	}
+	e.ToStatus = e.FromStatus
+	return validateAuditEvent(e)
 }
 
 func caseMutationFingerprint(m CaseMutation) (string, error) {
@@ -3025,9 +2986,6 @@ func (s *CaseStore) TransitionWithUpdate(ctx context.Context, caseID string, exp
 	if !errors.Is(err, sql.ErrNoRows) {
 		return IncidentCase{}, false, fmt.Errorf("check transition idempotency: %w", err)
 	}
-	if err = rejectUnresolvedBrowserRecovery(ctx, tx, caseID); err != nil {
-		return IncidentCase{}, false, err
-	}
 
 	updated, err = getCase(ctx, tx, caseID)
 	if err != nil {
@@ -3068,6 +3026,9 @@ func (s *CaseStore) TransitionWithUpdate(ctx context.Context, caseID string, exp
 	}
 	updated.Version++
 	updated.UpdatedAt = event.CreatedAt
+	if IsTerminalCaseStatus(updated.Status) && updated.ClosedAt == nil {
+		updated.ClosedAt = cloneTimePtr(&event.CreatedAt)
+	}
 	if err := updated.Validate(); err != nil {
 		return IncidentCase{}, false, err
 	}
@@ -3135,7 +3096,7 @@ func (s *CaseStore) ListEvents(ctx context.Context, caseID string) ([]Transition
 		if event.FromStatus == event.ToStatus {
 			validationErr = validateAuditEvent(event)
 		} else {
-			validationErr = event.Validate()
+			validationErr = validateStoredTransitionEvent(event)
 		}
 		if validationErr != nil {
 			return nil, fmt.Errorf("validate stored transition event: %w", validationErr)
@@ -3166,7 +3127,7 @@ func (s *CaseStore) GetEventByIdempotencyKey(ctx context.Context, key string) (T
 	if event.FromStatus == event.ToStatus {
 		err = validateAuditEvent(event)
 	} else {
-		err = event.Validate()
+		err = validateStoredTransitionEvent(event)
 	}
 	if err != nil {
 		return TransitionEvent{}, false, err
@@ -3215,7 +3176,7 @@ func (s *CaseStore) GetCommittedCaseMutation(ctx context.Context, key string) (C
 	if replay.Event.FromStatus == replay.Event.ToStatus {
 		err = validateAuditEvent(replay.Event)
 	} else {
-		err = replay.Event.Validate()
+		err = validateStoredTransitionEvent(replay.Event)
 	}
 	if err != nil {
 		return CommittedCaseMutation{}, false, err
@@ -3430,7 +3391,7 @@ func scanAttempt(row rowScanner) (PhaseAttempt, error) {
 		attempt.FinishedAt = &finished
 	}
 	attempt.Usage.Duration = time.Duration(durationNanos)
-	if err := attempt.ValidateWithOptions(AttemptValidationOptions{AllowLegacyMigration: attempt.Phase == PhaseLegacy}); err != nil {
+	if err := attempt.ValidateWithOptions(AttemptValidationOptions{AllowLegacyMigration: attempt.Phase == PhaseLegacy || attempt.Phase == PhaseValidation || attempt.Phase == PhaseRegression}); err != nil {
 		return PhaseAttempt{}, fmt.Errorf("validate stored phase attempt: %w", err)
 	}
 	return attempt.Clone(), nil
@@ -3648,4 +3609,13 @@ func marshalStringMap(values map[string]string) (string, error) {
 		return "", fmt.Errorf("encode string map: %w", err)
 	}
 	return string(encoded), nil
+}
+
+func stringInSlice(value string, values []string) bool {
+	for _, item := range values {
+		if item == value {
+			return true
+		}
+	}
+	return false
 }

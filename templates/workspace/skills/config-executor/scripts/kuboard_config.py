@@ -3,8 +3,7 @@
 
 凭证来源：
   1. CLI --url / --access-key / --username / --password
-  2. ~/.openclaw/<agent-id>-creds.json
-  3. ~/.tshoot/<agent-id>-creds.json
+  2. ~/.tshoot/<agent-id>-creds.json
 
 支持两种 creds 结构：
   {"kuboard":{"dev":{"url":"...","access_key":"..."}}}
@@ -37,7 +36,6 @@ def error_out(msg: str, hint: str = "", code: int = 2) -> int:
 
 def find_creds_file(agent_id: str) -> str:
     paths = [
-        os.path.expanduser(f"~/.openclaw/{agent_id}-creds.json"),
         os.path.expanduser(f"~/.tshoot/{agent_id}-creds.json"),
     ]
     for p in paths:
@@ -45,7 +43,7 @@ def find_creds_file(agent_id: str) -> str:
             return p
     raise FileNotFoundError(
         "creds file not found in any of: "
-        f"~/.openclaw/{agent_id}-creds.json, ~/.tshoot/{agent_id}-creds.json"
+        f"~/.tshoot/{agent_id}-creds.json"
     )
 
 

@@ -66,7 +66,6 @@ func NewCodexInvestigator(store *InvestigationStore, codexBin string) *CodexInve
 		binaries: map[string]string{
 			"codex":       codexBin,
 			"claude-code": "claude",
-			"openclaw":    "openclaw",
 		},
 		active: make(map[string]*activeCodexRun),
 	}
@@ -102,166 +101,11 @@ func (i *CodexInvestigator) SetEventSink(sink InvestigationEventSink) {
 }
 
 func BuildCodexInvestigationPrompt(b Bug, bot BotRef) string {
-	return BuildCodexInvestigationPromptWithValidation(b, bot, "")
-}
-
-func BuildCodexValidationPrompt(b Bug, bot BotRef) string {
-	var sb strings.Builder
-	sb.WriteString("你是 Bug 验证 Agent。\n")
-	sb.WriteString("目标：先做取证验证，不做根因判断，不给修复方案；修复后也可复用同一流程做回归复查。\n")
-	sb.WriteString("请读取 Bug 工单的复现步骤、附件、环境、前端 URL/API 线索；能实际打开页面或请求接口时优先执行，只读取证。\n")
-	sb.WriteString("边界：只复现场景和收集证据；不要读取业务源码定位函数/行号，不要输出\"代码根因/最可能原因/修复建议/候选原因\"。如需代码分析，交给后续排障 Agent。\n")
-	sb.WriteString("如果缺少账号、入口、测试数据或可重放请求，请明确标记 insufficient_info；如果用于修复后复查，请明确 fixed_verified 或 still_reproduces。\n")
-	sb.WriteString(validationAgentExecutionGuidance())
-	sb.WriteString("\n")
-	sb.WriteString(GenerateContext(b, bot))
-	sb.WriteString(validationOutputContract())
-	return sb.String()
-}
-
-func buildCodexDurableValidationContinuePrompt(b Bug, bot BotRef, userInputs []string, structuredInput, previousResult string) string {
-	var sb strings.Builder
-	sb.WriteString("你是 Bug 验证 Agent。\n")
-	sb.WriteString("目标：基于用户持续补充的信息继续实际取证验证，不做根因判断，不给修复方案。\n")
-	sb.WriteString("最新一条用户补充是本轮优先执行指令；如果用户明确要求通过 Web 页面或接口复现，必须实际尝试该路径，不能只复述历史附件。\n")
-	sb.WriteString("请重新核对上一轮 gaps：已经被本轮或历史补充满足的项目不得继续原样索要；只有实际执行仍被阻塞时才能保留。\n")
-	sb.WriteString("边界：只复现场景和收集证据；不要读取业务源码定位函数/行号，不要输出\"代码根因/最可能原因/修复建议/候选原因\"。如需代码分析，交给后续排障 Agent。\n")
-	sb.WriteString(validationAgentExecutionGuidance())
-	sb.WriteString("\n")
-	if len(userInputs) > 0 {
-		sb.WriteString("## 用户补充信息（按提交顺序，最后一条优先）\n\n")
-		for index, input := range userInputs {
-			sb.WriteString(fmt.Sprintf("%d. %s\n", index+1, strings.TrimSpace(input)))
-		}
-		sb.WriteString("\n")
-	}
-	if strings.TrimSpace(structuredInput) != "" {
-		sb.WriteString("## 本轮结构化验证信息\n\n```json\n")
-		sb.WriteString(strings.TrimSpace(structuredInput))
-		sb.WriteString("\n```\n\n")
-	}
-	if strings.TrimSpace(previousResult) != "" {
-		sb.WriteString("## 上一轮验证结果（仅作为待复核上下文）\n\n```json\n")
-		sb.WriteString(strings.TrimSpace(previousResult))
-		sb.WriteString("\n```\n\n")
-	}
-	sb.WriteString(GenerateContext(b, bot))
-	sb.WriteString(validationOutputContract())
-	return sb.String()
-}
-
-func BuildCodexInvestigationPromptWithValidation(b Bug, bot BotRef, validationReport string) string {
-	var sb strings.Builder
-	sb.WriteString("请作为选定的 AI 排障机器人开始排障。\n")
-	sb.WriteString("目标：基于下面 Bug 工单上下文和验证 Agent 已确认的复现证据，完成只读根因分析，输出可执行结论。\n\n")
-	sb.WriteString("## 强制流程（不可跳过）\n\n")
-	sb.WriteString("1. **第一步**：Read `incident-investigator/SKILL.md`，严格按 7 步排障图谱执行。\n")
-	sb.WriteString("2. 从步骤 2 timeline 开始：查最近变更（git log / K8s rollout / 配置 history）。\n")
-	sb.WriteString("3. 步骤 5 多向交叉：根据问题类型选维度，**至少覆盖 3 个维度**（日志 + 代码 + 数据 中至少 2 个），不要只靠验证 Agent 的截图。\n")
-	sb.WriteString("4. 用 trace_id / request_id 查 Jaeger 链路和 Loki/ELK 日志，不要跳过。\n")
-	sb.WriteString("5. 步骤 6 输出故障快报，步骤 7 沉淀。\n\n")
-	sb.WriteString("## 关键约束\n\n")
-	sb.WriteString("- **验证报告仅供复现参考**，不能替代你自己的排障证据链。你必须独立查询日志/指标/链路/代码/配置来确认根因。\n")
-	sb.WriteString("- 禁止只引用验证报告就下结论。没有自己查到的 trace span、日志行、代码片段、配置 diff 之前，不要写\"最可能根因\"。\n")
-	sb.WriteString("- 默认只读，不要修改代码或执行破坏性命令。\n\n")
-	sb.WriteString(GenerateContext(b, bot))
-	if strings.TrimSpace(validationReport) != "" {
-		sb.WriteString("\n## 验证 Agent 报告（复现参考，不是排障结论）\n")
-		sb.WriteString(strings.TrimSpace(validationReport))
-		sb.WriteString("\n")
-	}
-	sb.WriteString(investigationOutputContract())
-	return sb.String()
+	return "请作为选定排障机器人执行只读根因分析，遵循 incident-investigator/SKILL.md 的 7 步排障图谱。Read `incident-investigator/SKILL.md`。从工单、附件、日志、链路、配置、数据和源码收集实际证据；没有自动复现或业务验证阶段。证据不足时明确缺口，不猜测根因。不修改代码或执行写操作。\n" + GenerateContext(b, bot) + investigationOutputContract()
 }
 
 func BuildCodexContinuePrompt(b Bug, bot BotRef, userInput string, prevRun InvestigationRun) string {
-	var sb strings.Builder
-	sb.WriteString("## 用户补充信息（请优先根据此信息调整排障方向）\n\n")
-	sb.WriteString(strings.TrimSpace(userInput))
-	sb.WriteString("\n\n")
-
-	sb.WriteString("以上是用户针对前一轮排障中缺失的信息提供的补充说明。请基于这些补充信息重新排障，重点关注新的线索。\n\n")
-
-	// Get previous validation events
-	var validationParts []string
-	var investigationParts []string
-	for _, e := range prevRun.Events {
-		msg := strings.TrimSpace(e.Message)
-		if msg == "" {
-			continue
-		}
-		phase, _ := e.Meta["phase"].(string)
-		switch phase {
-		case "validation":
-			validationParts = append(validationParts, msg)
-		case "investigation":
-			investigationParts = append(investigationParts, msg)
-		default:
-			investigationParts = append(investigationParts, msg)
-		}
-	}
-
-	// Validation report (from previous run)
-	if len(validationParts) > 0 {
-		sb.WriteString("## 前一轮验证报告（复现参考）\n\n")
-		for _, p := range validationParts {
-			sb.WriteString(p)
-			sb.WriteString("\n\n")
-		}
-	}
-
-	// Previous investigation output
-	if len(investigationParts) > 0 || strings.TrimSpace(prevRun.FinalMessage) != "" {
-		sb.WriteString("## 前一轮排障输出\n\n")
-		for _, p := range investigationParts {
-			sb.WriteString(p)
-			sb.WriteString("\n\n")
-		}
-		if strings.TrimSpace(prevRun.FinalMessage) != "" {
-			sb.WriteString(strings.TrimSpace(prevRun.FinalMessage))
-			sb.WriteString("\n\n")
-		}
-	}
-
-	// Bug context
-	sb.WriteString(GenerateContext(b, bot))
-
-	sb.WriteString(investigationOutputContract())
-	return sb.String()
-}
-
-func BuildCodexValidationContinuePrompt(b Bug, bot BotRef, userInput string, prevRun InvestigationRun) string {
-	var sb strings.Builder
-	sb.WriteString("你是 Bug 验证 Agent。\n")
-	sb.WriteString("目标：基于用户补充信息继续取证验证，不做根因判断，不给修复方案。\n\n")
-	sb.WriteString(validationAgentExecutionGuidance())
-	sb.WriteString("\n")
-	sb.WriteString("## 用户补充信息\n\n")
-	sb.WriteString(strings.TrimSpace(userInput))
-	sb.WriteString("\n\n")
-
-	var previousValidation []string
-	for _, e := range prevRun.Events {
-		msg := strings.TrimSpace(e.Message)
-		if msg == "" {
-			continue
-		}
-		phase, _ := e.Meta["phase"].(string)
-		if phase == "validation" {
-			previousValidation = append(previousValidation, msg)
-		}
-	}
-	if len(previousValidation) > 0 {
-		sb.WriteString("## 前一轮验证证据\n\n")
-		for _, p := range previousValidation {
-			sb.WriteString(p)
-			sb.WriteString("\n\n")
-		}
-	}
-
-	sb.WriteString(GenerateContext(b, bot))
-	sb.WriteString(validationOutputContract())
-	return sb.String()
+	return BuildCodexInvestigationPrompt(b, bot) + "\n## 前轮排障输出（作为证据参考）\n" + prevRun.FinalMessage + "\n## 用户补充信息\n" + strings.TrimSpace(userInput)
 }
 
 func BuildCodexFixPrompt(b Bug, bot BotRef, prevRun InvestigationRun, userInput string) string {
@@ -314,7 +158,7 @@ func appendPreviousRunForFix(sb *strings.Builder, prevRun InvestigationRun) {
 		}
 	}
 	if len(validationParts) > 0 {
-		sb.WriteString("## 验证 Agent 证据\n\n")
+		sb.WriteString("## 历史工单证据\n\n")
 		for _, p := range validationParts {
 			sb.WriteString(p)
 			sb.WriteString("\n\n")
@@ -331,37 +175,6 @@ func appendPreviousRunForFix(sb *strings.Builder, prevRun InvestigationRun) {
 			sb.WriteString("\n\n")
 		}
 	}
-}
-
-func validationAgentExecutionGuidance() string {
-	var sb strings.Builder
-	sb.WriteString("\n## 执行环境说明\n")
-	sb.WriteString("- 当前验证 Agent 由桌面应用后台启动，不保证拥有 in-app browser / iab / 可视化浏览器控制能力。\n")
-	sb.WriteString("- 如果浏览器工具返回 unavailable，不要把它本身写入 gaps，也不要要求用户提供浏览器能力；应改用工单附件、本地附件路径、HAR/Network 导出、curl/API 请求、trace/request id、日志或已有截图取证。\n")
-	sb.WriteString("- 只有缺少业务验证必需资料时才写入 gaps，例如后台登录态/测试账号、受影响 URL/route/API、测试数据、HAR/Network 导出、request id 或 trace id。\n")
-	sb.WriteString("- 工具能力限制但不阻塞已有证据判断时，写入 handoff_to_troubleshooter.unchecked_scopes，不要写入 gaps。\n")
-	return sb.String()
-}
-
-func validationOutputContract() string {
-	return validationOutputContractFor("reproduced | not_reproduced | insufficient_info | fixed_verified | still_reproduces")
-}
-
-func validationOutputContractFor(statuses string) string {
-	var sb strings.Builder
-	sb.WriteString("\n请只输出下面的严格 YAML，不得增加字段或解释性段落：\n")
-	sb.WriteString("verification_status: ")
-	sb.WriteString(statuses)
-	sb.WriteByte('\n')
-	sb.WriteString("environment: \"<有效目标环境>\"\n")
-	sb.WriteString("observed_behavior: \"<what-was-observed-during-verification>\"\n")
-	sb.WriteString("expected_behavior: \"<expected>\"\n")
-	sb.WriteString("scenario_hash: \"<原始场景哈希；首次验证可为空，回归必须原样返回>\"\n")
-	sb.WriteString("evidence:\n  - kind: \"<har|screenshot|network|console|api|trace|log|command>\"\n    path: \"<Studio staging 目录内的相对路径>\"\n    captured_at: \"<RFC3339；仅兼容输出，Studio 以 fstat 为准>\"\n    environment: \"<env>\"\n    version: \"<宿主自动采集到的运行版本；不可得时留空>\"\n    request_id: \"<可空>\"\n    trace_id: \"<可空>\"\n    redaction_status: redacted | not_required # 仅兼容输出，Studio 总会重新扫描\n")
-	sb.WriteString("gaps: []\n")
-	sb.WriteString("只有当阻塞资料已经清空时 gaps 才能输出 []。证据必须通过 path 引用常规文件；不得内联密钥、cookie 或 Authorization。\n")
-	sb.WriteString("最终回答不得输出该结构之外的解释性段落。\n")
-	return sb.String()
 }
 
 func investigationOutputContract() string {
@@ -409,7 +222,7 @@ func fixOutputContract() string {
 	sb.WriteString("    result: passed | failed | skipped\n")
 	sb.WriteString("    note: \"<short evidence>\"\n")
 	sb.WriteString("    skipped_reason: \"<required only when result=skipped>\"\n")
-	sb.WriteString("deployment_notice: \"修复分支已推送；等待 Studio 将修复提交合入开发基线和环境分支，再部署环境分支并触发回归。\"\n")
+	sb.WriteString("deployment_notice: \"修复分支已推送；等待用户独立授权，由 Studio 将修复提交合入开发基线和环境分支，之后由用户人工验收。\"\n")
 	sb.WriteString("risks:\n")
 	sb.WriteString("  - \"<remaining-risk-or-empty>\"\n")
 	sb.WriteString("blocked_reason: \"<only when blocked/failed>\"\n")
@@ -988,36 +801,11 @@ func buildClaudeInvestigationCommand(claudeBin, workspace, agentPath, prompt str
 	return cmd, nil
 }
 
-func BuildOpenClawInvestigationCommand(openclawBin, agentID, prompt string) (*exec.Cmd, error) {
-	openclawBin = strings.TrimSpace(openclawBin)
-	if openclawBin == "" {
-		openclawBin = "openclaw"
-	}
-	agentID = strings.TrimSpace(agentID)
-	if agentID == "" {
-		return nil, errors.New("openclaw agent is required")
-	}
-	return exec.Command(openclawBin, "agent", "--agent", agentID, "--message", prompt, "--json"), nil
-}
-
 func (i *CodexInvestigator) Start(parent context.Context, bug Bug, bot BotRef) (InvestigationRun, error) {
-	return i.StartWithValidator(parent, bug, bot, ValidatorBotFor(bot))
-}
-
-func (i *CodexInvestigator) StartWithValidator(parent context.Context, bug Bug, bot BotRef, validator BotRef) (InvestigationRun, error) {
 	if i == nil || i.store == nil {
 		return InvestigationRun{}, errors.New("investigation store is required")
 	}
 	target := strings.TrimSpace(bot.Target)
-	validationBot := validator
-	if strings.TrimSpace(validationBot.Key) == "" {
-		validationBot = bot
-	}
-	validationTarget := strings.TrimSpace(validationBot.Target)
-	if validationTarget == "" {
-		validationTarget = target
-	}
-
 	i.mu.Lock()
 	if active, ok, err := i.store.ActiveRunForBug(bug.ID); err != nil {
 		i.mu.Unlock()
@@ -1033,8 +821,8 @@ func (i *CodexInvestigator) StartWithValidator(parent context.Context, bug Bug, 
 		}
 	}
 
-	validationPrompt := BuildCodexValidationPrompt(bug, validationBot)
-	validationCmd, validationParser, err := i.buildCommandLocked(validationTarget, validationBot, validationPrompt)
+	prompt := BuildCodexInvestigationPrompt(bug, bot)
+	cmd, parser, err := i.buildCommandLocked(target, bot, prompt)
 	if err != nil {
 		i.mu.Unlock()
 		return InvestigationRun{}, err
@@ -1047,7 +835,7 @@ func (i *CodexInvestigator) StartWithValidator(parent context.Context, bug Bug, 
 		BotKey:        bot.Key,
 		Status:        InvestigationRunning,
 		StartedAt:     time.Now().UTC(),
-		PromptPreview: promptPreview(validationPrompt),
+		PromptPreview: promptPreview(prompt),
 	}
 	if err := i.store.Upsert(run); err != nil {
 		i.mu.Unlock()
@@ -1058,13 +846,16 @@ func (i *CodexInvestigator) StartWithValidator(parent context.Context, bug Bug, 
 	i.active[run.ID] = active
 
 	i.mu.Unlock()
-	go i.collectRun(ctx, run.ID, bug, bot, target, validationCmd, validationParser, active)
+	go i.collectContinueRun(ctx, run.ID, cmd, parser, active, "investigation")
 	return run, nil
 }
 
 func (i *CodexInvestigator) Continue(ctx context.Context, bug Bug, bot BotRef, userInput string, previousRunID string, phase string) (InvestigationRun, error) {
 	if i == nil || i.store == nil {
 		return InvestigationRun{}, errors.New("investigation store is required")
+	}
+	if phase != "" && phase != "investigation" && phase != "fix" {
+		return InvestigationRun{}, errors.New("unsupported continuation phase")
 	}
 	phase = normalizeContinuationPhase(phase)
 
@@ -1086,16 +877,12 @@ func (i *CodexInvestigator) Continue(ctx context.Context, bug Bug, bot BotRef, u
 	}
 
 	continueBot := bot
-	if phase == "validation" {
-		continueBot = ValidatorBotFor(bot)
-	} else if phase == "fix" {
+	if phase == "fix" {
 		continueBot = FixerBotFor(bot)
 	}
 	target := strings.TrimSpace(continueBot.Target)
 	prompt := BuildCodexContinuePrompt(bug, continueBot, userInput, prevRun)
-	if phase == "validation" {
-		prompt = BuildCodexValidationContinuePrompt(bug, continueBot, userInput, prevRun)
-	} else if phase == "fix" {
+	if phase == "fix" {
 		prompt = BuildCodexFixPrompt(bug, continueBot, prevRun, userInput)
 	}
 	continueCmd, parser, err := i.buildCommandLocked(target, continueBot, prompt)
@@ -1123,11 +910,7 @@ func (i *CodexInvestigator) Continue(ctx context.Context, bug Bug, bot BotRef, u
 	i.active[run.ID] = active
 
 	i.mu.Unlock()
-	if phase == "validation" {
-		go i.collectValidationContinueRun(ctx, run.ID, bug, bot, continueCmd, parser, active)
-	} else {
-		go i.collectContinueRun(ctx, run.ID, continueCmd, parser, active, phase)
-	}
+	go i.collectContinueRun(ctx, run.ID, continueCmd, parser, active, phase)
 	return run, nil
 }
 
@@ -1183,8 +966,6 @@ func (i *CodexInvestigator) StartFix(ctx context.Context, bug Bug, bot BotRef, p
 
 func normalizeContinuationPhase(phase string) string {
 	switch strings.TrimSpace(strings.ToLower(phase)) {
-	case "validation":
-		return "validation"
 	case "fix":
 		return "fix"
 	default:
@@ -1206,9 +987,7 @@ func (i *CodexInvestigator) collectContinueRun(ctx context.Context, runID string
 	}()
 
 	stageMessage := "排障 Agent 继续执行（基于用户补充信息）"
-	if phase == "validation" {
-		stageMessage = "验证 Agent 继续取证（基于用户补充信息）"
-	} else if phase == "fix" {
+	if phase == "fix" {
 		stageMessage = "修复 Agent 开始修复（基于排障结论）"
 	}
 	i.emitStageEvent(runID, phase, stageMessage)
@@ -1234,79 +1013,6 @@ func (i *CodexInvestigator) collectContinueRun(ctx context.Context, runID string
 	})
 }
 
-func (i *CodexInvestigator) collectValidationContinueRun(ctx context.Context, runID string, bug Bug, bot BotRef, validationCmd *exec.Cmd, validationParser investigationEventParser, active *activeCodexRun) {
-	defer close(active.done)
-	defer i.removeActive(runID)
-	stopKillWatcher := make(chan struct{})
-	defer close(stopKillWatcher)
-	go func() {
-		select {
-		case <-ctx.Done():
-			active.kill()
-		case <-stopKillWatcher:
-		}
-	}()
-
-	i.emitStageEvent(runID, "validation", "验证 Agent 继续取证（基于用户补充信息）")
-	validationReport, validationStatus, validationError := i.runCommandStage(ctx, runID, validationCmd, validationParser, active, "validation")
-	if validationError != nil && validationStatus != InvestigationCancelled {
-		active.setError(validationError)
-	}
-	if validationStatus != InvestigationSucceeded {
-		_ = i.store.Finish(runID, validationStatus, "", runErrorText(ctx, validationError))
-		i.emitEvent(runID, InvestigationEvent{
-			At:      time.Now().UTC(),
-			Type:    "status",
-			Message: string(validationStatus),
-		})
-		return
-	}
-	if !validationReportReadyForInvestigation(validationReport) {
-		i.emitStageEvent(runID, "validation", validationPauseMessage(validationReport))
-		if err := i.store.Finish(runID, InvestigationSucceeded, formatValidationFinalReport(validationReport, bug, bot), ""); err != nil {
-			active.setError(err)
-			return
-		}
-		i.emitEvent(runID, InvestigationEvent{
-			At:      time.Now().UTC(),
-			Type:    "status",
-			Message: string(InvestigationSucceeded),
-		})
-		return
-	}
-	i.emitStageEvent(runID, "validation", "验证 Agent 完成，已将证据交给排障 Agent")
-
-	prompt := BuildCodexInvestigationPromptWithValidation(bug, bot, validationReport)
-	investigationCmd, parser, err := i.buildCommand(strings.TrimSpace(bot.Target), bot, prompt)
-	if err != nil {
-		active.setError(err)
-		_ = i.store.Finish(runID, InvestigationFailed, validationReport, err.Error())
-		i.emitEvent(runID, InvestigationEvent{
-			At:      time.Now().UTC(),
-			Type:    "status",
-			Message: string(InvestigationFailed),
-		})
-		return
-	}
-	finalMessage, finishStatus, runErr := i.runCommandStage(ctx, runID, investigationCmd, parser, active, "investigation")
-	if runErr != nil && finishStatus != InvestigationCancelled {
-		active.setError(runErr)
-	}
-	finishError := ""
-	if finishStatus != InvestigationSucceeded {
-		finishError = runErrorText(ctx, runErr)
-	}
-	if err := i.store.Finish(runID, finishStatus, finalMessage, finishError); err != nil {
-		active.setError(err)
-		return
-	}
-	i.emitEvent(runID, InvestigationEvent{
-		At:      time.Now().UTC(),
-		Type:    "status",
-		Message: string(finishStatus),
-	})
-}
-
 func (i *CodexInvestigator) buildCommandLocked(target string, bot BotRef, prompt string) (*exec.Cmd, investigationEventParser, error) {
 	if i.binaries == nil {
 		i.binaries = make(map[string]string)
@@ -1314,16 +1020,17 @@ func (i *CodexInvestigator) buildCommandLocked(target string, bot BotRef, prompt
 	switch target {
 	case "codex":
 		cmd, err := buildCodexBotExecCommand(firstNonEmpty(i.binaries["codex"], i.codexBin, "codex"), bot, prompt, nil)
-		return cmd, ParseCodexJSONLEvent, err
+		return cmd, newCodexStreamJSONParser(), err
 	case "claude-code":
 		workspace := claudeWorkspace(bot.Path)
 		cmd, err := BuildClaudeInvestigationCommand(firstNonEmpty(i.binaries["claude-code"], "claude"), workspace, bot.Path, prompt)
 		return cmd, ParseClaudeStreamJSONEvent, err
-	case "openclaw":
-		cmd, err := BuildOpenClawInvestigationCommand(firstNonEmpty(i.binaries["openclaw"], "openclaw"), openClawAgentID(bot), prompt)
-		return cmd, ParseOpenClawJSONEvent, err
+	case "opencode":
+		cmd, err := BuildOpenCodeInvestigationCommand(i.binaries["opencode"], bot, prompt, nil)
+		return cmd, newOpenCodeStreamJSONParser(), err
 	case "cursor":
-		return nil, nil, errors.New("暂不支持 Cursor 后台直启，请复制上下文后在 Cursor Custom Agent 中发起")
+		cmd, err := BuildCursorInvestigationCommand(i.binaries["cursor"], bot.Path, prompt)
+		return cmd, newCursorStreamJSONParser(), err
 	default:
 		return nil, nil, fmt.Errorf("暂不支持 %s 后台直启", firstNonEmpty(target, "unknown"))
 	}
@@ -1357,167 +1064,6 @@ func (i *CodexInvestigator) Wait(runID string) (InvestigationRun, error) {
 	return i.store.Get(runID)
 }
 
-func (i *CodexInvestigator) collectRun(ctx context.Context, runID string, bug Bug, bot BotRef, target string, validationCmd *exec.Cmd, validationParser investigationEventParser, active *activeCodexRun) {
-	defer close(active.done)
-	defer i.removeActive(runID)
-	stopKillWatcher := make(chan struct{})
-	defer close(stopKillWatcher)
-	go func() {
-		select {
-		case <-ctx.Done():
-			active.kill()
-		case <-stopKillWatcher:
-		}
-	}()
-
-	i.emitStageEvent(runID, "validation", "验证 Agent 开始取证验证")
-	validationReport, validationStatus, validationError := i.runCommandStage(ctx, runID, validationCmd, validationParser, active, "validation")
-	if validationError != nil && validationStatus != InvestigationCancelled {
-		active.setError(validationError)
-	}
-	if validationStatus != InvestigationSucceeded {
-		_ = i.store.Finish(runID, validationStatus, "", runErrorText(ctx, validationError))
-		i.emitEvent(runID, InvestigationEvent{
-			At:      time.Now().UTC(),
-			Type:    "status",
-			Message: string(validationStatus),
-		})
-		return
-	}
-	if !validationReportReadyForInvestigation(validationReport) {
-		i.emitStageEvent(runID, "validation", validationPauseMessage(validationReport))
-		if err := i.store.Finish(runID, InvestigationSucceeded, formatValidationFinalReport(validationReport, bug, bot), ""); err != nil {
-			active.setError(err)
-			return
-		}
-		i.emitEvent(runID, InvestigationEvent{
-			At:      time.Now().UTC(),
-			Type:    "status",
-			Message: string(InvestigationSucceeded),
-		})
-		return
-	}
-	i.emitStageEvent(runID, "validation", "验证 Agent 完成，已将证据交给排障 Agent")
-
-	prompt := BuildCodexInvestigationPromptWithValidation(bug, bot, validationReport)
-	investigationCmd, parser, err := i.buildCommand(target, bot, prompt)
-	if err != nil {
-		active.setError(err)
-		_ = i.store.Finish(runID, InvestigationFailed, validationReport, err.Error())
-		i.emitEvent(runID, InvestigationEvent{
-			At:      time.Now().UTC(),
-			Type:    "status",
-			Message: string(InvestigationFailed),
-		})
-		return
-	}
-	finalMessage, finishStatus, runErr := i.runCommandStage(ctx, runID, investigationCmd, parser, active, "investigation")
-	if runErr != nil && finishStatus != InvestigationCancelled {
-		active.setError(runErr)
-	}
-	finishError := ""
-	if finishStatus != InvestigationSucceeded {
-		finishError = runErrorText(ctx, runErr)
-	}
-	if err := i.store.Finish(runID, finishStatus, finalMessage, finishError); err != nil {
-		active.setError(err)
-		return
-	}
-	i.emitEvent(runID, InvestigationEvent{
-		At:      time.Now().UTC(),
-		Type:    "status",
-		Message: string(finishStatus),
-	})
-}
-
-func validationReportReadyForInvestigation(report string) bool {
-	text := strings.TrimSpace(report)
-	if text == "" {
-		return false
-	}
-	lower := strings.ToLower(text)
-	if strings.Contains(lower, "insufficient_info") {
-		return false
-	}
-	gapsPresent, gapsEmpty := validationGapsState(text)
-	if !gapsPresent || !gapsEmpty {
-		return false
-	}
-	// Flow control is allowlist-based: validation must emit a structured terminal
-	// status and explicitly empty blocking gaps before investigation can start.
-	status := validationStatus(text)
-	switch status {
-	case "reproduced", "still_reproduces":
-		return true
-	default:
-		return false
-	}
-}
-
-func validationPauseMessage(report string) string {
-	switch validationStatus(report) {
-	case "not_reproduced":
-		return "验证 Agent 未复现原始 Bug，已暂停进入排障 Agent"
-	case "fixed_verified":
-		return "验证 Agent 确认修复已通过，已暂停进入排障 Agent"
-	case "insufficient_info":
-		return "验证 Agent 信息不足，已暂停进入排障 Agent"
-	default:
-		return "验证 Agent 尚未给出可进入排障的复现结论，已暂停进入排障 Agent"
-	}
-}
-
-func formatValidationFinalReport(report string, bug Bug, bot BotRef) string {
-	report = strings.TrimSpace(strings.ReplaceAll(report, `\n`, "\n"))
-	if report == "" {
-		return ""
-	}
-	if strings.Contains(report, "验证报告 |") {
-		return report
-	}
-	status := validationStatus(report)
-	statusLabel := validationStatusLabel(status)
-	env := normalizeValidationReportEnv(yamlScalar(report, "environment"), bug, bot)
-	frontendURL := firstNonEmpty(yamlNestedScalar(report, "entry", "frontend_url"), "-")
-	apiURL := firstNonEmpty(yamlNestedScalar(report, "entry", "api_url"), "-")
-	observed := firstNonEmpty(yamlScalar(report, "observed_behavior"), "-")
-	expected := firstNonEmpty(yamlScalar(report, "expected_behavior"), "-")
-	evidenceSummary := firstNonEmpty(yamlNestedScalar(report, "handoff_to_troubleshooter", "evidence_summary"), "-")
-	gaps := yamlBlockSummary(report, "gaps")
-	if gaps == "" {
-		gaps = "[]"
-	}
-
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "### 验证报告 | %s | %s\n\n", env, statusLabel)
-	fmt.Fprintf(&sb, "- 结论: %s\n", validationConclusion(status))
-	fmt.Fprintf(&sb, "- 入口: frontend=%s; api=%s\n", frontendURL, apiURL)
-	fmt.Fprintf(&sb, "- 实际现象: %s\n", observed)
-	fmt.Fprintf(&sb, "- 期望表现: %s\n", expected)
-	fmt.Fprintf(&sb, "- 关键证据: %s\n", evidenceSummary)
-	fmt.Fprintf(&sb, "- 需补信息: %s\n\n", gaps)
-	sb.WriteString("#### 原始结构化结果\n\n")
-	sb.WriteString("```yaml\n")
-	sb.WriteString(report)
-	sb.WriteString("\n```\n")
-	return sb.String()
-}
-
-func normalizeValidationReportEnv(env string, bug Bug, bot BotRef) string {
-	env = strings.TrimSpace(strings.Trim(env, "`\"'"))
-	fallback := firstNonEmpty(effectiveBugEnv(bug, bot), "-")
-	if env == "" || env == "-" {
-		return fallback
-	}
-	lower := strings.ToLower(env)
-	if strings.Contains(lower, "bug env") || strings.Contains(lower, "bot env") {
-		bugEnv := fieldFromLooseEnvLabel(env, "bug env")
-		botEnv := fieldFromLooseEnvLabel(env, "bot env")
-		return firstNonEmpty(nonDash(bugEnv), nonDash(botEnv), fallback)
-	}
-	return env
-}
-
 func fieldFromLooseEnvLabel(text, key string) string {
 	lower := strings.ToLower(text)
 	key = strings.ToLower(key)
@@ -1541,40 +1087,6 @@ func nonDash(value string) string {
 		return ""
 	}
 	return value
-}
-
-func validationStatusLabel(status string) string {
-	switch status {
-	case "reproduced":
-		return "已复现"
-	case "not_reproduced":
-		return "未复现"
-	case "insufficient_info":
-		return "信息不足"
-	case "fixed_verified":
-		return "修复已验证"
-	case "still_reproduces":
-		return "修复后仍复现"
-	default:
-		return "结论不完整"
-	}
-}
-
-func validationConclusion(status string) string {
-	switch status {
-	case "reproduced":
-		return "已复现原始 Bug，可以进入排障 Agent。"
-	case "not_reproduced":
-		return "未复现原始 Bug，已暂停进入排障 Agent。"
-	case "insufficient_info":
-		return "验证所需信息不足，用户补充后应继续验证。"
-	case "fixed_verified":
-		return "修复验证通过，已暂停进入排障 Agent。"
-	case "still_reproduces":
-		return "修复后仍可复现，需要进入排障 Agent。"
-	default:
-		return "验证 Agent 未输出可进入排障的完整结构化结论。"
-	}
 }
 
 func formatFixFinalReport(report string) string {
@@ -1640,7 +1152,7 @@ func fixStatusLabel(status string) string {
 func fixConclusion(status string) string {
 	switch strings.TrimSpace(status) {
 	case "fixed_pushed":
-		return "修复分支已生成、提交并推送，等待部署后回归验证。"
+		return "修复分支已生成、提交并推送，等待独立合并授权与人工验收。"
 	case "blocked":
 		return "修复 Agent 遇到阻塞，用户补充信息后可继续修复。"
 	case "failed":
@@ -1723,43 +1235,6 @@ func yamlRawBlock(report, key string) string {
 	return ""
 }
 
-func validationGapsState(report string) (bool, bool) {
-	report = strings.ReplaceAll(report, `\n`, "\n")
-	lines := strings.Split(report, "\n")
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		lower := strings.ToLower(trimmed)
-		if !strings.HasPrefix(lower, "gaps") {
-			continue
-		}
-		_, value, ok := strings.Cut(trimmed, ":")
-		if !ok {
-			return true, false
-		}
-		value = strings.TrimSpace(value)
-		if value == "[]" || strings.EqualFold(value, "null") {
-			return true, true
-		}
-		if value != "" {
-			return true, false
-		}
-		for _, next := range lines[i+1:] {
-			nextTrimmed := strings.TrimSpace(next)
-			if nextTrimmed == "" {
-				continue
-			}
-			if isTopLevelYAMLKey(next) {
-				break
-			}
-			if nextTrimmed != "[]" {
-				return true, false
-			}
-		}
-		return true, true
-	}
-	return false, false
-}
-
 func isTopLevelYAMLKey(line string) bool {
 	if strings.TrimSpace(line) == "" {
 		return false
@@ -1773,26 +1248,6 @@ func isTopLevelYAMLKey(line string) bool {
 	}
 	key = strings.TrimSpace(key)
 	return key != ""
-}
-
-func validationStatus(report string) string {
-	report = strings.ReplaceAll(report, `\n`, "\n")
-	for _, line := range strings.Split(report, "\n") {
-		line = strings.TrimSpace(strings.ToLower(line))
-		if !strings.HasPrefix(line, "verification_status") {
-			continue
-		}
-		_, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		value = strings.TrimSpace(value)
-		if idx := strings.IndexAny(value, " \t,;|"); idx >= 0 {
-			value = value[:idx]
-		}
-		return strings.Trim(value, "`\"'")
-	}
-	return ""
 }
 
 func (i *CodexInvestigator) buildCommand(target string, bot BotRef, prompt string) (*exec.Cmd, investigationEventParser, error) {
@@ -1812,12 +1267,33 @@ func (i *CodexInvestigator) ExecutePhase(parent context.Context, attemptID strin
 	if err != nil {
 		return PhaseExecutionResult{}, err
 	}
+	if err := applyPhaseStagingEnvironment(cmd, prompt); err != nil {
+		return PhaseExecutionResult{}, err
+	}
 	return i.executePreparedPhase(parent, attemptID, cmd, parser, emit)
+}
+
+func applyPhaseStagingEnvironment(cmd *exec.Cmd, prompt string) error {
+	staging := codexStagingPathFromPrompt(prompt)
+	if staging == "" {
+		return nil
+	}
+	if !filepath.IsAbs(staging) {
+		return errors.New("Studio evidence staging path must be absolute")
+	}
+	info, err := os.Stat(staging)
+	if err != nil || !info.IsDir() {
+		return errors.New("Studio evidence staging directory is unavailable")
+	}
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = setProcessEnv(cmd.Env, "STUDIO_EVIDENCE_STAGING_DIR", staging)
+	return nil
 }
 
 // ExecutePhaseWithAttachments transports trusted host evidence through the
 // target-specific mechanism: Codex receives --image, Claude receives a
-// read-authorized directory, and OpenClaw receives a short-lived file inside
 // its configured workspace so its Read tool can load the rendered PNG.
 func (i *CodexInvestigator) ExecutePhaseWithAttachments(parent context.Context, attemptID string, bot BotRef, prompt string, attachments []PhaseAttachment, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
 	if i == nil {
@@ -1838,12 +1314,19 @@ func (i *CodexInvestigator) ExecutePhaseWithAttachments(parent context.Context, 
 	i.mu.Lock()
 	codexBin := firstNonEmpty(i.binaries["codex"], i.codexBin, "codex")
 	claudeBin := firstNonEmpty(i.binaries["claude-code"], "claude")
-	openclawBin := firstNonEmpty(i.binaries["openclaw"], "openclaw")
+	cursorBin := i.binaries["cursor"]
+	openCodeBin := i.binaries["opencode"]
 	i.mu.Unlock()
 	switch target {
+	case "opencode":
+		cmd, err = BuildOpenCodeInvestigationCommand(openCodeBin, bot, prompt+phaseAttachmentPrompt(nil), paths)
+		parser = newOpenCodeStreamJSONParser()
+	case "cursor":
+		cmd, err = BuildCursorInvestigationCommand(cursorBin, bot.Path, prompt+phaseAttachmentPrompt(paths))
+		parser = newCursorStreamJSONParser()
 	case "codex":
 		cmd, err = buildCodexBotExecCommand(codexBin, bot, prompt+phaseAttachmentPrompt(nil), paths)
-		parser = ParseCodexJSONLEvent
+		parser = newCodexStreamJSONParser()
 	case "claude-code":
 		directories := make([]string, 0, len(paths))
 		for _, path := range paths {
@@ -1851,22 +1334,14 @@ func (i *CodexInvestigator) ExecutePhaseWithAttachments(parent context.Context, 
 		}
 		cmd, err = buildClaudeInvestigationCommand(claudeBin, claudeWorkspace(bot.Path), bot.Path, prompt+phaseAttachmentPrompt(paths), directories)
 		parser = ParseClaudeStreamJSONEvent
-	case "openclaw":
-		if len(validated) != 1 {
-			return PhaseExecutionResult{}, errors.New("OpenClaw browser evaluation requires exactly one screenshot")
-		}
-		workspacePath, removeView, viewErr := createBrowserEvaluatorScreenshotViewAt(bot.Path, validated[0].Content)
-		if viewErr != nil {
-			return PhaseExecutionResult{}, viewErr
-		}
-		cleanup = removeView
-		paths = append(paths, workspacePath)
-		cmd, err = BuildOpenClawInvestigationCommand(openclawBin, openClawAgentID(bot), prompt+phaseAttachmentPrompt([]string{workspacePath}))
-		parser = ParseOpenClawJSONEvent
 	default:
 		return PhaseExecutionResult{}, fmt.Errorf("暂不支持 %s 后台直启", firstNonEmpty(target, "unknown"))
 	}
 	if err != nil {
+		_ = cleanup()
+		return PhaseExecutionResult{}, err
+	}
+	if err := applyPhaseStagingEnvironment(cmd, prompt); err != nil {
 		_ = cleanup()
 		return PhaseExecutionResult{}, err
 	}
@@ -1918,6 +1393,7 @@ func (i *CodexInvestigator) CancelPhase(ctx context.Context, attemptID string) e
 func executePhaseCommand(ctx context.Context, command *exec.Cmd, parser investigationEventParser, active *activeCodexRun, emit func(InvestigationEvent)) (PhaseExecutionResult, error) {
 	cmd := exec.CommandContext(ctx, command.Path, command.Args[1:]...)
 	cmd.Dir = command.Dir
+	cmd.Stdin = command.Stdin
 	if command.Env != nil {
 		cmd.Env = append([]string{}, command.Env...)
 	}
@@ -1972,6 +1448,7 @@ func executePhaseCommand(ctx context.Context, command *exec.Cmd, parser investig
 	waitErr := cmd.Wait()
 	active.setProcess(nil)
 	stderrText := <-stderrDone
+
 	result.Usage.Duration = time.Since(started)
 	switch {
 	case ctx.Err() != nil:
@@ -1986,7 +1463,7 @@ func executePhaseCommand(ctx context.Context, command *exec.Cmd, parser investig
 		}
 		return result, errors.New(stderrText)
 	case strings.TrimSpace(result.FinalYAML) == "":
-		return result, errors.New("agent returned no final structured result")
+		return result, missingAgentResultError(stderrText)
 	default:
 		return result, nil
 	}
@@ -2150,6 +1627,7 @@ func (i *CodexInvestigator) runCommandStage(ctx context.Context, runID string, c
 	waitErr := cmd.Wait()
 	active.setProcess(nil)
 	stderrText := <-stderrDone
+
 	switch {
 	case ctx.Err() != nil:
 		return finalMessage, InvestigationCancelled, ctx.Err()
@@ -2163,6 +1641,8 @@ func (i *CodexInvestigator) runCommandStage(ctx context.Context, runID string, c
 			errorText = waitErr.Error()
 		}
 		return finalMessage, InvestigationFailed, errors.New(errorText)
+	case strings.TrimSpace(finalMessage) == "":
+		return finalMessage, InvestigationFailed, missingAgentResultError(stderrText)
 	default:
 		return finalMessage, InvestigationSucceeded, nil
 	}
@@ -2289,10 +1769,13 @@ func claudeAgentName(path string) string {
 	return strings.TrimSuffix(base, ext)
 }
 
-func openClawAgentID(bot BotRef) string {
-	if strings.TrimSpace(bot.AgentID) != "" {
-		return strings.TrimSpace(bot.AgentID)
+func missingAgentResultError(stderr string) error {
+	message := "agent returned no final structured result"
+	if stderr = strings.TrimSpace(stderr); stderr != "" && !containsSensitiveData([]byte(stderr)) && !resetURLUserinfoPattern.MatchString(stderr) {
+		if len(stderr) > 2000 {
+			stderr = stderr[:2000]
+		}
+		message += ": " + stderr
 	}
-	pathBase := strings.TrimSuffix(filepath.Base(strings.TrimSpace(bot.Path)), filepath.Ext(strings.TrimSpace(bot.Path)))
-	return firstNonEmpty(pathBase, bot.SystemID, bot.Name)
+	return errors.New(message)
 }

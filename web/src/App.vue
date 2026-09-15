@@ -1,11 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { EventsOn } from '../wailsjs/runtime/runtime'
 import ToastContainer from './components/ToastContainer.vue'
-import { ackIncidentWorkflowReminder, listPendingIncidentWorkflowReminders, type WorkflowReminder } from './lib/bridge'
 import { hasWailsEventRuntime, setupGlobalLogBridges, useLogStore, pushLog } from './lib/logStore'
-import { toast } from './lib/toast'
 // Vite URL import:assets/app-icon.svg 会被打进 bundle,<img src> 直接用。
 // 用 app-icon(方形,1024×1024 viewBox) 而不是 logo.svg(宽 780×220)当侧边栏品牌
 // 标记——侧边栏宽 220px,方形 icon 挤一下更合适。
@@ -16,70 +13,13 @@ const currentPath = computed(() => route.path)
 
 // 全局日志收集:install:log / analyze:log 等事件桥接进 logStore,所有页面都能往里塞,
 // LogsPage 统一展示。App 启动挂一次。
-let unlistenWorkflowReminders: (() => void) | undefined
-let workflowReminderInitTimer: ReturnType<typeof setTimeout> | undefined
-let appUnmounted = false
-const handledWorkflowReminders = new Set<string>()
-
-async function handleWorkflowReminder(reminder: WorkflowReminder) {
-  if (!reminder?.reservation_key || handledWorkflowReminders.has(reminder.reservation_key)) return
-  handledWorkflowReminders.add(reminder.reservation_key)
-  try {
-    toast.info(`Bug ${reminder.bug_id || ''} 已等待人工部署超过 24 小时`)
-  } catch (error) {
-    handledWorkflowReminders.delete(reminder.reservation_key)
-    pushLog('system', 'warn', `故障闭环提醒展示失败: ${error instanceof Error ? error.message : String(error)}`)
-    return
-  }
-  try {
-    await ackIncidentWorkflowReminder({ case_id: reminder.case_id, reservation_key: reminder.reservation_key, delivery_attempt: reminder.delivery_attempt, actor_id: 'desktop-root' })
-  } catch (error) {
-    handledWorkflowReminders.delete(reminder.reservation_key)
-    pushLog('system', 'warn', `故障闭环提醒确认失败: ${error instanceof Error ? error.message : String(error)}`)
-  }
-}
-
-async function initializeWorkflowReminders(attempt = 0) {
-  if (appUnmounted || unlistenWorkflowReminders) return
-  // Wails 的 window.runtime 由宿主注入；WKWebView 冷启动时可能晚于 Vue mounted。
-  // 直接 EventsOn 会抛一个被 WebKit 脱敏成 "Script error" 的异常，并被 Vue 记为
-  // runtime-m。等待注入完成再订阅，浏览器预览则安静跳过。
-  if (!hasWailsEventRuntime()) {
-    if (attempt < 20) {
-      workflowReminderInitTimer = setTimeout(() => { void initializeWorkflowReminders(attempt + 1) }, 100)
-    }
-    return
-  }
-  // runtime 就绪后重试一次可能在冷启动阶段跳过/失败的全局日志订阅。
+let logInitTimer: ReturnType<typeof setTimeout> | undefined
+function initializeLogs(attempt = 0) {
   setupGlobalLogBridges()
-  try {
-    unlistenWorkflowReminders = EventsOn('incident-workflow:reminder', (reminder: WorkflowReminder) => { void handleWorkflowReminder(reminder) })
-  } catch (error) {
-    pushLog('system', 'warn', `故障闭环提醒订阅失败: ${error instanceof Error ? error.message : String(error)}`)
-    if (attempt < 20) {
-      workflowReminderInitTimer = setTimeout(() => { void initializeWorkflowReminders(attempt + 1) }, 100)
-    }
-    return
-  }
-  try {
-    for (const reminder of await listPendingIncidentWorkflowReminders()) await handleWorkflowReminder(reminder)
-  } catch (error) {
-    pushLog('system', 'warn', `读取待确认故障闭环提醒失败: ${error instanceof Error ? error.message : String(error)}`)
-  }
+  if (!hasWailsEventRuntime() && attempt < 20) logInitTimer = setTimeout(() => initializeLogs(attempt + 1), 100)
 }
-
-onMounted(() => {
-  setupGlobalLogBridges()
-  void initializeWorkflowReminders()
-})
-
-onUnmounted(() => {
-  appUnmounted = true
-  if (workflowReminderInitTimer) clearTimeout(workflowReminderInitTimer)
-  workflowReminderInitTimer = undefined
-  unlistenWorkflowReminders?.()
-  unlistenWorkflowReminders = undefined
-})
+onMounted(() => initializeLogs())
+onUnmounted(() => { if (logInitTimer) clearTimeout(logInitTimer) })
 // 给 main.ts 里的 errorHandler / window.error / unhandledrejection 留个钩子,
 // 它们触发时除了红 banner 还把错误塞进 logStore —— 即便某页面白屏,侧栏「日志」永远
 // 可点(侧栏不进 keep-alive 子树),用户切过去就能看到完整堆栈 + 时间 + 当前路由。
@@ -102,7 +42,7 @@ const navItems = [
   { path: '/', icon: '🏠', label: '首页', desc: '概览 + 下一步推荐' },
   { path: '/bots', icon: '🤖', label: '已装机器人', desc: '管理已部署机器人,可重部 / 卸载' },
   { path: '/bugs', icon: '🐞', label: 'Bug 工单', desc: '同步工单平台，查看完整 Bug 详情' },
-  { path: '/incidents', icon: '🔁', label: '故障闭环', desc: '选择 Bug，完成验证、排障、修复和回归' },
+  { path: '/incidents', icon: '🔁', label: '故障闭环', desc: '选择 Bug，排障、修复和提交' },
   { path: '/init', icon: '🧙', label: '创建向导', desc: '一步步创建一个新机器人' },
   // ── 诊断工具(下面几项) ──
   { path: '/editor', icon: '📝', label: 'YAML 沙盒', desc: '验证 yaml + 干跑生成 + 预览产物' },

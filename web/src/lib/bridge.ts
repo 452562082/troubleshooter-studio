@@ -14,7 +14,6 @@
 //   bridge/kuboard.ts       —— Kuboard 集群资源 / cm / Deployments
 //   bridge/configCenter.ts  —— Nacos / Apollo / Consul + DSProbe / URLProbe
 //   bridge/loki.ts          —— Loki + Grafana datasources
-//   bridge/openclaw.ts      —— OpenClaw 模型探测
 //   bridge/aitools.ts       —— Claude Code / Cursor / Codex 安装探测
 //   bridge/bugs.ts          —— Bug 工单收件箱 / 平台同步 / 机器人匹配
 // 本文件只保留:isDesktop re-export + YAML core(validate / plan / analyze / doctor / gen)
@@ -34,7 +33,6 @@ export * from './bridge/yamlIO'
 export * from './bridge/kuboard'
 export * from './bridge/configCenter'
 export * from './bridge/loki'
-export * from './bridge/openclaw'
 export * from './bridge/aitools'
 export * from './bridge/bugs'
 export * from './bridge/bugWorkflow'

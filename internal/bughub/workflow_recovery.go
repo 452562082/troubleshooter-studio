@@ -62,29 +62,6 @@ func (o *CaseOrchestrator) RecoverInterrupted(ctx context.Context) error {
 		if IsTerminalCaseStatus(incident.Status) {
 			continue
 		}
-		if incident.Status == CaseDeploymentUnverified {
-			if recoveryErr := o.recoverDeploymentVerification(ctx, incident); recoveryErr != nil {
-				recoveredErr = errors.Join(recoveredErr, recoveryErr)
-			}
-			continue
-		}
-		if incident.Status == CaseDeploymentVerified || incident.Status == CaseRemediationApplied {
-			// StartRegression advances the Case and replaces CurrentAttemptID. Mark
-			// this snapshot as consumed so the terminal-attempt reconciliation pass
-			// below does not apply the stale pre-regression version a second time.
-			processedCases[incident.ID] = struct{}{}
-			regression, recoveryErr := o.StartRegression(ctx, incident.ID, incident.Version)
-			if recoveryErr == nil {
-				o.markRecoveryStarted(regression.ID)
-			} else if !errors.Is(recoveryErr, ErrRegressionDuplicate) {
-				if _, handled, readinessErr := o.failSafeRegressionReadiness(ctx, incident, recoveryErr); handled {
-					recoveredErr = errors.Join(recoveredErr, readinessErr)
-				} else {
-					recoveredErr = errors.Join(recoveredErr, fmt.Errorf("recover verified deployment %s: %w", incident.ID, recoveryErr))
-				}
-			}
-			continue
-		}
 		if incident.Status != CaseMerging {
 			continue
 		}
@@ -110,119 +87,12 @@ func (o *CaseOrchestrator) RecoverInterrupted(ctx context.Context) error {
 			continue
 		}
 		if attempt.Status == AttemptStatusSucceeded || attempt.Status == AttemptStatusFailed || attempt.Status == AttemptStatusCancelled || attempt.Status == AttemptStatusInterrupted {
-			if repaired, repairErr := o.recoverFinalizedRegressionHostMetadataGap(ctx, incident, attempt); repairErr != nil {
-				recoveredErr = errors.Join(recoveredErr, repairErr)
-				continue
-			} else if repaired {
-				processedCases[incident.ID] = struct{}{}
-				continue
-			}
-			if repaired, repairErr := o.recoverFinalizedRegressionBrowserArtifactFreezeFailure(ctx, incident, attempt); repairErr != nil {
-				recoveredErr = errors.Join(recoveredErr, repairErr)
-				continue
-			} else if repaired {
-				processedCases[incident.ID] = struct{}{}
-				continue
-			}
 			if reconcileErr := o.reconcileTerminalCurrent(ctx, incident, attempt); reconcileErr != nil {
 				recoveredErr = errors.Join(recoveredErr, reconcileErr)
 			}
 		}
 	}
 	return recoveredErr
-}
-
-func (o *CaseOrchestrator) recoverFinalizedRegressionHostMetadataGap(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) (bool, error) {
-	if incident.Status != CaseWaitingEvidence || incident.CurrentAttemptID != attempt.ID || attempt.Status != AttemptStatusFailed || !regressionCompletionOnlyNeedsHostMetadata(attempt, attempt.OutputJSON) {
-		return false, nil
-	}
-	retryAvailable, err := o.regressionHostMetadataRetryAvailable(ctx, attempt)
-	if err != nil || !retryAvailable {
-		return false, err
-	}
-	bug, bot, err := o.resolveRecoveryContext(ctx, incident, attempt)
-	if err != nil {
-		return false, fmt.Errorf("resolve regression metadata retry context: %w", err)
-	}
-	key := "recovery:" + attempt.ID + ":regression-host-metadata-retry"
-	retry := newAttempt(incident, PhaseRegression, AttemptRegression, key, bot, attempt.InputJSON, attempt.ID)
-	payload := mustJSON(map[string]string{"attempt_id": attempt.ID, "retry_attempt_id": retry.ID, "reason": "regression_host_metadata_gap"})
-	update := CaseSnapshotUpdate{CurrentAttemptID: workflowStringPtr(retry.ID), SelectedBotKey: workflowStringPtr(bot.Key)}
-	mutation, err := o.store.ApplyCaseMutation(ctx, CaseMutation{
-		CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key,
-		RequestJSON: payload, CreateAttempts: []PhaseAttempt{retry}, Snapshot: update,
-		Steps: []CaseMutationStep{{To: CaseRegressionValidating, Event: TransitionEvent{ID: stableID("event", key), EventType: "regression_host_metadata_retry_started", ActorType: "recovery", ActorID: "recovery", PayloadJSON: payload}}},
-	})
-	if err != nil {
-		return false, err
-	}
-	if mutation.Replay {
-		return true, nil
-	}
-	if o.runner == nil {
-		_, scheduleErr := o.phaseScheduleFailure(ctx, mutation.Case, retry, key, errors.New("phase runner is unavailable"))
-		return true, scheduleErr
-	}
-	if err := o.startPhase(retry, bug, bot); err != nil {
-		_, scheduleErr := o.phaseScheduleFailure(ctx, mutation.Case, retry, key, err)
-		return true, scheduleErr
-	}
-	o.markRecoveryStarted(retry.ID)
-	return true, nil
-}
-
-func (o *CaseOrchestrator) recoverFinalizedRegressionBrowserArtifactFreezeFailure(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) (bool, error) {
-	const errorCode = "browser_artifact_freeze_failed"
-	if incident.Status != CaseWaitingEvidence || incident.CurrentAttemptID != attempt.ID || attempt.Status != AttemptStatusFailed || attempt.Phase != PhaseRegression || attempt.ErrorCode != errorCode {
-		return false, nil
-	}
-	retryAvailable, err := o.regressionSystemFailureRetryAvailable(ctx, attempt, errorCode)
-	if err != nil || !retryAvailable {
-		return false, err
-	}
-	bug, bot, err := o.resolveRecoveryContext(ctx, incident, attempt)
-	if err != nil {
-		return false, fmt.Errorf("resolve regression browser artifact retry context: %w", err)
-	}
-	key := "recovery:" + attempt.ID + ":browser-artifact-freeze-retry"
-	retry := newAttempt(incident, PhaseRegression, AttemptRegression, key, bot, attempt.InputJSON, attempt.ID)
-	payload := mustJSON(map[string]string{"attempt_id": attempt.ID, "retry_attempt_id": retry.ID, "reason": errorCode})
-	update := CaseSnapshotUpdate{CurrentAttemptID: workflowStringPtr(retry.ID), SelectedBotKey: workflowStringPtr(bot.Key)}
-	mutation, err := o.store.ApplyCaseMutation(ctx, CaseMutation{
-		CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: key,
-		RequestJSON: payload, CreateAttempts: []PhaseAttempt{retry}, Snapshot: update,
-		Steps: []CaseMutationStep{{To: CaseRegressionValidating, Event: TransitionEvent{ID: stableID("event", key), EventType: "regression_browser_artifact_retry_started", ActorType: "recovery", ActorID: "recovery", PayloadJSON: payload}}},
-	})
-	if err != nil {
-		return false, err
-	}
-	if mutation.Replay {
-		return true, nil
-	}
-	if o.runner == nil {
-		_, scheduleErr := o.phaseScheduleFailure(ctx, mutation.Case, retry, key, errors.New("phase runner is unavailable"))
-		return true, scheduleErr
-	}
-	if err := o.startPhase(retry, bug, bot); err != nil {
-		_, scheduleErr := o.phaseScheduleFailure(ctx, mutation.Case, retry, key, err)
-		return true, scheduleErr
-	}
-	o.markRecoveryStarted(retry.ID)
-	return true, nil
-}
-
-func (o *CaseOrchestrator) regressionSystemFailureRetryAvailable(ctx context.Context, attempt PhaseAttempt, errorCode string) (bool, error) {
-	attempts, err := o.store.ListAttempts(ctx, AttemptFilter{CaseID: attempt.CaseID})
-	if err != nil {
-		return false, err
-	}
-	failures := 0
-	for _, candidate := range attempts {
-		if candidate.CycleNumber == attempt.CycleNumber && candidate.Phase == PhaseRegression && candidate.ErrorCode == errorCode {
-			failures++
-		}
-	}
-	return failures < 2, nil
 }
 
 func (o *CaseOrchestrator) preflightRecoveryContexts(ctx context.Context, attempts []PhaseAttempt) (map[string]resolvedRecoveryContext, error) {
@@ -268,30 +138,16 @@ func (o *CaseOrchestrator) recoveryAttemptNeedsPhaseContext(ctx context.Context,
 	if incident.CurrentAttemptID != attempt.ID {
 		return CanTransition(incident.Status, statusForPhase(attempt.Phase)), nil
 	}
-	completion, found, err := parseCompletionIntent(attempt.OutputJSON)
+	_, found, err := parseCompletionIntent(attempt.OutputJSON)
 	if err != nil {
 		return false, err
 	}
 	if found {
-		return completion.Outcome == PhaseOutcomeReproduced || completion.Outcome == PhaseOutcomeStillReproduces, nil
+		return false, nil
 	}
-	if attempt.Status == AttemptStatusRunning && (attempt.Phase == PhaseValidation || attempt.Phase == PhaseRegression) {
-		if routeReader, ok := o.runner.(BrowserRouteRecoveryReader); ok {
-			if _, routeErr := routeReader.BrowserRouteForRecovery(ctx, attempt); routeErr != nil {
-				// Invalid durable route state is completed fail-closed by recoverAttempt
-				// and must not be masked by an unrelated recovery-context failure.
-				return false, nil
-			}
-		}
-	}
+
 	switch incident.Status {
-	case CaseValidating, CaseInvestigating:
-		return o.recoveryRetryAvailable(ctx, incident, attempt)
-	case CaseRegressionValidating:
-		matched, err := o.latestDeploymentMatched(ctx, incident.ID)
-		if err != nil || !matched {
-			return false, err
-		}
+	case CaseInvestigating:
 		return o.recoveryRetryAvailable(ctx, incident, attempt)
 	default:
 		return false, nil
@@ -310,51 +166,6 @@ func (o *CaseOrchestrator) recoveryRetryAvailable(ctx context.Context, incident 
 		}
 	}
 	return count < 2, nil
-}
-
-func (o *CaseOrchestrator) recoverDeploymentVerification(ctx context.Context, incident IncidentCase) error {
-	typed, found, err := o.store.latestDeploymentReservationEvent(ctx, incident.ID)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return nil
-	}
-	var reservation DeploymentReservation
-	reservationEventKey := typed.IdempotencyKey
-	if decodeErr := json.Unmarshal(typed.PayloadJSON, &reservation); decodeErr != nil {
-		return o.recordInvalidDeploymentReservation(ctx, incident, reservationEventKey, fmt.Errorf("decode deployment reservation: %w", decodeErr))
-	}
-	if identityErr := validateDeploymentReservationIdentity(reservation, reservationEventKey, reservation.CallerIdempotencyKey, typed.ActorID); identityErr != nil {
-		return o.recordInvalidDeploymentReservation(ctx, incident, reservationEventKey, identityErr)
-	}
-	if _, resultFound, resultErr := o.store.GetEventByIdempotencyKey(ctx, reservation.ReservationKey+":result"); resultErr != nil || resultFound {
-		return resultErr
-	}
-	if o.deployment == nil {
-		return nil
-	}
-	observation, verifyErr := o.deployment.Verify(ctx, reservation.VerifierInput)
-	_, recordErr := o.recordDeploymentResult(incident, reservation, observation, verifyErr)
-	return recordErr
-}
-
-func (o *CaseOrchestrator) recordInvalidDeploymentReservation(ctx context.Context, incident IncidentCase, reservationKey string, cause error) error {
-	if strings.TrimSpace(reservationKey) == "" {
-		reservationKey = "deployment-reservation:" + incident.ID
-	}
-	auditKey := reservationKey + ":identity-invalid"
-	payload := mustJSON(map[string]string{"error": cause.Error()})
-	if existing, found, err := o.store.GetEventByIdempotencyKey(ctx, auditKey); err != nil {
-		return err
-	} else if found {
-		if existing.EventType == "deployment_reservation_invalid" && string(existing.PayloadJSON) == string(payload) {
-			return nil
-		}
-		return ErrIdempotencyConflict
-	}
-	_, err := o.store.ApplyCaseMutation(ctx, CaseMutation{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: auditKey, RequestJSON: payload, Steps: []CaseMutationStep{{To: CaseDeploymentUnverified, AuditOnly: true, Event: TransitionEvent{ID: stableID("event", auditKey), EventType: "deployment_reservation_invalid", ActorType: "studio", ActorID: "recovery", PayloadJSON: payload}}}})
-	return err
 }
 
 func (o *CaseOrchestrator) recoverMergeWithoutAttempt(ctx context.Context, incident IncidentCase) error {
@@ -445,42 +256,14 @@ func (o *CaseOrchestrator) recoverAttempt(ctx context.Context, attempt PhaseAtte
 		}
 		return err
 	}
-	if attempt.Phase == PhaseValidation || attempt.Phase == PhaseRegression {
-		if routeReader, ok := o.runner.(BrowserRouteRecoveryReader); ok {
-			assisted, routeErr := routeReader.BrowserRouteForRecovery(ctx, attempt)
-			if routeErr != nil {
-				return o.finishBrowserRouteRecoveryFailure(ctx, incident, attempt)
-			}
-			if assisted {
-				bug, bot, contextErr := o.resolveRecoveryContext(ctx, incident, attempt)
-				if contextErr != nil {
-					return fmt.Errorf("resolve durable route recovery context: %w", contextErr)
-				}
-				return o.recoverBrowserAttempt(ctx, incident, attempt, bug, bot)
-			}
-		} else {
-			bug, bot, contextErr := o.resolveRecoveryContext(ctx, incident, attempt)
-			if contextErr != nil {
-				return fmt.Errorf("resolve browser recovery context: %w", contextErr)
-			}
-			if browserAssistedAttempt(bug, attempt) {
-				return o.recoverBrowserAttempt(ctx, incident, attempt, bug, bot)
-			}
-		}
-	}
+
 	attempt.Status = AttemptStatusInterrupted
 	attempt.OutputJSON = []byte(`{}`)
 	attempt.ErrorCode = "studio_restarted"
 	attempt.ErrorMessage = "phase process was interrupted by Studio restart"
 	switch incident.Status {
-	case CaseValidating, CaseInvestigating:
+	case CaseInvestigating:
 		return o.recoverReadOnly(ctx, incident, attempt, true)
-	case CaseRegressionValidating:
-		matched, err := o.latestDeploymentMatched(ctx, incident.ID)
-		if err != nil {
-			return err
-		}
-		return o.recoverReadOnly(ctx, incident, attempt, matched)
 	case CaseFixing:
 		if err := o.reserveInspectionOnly(ctx, incident, attempt); err != nil {
 			return err
@@ -502,59 +285,6 @@ func (o *CaseOrchestrator) recoverAttempt(ctx context.Context, attempt PhaseAtte
 	default:
 		return nil
 	}
-}
-
-func (o *CaseOrchestrator) recoverBrowserAttempt(ctx context.Context, incident IncidentCase, attempt PhaseAttempt, bug Bug, bot BotRef) error {
-	if err := o.store.releaseBrowserRecoveryRunClaim(ctx, attempt); err != nil {
-		return err
-	}
-	key := "recovery:" + attempt.ID + ":browser-replay"
-	if o.runner == nil {
-		_, scheduleErr := o.phaseScheduleFailure(ctx, incident, attempt, key, errors.New("phase runner is unavailable"))
-		return scheduleErr
-	}
-	if err := o.startPhase(attempt, bug, bot); err != nil {
-		current, loadErr := o.store.GetCase(ctx, incident.ID)
-		if loadErr != nil {
-			return errors.Join(err, loadErr)
-		}
-		_, scheduleErr := o.phaseScheduleFailure(ctx, current, attempt, key, err)
-		return scheduleErr
-	}
-	o.markRecoveryStarted(attempt.ID)
-	return nil
-}
-
-func (o *CaseOrchestrator) finishBrowserRouteRecoveryFailure(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) error {
-	failure := browserCoordinatorFailure(BrowserCoordinatorResult{}, "browser_execution_interrupted")
-	command := CompleteAttemptCommand{
-		CaseID: incident.ID, AttemptID: attempt.ID, ExpectedVersion: incident.Version,
-		IdempotencyKey: "recovery:" + attempt.ID + ":browser-route-invalid", ActorID: "recovery",
-		Outcome: PhaseOutcomeSystemFailed, OutputJSON: browserStopOutput(failure),
-		ErrorCode: failure.ErrorCode, ErrorMessage: failure.ErrorMessage,
-	}
-	if _, err := o.CompleteAttempt(ctx, command); err != nil {
-		return err
-	}
-	if cleaner, ok := o.runner.(AttemptStagingCleaner); ok {
-		_ = cleaner.CleanupAttemptStaging(ctx, attempt)
-	}
-	return nil
-}
-
-func (s *CaseStore) releaseBrowserRecoveryRunClaim(ctx context.Context, attempt PhaseAttempt) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE phase_attempts SET run_claim_token='' WHERE id=? AND case_id=? AND status=?`, attempt.ID, attempt.CaseID, AttemptStatusRunning)
-	if err != nil {
-		return fmt.Errorf("release interrupted browser run claim: %w", err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows != 1 {
-		return ErrAttemptRunClaimConflict
-	}
-	return nil
 }
 
 func (o *CaseOrchestrator) reserveInspectionOnly(ctx context.Context, incident IncidentCase, attempt PhaseAttempt) error {
@@ -856,20 +586,6 @@ func (o *CaseOrchestrator) inspectInterruptedMerge(ctx context.Context, incident
 	return err
 }
 
-func (o *CaseOrchestrator) latestDeploymentMatched(ctx context.Context, caseID string) (bool, error) {
-	observations, err := o.store.ListDeploymentObservations(ctx, caseID)
-	if err != nil {
-		return false, err
-	}
-	for index := len(observations) - 1; index >= 0; index-- {
-		if observations[index].VerificationSource == "user-notification" {
-			continue
-		}
-		return observations[index].Result == DeploymentResultMatched || observations[index].Result == DeploymentResultUnavailable, nil
-	}
-	return false, nil
-}
-
 func decodeRecoveryMergeRequest(caseID string, input json.RawMessage) (MergeRequest, error) {
 	var request MergeRequest
 	if err := json.Unmarshal(input, &request); err != nil {
@@ -884,15 +600,15 @@ func decodeRecoveryMergeRequest(caseID string, input json.RawMessage) (MergeRequ
 
 func statusForPhase(phase Phase) CaseStatus {
 	switch phase {
-	case PhaseValidation:
-		return CaseValidating
 	case PhaseInvestigation:
 		return CaseInvestigating
-	case PhaseRegression:
-		return CaseRegressionValidating
 	case PhaseFix:
 		return CaseFixing
 	default:
 		return ""
 	}
+}
+
+type AttemptStagingCleaner interface {
+	CleanupAttemptStaging(context.Context, PhaseAttempt) error
 }

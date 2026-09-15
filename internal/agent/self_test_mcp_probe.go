@@ -357,7 +357,6 @@ func (b *boundedWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// probeMCPServersFromConfig 对 servers map(self_test 从 openclaw.json 反读出来的)
 // **并发** 跑 probe,返每个 mcp 的 PASS/FAIL/WARN 项。
 //
 //   - PASS:进程起 + tools/list 返非空 → mcp 真能用

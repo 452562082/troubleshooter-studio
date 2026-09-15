@@ -32,7 +32,7 @@ func prepareFixApprovalCase(t *testing.T, output string) (*CaseStore, IncidentCa
 		t.Fatal(err)
 	}
 	runner := &recordingPhaseRunner{}
-	return store, incident, attempt, runner, NewCaseOrchestrator(store, runner, nil, nil)
+	return store, incident, attempt, runner, NewCaseOrchestrator(store, runner, nil)
 }
 
 func validRootCauseOutput() string {
@@ -164,7 +164,7 @@ func TestApproveFixReplaySurvivesLaterCycleAndRejectsDivergentPayload(t *testing
 func TestApproveFixConcurrentExactCommandSchedulesOnce(t *testing.T) {
 	store, incident, root, runner, _ := prepareFixApprovalCase(t, validRootCauseOutput())
 	command := ApproveFixCommand{CaseID: incident.ID, ExpectedVersion: incident.Version, IdempotencyKey: StartFixApprovalKey(incident.ID, root.ID, incident.Version), ActorID: "alice", RootCauseAttemptID: root.ID, Bug: Bug{ID: incident.BugID}, Bot: BotRef{Key: "fixer", Target: "codex"}, InputJSON: []byte(`{"source_baselines":{"api":"feature/work"}}`)}
-	orchestrators := []*CaseOrchestrator{NewCaseOrchestrator(store, runner, nil, nil), NewCaseOrchestrator(store, runner, nil, nil)}
+	orchestrators := []*CaseOrchestrator{NewCaseOrchestrator(store, runner, nil), NewCaseOrchestrator(store, runner, nil)}
 	results := make([]IncidentCase, len(orchestrators))
 	errs := make([]error, len(orchestrators))
 	var wait sync.WaitGroup
@@ -422,7 +422,7 @@ func TestCompleteAttemptRejectsDivergentFixPayloadAndCodeChanges(t *testing.T) {
 			incident, attempt := createRunningPhase(t, store, "completion-"+strings.ReplaceAll(test.name, " ", "-"), CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
 			command := validFixCompletion(t, incident, attempt)
 			test.mutate(&command)
-			orchestrator := NewCaseOrchestrator(store, nil, nil, nil)
+			orchestrator := NewCaseOrchestrator(store, nil, nil)
 			if _, err := orchestrator.CompleteAttempt(context.Background(), command); err == nil {
 				t.Fatal("divergent fix completion accepted")
 			}
@@ -432,9 +432,9 @@ func TestCompleteAttemptRejectsDivergentFixPayloadAndCodeChanges(t *testing.T) {
 
 func TestCompleteAttemptRejectsFixChangesOnWrongPhaseOrOutcome(t *testing.T) {
 	store := newOrchestratorStore(t)
-	incident, attempt := createRunningPhase(t, store, "completion-wrong-phase", CaseReproduced, CaseInvestigating, PhaseInvestigation, "", []byte(`{}`))
+	incident, attempt := createRunningPhase(t, store, "completion-wrong-phase", CasePendingInvestigation, CaseInvestigating, PhaseInvestigation, "", []byte(`{}`))
 	command := validFixCompletion(t, incident, PhaseAttempt{ID: attempt.ID, CaseID: attempt.CaseID, CycleNumber: attempt.CycleNumber, Phase: PhaseFix})
-	if _, err := NewCaseOrchestrator(store, nil, nil, nil).CompleteAttempt(context.Background(), command); err == nil {
+	if _, err := NewCaseOrchestrator(store, nil, nil).CompleteAttempt(context.Background(), command); err == nil {
 		t.Fatal("FixPushed accepted for investigation attempt")
 	}
 
@@ -442,7 +442,7 @@ func TestCompleteAttemptRejectsFixChangesOnWrongPhaseOrOutcome(t *testing.T) {
 	incident, attempt = createRunningPhase(t, store, "completion-failed-changes", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
 	command = validFixCompletion(t, incident, attempt)
 	command.Outcome = PhaseOutcomeFixFailed
-	if _, err := NewCaseOrchestrator(store, nil, nil, nil).CompleteAttempt(context.Background(), command); err == nil {
+	if _, err := NewCaseOrchestrator(store, nil, nil).CompleteAttempt(context.Background(), command); err == nil {
 		t.Fatal("FixFailed accepted CodeChanges")
 	}
 }
@@ -464,7 +464,7 @@ func TestCompletionIntentUsesStrictFixBoundaryOnSaveAndReplay(t *testing.T) {
 	if err := store.SaveCompletionIntentIfRunning(context.Background(), command); err != nil {
 		t.Fatalf("exact intent replay: %v", err)
 	}
-	finished, err := NewCaseOrchestrator(store, nil, &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: command.CodeChanges}}, nil).CompleteAttempt(context.Background(), command)
+	finished, err := NewCaseOrchestrator(store, nil, &recordingGitIntegration{fixInspection: FixInspection{Complete: true, Changes: command.CodeChanges}}).CompleteAttempt(context.Background(), command)
 	if err != nil || finished.Status != CaseWaitingMergeApproval {
 		t.Fatalf("case=%+v err=%v", finished, err)
 	}
@@ -474,7 +474,7 @@ func TestFixCompletionRemoteMismatchFailsAttemptWithoutWaitingForRestart(t *test
 	store := newOrchestratorStore(t)
 	incident, attempt := createRunningPhase(t, store, "fix-remote-mismatch", CaseWaitingFixApproval, CaseFixing, PhaseFix, "", []byte(`{}`))
 	command := validFixCompletion(t, incident, attempt)
-	failed, err := NewCaseOrchestrator(store, nil, &recordingGitIntegration{err: ErrFixRemoteMismatch}, nil).CompleteAttempt(context.Background(), command)
+	failed, err := NewCaseOrchestrator(store, nil, &recordingGitIntegration{err: ErrFixRemoteMismatch}).CompleteAttempt(context.Background(), command)
 	if !errors.Is(err, ErrFixRemoteMismatch) || failed.Status != CaseFixFailed {
 		t.Fatalf("case=%+v err=%v", failed, err)
 	}
@@ -526,7 +526,7 @@ func TestCompleteAttemptExactFixReplayUsesImmutableIdentityBeforeGit(t *testing.
 	store, command, completed, fixture := completeFixForReplayTest(t)
 	runGitTest(t, fixture.repo, "push", "origin", "--delete", "fix/bug")
 	git := &recordingGitIntegration{err: errors.New("Git must not run during exact replay")}
-	replayed, err := NewCaseOrchestrator(store, nil, git, nil).CompleteAttempt(context.Background(), command)
+	replayed, err := NewCaseOrchestrator(store, nil, git).CompleteAttempt(context.Background(), command)
 	if err != nil || !reflect.DeepEqual(replayed, completed) {
 		t.Fatalf("replayed=%+v want=%+v err=%v", replayed, completed, err)
 	}
@@ -558,7 +558,7 @@ func TestCompleteAttemptFixReplayRejectsEveryIdentityDifferenceBeforeGit(t *test
 			changed.CodeChanges = []CodeChange{command.CodeChanges[0].Clone()}
 			test.mutate(&changed)
 			git := &recordingGitIntegration{err: errors.New("Git must not run for divergent replay")}
-			if _, err := NewCaseOrchestrator(store, nil, git, nil).CompleteAttempt(context.Background(), changed); !errors.Is(err, ErrIdempotencyConflict) {
+			if _, err := NewCaseOrchestrator(store, nil, git).CompleteAttempt(context.Background(), changed); !errors.Is(err, ErrIdempotencyConflict) {
 				t.Fatalf("err=%v", err)
 			}
 			git.mu.Lock()
@@ -583,7 +583,7 @@ func TestCompleteAttemptExactFixReplayIsConcurrentAndSurvivesLaterWorkflowMutati
 	errs := make(chan error, workers)
 	for range workers {
 		go func() {
-			got, err := NewCaseOrchestrator(store, nil, git, nil).CompleteAttempt(context.Background(), command)
+			got, err := NewCaseOrchestrator(store, nil, git).CompleteAttempt(context.Background(), command)
 			if err == nil && !reflect.DeepEqual(got, completed) {
 				err = fmt.Errorf("replay result changed: %+v", got)
 			}
@@ -605,7 +605,7 @@ func TestCompleteAttemptExactFixReplayIsConcurrentAndSurvivesLaterWorkflowMutati
 
 func TestCompletionIntentRejectsFixPushedForNonFixAttempt(t *testing.T) {
 	store := newOrchestratorStore(t)
-	incident, attempt := createRunningPhase(t, store, "completion-intent-wrong-phase", CaseReproduced, CaseInvestigating, PhaseInvestigation, "", []byte(`{}`))
+	incident, attempt := createRunningPhase(t, store, "completion-intent-wrong-phase", CasePendingInvestigation, CaseInvestigating, PhaseInvestigation, "", []byte(`{}`))
 	command := validFixCompletion(t, incident, PhaseAttempt{ID: attempt.ID, CaseID: attempt.CaseID, CycleNumber: attempt.CycleNumber, Phase: PhaseFix})
 	if err := store.SaveCompletionIntentIfRunning(context.Background(), command); err == nil {
 		t.Fatal("fix-pushed intent was saved for investigation attempt")

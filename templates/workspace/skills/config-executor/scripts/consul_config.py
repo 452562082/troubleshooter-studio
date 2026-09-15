@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """通过 Consul KV HTTP API 读取配置（不依赖 MCP）
 
-凭证来源：~/.openclaw/<agent-id>-creds.json
+凭证来源：~/.tshoot/<agent-id>-creds.json
 {
   "consul": {
     "<env>": {"host": "http://consul-dev:8500", "token": "xxx"}
@@ -23,13 +23,12 @@ import urllib.request
 
 
 def _find_creds_file(agent_id: str) -> str:
-    """凭证文件双路径回退:OpenClaw 优先 + ~/.tshoot 兜底(Claude Code/Cursor/Codex 用)。"""
-    for p in (f"~/.openclaw/{agent_id}-creds.json", f"~/.tshoot/{agent_id}-creds.json"):
-        ap = os.path.expanduser(p)
-        if os.path.isfile(ap):
-            return ap
+    """读取 Studio 的机器人凭证文件。"""
+    path = os.path.expanduser(f"~/.tshoot/{agent_id}-creds.json")
+    if os.path.isfile(path):
+        return path
     raise FileNotFoundError(
-        f"creds file not found in any of: ~/.openclaw/{agent_id}-creds.json, ~/.tshoot/{agent_id}-creds.json;请先跑 install.sh 或在 wizard 里补齐凭证再部署"
+        f"creds file not found in any of: ~/.tshoot/{agent_id}-creds.json;请先在 Studio 向导里补齐凭证并部署"
     )
 
 

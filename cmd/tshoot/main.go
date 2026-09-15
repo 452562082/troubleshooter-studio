@@ -102,16 +102,6 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
-	case "self-test":
-		if err := runSelfTest(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
-		}
-	case "uninstall":
-		if err := runUninstall(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
-		}
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -139,16 +129,14 @@ func printWelcome() {
   ● CLI 全流程(脚本化 / CI 场景):
        tshoot init    -o troubleshooter.yaml             # 交互向导生成 yaml
        tshoot gen     -i troubleshooter.yaml             # 生成 staging
-       tshoot install --path dist/<id> --target openclaw    # 部署(原生 Go,无 bash)
+       tshoot install --path dist/<id> --target claude-code    # 部署(原生 Go,无 bash)
 
 已有 troubleshooter.yaml 的常用命令:
   tshoot validate -i troubleshooter.yaml                 # 校验格式
   tshoot serve --addr 127.0.0.1:8080                     # 启动 HTTP API + Web UI
   tshoot plan     -i troubleshooter.yaml                 # 预览会生成什么
   tshoot gen      -i troubleshooter.yaml                 # 真落盘 staging
-  tshoot install  --path <staging> --target X    # 部署到本机(openclaw / claude-code / cursor / codex)
-  tshoot self-test --path <staging>              # openclaw 部署后自检
-  tshoot uninstall --path <staging>              # 卸载 openclaw agent
+  tshoot install  --path <staging> --target X    # 部署到本机(claude-code / cursor / codex / opencode)
   tshoot doctor   -i troubleshooter.yaml                 # 检查声明 vs 实态漂移
   tshoot discover                                # 扫本机已装机器人
   tshoot apply -i new.yaml --path <p>            # 原地更新已装机器人
@@ -176,9 +164,7 @@ func usage() {
   tshoot validate -i <troubleshooter.yaml>
   tshoot discover [--roots <p1>,<p2>] [--format text|json]    # 扫本机已装机器人
   tshoot apply -i <new.yaml> --path <agent-path> [--dry-run]  # 用新 yaml 原地更新已装机器人
-  tshoot install --path <staging> --target <openclaw|claude-code|cursor|codex> [--env-file <.env>] [--skip-gateway-restart]
-  tshoot self-test --path <staging>                           # openclaw 部署后自检
-  tshoot uninstall --path <staging>                           # 卸载 openclaw agent
+  tshoot install --path <staging> --target <claude-code|cursor|codex|opencode> [--env-file <.env>]
 
 子命令:
   init       交互式问答生成一份最小可用 troubleshooter.yaml
@@ -196,10 +182,7 @@ func usage() {
   discover   扫本机 tshoot.json 锚点，列出已装机器人
   apply      拿新 yaml 重 render + rsync 回已装 workspace（模板派生文件按模板覆盖）
   install    把 staging 装到本机最终位置(原生 Go,无 bash 依赖):
-             - openclaw:   ~/.openclaw/workspace/<name>/ + 注入 openclaw.json
              - claude-code: ~/.claude/agents/<name>.md  + skills/scripts namespace 子目录
              - cursor:     ~/.cursor/agents/<name>.md   + skills/scripts namespace 子目录
-             - codex:      ~/.codex/agents/<name>.toml + tshoot-runtimes/<name>/config.toml + ~/.codex/skills/<name>/
-  self-test  openclaw 部署后自检(workspace / openclaw.json / mcp.servers / TCP+HTTP 探活)
-  uninstall  卸载 openclaw agent(workspace 移到 ~/.Trash + 摘 openclaw.json + 清 creds.json)`)
+             - codex:      ~/.codex/agents/<name>.toml + tshoot-runtimes/<name>/config.toml + ~/.codex/skills/<name>/`)
 }

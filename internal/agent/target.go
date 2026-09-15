@@ -1,15 +1,15 @@
 // target.go —— IDE 平台 target 抽象。把"target string"散落在 install / uninstall /
 // merge MCP 多个 switch 里的 ~/.<name>/ 根目录、settings 文件名、合法性判断收口到一处,
 // 改一家行为只改这里。
-//
-// openclaw 不在本枚举里 —— 它走自己的 ~/.openclaw/ 全套逻辑(install_native_openclaw.go),
-// 跟"用户级 IDE 装机"模型差太远,强行套同一抽象只会让接口形状奇怪。
 package agent
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/xiaolong/troubleshooter-studio/internal/platform"
 )
 
 // IDETarget 三家 IDE 的 target 标识。直接用 string 兼容现有调用方
@@ -20,10 +20,11 @@ const (
 	TargetClaudeCode IDETarget = "claude-code"
 	TargetCursor     IDETarget = "cursor"
 	TargetCodex      IDETarget = "codex"
+	TargetOpenCode   IDETarget = "opencode"
 )
 
 // allIDETargets 跟下面 spec 一一对齐;改一处必改另一处。
-var allIDETargets = []IDETarget{TargetClaudeCode, TargetCursor, TargetCodex}
+var allIDETargets = []IDETarget{TargetClaudeCode, TargetCursor, TargetCodex, TargetOpenCode}
 
 // ideSpec 单 target 的所有"路径/文件名/特性"参数,集中在一处声明。
 type ideSpec struct {
@@ -43,6 +44,7 @@ type ideSpec struct {
 }
 
 var ideSpecs = map[IDETarget]ideSpec{
+	TargetOpenCode:   {dirName: ".config/opencode", agentExt: ".md"},
 	TargetClaudeCode: {dirName: ".claude", mcpHomeRel: ".claude.json", agentExt: ".md"},
 	TargetCursor:     {dirName: ".cursor", mcpHomeRel: ".cursor/mcp.json", agentExt: ".md"},
 	TargetCodex:      {dirName: ".codex", mcpHomeRel: "", agentExt: ".toml"},
@@ -69,6 +71,9 @@ func (t IDETarget) DirName() string { return ideSpecs[t].dirName }
 // 之前各自 filepath.Join 现在统一走这里,改路径形态(比如未来加 XDG_CONFIG_HOME 兜底)
 // 一处即生效。
 func (t IDETarget) RootDir(home string) string {
+	if t == TargetOpenCode {
+		return platform.OpenCodeRoot(home)
+	}
 	return filepath.Join(home, t.DirName())
 }
 
@@ -81,6 +86,13 @@ func (t IDETarget) RootDir(home string) string {
 //   - codex       → 空串。codex MCP 嵌入 agent toml 内联段,没有独立 JSON 配置。
 //     调用方对 codex 走专门分支,不该走 JSON 路径。
 func (t IDETarget) MCPConfigPath(home string) string {
+	if t == TargetOpenCode {
+		root := platform.OpenCodeRoot(home)
+		if _, err := os.Stat(filepath.Join(root, "opencode.jsonc")); err == nil {
+			return filepath.Join(root, "opencode.jsonc")
+		}
+		return filepath.Join(root, "opencode.json")
+	}
 	rel := ideSpecs[t].mcpHomeRel
 	if rel == "" {
 		return ""
@@ -91,6 +103,9 @@ func (t IDETarget) MCPConfigPath(home string) string {
 // MCPConfigDisplay 返回展示用的"~/路径"形式,给 install 末尾提示文案用。
 // 不存在配置文件时(codex)返回空串。
 func (t IDETarget) MCPConfigDisplay() string {
+	if t == TargetOpenCode {
+		return "$XDG_CONFIG_HOME/opencode/opencode.json（默认 ~/.config/opencode/opencode.json）"
+	}
 	rel := ideSpecs[t].mcpHomeRel
 	if rel == "" {
 		return ""

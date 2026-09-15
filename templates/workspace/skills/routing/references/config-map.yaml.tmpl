@@ -14,7 +14,7 @@
 # - 凭据来源:
 #     nacos:  install 阶段写进 MCP env(NACOS_HOST/PORT/USERNAME/PASSWORD),MCP 进程运行时
 #             自己 login + refresh,LLM 调 MCP 工具不碰凭据。HTTP fallback 仍读 <workspace>/scripts/.env。
-#     apollo / consul / kuboard:  ~/.openclaw/<agent-id>-creds.json(脚本按 --agent-id --env 自己取)
+#     apollo / consul / kuboard:  ~/.tshoot/<agent-id>-creds.json(脚本按 --agent-id --env 自己取)
 #     one2all:  Bearer token 在 MCP server 的 headers 里,LLM 调 MCP 工具不碰凭据
 # 优先级:analyzer finding > prior manual override > inferred skeleton
 {{- $ctx := .}}

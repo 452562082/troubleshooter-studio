@@ -4,7 +4,7 @@
 //
 //	render_walk.go    walkAndRender / shouldSkipDir / renderFile / copyFile
 //	readme.go         writeReadme + 三个 section helpers
-//	clawhub_lock.go   writeClawhubLock + count* 摘要计数
+//	summary.go        count* 摘要计数
 //	funcs.go          模板 funcMap
 //	tshoot_meta.go    writeTshootMeta(产物锚点 tshoot.json)
 //	plan.go / preserve.go / diff.go  二次生成的计划 / 保留 / diff
@@ -69,7 +69,6 @@ type Generator struct {
 	// SharedStaging 当非空时，GenerateClaudeCode/Cursor/Embedded 跳过各自
 	// 内部的 workspace 临时渲染，直接复用该目录下已渲染好的
 	// templates/workspace-template/ 作为 wsRoot。调用方（cmd/tshoot/main.go）
-	// 负责在多 target 生成时先跑一次 Generate() 到此目录、或把 openclaw 产物挪过来。
 	SharedStaging string
 
 	// TshootVersion 写入产物 tshoot.json 的 tshoot_version 字段
@@ -389,25 +388,15 @@ func (g *Generator) Generate() error {
 	}
 
 	// scripts/ 已不再生成 —— install / self-test / uninstall 全部由
-	// internal/agent.{InstallNativeOpenclaw, SelfTestOpenclaw, UninstallNativeOpenclaw}
 	// 原生 Go 实现,不再用 bash + 嵌入式 Python。staging 目录瘦身。
 
 	if err := g.writeReadme(); err != nil {
 		return fmt.Errorf("readme: %w", err)
 	}
 
-	// 写 .clawhub/lock.json：列出本次生成的 skills（OpenClaw 工作区元数据）
-	if err := g.writeClawhubLock(); err != nil {
-		return fmt.Errorf("clawhub lock: %w", err)
-	}
-
-	// 写 tshoot.json 到真正的 workspace 根（agent.InstallNativeOpenclaw cp 它到
-	// ~/.openclaw/workspace/<name>/,被 discover.Scan 反向识别）
-	// 注意:刻意不在 staging 根再写一份 —— 否则 discover 会扫到两份,UI 出重复
-	// 卡片。ScanInstallPrompts 直接去 templates/workspace-template/tshoot.json 找。
-	wsDir := filepath.Join(g.OutputDir, "templates", "workspace-template")
-	if err := g.writeTshootMeta(wsDir, "openclaw"); err != nil {
-		return fmt.Errorf("write tshoot meta: %w", err)
+	// Shared staging metadata preserves source YAML; it is not an install target.
+	if err := g.writeTshootMeta(wsDst, "workspace"); err != nil {
+		return err
 	}
 
 	// 填 Summary：供 CLI 按 text/json 渲染；不再直接 Printf

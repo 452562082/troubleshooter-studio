@@ -20,7 +20,7 @@ const coverage = {
 }
 
 describe('YamlPreviewStep', () => {
-  it('shows deployment capability coverage during generation preview instead of observability configuration', () => {
+  it('shows deployment capability coverage during generation preview instead of observability configuration', async () => {
     const wrapper = mount(YamlPreviewStep, { props: {
       yamlOutput: 'system:\n  id: base', validateLoading: false, validateResult: null, copySuccess: false,
       targetOptions: ['codex'], enabledTargets: { codex: true }, targetLabels: { codex: 'Codex CLI' },
@@ -30,9 +30,15 @@ describe('YamlPreviewStep', () => {
     expect(wrapper.get('.coverage-panel').text()).toContain('部署能力覆盖')
     expect(wrapper.get('.coverage-panel').text()).toContain('生成前汇总')
     expect(wrapper.get('.coverage-panel').text()).toContain('base-backend')
+    expect(wrapper.find('.yaml-preview').exists()).toBe(false)
+    await wrapper.get('button[aria-expanded]').trigger('click')
     expect(wrapper.get('.coverage-panel').element.compareDocumentPosition(wrapper.get('.yaml-preview').element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(wrapper.get('.portable-export-note').text()).toContain('导出文件将写入当前凭据')
+    expect(wrapper.get('.portable-export-note').text()).toContain('预览、复制和导出都包含当前明文凭据')
     expect(wrapper.get('.action-bar').text()).toContain('导出可部署配置')
+    const initPage = readFileSync('src/pages/InitPage.vue', 'utf8')
+    expect(initPage).toContain("yamlPreviewOutput.value = generateYAML({ includeSecrets: true })")
+    expect(initPage).toContain('copyToClipboard(yamlPreviewOutput.value)')
+    expect(initPage).toContain(':yaml-output="yamlPreviewOutput"')
     expect(readFileSync('src/components/ObservabilityStep.vue', 'utf8')).not.toContain('ResourceCoveragePanel')
   })
 })

@@ -67,7 +67,6 @@ func runDemo(args []string) error {
 	// 2) plan（干跑，不写盘，展示将生成什么）
 	g := generator.New(cfg, tmplRoot, outDir)
 	// 写到 staging 的 tshoot.json 里要能反读出原 yaml,后续 tshoot install
-	// 走 InstallNativeOpenclaw 时会用。demo 没 -i 显式 yaml,直接读 sysPath。
 	if data, err := os.ReadFile(sysPath); err == nil {
 		g.TroubleshooterYAMLSource = data
 	}
@@ -84,6 +83,10 @@ func runDemo(args []string) error {
 	if err := g.Generate(); err != nil {
 		return fmt.Errorf("[3/3] gen: %w", err)
 	}
+	g.SharedStaging = outDir
+	if err := g.GenerateClaudeCode(); err != nil {
+		return fmt.Errorf("[3/3] claude-code: %w", err)
+	}
 	s := g.Summary
 	fmt.Printf("[3/3] gen      ✓ 产物写入 %s (%d 个文件)\n", outDir, s.FilesWritten)
 
@@ -99,11 +102,11 @@ func runDemo(args []string) error {
 	fmt.Println("  想看 analyze 从 fake-repos 抽到什么配置线索：")
 	fmt.Printf("    %s analyze -i %s --repos-root %s\n", os.Args[0], sysPath, reposRoot)
 	fmt.Println()
-	fmt.Println("  想看 multi-target（claude-code / cursor）各长啥样：")
+	fmt.Println("  想看 multi-target（claude-code / cursor / codex / opencode）各长啥样：")
 	fmt.Println("    在自己的 troubleshooter.yaml 的 generation.targets 里加上它们，再跑 tshoot gen")
 	fmt.Println()
 	fmt.Println("  真装到本机(原生 Go,无 bash):")
-	fmt.Printf("    %s install --path %s --target openclaw\n", os.Args[0], outDir)
+	fmt.Printf("    %s install --path %s-claude-code --target claude-code\n", os.Args[0], outDir)
 	_ = reposRoot // 预留给未来 analyze/doctor 集成
 	return nil
 }

@@ -46,6 +46,7 @@ export interface UseDataStoreScanDeps {
   dsImportStats: { scanned: number; matched: number }
   dsAutoFilled: Record<string, boolean>
   enabledDataStores: Record<string, boolean>
+  manualEntries?: Record<string, boolean>
   dataStoreTypes: Record<string, string>
   dataStoreType: (id: string) => string
   scanStateKey: (envID: string, svc: string) => string
@@ -120,10 +121,12 @@ export function useDataStoreScan(deps: UseDataStoreScanDeps) {
       toast.error('该数据层无字段可测')
       return
     }
+    const snapshot = JSON.stringify(fields)
     const k = probeKey(envID, svc, dsKey)
     deps.dsProbeResults[k] = { status: 'loading' }
     try {
       const r = await probeDataStore({ type: deps.dataStoreType(dsKey), fields: { ...fields } })
+      if (JSON.stringify(deps.scannedDS[envID]?.[svc]?.[dsKey]) !== snapshot) return
       if (r.ok) {
         deps.dsProbeResults[k] = { status: 'ok', latency: r.latency, detail: r.detail }
         pushLog('cchub', 'info',
@@ -136,6 +139,7 @@ export function useDataStoreScan(deps: UseDataStoreScanDeps) {
           { envID, svc, dsKey })
       }
     } catch (e: any) {
+      if (JSON.stringify(deps.scannedDS[envID]?.[svc]?.[dsKey]) !== snapshot) return
       const msg = String(e?.message || e)
       deps.dsProbeResults[k] = { status: 'fail', error: msg }
       pushLog('cchub', 'error', `[${envID}/${svc}] ${dsKey} 测试异常: ${msg}`, { envID, svc, dsKey })
@@ -249,7 +253,9 @@ export function useDataStoreScan(deps: UseDataStoreScanDeps) {
     const stateKey = deps.scanStateKey(env, svc)
     const hits: string[] = []
     if (!deps.scannedDS[env]) deps.scannedDS[env] = {}
-    deps.scannedDS[env][svc] = {}
+    deps.scannedDS[env][svc] = Object.fromEntries(
+      Object.entries(deps.scannedDS[env][svc] || {}).filter(([id]) => deps.manualEntries?.[probeKey(env, svc, id)])
+    )
     for (const m of DS_MATCHERS) {
       const hit = m.matchYAML(root)
       if (!hit) continue
@@ -260,7 +266,7 @@ export function useDataStoreScan(deps: UseDataStoreScanDeps) {
       deps.dataStoreTypes[m.dsKey] = m.dsKey
       deps.dsAutoFilled[m.dsKey] = true
       matchedSet.add(`${env}:${m.dsKey}`)
-      deps.scannedDS[env][svc][m.dsKey] = { ...hit }
+      if (!deps.manualEntries?.[probeKey(env, svc, m.dsKey)]) deps.scannedDS[env][svc][m.dsKey] = { ...hit }
       pushLog('cchub', 'info',
         `[${env}/${svc}] ${matchLogPrefix} ${m.dsKey}: ${Object.keys(hit).join(',')}`,
         { envID: env, svc, dsKey: m.dsKey })

@@ -38,7 +38,7 @@ const report = {
 function mountStep(overrides: Record<string, unknown> = {}) {
   return mount(OneClickDeployStep, {
     props: {
-      deploySummary: [{ target: 'openclaw', label: 'OpenClaw', path: '/tmp/agent' }],
+      deploySummary: [{ target: 'claude-code', label: 'Claude Code', path: '/tmp/agent' }],
       deployLoading: false,
       deployError: null,
       codeGraphReport: report,

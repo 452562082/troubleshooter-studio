@@ -7,14 +7,12 @@
 // 校验范围分步规则:
 //   Step 1 欢迎页(导入 yaml / 从零开始):无校验
 //   Step 2:system.id 必填且 [a-z0-9-];system.name 必填
-//   Step 3:agent.name 必填、≥1 个 target、勾 openclaw 要 model
 //   Step 4:每个 env 的 id + api_domain 必填
 //   Step 5:每个 repo:name + (remote 必填 url+_cloneTarget,local 必填 _localPath)
 //   Step 6:所选源每个 (env, svc) 组合的 non-optional 字段必填(showWhen 隐藏跳过)
 //          多源必须每个服务都明确归属;kuboard 还要扫过 + 每服务挑齐 cluster/ns/cm
 //   Step 7:dsProbeResults 里展示的每个组件必须 status='ok'
 
-import { Target } from './constants'
 import { canonicalizeGitURL } from './canonicalGitURL'
 import type { CredField, KuboardResourceState } from './credFields'
 import { isEffectiveObsFieldHidden, resolveObsFieldValue } from './obsConnection'
@@ -105,7 +103,7 @@ export interface ValidatorContext {
   getObsAccessMode?: (toolKey: string, envID: string) => 'via_grafana' | 'direct'
   grafanaDsUidByObsEnv?: Record<string, string>
   obsGrafanaDsKey?: (obsKey: string, envID: string) => string
-  lokiMappingByEnv?: Record<string, { dsUID?: string } | undefined>
+  lokiMappingByEnv?: Record<string, { dsUID?: string; dsListStatus?: string } | undefined>
   k8sRuntimeEnvLoc?: Record<string, { cluster?: string; cluster_id?: string; namespace?: string } | undefined>
   requireObsProbe?: boolean
 }
@@ -136,9 +134,7 @@ export function computeStepErrors(ctx: ValidatorContext): Set<string> {
   if (step === 3) {
     if (!ctx.agent.name.trim()) errs.add('agent.name')
     if (!ctx.anyTargetSelected) errs.add('targets.none')
-    if (ctx.enabledTargets[Target.Openclaw]) {
-      if (!(ctx.targetModels[Target.Openclaw] || '').trim()) errs.add('model.openclaw')
-    }
+
     return errs
   }
 
@@ -389,6 +385,9 @@ export function computeStepErrors(ctx: ValidatorContext): Set<string> {
           continue
         }
 
+        if (spec.key === 'grafana' && ctx.requireObsProbe && ctx.lokiMappingByEnv?.[env.id]?.dsListStatus !== 'ok') {
+          errs.add(`obs.grafana.${env.id}.discovery`)
+        }
         const probeKeyForTool = ctx.obsProbeKey?.(spec.key, env.id)
         if (ctx.requireObsProbe && probeKeyForTool && ctx.obsProbeResults?.[probeKeyForTool]?.status !== 'ok') {
           errs.add(`obs.${spec.key}.${env.id}.probe`)
@@ -407,9 +406,8 @@ const STATIC_LABELS: Record<string, string> = {
   'system.id': '系统 ID',
   'system.name': '系统显示名',
   'agent.name': '机器人名称',
-  'agent.workspace_name': 'OpenClaw 工作区名',
+  'agent.workspace_name': '工作区名',
   'targets.none': '至少勾一个部署平台',
-  'model.openclaw': 'OpenClaw 模型',
 }
 
 export function labelForErrorKey(k: string, repos: ValidatorRepo[]): string {
@@ -494,6 +492,7 @@ export function labelForErrorKey(k: string, repos: ValidatorRepo[]): string {
     const env = parts[2]
     const kind = parts[3]
     if (tool === 'k8s_runtime' && env === 'provider_mismatch') return 'K8s 运行时各环境必须使用同一种 Provider'
+    if (kind === 'discovery') return `${env} 环境 Grafana 账号和数据源尚未检查成功`
     if (kind === 'datasource') return `${env} 环境 ${tool} 未选择 Grafana datasource`
     if (kind === 'location') return `${env} 环境 K8s 运行时未选择集群和 Namespace`
     if (kind === 'probe') return `${env} 环境 ${tool} 尚未连接成功`

@@ -25,7 +25,7 @@ system:
 agent:
   name: "shop-troubleshooter"
   model: "gpt-5"
-  targets: ["openclaw"]
+  targets: ["claude-code"]
 environments:
   - id: "dev"
     api_domain: "https://api.dev.example.com"

@@ -1,13 +1,7 @@
-// bridge/install.ts —— 部署/安装 workflow:importAndDeploy / runInstall / scanInstallPrompts /
-// readEnv / selfTestAgent / cancelInstall / defaultDestPath。
-// InitPage Step 10 + BotsPage 都走这套。仅桌面 app 可用。
+// 三平台原生部署与 CodeGraph 索引。
 import * as App from '../../../wailsjs/go/main/App'
-import { deploy, main } from '../../../wailsjs/go/models'
 import { isDesktop } from './shared'
 import type { ApplyResult } from './discoverBot'
-
-export type InstallPrompt = deploy.Prompt
-export type RunInstallResult = main.RunInstallResult
 
 export type CodeGraphRepoResult = {
   name: string
@@ -59,49 +53,8 @@ export async function reindexCodeGraph(
   return App.ReindexCodeGraph(yamlText, repoPaths) as unknown as CodeGraphIndexReport
 }
 
-/** 给 target 推荐默认部署路径。embedded/openclaw 返回 ~/.tshoot/<target>/<id>/
- *  (UI 据此不让用户手填 destPath);claude-code/cursor 返回空串(UI 强制必填)。
- *  浏览器模式直接返回空,浏览器模式本来就没 home dir 概念。 */
+
 export async function defaultDestPath(target: string, systemId: string): Promise<string> {
   if (!isDesktop()) return ''
   return App.DefaultDestPath(target, systemId)
-}
-
-/** 扫 install.sh 里所有 read_var 调用,给 UI 渲染凭证表单 */
-export async function scanInstallPrompts(outputDir: string): Promise<InstallPrompt[]> {
-  if (!isDesktop()) throw new Error('ScanInstallPrompts 只在桌面 app 里可用')
-  const r = await App.ScanInstallPrompts(outputDir)
-  return Array.isArray(r) ? r : []
-}
-
-/** 读 scripts/.env 现存值(用于预填表单) */
-export async function readEnv(outputDir: string): Promise<Record<string, string>> {
-  if (!isDesktop()) return {}
-  return App.ReadEnv(outputDir)
-}
-
-/** 写凭证到 scripts/.env 后 shell-out bash install.sh,返回合并日志 */
-export async function runInstall(
-  outputDir: string,
-  creds: Record<string, string>,
-): Promise<RunInstallResult> {
-  if (!isDesktop()) throw new Error('RunInstall 只在桌面 app 里可用')
-  return App.RunInstall(outputDir, creds)
-}
-
-/** 跑一次 self-test:校验 agent 安装完整性 + ping 各 env 配置中心/可观测性端点。
- *  返回 ok 标志 + checks 明细;部署完自动触发,把 fail/warn 摘要弹给用户。 */
-export type SelfTestCheck = { name: string; status: string; detail?: string }
-export type SelfTestResult = { ok: boolean; checks: SelfTestCheck[] }
-
-export async function selfTestAgent(dir: string): Promise<SelfTestResult> {
-  if (!isDesktop()) throw new Error('SelfTestAgent 只在桌面 app 里可用')
-  return App.SelfTestAgent(dir) as unknown as SelfTestResult
-}
-
-/** 取消正在跑的 install.sh(SIGKILL 给 bash 进程组)。返回 true=成功取消,
- *  false=当前没 install 在跑(UI 可忽略)。浏览器模式无 install,直接 false。 */
-export async function cancelInstall(): Promise<boolean> {
-  if (!isDesktop()) return false
-  return App.CancelInstall()
 }

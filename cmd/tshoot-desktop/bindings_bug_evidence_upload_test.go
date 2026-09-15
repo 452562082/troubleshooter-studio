@@ -27,8 +27,8 @@ func TestUploadIncidentEvidenceImagesRegistersCurrentValidationArtifact(t *testi
 		t.Fatal(err)
 	}
 	if err := store.CreateAttempt(context.Background(), bughub.PhaseAttempt{
-		ID: "attempt-upload", CaseID: incident.ID, CycleNumber: 1, Phase: bughub.PhaseValidation,
-		Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusFailed,
+		ID: "attempt-upload", CaseID: incident.ID, CycleNumber: 1, Phase: bughub.PhaseInvestigation,
+		Mode: "", Status: bughub.AttemptStatusFailed,
 		AgentTarget: "codex", BotKey: "base|codex", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
 	}); err != nil {
 		t.Fatal(err)
@@ -123,8 +123,8 @@ func TestUploadIncidentEvidenceFilesRegistersCurrentValidationInput(t *testing.T
 		t.Fatal(err)
 	}
 	if err := store.CreateAttempt(context.Background(), bughub.PhaseAttempt{
-		ID: incident.CurrentAttemptID, CaseID: incident.ID, CycleNumber: 1, Phase: bughub.PhaseValidation,
-		Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusFailed,
+		ID: incident.CurrentAttemptID, CaseID: incident.ID, CycleNumber: 1, Phase: bughub.PhaseInvestigation,
+		Mode: "", Status: bughub.AttemptStatusFailed,
 		AgentTarget: "codex", BotKey: "base|codex", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
 	}); err != nil {
 		t.Fatal(err)
@@ -149,7 +149,7 @@ func TestUploadIncidentEvidenceFilesRegistersCurrentValidationInput(t *testing.T
 		t.Fatalf("uploaded = %+v", got)
 	}
 	registered, err := store.ListEvidenceArtifacts(context.Background(), incident.ID)
-	if err != nil || len(registered) != 1 || registered[0].Kind != "user_browser_file_xlsx" {
+	if err != nil || len(registered) != 1 || registered[0].Kind != "user_file_xlsx" {
 		t.Fatalf("registered=%+v err=%v", registered, err)
 	}
 }

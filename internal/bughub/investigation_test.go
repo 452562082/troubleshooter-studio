@@ -116,45 +116,6 @@ func TestInvestigationStoreListByBugFiltersAndSortsNewestFirst(t *testing.T) {
 	}
 }
 
-func TestInvestigationStoreUpsertValidationAndDefaults(t *testing.T) {
-	store := NewInvestigationStore(t.TempDir())
-	if err := store.Upsert(InvestigationRun{BugID: "b1"}); err == nil {
-		t.Fatal("expected empty ID error")
-	}
-	if err := store.Upsert(InvestigationRun{ID: "run-1"}); err == nil {
-		t.Fatal("expected empty BugID error")
-	}
-
-	if err := store.Upsert(InvestigationRun{ID: "run-1", BugID: "b1"}); err != nil {
-		t.Fatalf("Upsert: %v", err)
-	}
-	runs, err := store.ListByBug("b1")
-	if err != nil {
-		t.Fatalf("ListByBug: %v", err)
-	}
-	if len(runs) != 1 {
-		t.Fatalf("runs len = %d", len(runs))
-	}
-	got := runs[0]
-	if got.Status != InvestigationQueued {
-		t.Fatalf("status = %q", got.Status)
-	}
-	if got.StartedAt.IsZero() {
-		t.Fatal("StartedAt is zero")
-	}
-	if got.StartedAt.Location() != time.UTC {
-		t.Fatalf("StartedAt location = %v", got.StartedAt.Location())
-	}
-
-	data, err := os.ReadFile(store.Path())
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
-	}
-	if strings.Contains(string(data), "finished_at") {
-		t.Fatalf("unfinished run serialized finished_at: %s", data)
-	}
-}
-
 func TestInvestigationStoreMissingRunErrors(t *testing.T) {
 	store := NewInvestigationStore(t.TempDir())
 	if err := store.AppendEvent("missing", InvestigationEvent{Type: "agent_message"}); !errors.Is(err, os.ErrNotExist) {
@@ -324,7 +285,6 @@ func TestParseClaudeStreamJSONEventIgnoresProtocolNoise(t *testing.T) {
 	for _, raw := range []string{
 		`{"type":"system","subtype":"init","session_id":"s1"}`,
 		`{"type":"user","message":{"role":"user","content":"prompt echo"}}`,
-		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read"}]}}`,
 	} {
 		event, final, failed := ParseClaudeStreamJSONEvent([]byte(raw))
 		if event.Message != "" || final != "" || failed != "" {
@@ -345,11 +305,11 @@ func TestBuildCodexInvestigationPromptIncludesBugAndBot(t *testing.T) {
 	bot := BotRef{Key: "/tmp/base.toml|codex", SystemID: "base", Target: "codex", Path: "/tmp/base.toml"}
 	prompt := BuildCodexInvestigationPrompt(bug, bot)
 	for _, want := range []string{
-		"请作为选定的 AI 排障机器人开始排障",
+		"请作为选定排障机器人执行只读根因分析",
 		"搜索结果错误",
 		"zentao:577",
 		"target: codex",
-		"不要修改代码",
+		"不修改代码",
 		"Read `incident-investigator/SKILL.md`",
 		"7 步排障图谱",
 		"最终回答必须使用下面的故障快报模板",
@@ -987,19 +947,6 @@ func TestBuildClaudeInvestigationCommand(t *testing.T) {
 	}
 }
 
-func TestBuildOpenClawInvestigationCommand(t *testing.T) {
-	cmd, err := BuildOpenClawInvestigationCommand("openclaw", "base", "hello")
-	if err != nil {
-		t.Fatalf("BuildOpenClawInvestigationCommand: %v", err)
-	}
-	got := strings.Join(cmd.Args, " ")
-	for _, want := range []string{"agent", "--agent base", "--message hello", "--json"} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("args %q missing %q", got, want)
-		}
-	}
-}
-
 func TestCodexInvestigatorRunsFakeCodex(t *testing.T) {
 	root := t.TempDir()
 	workspace := filepath.Join(root, "repo")
@@ -1026,261 +973,6 @@ func TestCodexInvestigatorRunsFakeCodex(t *testing.T) {
 	}
 	if waited.Status != InvestigationSucceeded || waited.FinalMessage != "final answer" {
 		t.Fatalf("waited = %+v", waited)
-	}
-}
-
-func TestCodexInvestigatorRunsValidationAgentBeforeInvestigationAgent(t *testing.T) {
-	root := t.TempDir()
-	workspace := filepath.Join(root, "repo")
-	if err := os.MkdirAll(workspace, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	promptsPath := filepath.Join(root, "prompts.txt")
-	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\n{\n  printf '%s\\n' '---PROMPT---'\n  printf '%s\\n' \"$last\"\n} >> " + shellQuote(promptsPath) + "\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\\\\ngaps: []\\\\nobserved_behavior: movie shows 一集全\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"rca final\"}}' ;;\nesac\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	store := NewInvestigationStore(root)
-	inv := NewCodexInvestigator(store, bin)
-	run, err := inv.Start(context.Background(), Bug{
-		ID:       "bug-1",
-		Source:   "zentao",
-		SourceID: "577",
-		Title:    "电影展示一集全",
-		Steps:    "1. 打开搜索页\n2. 搜索电影",
-	}, BotRef{Key: "b|codex", Target: "codex", Path: workspace})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	waited, err := inv.Wait(run.ID)
-	if err != nil {
-		t.Fatalf("Wait: %v", err)
-	}
-	if waited.Status != InvestigationSucceeded || waited.FinalMessage != "rca final" {
-		t.Fatalf("waited = %+v", waited)
-	}
-	data, err := os.ReadFile(promptsPath)
-	if err != nil {
-		t.Fatalf("ReadFile prompts: %v", err)
-	}
-	prompts := string(data)
-	if got := strings.Count(prompts, "---PROMPT---"); got != 2 {
-		t.Fatalf("prompt count = %d\n%s", got, prompts)
-	}
-	if !strings.Contains(prompts, "你是 Bug 验证 Agent") {
-		t.Fatalf("missing validation prompt:\n%s", prompts)
-	}
-	if strings.Contains(prompts, "复现 Agent") || strings.Contains(prompts, "repro_status") {
-		t.Fatalf("prompt still uses repro naming:\n%s", prompts)
-	}
-	if !strings.Contains(prompts, "## 验证 Agent 报告") || !strings.Contains(prompts, "movie shows 一集全") {
-		t.Fatalf("investigation prompt missing validation report:\n%s", prompts)
-	}
-}
-
-func TestCodexInvestigatorPausesWhenValidationNeedsUserInput(t *testing.T) {
-	root := t.TempDir()
-	workspace := filepath.Join(root, "repo")
-	if err := os.MkdirAll(workspace, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	promptsPath := filepath.Join(root, "prompts.txt")
-	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\n{\n  printf '%s\\n' '---PROMPT---'\n  printf '%s\\n' \"$last\"\n} >> " + shellQuote(promptsPath) + "\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: insufficient_info\\\\ngaps:\\\\n- 未提供后台账号/登录态，无法确认页面业务数据。\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"rca should not run\"}}' ;;\nesac\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	store := NewInvestigationStore(root)
-	inv := NewCodexInvestigator(store, bin)
-	run, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|codex", Target: "codex", Path: workspace})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	waited, err := inv.Wait(run.ID)
-	if err != nil {
-		t.Fatalf("Wait: %v", err)
-	}
-	if waited.Status != InvestigationSucceeded ||
-		!strings.Contains(waited.FinalMessage, "### 验证报告") ||
-		!strings.Contains(waited.FinalMessage, "信息不足") ||
-		!strings.Contains(waited.FinalMessage, "未提供后台账号") {
-		t.Fatalf("waited = %+v", waited)
-	}
-	data, err := os.ReadFile(promptsPath)
-	if err != nil {
-		t.Fatalf("ReadFile prompts: %v", err)
-	}
-	prompts := string(data)
-	if got := strings.Count(prompts, "---PROMPT---"); got != 1 {
-		t.Fatalf("prompt count = %d, want validation only\n%s", got, prompts)
-	}
-	var messages []string
-	for _, event := range waited.Events {
-		if phase, _ := event.Meta["phase"].(string); phase == "validation" {
-			messages = append(messages, event.Message)
-		}
-		if phase, _ := event.Meta["phase"].(string); phase == "investigation" {
-			t.Fatalf("unexpected investigation event: %+v", event)
-		}
-	}
-	joined := strings.Join(messages, "\n")
-	if !strings.Contains(joined, "验证 Agent 信息不足，已暂停进入排障 Agent") || !strings.Contains(joined, "未提供后台账号") {
-		t.Fatalf("validation messages = %q", joined)
-	}
-}
-
-func TestCodexInvestigatorPausesWhenValidationStatusMissing(t *testing.T) {
-	root := t.TempDir()
-	workspace := filepath.Join(root, "repo")
-	if err := os.MkdirAll(workspace, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	promptsPath := filepath.Join(root, "prompts.txt")
-	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\n{\n  printf '%s\\n' '---PROMPT---'\n  printf '%s\\n' \"$last\"\n} >> " + shellQuote(promptsPath) + "\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"验证看起来完成了，但没有结构化状态\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"rca should not run\"}}' ;;\nesac\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	store := NewInvestigationStore(root)
-	inv := NewCodexInvestigator(store, bin)
-	run, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|codex", Target: "codex", Path: workspace})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	waited, err := inv.Wait(run.ID)
-	if err != nil {
-		t.Fatalf("Wait: %v", err)
-	}
-	if waited.Status != InvestigationSucceeded {
-		t.Fatalf("waited = %+v", waited)
-	}
-	data, err := os.ReadFile(promptsPath)
-	if err != nil {
-		t.Fatalf("ReadFile prompts: %v", err)
-	}
-	if got := strings.Count(string(data), "---PROMPT---"); got != 1 {
-		t.Fatalf("prompt count = %d, want validation only\n%s", got, data)
-	}
-}
-
-func TestValidationReportReadyForInvestigationRequiresTerminalStatusAndNoGaps(t *testing.T) {
-	cases := []struct {
-		name   string
-		report string
-		want   bool
-	}{
-		{
-			name: "reproduced",
-			report: `verification_status: reproduced
-gaps: []`,
-			want: true,
-		},
-		{
-			name: "still reproduces",
-			report: `verification_status: still_reproduces
-gaps: []`,
-			want: true,
-		},
-		{
-			name: "not reproduced pauses before investigation",
-			report: `verification_status: not_reproduced
-gaps: []`,
-			want: false,
-		},
-		{
-			name: "fixed verified pauses before investigation",
-			report: `verification_status: fixed_verified
-gaps: []`,
-			want: false,
-		},
-		{
-			name: "tool limitation is non blocking when gaps empty",
-			report: `verification_status: reproduced
-handoff_to_troubleshooter:
-  unchecked_scopes:
-  - in-app browser unavailable: iab
-gaps: []`,
-			want: true,
-		},
-		{
-			name: "insufficient info",
-			report: `verification_status: insufficient_info
-gaps:
-- 缺少测试账号`,
-			want: false,
-		},
-		{
-			name: "missing status",
-			report: `observed_behavior: 已打开页面
-gaps: []`,
-			want: false,
-		},
-		{
-			name: "missing gaps",
-			report: `verification_status: reproduced
-observed_behavior: 已打开页面`,
-			want: false,
-		},
-		{
-			name: "non empty gaps",
-			report: `verification_status: reproduced
-gaps:
-- 仍缺少登录态`,
-			want: false,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := validationReportReadyForInvestigation(tc.report); got != tc.want {
-				t.Fatalf("validationReportReadyForInvestigation() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestFormatValidationFinalReportSummarizesStructuredResult(t *testing.T) {
-	report := `verification_status: not_reproduced
-environment: test
-entry:
-  frontend_url: https://example.test/admin
-  api_url: /admin/items
-observed_behavior: 当前接口返回计数正确
-expected_behavior: 历史截图中计数为 0
-handoff_to_troubleshooter:
-  evidence_summary: GET /admin/items 返回 total=2
-  unchecked_scopes:
-  - 未采集实时 console
-gaps: []`
-
-	formatted := formatValidationFinalReport(report, Bug{}, BotRef{})
-	for _, want := range []string{
-		"### 验证报告 | test | 未复现",
-		"未复现原始 Bug",
-		"frontend=https://example.test/admin; api=/admin/items",
-		"GET /admin/items 返回 total=2",
-		"```yaml",
-		"verification_status: not_reproduced",
-	} {
-		if !strings.Contains(formatted, want) {
-			t.Fatalf("formatted report missing %q:\n%s", want, formatted)
-		}
-	}
-}
-
-func TestFormatValidationFinalReportNormalizesCompositeEnv(t *testing.T) {
-	report := `verification_status: not_reproduced
-environment: bug env: -, bot env: test
-observed_behavior: 未复现
-gaps: []`
-
-	formatted := formatValidationFinalReport(report, Bug{}, BotRef{Env: "test"})
-	if !strings.Contains(formatted, "### 验证报告 | test | 未复现") {
-		t.Fatalf("formatted report should normalize env:\n%s", formatted)
-	}
-	if strings.Contains(formatted, "验证报告 | bug env") {
-		t.Fatalf("formatted report leaked composite env:\n%s", formatted)
 	}
 }
 
@@ -1324,79 +1016,6 @@ blocked_reason: ""`
 	}
 }
 
-func TestBuildCodexValidationPromptKeepsValidatorEvidenceOnly(t *testing.T) {
-	prompt := BuildCodexValidationPrompt(Bug{
-		ID:    "577",
-		Title: "电影展示一集全",
-		Steps: "搜索电影",
-	}, BotRef{Target: "codex", Env: "test"})
-	for _, want := range []string{
-		"只复现场景和收集证据",
-		"不要读取业务源码定位函数/行号",
-		"不要输出\"代码根因/最可能原因/修复建议/候选原因\"",
-		"如需代码分析，交给后续排障 Agent",
-		"verification_status",
-		"不保证拥有 in-app browser / iab",
-		"不要把它本身写入 gaps",
-		"后台登录态/测试账号",
-		"unchecked_scopes",
-		"运行版本；不可得时留空",
-		"最终回答不得输出该结构之外的解释性段落",
-	} {
-		if !strings.Contains(prompt, want) {
-			t.Fatalf("validation prompt missing %q:\n%s", want, prompt)
-		}
-	}
-	if strings.Contains(prompt, "禅道工单") {
-		t.Fatalf("validation prompt should use generic bug platform wording:\n%s", prompt)
-	}
-	if strings.Contains(prompt, "运行版本；回归必填") {
-		t.Fatalf("validation prompt must not require a runtime version:\n%s", prompt)
-	}
-}
-
-func TestValidationSkillTemplateMatchesRuntimeOutputContract(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "templates", "workspace", "skills", "bug-verifier", "SKILL.md.tmpl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	templateBlock := fencedYAMLBlock(string(data))
-	runtimeBlock := strings.TrimSpace(strings.SplitN(validationOutputContract(), "只有当阻塞资料", 2)[0])
-	runtimeBlock = strings.TrimSpace(strings.TrimPrefix(runtimeBlock, "请只输出下面的严格 YAML，不得增加字段或解释性段落："))
-	if templateBlock != runtimeBlock {
-		t.Fatalf("validator template/runtime contract drift\ntemplate:\n%s\nruntime:\n%s", templateBlock, runtimeBlock)
-	}
-}
-
-func TestValidatorTemplateUsesStudioBrowserVerifierAsPrimary(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "templates", "workspace", "skills", "bug-verifier", "SKILL.md.tmpl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-	for _, required := range []string{"Studio BrowserVerifier", "渲染截图", "browser_login_required", "不得直接启动 Playwright"} {
-		if !strings.Contains(content, required) {
-			t.Fatalf("missing %q", required)
-		}
-	}
-	if strings.Contains(content, "后台运行时不保证有 in-app browser") {
-		t.Fatal("obsolete browser downgrade guidance remains")
-	}
-}
-
-func TestFrontendReproTemplateTreatsBrowserCollectAsManualCompatibilityOnly(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "templates", "workspace", "skills", "frontend-repro-investigator", "SKILL.md.tmpl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	content := string(data)
-	for _, required := range []string{"Studio BrowserVerifier", "手动兼容路径", "不属于持久化 Case 证据协议"} {
-		if !strings.Contains(content, required) {
-			t.Fatalf("missing %q", required)
-		}
-	}
-}
-
 func TestFixerSkillTemplateMatchesRuntimeOutputContract(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "templates", "workspace", "skills", "bug-fixer", "SKILL.md.tmpl"))
 	if err != nil {
@@ -1418,251 +1037,6 @@ func fencedYAMLBlock(text string) string {
 		return ""
 	}
 	return strings.TrimSpace(remaining[:end])
-}
-
-func TestCodexInvestigatorUsesValidatorBotForValidationStage(t *testing.T) {
-	root := t.TempDir()
-	troubleshooterWorkspace := filepath.Join(root, "troubleshooter")
-	validatorWorkspace := filepath.Join(root, "validator")
-	for _, dir := range []string{troubleshooterWorkspace, validatorWorkspace} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	callsPath := filepath.Join(root, "calls.txt")
-	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\n{\n  printf '%s\\n' '---CALL---'\n  pwd\n  printf '%s\\n' \"$last\"\n} >> " + shellQuote(callsPath) + "\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\\ngaps: []\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"rca final\"}}' ;;\nesac\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	store := NewInvestigationStore(root)
-	inv := NewCodexInvestigator(store, bin)
-
-	run, err := inv.StartWithValidator(
-		context.Background(),
-		Bug{ID: "bug-1", Title: "Bug"},
-		BotRef{Key: "t|codex", Target: "codex", Path: troubleshooterWorkspace, Role: "troubleshooter"},
-		BotRef{Key: "v|codex", Target: "codex", Path: validatorWorkspace, Role: "validator"},
-	)
-	if err != nil {
-		t.Fatalf("StartWithValidator: %v", err)
-	}
-	waited, err := inv.Wait(run.ID)
-	if err != nil {
-		t.Fatalf("Wait: %v", err)
-	}
-	if waited.Status != InvestigationSucceeded || waited.FinalMessage != "rca final" {
-		t.Fatalf("waited = %+v", waited)
-	}
-	data, err := os.ReadFile(callsPath)
-	if err != nil {
-		t.Fatalf("ReadFile calls: %v", err)
-	}
-	calls := strings.Split(string(data), "---CALL---")
-	if len(calls) < 3 {
-		t.Fatalf("want two calls, got:\n%s", data)
-	}
-	if !strings.Contains(calls[1], validatorWorkspace) || !strings.Contains(calls[1], "你是 Bug 验证 Agent") {
-		t.Fatalf("validation call should use validator workspace and prompt:\n%s", calls[1])
-	}
-	if !strings.Contains(calls[2], troubleshooterWorkspace) || !strings.Contains(calls[2], "请作为选定的 AI 排障机器人开始排障") {
-		t.Fatalf("investigation call should use troubleshooter workspace and prompt:\n%s", calls[2])
-	}
-}
-
-func TestCodexInvestigatorContinuesValidationPhaseWithValidatorBot(t *testing.T) {
-	root := t.TempDir()
-	troubleshooterWorkspace := filepath.Join(root, "troubleshooter")
-	validatorWorkspace := filepath.Join(root, "validator")
-	for _, dir := range []string{troubleshooterWorkspace, validatorWorkspace} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	callsPath := filepath.Join(root, "calls.txt")
-	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\n{\n  printf '%s\\n' '---CALL---'\n  pwd\n  printf '%s\\n' \"$last\"\n} >> " + shellQuote(callsPath) + "\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\\\\ngaps: []\\\\nvalidation continued\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"rca final\"}}' ;;\nesac\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	store := NewInvestigationStore(root)
-	prevRun := InvestigationRun{
-		ID:     "run-prev",
-		BugID:  "bug-1",
-		Status: InvestigationSucceeded,
-		Events: []InvestigationEvent{{
-			Type:    "agent_message",
-			Message: "previous validation",
-			Meta:    map[string]any{"phase": "validation"},
-		}},
-	}
-	if err := store.Upsert(prevRun); err != nil {
-		t.Fatalf("Upsert previous run: %v", err)
-	}
-	inv := NewCodexInvestigator(store, bin)
-	run, err := inv.Continue(
-		context.Background(),
-		Bug{ID: "bug-1", Title: "Bug"},
-		BotRef{
-			Key:      "t|codex",
-			Target:   "codex",
-			Path:     troubleshooterWorkspace,
-			SystemID: "base",
-			Role:     "troubleshooter",
-			InternalAgents: []BotInternalAgent{
-				{ID: "troubleshooter", Role: "troubleshooter"},
-				{ID: "validator", Role: "validator"},
-			},
-		},
-		"补充验证账号",
-		prevRun.ID,
-		"validation",
-	)
-	if err != nil {
-		t.Fatalf("Continue validation: %v", err)
-	}
-	waited, err := inv.Wait(run.ID)
-	if err != nil {
-		t.Fatalf("Wait: %v", err)
-	}
-	if waited.Status != InvestigationSucceeded || waited.BotKey != "t|codex" || waited.FinalMessage != "rca final" {
-		t.Fatalf("waited = %+v", waited)
-	}
-	calls, err := os.ReadFile(callsPath)
-	if err != nil {
-		t.Fatalf("ReadFile calls: %v", err)
-	}
-	callParts := strings.Split(string(calls), "---CALL---")
-	if len(callParts) < 3 {
-		t.Fatalf("want validation + investigation calls, got:\n%s", calls)
-	}
-	if !strings.Contains(callParts[1], validatorWorkspace) || !strings.Contains(callParts[1], "你是 Bug 验证 Agent") {
-		t.Fatalf("validation continuation should use validator workspace and prompt:\n%s", callParts[1])
-	}
-	if !strings.Contains(callParts[2], troubleshooterWorkspace) || !strings.Contains(callParts[2], "请作为选定的 AI 排障机器人开始排障") {
-		t.Fatalf("validation continuation should enter investigation after evidence:\n%s", callParts[2])
-	}
-	phasesByMessage := map[string]string{}
-	for _, event := range waited.Events {
-		if event.Meta != nil {
-			phase, _ := event.Meta["phase"].(string)
-			phasesByMessage[event.Message] = phase
-		}
-	}
-	if phasesByMessage["验证 Agent 继续取证（基于用户补充信息）"] != "validation" || phasesByMessage["rca final"] != "investigation" || phaseForMessageContaining(phasesByMessage, "validation continued") != "validation" {
-		t.Fatalf("phasesByMessage = %+v", phasesByMessage)
-	}
-}
-
-func TestCodexInvestigatorKeepsValidationContinuationPausedWithoutEvidence(t *testing.T) {
-	root := t.TempDir()
-	troubleshooterWorkspace := filepath.Join(root, "troubleshooter")
-	validatorWorkspace := filepath.Join(root, "validator")
-	for _, dir := range []string{troubleshooterWorkspace, validatorWorkspace} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	callsPath := filepath.Join(root, "calls.txt")
-	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\n{\n  printf '%s\\n' '---CALL---'\n  pwd\n  printf '%s\\n' \"$last\"\n} >> " + shellQuote(callsPath) + "\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: insufficient_info\\\\ngaps:\\\\n- 仍缺少测试账号\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"rca should not run\"}}' ;;\nesac\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	store := NewInvestigationStore(root)
-	prevRun := InvestigationRun{ID: "run-prev", BugID: "bug-1", Status: InvestigationSucceeded}
-	if err := store.Upsert(prevRun); err != nil {
-		t.Fatalf("Upsert previous run: %v", err)
-	}
-	inv := NewCodexInvestigator(store, bin)
-	run, err := inv.Continue(
-		context.Background(),
-		Bug{ID: "bug-1", Title: "Bug"},
-		BotRef{
-			Key:      "t|codex",
-			Target:   "codex",
-			Path:     troubleshooterWorkspace,
-			SystemID: "base",
-			InternalAgents: []BotInternalAgent{
-				{ID: "troubleshooter", Role: "troubleshooter"},
-				{ID: "validator", Role: "validator"},
-			},
-		},
-		"继续补充",
-		prevRun.ID,
-		"validation",
-	)
-	if err != nil {
-		t.Fatalf("Continue validation: %v", err)
-	}
-	waited, err := inv.Wait(run.ID)
-	if err != nil {
-		t.Fatalf("Wait: %v", err)
-	}
-	if waited.Status != InvestigationSucceeded ||
-		!strings.Contains(waited.FinalMessage, "### 验证报告") ||
-		!strings.Contains(waited.FinalMessage, "信息不足") ||
-		!strings.Contains(waited.FinalMessage, "仍缺少测试账号") {
-		t.Fatalf("waited = %+v", waited)
-	}
-	calls, err := os.ReadFile(callsPath)
-	if err != nil {
-		t.Fatalf("ReadFile calls: %v", err)
-	}
-	if got := strings.Count(string(calls), "---CALL---"); got != 1 {
-		t.Fatalf("want validation only, got %d calls:\n%s", got, calls)
-	}
-}
-
-func TestCodexInvestigatorPausesWhenValidationDoesNotReproduce(t *testing.T) {
-	root := t.TempDir()
-	troubleshooterWorkspace := filepath.Join(root, "troubleshooter")
-	validatorWorkspace := filepath.Join(root, "validator")
-	for _, dir := range []string{troubleshooterWorkspace, validatorWorkspace} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	callsPath := filepath.Join(root, "calls.txt")
-	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\n{\n  printf '%s\\n' '---CALL---'\n  pwd\n  printf '%s\\n' \"$last\"\n} >> " + shellQuote(callsPath) + "\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: not_reproduced\\\\ngaps: []\\\\nobserved_behavior: 未复现原始问题\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"rca should not run\"}}' ;;\nesac\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	store := NewInvestigationStore(root)
-	inv := NewCodexInvestigator(store, bin)
-	run, err := inv.StartWithValidator(
-		context.Background(),
-		Bug{ID: "bug-1", Title: "Bug"},
-		BotRef{Key: "t|codex", Target: "codex", Path: troubleshooterWorkspace, Role: "troubleshooter"},
-		BotRef{Key: "v|codex", Target: "codex", Path: validatorWorkspace, Role: "validator"},
-	)
-	if err != nil {
-		t.Fatalf("StartWithValidator: %v", err)
-	}
-	waited, err := inv.Wait(run.ID)
-	if err != nil {
-		t.Fatalf("Wait: %v", err)
-	}
-	if waited.Status != InvestigationSucceeded ||
-		!strings.Contains(waited.FinalMessage, "### 验证报告") ||
-		!strings.Contains(waited.FinalMessage, "未复现") ||
-		!strings.Contains(waited.FinalMessage, "未复现原始 Bug") {
-		t.Fatalf("waited = %+v", waited)
-	}
-	calls, err := os.ReadFile(callsPath)
-	if err != nil {
-		t.Fatalf("ReadFile calls: %v", err)
-	}
-	if got := strings.Count(string(calls), "---CALL---"); got != 1 {
-		t.Fatalf("want validation only, got %d calls:\n%s", got, calls)
-	}
-	if !strings.Contains(string(calls), "verification_status") || strings.Contains(string(calls), "请作为选定的 AI 排障机器人开始排障") {
-		t.Fatalf("unexpected calls:\n%s", calls)
-	}
-	if phaseForMessageContaining(eventPhases(waited.Events), "未复现原始 Bug") != "validation" {
-		t.Fatalf("missing not reproduced pause event: %+v", waited.Events)
-	}
 }
 
 func TestCodexInvestigatorStartFixUsesFixerBot(t *testing.T) {
@@ -1816,90 +1190,6 @@ sawAgentMessage:
 	}
 }
 
-func TestCodexInvestigatorEmitsValidationStageEvents(t *testing.T) {
-	root := t.TempDir()
-	workspace := filepath.Join(root, "repo")
-	if err := os.MkdirAll(workspace, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\\\\ngaps: []\\\\nvalidation report\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"final report\"}}' ;;\nesac\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	store := NewInvestigationStore(root)
-	inv := NewCodexInvestigator(store, bin)
-	got := make(chan InvestigationEvent, 8)
-	inv.SetEventSink(func(run InvestigationRun, event InvestigationEvent) {
-		got <- event
-	})
-	run, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|codex", Target: "codex", Path: workspace})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if _, err := inv.Wait(run.ID); err != nil {
-		t.Fatalf("Wait: %v", err)
-	}
-	var messages []string
-	deadline := time.After(time.Second)
-	for {
-		select {
-		case event := <-got:
-			if event.Type == "stage" {
-				if event.Meta["phase"] != "validation" {
-					t.Fatalf("stage phase = %+v", event.Meta)
-				}
-				messages = append(messages, event.Message)
-			}
-			if len(messages) >= 2 {
-				if messages[0] != "验证 Agent 开始取证验证" || messages[1] != "验证 Agent 完成，已将证据交给排障 Agent" {
-					t.Fatalf("stage messages = %+v", messages)
-				}
-				return
-			}
-		case <-deadline:
-			t.Fatalf("timed out waiting for stage events, got %+v", messages)
-		}
-	}
-}
-
-func TestCodexInvestigatorTagsValidationAndInvestigationEvents(t *testing.T) {
-	root := t.TempDir()
-	workspace := filepath.Join(root, "repo")
-	if err := os.MkdirAll(workspace, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	bin := filepath.Join(root, "codex")
-	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\\\\ngaps: []\\\\nvalidation evidence\"}}' ;;\n  *) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"investigation evidence\"}}' ;;\nesac\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	store := NewInvestigationStore(root)
-	inv := NewCodexInvestigator(store, bin)
-	run, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|codex", Target: "codex", Path: workspace})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	waited, err := inv.Wait(run.ID)
-	if err != nil {
-		t.Fatalf("Wait: %v", err)
-	}
-	phasesByMessage := map[string]string{}
-	for _, event := range waited.Events {
-		if event.Message != "" && event.Meta != nil {
-			if phase, _ := event.Meta["phase"].(string); phase != "" {
-				phasesByMessage[event.Message] = phase
-			}
-		}
-	}
-	if phaseForMessageContaining(phasesByMessage, "validation evidence") != "validation" {
-		t.Fatalf("validation event phase map = %+v", phasesByMessage)
-	}
-	if phasesByMessage["investigation evidence"] != "investigation" {
-		t.Fatalf("investigation event phase map = %+v", phasesByMessage)
-	}
-}
-
 func TestCodexInvestigatorUsesPhaseSpecificLifecycleMessages(t *testing.T) {
 	root := t.TempDir()
 	workspace := filepath.Join(root, "repo")
@@ -1934,7 +1224,7 @@ func TestCodexInvestigatorUsesPhaseSpecificLifecycleMessages(t *testing.T) {
 	}
 	validationJoined := strings.Join(validationMessages, "\n")
 	investigationJoined := strings.Join(investigationMessages, "\n")
-	if !strings.Contains(validationJoined, "开始验证") || !strings.Contains(validationJoined, "验证完成") {
+	if validationJoined != "" {
 		t.Fatalf("validation messages = %q", validationJoined)
 	}
 	if strings.Contains(validationJoined, "排障完成") {
@@ -1954,6 +1244,7 @@ func TestCodexInvestigatorStoresLongAgentMessage(t *testing.T) {
 	longMessage := strings.Repeat("x", 70*1024)
 	bin := filepath.Join(root, "codex")
 	script := "#!/bin/sh\nlast=\"\"\nfor arg in \"$@\"; do last=\"$arg\"; done\ncase \"$last\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"verification_status: reproduced\\ngaps: []\"}}' ;;\n  *) printf '%s\\n' " + shellQuote(`{"type":"item.completed","item":{"type":"agent_message","text":"`+longMessage+`"}}`) + " ;;\nesac\n"
+	script += "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2003,33 +1294,10 @@ func TestCodexInvestigatorRunsFakeClaude(t *testing.T) {
 	}
 }
 
-func TestCodexInvestigatorRunsFakeOpenClaw(t *testing.T) {
-	root := t.TempDir()
-	bin := filepath.Join(root, "openclaw")
-	script := "#!/bin/sh\nall=\"$*\"\ncase \"$all\" in\n  *你是\\ Bug\\ 验证\\ Agent*) printf '%s\\n' '{\"ok\":true,\"reply\":\"verification_status: reproduced\\ngaps: []\"}' ;;\n  *) printf '%s\\n' '{\"ok\":true,\"reply\":\"openclaw final\"}' ;;\nesac\n"
-	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	store := NewInvestigationStore(root)
-	inv := NewCodexInvestigator(store, "codex")
-	inv.SetBinaryForTarget("openclaw", bin)
-	run, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "base|openclaw", Target: "openclaw", Path: "base", SystemID: "base"})
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	waited, err := inv.Wait(run.ID)
-	if err != nil {
-		t.Fatalf("Wait: %v", err)
-	}
-	if waited.Status != InvestigationSucceeded || waited.FinalMessage != "openclaw final" {
-		t.Fatalf("waited = %+v", waited)
-	}
-}
-
 func TestCodexInvestigatorRejectsUnsupportedBot(t *testing.T) {
 	store := NewInvestigationStore(t.TempDir())
 	inv := NewCodexInvestigator(store, "codex")
-	_, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|cursor", Target: "cursor", Path: t.TempDir()})
+	_, err := inv.Start(context.Background(), Bug{ID: "bug-1", Title: "Bug"}, BotRef{Key: "b|embedded", Target: "embedded", Path: t.TempDir()})
 	if err == nil || !strings.Contains(err.Error(), "不支持") {
 		t.Fatalf("err = %v", err)
 	}
@@ -2124,6 +1392,7 @@ func TestCodexInvestigatorStartsNewRunWhenStoredActiveRunIsOrphaned(t *testing.T
 	}
 	bin := filepath.Join(root, "codex")
 	script := "#!/bin/sh\nprintf '%s\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"new final\"}}'\n"
+	script += "printf '%s\\n' '{\"type\":\"turn.completed\"}'\n"
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

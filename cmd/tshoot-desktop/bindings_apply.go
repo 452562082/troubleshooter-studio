@@ -56,8 +56,6 @@ func (a *App) ApplyBot(agentPath, newYamlText string, dryRun bool) (*agent.Resul
 }
 
 // ImportAndDeploy 把 yaml 直接部署成新机器人（agent.ImportAndApply 的 UI 封装）。
-// target: openclaw / claude-code / cursor / embedded
-// destPath: 部署目标路径。openclaw 下是产物目录（含 install.sh）；其它 target 下是目标项目根。
 // repoPaths: 仓库名 → 本机绝对路径,烤进产物 skills/routing/references/repo-path-map.yaml。
 // 前端从 wizard 里抽出每个 repo 的 _localPath / _cloneTarget 传过来;troubleshooter.yaml
 // 里不含路径(故意的,保持可分享),这里是唯一的路径传入口。
@@ -111,14 +109,13 @@ func (a *App) ImportAndDeploy(yamlText, target, destPath string, repoPaths map[s
 //
 // 设计:三种 target 都是 Studio 托管的中间包,装到 ~/.tshoot/<target>/<id>/。
 // install.sh 跑完后再各自分发到用户级的真实位置:
-//   - openclaw     ~/.openclaw/workspace/<workspace_name>/
 //   - claude-code  ~/.claude/agents/<name>.md  + ~/.claude/skills/<name>/
 //   - cursor       ~/.cursor/agents/<name>.md  + ~/.cursor/skills/<name>/
 //
 // 空 systemID 时回退到 "default"(UI 初始化时 system.id 可能还空,给个兜底)。
 func (a *App) DefaultDestPath(target, systemID string) (string, error) {
 	switch target {
-	case "openclaw", "claude-code", "cursor", "codex":
+	case "claude-code", "cursor", "codex", "opencode":
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("read home: %w", err)

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { IncidentPhaseEvent, PhaseAttempt } from '../lib/bridge/bugWorkflow'
 
 const props = withDefaults(defineProps<{
@@ -10,7 +10,7 @@ const props = withDefaults(defineProps<{
 const visiblePhases = new Set(['investigation', 'fix'])
 const visibleTypes = new Set(['thread_started', 'turn_started', 'turn_completed', 'command_execution', 'mcp_tool_call', 'agent_message', 'code_intelligence', 'retry', 'error', 'turn_failed', 'result'])
 const investigationSteps = [
-  { key: 'evidence_handoff', label: '验证证据' },
+  { key: 'evidence_handoff', label: '工单分析' },
   { key: 'timeline', label: '时间轴' },
   { key: 'runtime_scope', label: '运行时' },
   { key: 'dependency_chain', label: '调用链' },
@@ -61,6 +61,11 @@ const safeEvents = computed(() => props.events.reduce<Array<{
   result.push({ key: `${event.at || ''}:${type}:${state}:${index}`, type, message, state, exitCode, at: typeof event.at === 'string' ? event.at : '' })
   return result
 }, []).slice(-30))
+
+const detailsOpen = ref(false)
+watch(() => props.attempt?.id, () => { detailsOpen.value = false })
+const latestEvent = computed(() => safeEvents.value[safeEvents.value.length - 1])
+const latestAnalysis = computed(() => [...safeEvents.value].reverse().find(event => ['agent_message', 'result', 'error', 'turn_failed'].includes(event.type)))
 
 function eventTitle(event: { type: string; state: string; exitCode?: number }): string {
   if (event.type === 'thread_started') return 'Agent 会话已启动'
@@ -122,38 +127,50 @@ function fmtTime(value: string): string {
       </ol>
     </div>
 
-    <ol v-if="safeEvents.length" class="agent-progress-events" aria-label="Agent 执行进度" aria-live="polite">
-      <li v-for="event in safeEvents" :key="event.key" :data-event-type="event.type">
-        <span class="event-marker" aria-hidden="true"></span>
-        <div>
-          <div class="event-heading">
-            <strong>{{ eventTitle(event) }}</strong>
-            <time v-if="fmtTime(event.at)">{{ fmtTime(event.at) }}</time>
-          </div>
-          <pre v-if="event.message">{{ event.message }}</pre>
-        </div>
-      </li>
-    </ol>
+    <template v-if="safeEvents.length">
+      <div class="latest-activity" role="status" aria-live="polite">
+        <div class="event-heading"><strong>{{ latestEvent ? eventTitle(latestEvent) : '' }}</strong><time v-if="latestEvent">{{ fmtTime(latestEvent.at) }}</time></div>
+        <p v-if="latestAnalysis?.message" class="analysis-preview">{{ latestAnalysis.message }}</p>
+      </div>
+      <details class="execution-details" :open="detailsOpen" @toggle="detailsOpen = ($event.target as HTMLDetailsElement).open">
+        <summary>执行详情 <span>最近 {{ safeEvents.length }} 条</span></summary>
+        <ol v-if="detailsOpen" class="agent-progress-events" aria-label="Agent 执行进度">
+          <li v-for="event in [...safeEvents].reverse()" :key="event.key" :data-event-type="event.type">
+            <span class="event-marker" aria-hidden="true"></span>
+            <div>
+              <div class="event-heading"><strong>{{ eventTitle(event) }}</strong><time v-if="fmtTime(event.at)">{{ fmtTime(event.at) }}</time></div>
+              <pre v-if="event.message">{{ event.message }}</pre>
+            </div>
+          </li>
+        </ol>
+      </details>
+    </template>
     <div v-else class="agent-progress-empty" role="status" aria-live="polite">
       <span aria-hidden="true"></span>
       <p>Agent 已启动，正在等待第一条执行事件…</p>
     </div>
-    <footer>最多展示当前阶段最近 30 条事件；原始工具参数和命令输出不会在页面公开。</footer>
   </section>
 </template>
 
 <style scoped>
-.agent-progress { min-width: 0; display: grid; gap: var(--sp-3); padding: var(--sp-4); border: 1px solid #bfdbfe; border-left: 3px solid #2563eb; border-radius: var(--r-lg); background: #f8fbff; }
+.agent-progress { container: agent-progress / inline-size; min-width: 0; display: grid; gap: var(--sp-3); padding: var(--sp-4); border: 1px solid #dbe5f4; border-radius: var(--r-lg); background: #fbfdff; }
+.latest-activity { min-width: 0; padding: 4px 0; }
+.analysis-preview { margin: 10px 0 0; color: var(--c-text); font-size: 13px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.execution-details { border-top: 1px solid #dbeafe; }
+.execution-details summary { padding: 12px 0 0; color: #475569; font-size: 12px; cursor: pointer; }
+.execution-details summary span { margin-left: 8px; color: var(--c-muted); }
+.execution-details summary:focus-visible { outline: 2px solid #2563eb; outline-offset: 3px; }
+.execution-details[open] summary { margin-bottom: 12px; }
 .agent-progress header { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: var(--sp-2); }
 .agent-progress header > div:first-child { min-width: 0; }
 .agent-progress header span, .agent-progress footer { color: var(--c-muted); font-size: var(--fs-xs); }
 .agent-progress h3 { margin: 2px 0 0; color: var(--c-ink); font-size: var(--fs-base); }
 .agent-running-state { display: inline-flex; align-items: center; gap: 7px; padding: 5px 9px; border-radius: 999px; background: #dbeafe; }
 .agent-running-state i { width: 8px; height: 8px; border-radius: 50%; background: #2563eb; box-shadow: 0 0 0 4px rgba(37, 99, 235, .12); animation: agent-pulse 1.6s ease-in-out infinite; }
-.remediation-reassessment-progress { display: grid; gap: 4px; padding: 12px; border: 1px solid #dbeafe; border-radius: var(--r-md); background: #fff; }
+.remediation-reassessment-progress { display: grid; gap: 4px; padding: 12px; border: 1px solid #e2e8f0; border-radius: var(--r-md); background: #fff; }
 .remediation-reassessment-progress strong { color: var(--c-ink); font-size: var(--fs-sm); }
 .remediation-reassessment-progress span { color: var(--c-muted); font-size: var(--fs-xs); line-height: 1.5; }
-.investigation-step-progress { display: grid; gap: 10px; padding: 12px; border: 1px solid #dbeafe; border-radius: var(--r-md); background: #fff; }
+.investigation-step-progress { display: grid; gap: 10px; padding: 12px; border: 1px solid #e2e8f0; border-radius: var(--r-md); background: #fff; }
 .step-progress-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: var(--sp-2); }
 .step-progress-heading strong { color: var(--c-ink); font-size: var(--fs-sm); }
 .step-progress-heading span { color: #2563eb; font-size: var(--fs-xs); font-weight: 600; }
@@ -164,7 +181,7 @@ function fmtTime(value: string): string {
 .investigation-step-progress li.is-complete .step-index { border-color: #86efac; background: #dcfce7; color: #15803d; }
 .investigation-step-progress li.is-current { background: #eff6ff; color: #1d4ed8; font-weight: 600; }
 .investigation-step-progress li.is-current .step-index { border-color: #3b82f6; background: #2563eb; color: #fff; box-shadow: 0 0 0 4px rgba(37, 99, 235, .1); }
-.agent-progress-events { max-height: 340px; display: grid; gap: 0; margin: 0; padding: 0 var(--sp-1) 0 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; list-style: none; }
+.agent-progress-events { max-height: 260px; display: grid; gap: 0; margin: 0; padding: 0 var(--sp-1) 0 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; list-style: none; }
 .agent-progress-events li { min-width: 0; display: grid; grid-template-columns: 12px minmax(0, 1fr); gap: var(--sp-2); padding: 9px 0; border-bottom: 1px solid #dbeafe; }
 .agent-progress-events li:last-child { border-bottom: 0; }
 .event-marker { width: 8px; height: 8px; margin-top: 5px; border: 2px solid #60a5fa; border-radius: 50%; background: #fff; }
@@ -172,13 +189,19 @@ function fmtTime(value: string): string {
 .agent-progress-events li > div { min-width: 0; display: grid; gap: 5px; }
 .event-heading { min-width: 0; display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-2); }
 .event-heading strong { color: var(--c-ink); font-size: var(--fs-sm); }
-.event-heading time { flex: 0 0 auto; color: var(--c-muted); font-size: 10px; }
-.agent-progress pre { max-height: 150px; margin: 0; padding: 8px 10px; overflow: auto; border: 1px solid #dbeafe; border-radius: var(--r-md); background: #fff; color: var(--c-text); font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.event-heading time { flex: 0 0 auto; color: var(--c-muted); font-size: 11px; }
+.agent-progress pre { max-height: 150px; margin: 0; padding: 8px 10px; overflow: auto; border: 1px solid #e2e8f0; border-radius: var(--r-md); background: #fff; color: var(--c-text); font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .agent-progress-empty { display: flex; align-items: center; gap: var(--sp-2); min-height: 46px; padding: 10px 12px; border: 1px dashed #93c5fd; border-radius: var(--r-md); color: var(--c-muted); }
 .agent-progress-empty span { width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%; background: #2563eb; }
 .agent-progress-empty p { margin: 0; font-size: var(--fs-sm); }
 .agent-progress footer { line-height: 1.5; }
 @keyframes agent-pulse { 50% { opacity: .35; transform: scale(.82); } }
-@media (max-width: 980px) { .investigation-step-progress ol { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@container agent-progress (max-width: 540px) { .investigation-step-progress ol { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @media (prefers-reduced-motion: reduce) { .agent-running-state i { animation: none; } }
+
+.latest-activity { padding: 12px; border-radius: 8px; background: #f1f5fb; }
+.agent-progress h3 { font-size: 14px; line-height: 1.5; }
+.agent-progress-events { padding: 0 10px; border-radius: 8px; background: white; }
+.agent-progress pre { background: #f8fafc; border-color: #e2e8f0; }
+@container agent-progress (max-width: 340px) { .investigation-step-progress ol { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 </style>

@@ -5,7 +5,7 @@ description: 可选的 AI 排障机器人项目路由入口。遇到排障或修
 
 # Troubleshooter 项目路由
 
-本 skill 是 {{TARGET}} 用户级安装中唯一的通用排障入口。它只负责识别当前项目是否已经配置排障机器人，不拥有未绑定项目，也不能让排障机器人影响普通 Codex 工作。业务排障、验证和修复 Agent 都是系统专属执行器，不能在未确认项目归属前直接选择。
+本 skill 是 {{TARGET}} 用户级安装中唯一的通用排障入口。它只负责识别当前项目是否已经配置排障机器人，不拥有未绑定项目，也不能让排障机器人影响普通 Codex 工作。业务排障和修复 Agent 都是系统专属执行器，不能在未确认项目归属前直接选择。
 
 ## 强制路由
 
@@ -22,7 +22,6 @@ description: 可选的 AI 排障机器人项目路由入口。遇到排障或修
    - `request_system_correction`：仅当用户明确传入 `--system` 但系统不存在时，说明该显式名称无效。
 3. `action=use_troubleshooter` 时，根据意图从 `agents` 精确选择 ID：
    - 默认排障、定位原因：`troubleshooter`
-   - 复现、验证、修复后回归：`validator`
    - 只有用户明确要求改代码、提交或推送：`fixer`
 4. 必须调用返回的完整 Agent ID，不得换成名称相似的另一个 Agent。
 

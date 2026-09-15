@@ -49,7 +49,7 @@ func TestScanFindsAgentInRoot(t *testing.T) {
 		SchemaVersion: 1,
 		SystemID:      "shop",
 		SystemName:    "Shop",
-		Target:        "openclaw",
+		Target:        "claude-code",
 		TroubleshooterYAML: `system:
   id: shop
 environments:
@@ -59,7 +59,7 @@ repos:
   - name: order
 generation:
   skills_whitelist: [routing, config-executor]
-  targets: [openclaw]
+  targets: [claude-code]
 `,
 	})
 
@@ -71,7 +71,7 @@ generation:
 		t.Fatalf("want 1 agent, got %d", len(agents))
 	}
 	a := agents[0]
-	if a.Meta.SystemID != "shop" || a.Meta.Target != "openclaw" {
+	if a.Meta.SystemID != "shop" || a.Meta.Target != "claude-code" {
 		t.Errorf("meta 解错:%+v", a.Meta)
 	}
 	if a.EnvCount != 2 || a.RepoCount != 1 || a.SkillCount != 2 {
@@ -116,7 +116,7 @@ func TestScanDedupByAgentIDAndTarget(t *testing.T) {
 		SystemName:    "Shop",
 		AgentID:       "shop-troubleshooter",
 		Role:          RoleTroubleshooter,
-		Target:        "openclaw",
+		Target:        "claude-code",
 	}
 	writeMeta(t, filepath.Join(root1, "a"), m)
 	writeMeta(t, filepath.Join(root2, "b"), m)
@@ -167,7 +167,7 @@ func TestScanKeepsInternalAgentsInSingleBotMeta(t *testing.T) {
 		SystemID:      "shop",
 		AgentID:       "shop-troubleshooter",
 		Role:          RoleTroubleshooter,
-		Target:        "openclaw",
+		Target:        "claude-code",
 		InternalAgents: []InternalAgent{
 			{ID: "shop-troubleshooter", Role: RoleTroubleshooter},
 			{ID: "shop-validator", Role: RoleValidator},
@@ -266,7 +266,7 @@ func TestScanPrefersPrimaryAgentAnchorOverStaleInternalAnchor(t *testing.T) {
 func TestScanMultipleTargetsOfSameSystem(t *testing.T) {
 	// 同 systemID 但不同 target 的算不同 agent,不去重。
 	root := t.TempDir()
-	writeMeta(t, filepath.Join(root, "a"), Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "openclaw"})
+	writeMeta(t, filepath.Join(root, "a"), Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "claude-code"})
 	writeMeta(t, filepath.Join(root, "b"), Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "cursor"})
 
 	agents, err := Scan([]string{root})
@@ -293,11 +293,11 @@ func TestScanSkipsInvalidMeta(t *testing.T) {
 	// meta 文件缺 systemID / target 的应该跳过,不抛错。
 	root := t.TempDir()
 	// 合法的一个
-	writeMeta(t, filepath.Join(root, "ok"), Meta{SchemaVersion: 1, SystemID: "ok", Target: "openclaw"})
+	writeMeta(t, filepath.Join(root, "ok"), Meta{SchemaVersion: 1, SystemID: "ok", Target: "claude-code"})
 	// 缺 target 的
 	writeMeta(t, filepath.Join(root, "bad1"), Meta{SchemaVersion: 1, SystemID: "bad1"})
 	// 缺 systemID 的
-	writeMeta(t, filepath.Join(root, "bad2"), Meta{SchemaVersion: 1, Target: "openclaw"})
+	writeMeta(t, filepath.Join(root, "bad2"), Meta{SchemaVersion: 1, Target: "claude-code"})
 	// 直接垃圾 JSON
 	_ = os.MkdirAll(filepath.Join(root, "garbage"), 0o755)
 	_ = os.WriteFile(filepath.Join(root, "garbage", MetaFilename), []byte("not json"), 0o644)
@@ -322,5 +322,30 @@ func TestExpandHome(t *testing.T) {
 	// 非 ~ 前缀不动
 	if expandHome("/tmp/x") != "/tmp/x" {
 		t.Error("非 ~ 前缀不应改")
+	}
+}
+
+func TestScanIgnoresRetiredPlatform(t *testing.T) {
+	root := t.TempDir()
+	writeMeta(t, root, Meta{SchemaVersion: 1, SystemID: "shop", Target: "openclaw"})
+	bots, err := Scan([]string{root})
+	if err != nil || len(bots) != 0 {
+		t.Fatalf("retired bot found: %v %v", bots, err)
+	}
+}
+
+func TestScanOpenCodeUsesXDGConfig(t *testing.T) {
+	home := t.TempDir()
+	xdg := filepath.Join(home, "custom-config")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	root := filepath.Join(xdg, "opencode", "skills", "shop-bot")
+	writeMeta(t, root, Meta{SchemaVersion: 2, SystemID: "shop", SystemName: "Shop", Target: "opencode"})
+	found, err := Scan(DefaultRoots())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 1 || found[0].Path != root || found[0].Meta.Target != "opencode" {
+		t.Fatalf("found=%+v", found)
 	}
 }

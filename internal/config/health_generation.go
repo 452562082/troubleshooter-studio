@@ -8,7 +8,6 @@ import (
 // checkGeneration:生成可行性检查 —— 未知 skill / 已 whitelist 但 ds 没启用 / preserve 越狱 / model 字段不消费等。
 func checkGeneration(c *SystemConfig) []HealthIssue {
 	var out []HealthIssue
-	targets := c.Generation.ResolvedTargets()
 
 	// 未知 skill
 	for _, s := range c.Generation.SkillsWhitelist {
@@ -62,26 +61,6 @@ func checkGeneration(c *SystemConfig) []HealthIssue {
 	dsCheck("es-runtime-query", "elasticsearch")
 	dsCheck("postgresql-runtime-query", "postgresql")
 	dsCheck("clickhouse-runtime-query", "clickhouse")
-
-	// targets 不含 openclaw 但配了 agent.model:模型字段对 claude-code/cursor 不消费
-	hasOpenclaw := false
-	hasOther := false
-	for _, t := range targets {
-		switch t {
-		case "openclaw":
-			hasOpenclaw = true
-		case "claude-code", "cursor":
-			hasOther = true
-		}
-	}
-	if !hasOpenclaw && hasOther && c.Agent.Model != "" {
-		out = append(out, HealthIssue{
-			Severity: "info",
-			Category: "generation",
-			Field:    "agent.model",
-			Message:  "agent.model 仅 openclaw 消费,目前 targets 不含 openclaw,该字段不生效",
-		})
-	}
 
 	return out
 }

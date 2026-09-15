@@ -223,7 +223,7 @@ func TestCheck_OriginMatches(t *testing.T) {
 			Name: repoName, URL: origin, Stack: "go",
 			EnvBranches: map[string]string{"dev": "main"},
 		}},
-		Generation: config.Generation{TargetHost: "openclaw"},
+		Generation: config.Generation{TargetHost: "claude-code"},
 		Meta:       config.Meta{SchemaVersion: "0.1"},
 	}
 	rep, err := Check(cfg, reposRoot)
@@ -253,7 +253,7 @@ func TestCheck_OriginMismatch(t *testing.T) {
 			Name: repoName, URL: declaredURL, Stack: "go",
 			EnvBranches: map[string]string{"dev": "main"},
 		}},
-		Generation: config.Generation{TargetHost: "openclaw"},
+		Generation: config.Generation{TargetHost: "claude-code"},
 		Meta:       config.Meta{SchemaVersion: "0.1"},
 	}
 	rep, err := Check(cfg, reposRoot)
@@ -291,7 +291,7 @@ func TestCheck_OriginCrossProtocolMatch(t *testing.T) {
 			Name: repoName, URL: declared, Stack: "go",
 			EnvBranches: map[string]string{"dev": "main"},
 		}},
-		Generation: config.Generation{TargetHost: "openclaw"},
+		Generation: config.Generation{TargetHost: "claude-code"},
 		Meta:       config.Meta{SchemaVersion: "0.1"},
 	}
 	rep, err := Check(cfg, reposRoot)

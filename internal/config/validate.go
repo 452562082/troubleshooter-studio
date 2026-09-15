@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/platform"
 	"github.com/xiaolong/troubleshooter-studio/internal/topology"
 )
 
@@ -26,25 +27,6 @@ func Validate(c *SystemConfig) error {
 	}
 	if c.Agent.Name == "" {
 		return fmt.Errorf("agent.name required")
-	}
-	// workspace_name / model 仅 openclaw target 消费;其它 target(claude-code / cursor)
-	// 不读这两个字段,所以只在勾了 openclaw 时才强制必填。
-	hasOpenclaw := false
-	for _, t := range c.Generation.ResolvedTargets() {
-		if t == "openclaw" {
-			hasOpenclaw = true
-			break
-		}
-	}
-	if hasOpenclaw {
-		// workspace_name 可空,有 system.id / agent.id 就能 ResolveWorkspaceName() 出来;
-		// 老 yaml 里显式写了 workspace_name 的也兼容。完全空才拦。
-		if c.ResolveWorkspaceName() == "" {
-			return fmt.Errorf("openclaw target 需要 system.id / agent.id / agent.workspace_name 至少一个非空")
-		}
-		if c.Agent.Model == "" {
-			return fmt.Errorf("agent.model required (openclaw target)")
-		}
 	}
 
 	if len(c.Environments) == 0 {
@@ -209,11 +191,10 @@ func Validate(c *SystemConfig) error {
 		return err
 	}
 
-	validTargets := map[string]bool{"openclaw": true, "claude-code": true, "cursor": true, "codex": true}
 	targets := c.Generation.ResolvedTargets()
 	for _, t := range targets {
-		if !validTargets[t] {
-			return fmt.Errorf("generation.targets: %q not supported (valid: openclaw, claude-code, cursor)", t)
+		if !platform.Supported(t) {
+			return fmt.Errorf("generation.targets: %q not supported (valid: claude-code, cursor, codex, opencode)", t)
 		}
 	}
 

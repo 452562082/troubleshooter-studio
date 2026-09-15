@@ -8,13 +8,13 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/xiaolong/troubleshooter-studio/internal/platform"
 	"gopkg.in/yaml.v3"
 )
 
 // Scan 在给定目录里寻找 tshoot.json 锚点。每个命中 = 一个已安装机器人。
 //
 // 搜索策略：
-//   - roots 传入的是候选根目录（例如 ~/.openclaw/workspace/、指定项目根）
 //   - 每个 root 下最多下探 2 层寻找 tshoot.json，避免把用户硬盘全扫一遍
 //   - 同一个 Meta.SystemID + Target 的机器人在 roots 里出现多次，只保留第一条
 //
@@ -81,13 +81,12 @@ func preferDiscoveredAgent(candidate, current DiscoveredAgent) bool {
 
 // WorkDirFor 返回 Apply / 重 gen / 卸载 实际写入产物的"工作目录"。跟 ag.Path("UI 显示用的
 // 真实部署位置")可能不同 —— Claude Code/Cursor 走"staging 中间包 → InstallNative 拷到真实
-// 位置"两段式部署,所以工作目录是 staging 而非真实位置。OpenClaw 单段式,工作目录==真实位置。
 //
 // staging 路径约定:`<HOME>/.tshoot/<target>/<system_id>/`(跟 cmd/tshoot-desktop/bindings_apply.go
 // ::DefaultDestPath 对齐)。
 func WorkDirFor(ag DiscoveredAgent) string {
 	switch ag.Meta.Target {
-	case "claude-code", "cursor", "codex":
+	case "claude-code", "cursor", "codex", "opencode":
 		if ag.Meta.SystemID == "" {
 			return ag.Path // 异常 fallback,跟老行为一致
 		}
@@ -101,7 +100,6 @@ func WorkDirFor(ag DiscoveredAgent) string {
 }
 
 // DefaultRoots 返回 discover 默认扫描的位置 —— 全是"真实部署位置":
-//   - ~/.openclaw/workspace/    OpenClaw 真实部署根
 //   - ~/.claude/skills/         Claude Code 真实部署根(每个 agent 一个 skills/<name> 子目录,
 //     里面有 InstallNative 写进去的 tshoot.json 锚点)
 //   - ~/.cursor/skills/         Cursor 真实部署根,同上
@@ -120,11 +118,12 @@ func WorkDirFor(ag DiscoveredAgent) string {
 // scanOne 最深下探 2 层(见调用 `scanOne(root, 2)`),刚好够 ~/.claude/skills/<name>/tshoot.json
 // 这种"root + 1 层子目录 + tshoot.json 文件" 的结构。
 func DefaultRoots() []string {
+	home, _ := os.UserHomeDir()
 	return []string{
-		"~/.openclaw/workspace",
 		"~/.claude/skills",
 		"~/.cursor/skills",
 		"~/.codex/skills",
+		filepath.Join(platform.OpenCodeRoot(home), "skills"),
 	}
 }
 
@@ -171,17 +170,15 @@ func readAgent(metaPath string) (DiscoveredAgent, error) {
 		return DiscoveredAgent{}, err
 	}
 	NormalizeMetaForPath(&meta, metaPath)
-	if meta.SystemID == "" || meta.Target == "" {
+	if meta.SystemID == "" || !platform.Supported(meta.Target) {
 		return DiscoveredAgent{}, os.ErrInvalid // 无效元数据（不是 tshoot 生成的）
 	}
 	info, _ := os.Stat(metaPath)
 	// agent.Path = 真实部署位置(tshoot.json 实际所在目录),给 UI 卡片显示 + 用户感知"我的机器人在哪"。
-	//   OpenClaw → ~/.openclaw/workspace/<id>/
 	//   Claude Code → ~/.claude/skills/<name>/
 	//   Cursor → ~/.cursor/skills/<name>/
 	//
 	// Apply / 重 gen / 卸载 内部用 WorkDirFor(agent) 反推 staging 工作目录(Claude Code/Cursor
-	// 走两段式 staging 中间包 → InstallNative 拷到真实位置;OpenClaw deploy=staging 同一目录)。
 	a := DiscoveredAgent{
 		Meta: meta,
 		Path: filepath.Dir(metaPath),
@@ -225,7 +222,7 @@ func inferInternalAgentsFromIDELayout(meta *Meta, metaPath string) {
 	}
 	ext := ""
 	switch meta.Target {
-	case "claude-code", "cursor":
+	case "claude-code", "cursor", "opencode":
 		ext = ".md"
 	case "codex":
 		ext = ".toml"

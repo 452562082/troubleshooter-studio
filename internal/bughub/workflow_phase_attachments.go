@@ -52,7 +52,7 @@ func validatePhaseAttachments(attachments []PhaseAttachment) ([]validatedPhaseAt
 		if err != nil || !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
 			return nil, errors.New("phase attachment changed while being read")
 		}
-		if !bytes.HasPrefix(content, browserPNGSignature) || int64(len(content)) != attachment.Size {
+		if !bytes.HasPrefix(content, phasePNGSignature) || int64(len(content)) != attachment.Size {
 			return nil, errors.New("phase screenshot attachment is not a bounded PNG")
 		}
 		digest := sha256.Sum256(content)

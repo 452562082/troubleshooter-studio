@@ -1,32 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import {
-  approveIncidentFix,
-  approveIncidentMerge,
-  ackIncidentWorkflowReminder,
-  cancelIncidentAttempt,
-  confirmIncidentValidation,
-  continueIncidentCase,
-  clearIncidentBrowserSession,
-  completeIncidentRemediation,
-  confirmIncidentBrowserLogin,
-  deleteIncidentHistory,
-  getIncidentArtifactPreview,
-  getIncidentCase,
-  listIncidentFixBranches,
-  listIncidentCases,
-  listPendingIncidentWorkflowReminders,
-  notifyIncidentDeployed,
-  normalizeIncidentCaseEvent,
-  openIncidentBrowserLogin,
-  repairIncidentBrowserRuntime,
-  resetIncidentCase,
-  resetIncidentCaseWithWarnings,
-  IncidentWorkflowCommandError,
-  isIncidentWorkflowConflict,
-  saveIncidentArtifact,
-  startIncidentCase,
-  uploadIncidentEvidenceFiles,
-} from './bugWorkflow'
+import { completeIncidentRemediation, deleteIncidentHistory, getIncidentArtifactPreview, getIncidentCase, listIncidentFixBranches, listIncidentCases, normalizeIncidentCaseEvent, resetIncidentCase, resetIncidentCaseWithWarnings, IncidentWorkflowCommandError, isIncidentWorkflowConflict, saveIncidentArtifact, selectIncidentEvidence, startIncidentCase, uploadIncidentEvidenceFiles } from './bugWorkflow'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -34,18 +7,6 @@ afterEach(() => {
 })
 
 describe('incident workflow bridge', () => {
-  it('forwards validation confirmation through the desktop binding', async () => {
-    const confirm = vi.fn().mockResolvedValue({ id: 'case-1', status: 'investigating', version: 8 })
-    ;(window as any).go = { main: { App: { ConfirmIncidentValidation: confirm } } }
-    const input = {
-      case_id: 'case-1', expected_version: 7,
-      idempotency_key: 'confirm-validation:case-1:attempt-1:7',
-      actor_id: 'desktop-user', validation_attempt_id: 'attempt-1',
-    }
-
-    await expect(confirmIncidentValidation(input)).resolves.toMatchObject({ id: 'case-1', status: 'investigating', version: 8 })
-    expect(confirm).toHaveBeenCalledWith(input)
-  })
 
   it('normalizes nullable collections while preserving numeric versions', async () => {
     const list = vi.fn().mockResolvedValue([{ id: 'case-1', status: 'validating', version: 7 }])
@@ -99,8 +60,6 @@ describe('incident workflow bridge', () => {
   it('returns an empty list in browser preview', async () => {
     await expect(listIncidentCases()).resolves.toEqual([])
     await expect(listIncidentFixBranches('case-1', 'attempt-1')).resolves.toEqual({})
-    await expect(listPendingIncidentWorkflowReminders()).resolves.toEqual([])
-    await expect(ackIncidentWorkflowReminder({ case_id: 'case-1', reservation_key: 'slot-1', delivery_attempt: 1, actor_id: 'desktop-root' })).rejects.toThrow(/桌面 app/)
   })
 
   it('forwards incident history deletion and normalizes nullable Case IDs', async () => {
@@ -162,58 +121,6 @@ describe('incident workflow bridge', () => {
     expect(list).toHaveBeenCalledWith('case-1', 'attempt-1')
   })
 
-  it('forwards durable reminder pull and acknowledgement', async () => {
-    const reminder = { case_id: 'case-1', reservation_key: 'slot-1', delivery_attempt: 1 }
-    const list = vi.fn().mockResolvedValue([reminder])
-    const ack = vi.fn().mockResolvedValue(undefined)
-    ;(window as any).go = { main: { App: { ListPendingIncidentWorkflowReminders: list, AckIncidentWorkflowReminder: ack } } }
-    await expect(listPendingIncidentWorkflowReminders()).resolves.toEqual([reminder])
-    const input = { ...reminder, actor_id: 'desktop-root' }
-    await ackIncidentWorkflowReminder(input)
-    expect(ack).toHaveBeenCalledWith(input)
-  })
-
-  it('rejects every mutation in browser preview with a desktop-only error', async () => {
-    const base = { case_id: 'case-1', expected_version: 1, idempotency_key: 'command', actor_id: 'user' }
-    await expect(startIncidentCase(base)).rejects.toThrow(/桌面 app/)
-    await expect(continueIncidentCase({ ...base, phase: 'validation' })).rejects.toThrow(/桌面 app/)
-    await expect(approveIncidentFix({ ...base, root_cause_attempt_id: 'attempt-1' })).rejects.toThrow(/桌面 app/)
-    await expect(completeIncidentRemediation({ ...base, root_cause_attempt_id: 'attempt-1', summary: 'rolled back config', evidence: 'ticket-42' })).rejects.toThrow(/桌面 app/)
-    await expect(approveIncidentMerge({ ...base, fix_commits: { api: 'abc' }, target_branches: { api: 'test' } })).rejects.toThrow(/桌面 app/)
-    await expect(notifyIncidentDeployed({ ...base, observed_version: 'build-1' })).rejects.toThrow(/桌面 app/)
-    await expect(cancelIncidentAttempt({ ...base, attempt_id: 'attempt-1' })).rejects.toThrow(/桌面 app/)
-    await expect(resetIncidentCase({ ...base, new_case_id: 'case-2', bot_key: 'base|codex' })).rejects.toThrow(/桌面 app/)
-    const browser = { ...base, attempt_id: 'attempt-1' }
-    await expect(openIncidentBrowserLogin(browser)).rejects.toThrow(/桌面 app/)
-    await expect(confirmIncidentBrowserLogin(browser)).rejects.toThrow(/桌面 app/)
-    await expect(repairIncidentBrowserRuntime(browser)).rejects.toThrow(/桌面 app/)
-    await expect(clearIncidentBrowserSession(browser)).rejects.toThrow(/桌面 app/)
-    await expect(getIncidentArtifactPreview('case-1', 'shot-1')).rejects.toThrow(/桌面 app/)
-    await expect(saveIncidentArtifact('case-1', 'shot-1')).rejects.toThrow(/桌面 app/)
-  })
-
-  it('forwards exact browser recovery inputs through the desktop bridge', async () => {
-    const login = vi.fn().mockResolvedValue({ id: 'case-1', status: 'validating', version: 8 })
-    const confirmLogin = vi.fn().mockResolvedValue({ id: 'case-1', status: 'validating', version: 8 })
-    const repair = vi.fn().mockResolvedValue({ id: 'case-1', status: 'validating', version: 9 })
-    const clear = vi.fn().mockResolvedValue(undefined)
-    ;(window as any).go = { main: { App: {
-      OpenIncidentBrowserLogin: login,
-      ConfirmIncidentBrowserLogin: confirmLogin,
-      RepairIncidentBrowserRuntime: repair,
-      ClearIncidentBrowserSession: clear,
-    } } }
-    const input = { case_id: 'case-1', attempt_id: 'attempt-1', expected_version: 7, idempotency_key: 'browser-login:case-1:attempt-1:v7', actor_id: 'desktop-user' }
-
-    await expect(openIncidentBrowserLogin(input)).resolves.toMatchObject({ id: 'case-1', version: 8 })
-    await expect(confirmIncidentBrowserLogin(input)).resolves.toMatchObject({ id: 'case-1', version: 8 })
-    await expect(repairIncidentBrowserRuntime(input)).resolves.toMatchObject({ id: 'case-1', version: 9 })
-    await expect(clearIncidentBrowserSession(input)).resolves.toBeUndefined()
-    expect(login).toHaveBeenCalledWith(input)
-    expect(confirmLogin).toHaveBeenCalledWith(input)
-    expect(repair).toHaveBeenCalledWith(input)
-    expect(clear).toHaveBeenCalledWith(input)
-  })
 
   it('returns only strict PNG preview data and hides save destinations behind a boolean', async () => {
     const preview = vi.fn().mockResolvedValue({ artifact_id: 'shot-1', mime_type: 'image/png', base64_data: 'iVBORw0KGgo=', size: 8 })
@@ -347,5 +254,20 @@ describe('incident workflow bridge', () => {
       kind: 'startup_error',
       error: { message: 'db unavailable', retryable: true },
     })
+  })
+})
+
+describe('native evidence selection bridge', () => {
+  it('invokes the native chooser without accepting arbitrary file paths', async () => {
+    const choose = vi.fn().mockResolvedValue({ images: [{ name:'截图.png', mime_type:'image/png', base64_data:'cG5n' }], files: [] })
+    ;(window as any).go = { main: { App: { SelectIncidentEvidence: choose } } }
+    expect((await selectIncidentEvidence()).images[0].name).toBe('截图.png')
+    expect(choose).toHaveBeenCalledWith()
+  })
+  it('normalizes cancelled selections and rejects unsupported image types', async () => {
+    const choose = vi.fn().mockResolvedValueOnce({ images:null, files:null }).mockResolvedValueOnce({ images:[{ name:'a', mime_type:'bad', base64_data:'a' }] })
+    ;(window as any).go = { main: { App: { SelectIncidentEvidence: choose } } }
+    await expect(selectIncidentEvidence()).resolves.toEqual({ images:[], files:[] })
+    await expect(selectIncidentEvidence()).rejects.toThrow('截图格式不受支持')
   })
 })

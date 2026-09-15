@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onActivated, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter, type LocationQueryRaw } from 'vue-router'
-import { EventsOn } from '../../wailsjs/runtime/runtime'
 import BugBotPicker from '../components/BugBotPicker.vue'
 import BugCaseLifecycle, { type CasePrimaryAction } from '../components/BugCaseLifecycle.vue'
 import IncidentBugSummary from '../components/IncidentBugSummary.vue'
@@ -10,27 +9,17 @@ import {
   approveIncidentFix,
   approveIncidentMerge,
   cancelIncidentAttempt,
-  captureIncidentManualReproduction,
-  clearIncidentBrowserSession,
   completeIncidentRemediation,
-  confirmIncidentBrowserLogin,
-  confirmIncidentValidation,
   continueIncidentCase,
   deleteIncidentHistory,
   disputeIncidentRootCause,
   fetchBugByID,
-  getIncidentBrowserRuntimeStatus,
   getIncidentCase,
   listBugs,
   listIncidentFixBranches,
   listIncidentCases,
   matchBugBots,
-  notifyIncidentDeployed,
-  openIncidentBrowserLogin,
-  prepareIncidentBrowserRuntime,
   reconsiderIncidentRemediation,
-  repairIncidentBrowserRuntime,
-  resolveIncidentFrontendEntry,
   isIncidentWorkflowConflict,
   resetIncidentCaseWithWarnings,
   saveBugSelectedBot,
@@ -40,14 +29,11 @@ import {
   type BotMatch,
   type BotRef,
   type BugRecord,
-  type IncidentBrowserRuntimeStatus,
   type IncidentCase,
   type IncidentEvidenceFileInput,
   type IncidentEvidenceImageInput,
-  type IncidentManualReproductionResult,
-  type FrontendEntryResolution,
 } from '../lib/bridge'
-import { dismiss as dismissToast, toast, toastError } from '../lib/toast'
+import { toast, toastError } from '../lib/toast'
 import { confirmDialog } from '../lib/confirm'
 import { useBugTickets } from '../lib/useBugTickets'
 import { activeCaseForBug, casesForBug, continuationForDetail, terminalCaseStatuses, useIncidentCase } from '../lib/useIncidentCase'
@@ -65,28 +51,12 @@ const visibleBugs = computed(() => tickets.filteredBugs.value.filter(bug => tick
   : bug.inbox_state !== 'history'))
 const matches = ref<BotMatch[]>([])
 const selectedBotKey = ref('')
-const frontendResolution = ref<FrontendEntryResolution | null>(null)
-const selectedFrontendEntryIDs = ref<string[]>([])
-const primaryFrontendEntryID = ref('')
-const resolvingFrontendEntry = ref(false)
 const explicitlySelectedBots = ref<Record<string, string>>({})
 const matching = ref(false)
+let matchingGeneration = 0
 const botError = ref('')
 const starting = ref(false)
 const workflowNotice = ref('')
-const browserLoginConfirmationKey = ref('')
-const browserLoginToastID = ref<number | null>(null)
-const manualReproductionPending = ref(false)
-const manualReproductionPendingEntryID = ref('')
-const lifecycleComponent = ref<{ openManualReproductionEvidence: (summary: string) => Promise<void> } | null>(null)
-const browserRuntimeStatus = ref<IncidentBrowserRuntimeStatus>({
-  state: 'installing',
-  version: '',
-  error_code: 'browser_runtime_install_in_progress',
-  message: '',
-})
-const browserRuntimeProgress = ref({ code: '', current: 0, total: 0 })
-const retryingBrowserRuntime = ref(false)
 const startCaseIDs = new Map<string, string>()
 type RestartMode = 'active_reset' | 'terminal_new_round'
 type ResetDialogSnapshot = {
@@ -99,8 +69,6 @@ type ResetDialogSnapshot = {
   newBotName: string
   newBotTarget: string
   newEnvironment: string
-  frontendEntryIDs: string[]
-  primaryFrontendEntryID: string
   newCaseID: string
   idempotencyKey: string
 }
@@ -123,54 +91,20 @@ if (initialRequestedBugID) tickets.select(initialRequestedBugID)
 const selectedActiveCase = computed(() => activeCaseForBug(incidentWorkflow.cases.value, tickets.selectedID.value))
 const selectedLatestCase = computed(() => casesForBug(incidentWorkflow.cases.value, tickets.selectedID.value)[0])
 const historyViewRequested = computed(() => ticketView.value === 'history')
-const displayedCase = computed(() => selectedActiveCase.value || (historyViewRequested.value ? selectedLatestCase.value : undefined))
+const displayedCase = computed(() => selectedActiveCase.value || (historyViewRequested.value || ['submitted', 'remediation_recorded'].includes(selectedLatestCase.value?.status || '') ? selectedLatestCase.value : undefined))
 const displayedDetail = computed(() => incidentWorkflow.detail.value?.case.id === displayedCase.value?.id ? incidentWorkflow.detail.value : null)
 const invalidURLBug = computed(() => Boolean(routeBugID() && !tickets.loading.value && tickets.bugs.value.length > 0 && !tickets.selectedBug.value))
 const pickerSelectedBotKey = computed(() => selectedBotKey.value)
 const selectedBot = computed(() => matches.value.find(match => match.bot.key === pickerSelectedBotKey.value)?.bot)
-const selectedBotSupportsStart = computed(() => Boolean(selectedBot.value && ['codex', 'claude-code', 'openclaw'].includes(selectedBot.value.target)))
-const browserRuntimeBlocksSelectedBug = computed(() => Boolean(frontendResolution.value?.required) && browserRuntimeStatus.value.state !== 'ready')
-const frontendEntryBlocksSelectedBug = computed(() => {
-  if (resolvingFrontendEntry.value) return true
-  const resolution = frontendResolution.value
-  if (!resolution) return true
-  if (!resolution.required) return false
-  if (resolution.status === 'unavailable') return true
-  return selectedFrontendEntryIDs.value.length === 0 || !selectedFrontendEntryIDs.value.includes(primaryFrontendEntryID.value)
-})
-const browserRuntimePercent = computed(() => {
-  const { current, total } = browserRuntimeProgress.value
-  if (total <= 0) return 0
-  return Math.max(0, Math.min(100, Math.round(current / total * 100)))
-})
-const browserRuntimeSummary = computed(() => {
-  if (browserRuntimeStatus.value.state === 'ready') return 'Chromium 已安装并通过启动探测，Web 验证可直接执行。'
-  if (browserRuntimeStatus.value.state === 'broken') return '基础工具准备失败。故障 Case 尚未启动，请先重新准备 Chromium。'
-  switch (browserRuntimeProgress.value.code) {
-    case 'browser_runtime_importing': return '正在初始化 App 内置 Chromium，无需联网下载…'
-    case 'browser_runtime_dependencies_installing': return '正在安装 Playwright 运行依赖…'
-    case 'browser_runtime_downloading': return browserRuntimePercent.value > 0 ? `正在下载 Chromium（${browserRuntimePercent.value}%）…` : '正在下载 Chromium…'
-    case 'browser_runtime_probing': return 'Chromium 已下载，正在执行启动探测…'
-    default: return 'Studio 正在初始化验证浏览器基础工具…'
-  }
-})
+const selectedBotSupportsStart = computed(() => Boolean(selectedBot.value && ['codex', 'claude-code', 'cursor', 'opencode'].includes(selectedBot.value.target)))
 const writeActionPending = computed(() => matching.value || starting.value || resetting.value || restartPreparing.value || incidentWorkflow.pending.value)
-const writeActionDisabled = computed(() => writeActionPending.value || browserRuntimeBlocksSelectedBug.value || frontendEntryBlocksSelectedBug.value || !tickets.selectedBug.value || !selectedBot.value || !selectedBotSupportsStart.value || !selectedBot.value.env?.trim())
+const writeActionDisabled = computed(() => writeActionPending.value || !tickets.selectedBug.value || !selectedBot.value || !selectedBotSupportsStart.value || !selectedBot.value.env?.trim())
 const writeActionDisabledReason = computed(() => {
   if (matching.value) return '正在匹配排障机器人…'
   if (starting.value || resetting.value || restartPreparing.value || incidentWorkflow.pending.value) return '故障闭环操作正在处理中…'
   if (!tickets.selectedBug.value) return '请先选择一条 Bug。'
-  if (browserRuntimeBlocksSelectedBug.value) {
-    return browserRuntimeStatus.value.state === 'installing'
-      ? 'Studio 正在初始化验证浏览器基础工具；完成后才能启动 Web 验证。'
-      : '验证浏览器基础工具未就绪，请先重新准备 Chromium。'
-  }
-  if (resolvingFrontendEntry.value) return '正在识别工单对应的前端应用入口…'
-  if (frontendResolution.value?.status === 'ambiguous' && selectedFrontendEntryIDs.value.length === 0) return '工单可能对应多个前端应用，请选择所有需要验证的端。'
-  if (frontendResolution.value?.required && !primaryFrontendEntryID.value) return '请从已选端中指定一个起始端。'
-  if (frontendResolution.value?.status === 'unavailable') return frontendResolution.value.message || '当前环境未配置可用的前端应用入口。'
   if (!selectedBot.value) return '请选择排障机器人后继续。'
-  if (!selectedBotSupportsStart.value) return `${selectedBot.value.target} 暂不支持由 Studio 后台启动，请选择 Codex、Claude Code 或 OpenClaw。`
+  if (!selectedBotSupportsStart.value) return `${selectedBot.value.target} 暂不支持由 Studio 后台启动，请选择 Codex、Claude Code 或 Cursor。`
   if (!selectedBot.value.env?.trim()) return '所选机器人缺少目标环境，请先完善平台机器人映射。'
   return ''
 })
@@ -193,6 +127,9 @@ watch(() => tickets.selectedID.value, async bugID => {
     discardResetDialog()
   }
   if (!bugID || !tickets.selectedBug.value) {
+    matchingGeneration++
+    matching.value = false
+    botError.value = ''
     matches.value = []
     selectedBotKey.value = ''
     return
@@ -200,50 +137,13 @@ watch(() => tickets.selectedID.value, async bugID => {
   await Promise.all([refreshMatches(bugID), openPreferredCase()])
 })
 
-let frontendResolutionGeneration = 0
-watch(() => [tickets.selectedBug.value?.id || '', selectedBot.value?.key || '', selectedBot.value?.env || ''], () => {
-  void refreshFrontendEntryResolution()
-})
-
-async function refreshFrontendEntryResolution() {
-  const bug = tickets.selectedBug.value
-  const bot = selectedBot.value
-  const generation = ++frontendResolutionGeneration
-  selectedFrontendEntryIDs.value = []
-  primaryFrontendEntryID.value = ''
-  frontendResolution.value = null
-  if (!bug || !bot || !bot.env?.trim()) return
-  resolvingFrontendEntry.value = true
-  try {
-    const resolution = await resolveIncidentFrontendEntry({ bug_id: bug.id, bot_key: bot.key, bot_environment: bot.env })
-    if (generation !== frontendResolutionGeneration) return
-    frontendResolution.value = resolution
-    if (resolution.status === 'selected' && resolution.selected) {
-      selectedFrontendEntryIDs.value = (resolution.selected_entries?.length ? resolution.selected_entries : [resolution.selected]).map(entry => entry.id)
-      primaryFrontendEntryID.value = resolution.selected.id
-    } else if (resolution.status === 'ambiguous' && resolution.suggested_entry_ids?.length) {
-      selectedFrontendEntryIDs.value = [...resolution.suggested_entry_ids]
-      primaryFrontendEntryID.value = resolution.suggested_entry_ids[0]
-    }
-  } catch (error) {
-    if (generation !== frontendResolutionGeneration) return
-    frontendResolution.value = { status: 'unavailable', required: true, message: error instanceof Error ? error.message : String(error) }
-  } finally {
-    if (generation === frontendResolutionGeneration) resolvingFrontendEntry.value = false
-  }
-}
-
-watch(selectedFrontendEntryIDs, ids => {
-  if (!ids.includes(primaryFrontendEntryID.value)) primaryFrontendEntryID.value = ids[0] || ''
-}, { deep: true })
-
 watch(incidentWorkflow.cases, () => {
   void openPreferredCase()
 })
 
 watch([displayedCase, resetting], ([current, isResetting]) => {
   const request = resetDialog.value
-  if (!request || request.mode !== 'active_reset' || isResetting || current?.id === request.caseID) return
+  if (!request || request.mode !== 'active_reset' || isResetting || (current?.id === request.caseID && !terminalCaseStatuses.has(current.status))) return
   discardResetDialog()
 })
 
@@ -251,30 +151,11 @@ watch(displayedDetail, detail => {
   if (detail?.case.id === pendingEnterCaseID.value) void focusIncidentCase(detail.case.id)
 })
 
-let archivedTicketRefreshKey = ''
-watch(incidentWorkflow.detail, async detail => {
-  if (detail?.case.status !== 'fixed_verified' || detail.bug_ticket_resolution?.state !== 'resolved') return
-  const refreshKey = `${detail.case.id}:${detail.case.version}:${detail.bug_ticket_resolution.source_status || ''}`
-  if (refreshKey === archivedTicketRefreshKey) return
-  archivedTicketRefreshKey = refreshKey
-  try {
-    await tickets.load()
-    const archived = tickets.bugs.value.find(bug => bug.id === detail.case.bug_id)
-    if (!archived || archived.inbox_state !== 'history' || tickets.selectedID.value !== archived.id) return
-    ticketView.value = 'history'
-    await replaceTicketRoute(archived.id, 'history')
-  } catch (error) {
-    archivedTicketRefreshKey = ''
-    toastError('刷新已解决 Bug 工单', error)
-  }
-})
-
 watch(() => [route.path, route.query.bug_id, route.query.view], () => {
   if (route.path === '/incidents') void syncRouteBugSelection(false)
 })
 
 let hasActivatedOnce = false
-let unlistenBrowserRuntime: (() => void) | undefined
 onActivated(() => {
   if (!hasActivatedOnce) {
     hasActivatedOnce = true
@@ -284,8 +165,6 @@ onActivated(() => {
 })
 
 onMounted(async () => {
-  unlistenBrowserRuntime = EventsOn('browser-runtime:status', applyBrowserRuntimeEvent)
-  await refreshBrowserRuntimeStatus()
   try {
     await tickets.load()
     await reconcileTicketSelectionAfterLoad()
@@ -297,49 +176,6 @@ onMounted(async () => {
   }
 })
 
-onUnmounted(() => unlistenBrowserRuntime?.())
-
-function applyBrowserRuntimeEvent(raw: unknown) {
-  const payload = raw !== null && typeof raw === 'object' ? raw as Record<string, unknown> : {}
-  const status = payload.status !== null && typeof payload.status === 'object' ? payload.status as Record<string, unknown> : {}
-  const state = status.state === 'ready' || status.state === 'installing' || status.state === 'broken' ? status.state : 'broken'
-  browserRuntimeStatus.value = {
-    state,
-    version: typeof status.version === 'string' ? status.version : '',
-    error_code: typeof status.error_code === 'string' ? status.error_code : '',
-    message: '',
-  }
-  browserRuntimeProgress.value = {
-    code: typeof payload.code === 'string' ? payload.code : '',
-    current: typeof payload.current === 'number' && Number.isFinite(payload.current) && payload.current >= 0 ? payload.current : 0,
-    total: typeof payload.total === 'number' && Number.isFinite(payload.total) && payload.total >= 0 ? payload.total : 0,
-  }
-}
-
-async function refreshBrowserRuntimeStatus() {
-  try {
-    browserRuntimeStatus.value = await getIncidentBrowserRuntimeStatus()
-  } catch {
-    browserRuntimeStatus.value = { state: 'broken', version: '', error_code: 'browser_runtime_status_unavailable', message: '' }
-  }
-}
-
-async function retryBrowserRuntimePreparation() {
-  if (retryingBrowserRuntime.value || browserRuntimeStatus.value.state === 'installing') return
-  retryingBrowserRuntime.value = true
-  browserRuntimeStatus.value = { ...browserRuntimeStatus.value, state: 'installing', error_code: 'browser_runtime_install_in_progress', message: '' }
-  browserRuntimeProgress.value = { code: 'browser_runtime_dependencies_installing', current: 0, total: 0 }
-  try {
-    await prepareIncidentBrowserRuntime()
-    await refreshBrowserRuntimeStatus()
-    if (browserRuntimeStatus.value.state === 'ready') toast.success('验证浏览器基础工具已就绪')
-  } catch (error) {
-    await refreshBrowserRuntimeStatus()
-    toastError('准备验证浏览器基础工具', error)
-  } finally {
-    retryingBrowserRuntime.value = false
-  }
-}
 
 function routeBugID(): string {
   return typeof route.query.bug_id === 'string' ? route.query.bug_id : ''
@@ -465,22 +301,23 @@ async function deleteDisplayedIncidentHistory() {
 }
 
 async function refreshMatches(bugID: string) {
+  const generation = ++matchingGeneration
   matching.value = true
   botError.value = ''
   try {
     const next = await matchBugBots(bugID)
-    if (tickets.selectedID.value !== bugID) return
+    if (generation !== matchingGeneration || tickets.selectedID.value !== bugID) return
     matches.value = next
     const preferred = tickets.selectedBug.value?.selected_bot_key || ''
     selectedBotKey.value = next.some(match => match.bot.key === preferred) ? preferred : next[0]?.bot.key || ''
   } catch (error) {
-    if (tickets.selectedID.value !== bugID) return
+    if (generation !== matchingGeneration || tickets.selectedID.value !== bugID) return
     matches.value = []
     selectedBotKey.value = ''
     botError.value = error instanceof Error ? error.message : String(error)
     toastError('匹配排障机器人', error)
   } finally {
-    if (tickets.selectedID.value === bugID) matching.value = false
+    if (generation === matchingGeneration) matching.value = false
   }
 }
 
@@ -599,9 +436,9 @@ async function openResetDialog(incident: IncidentCase, choice: StartBotChoice) {
   const bugID = tickets.selectedID.value
   const newBot = choice.bot
   const newEnvironment = newBot?.env?.trim() || ''
-  if (!choice.key || !newBot || !['codex', 'claude-code', 'openclaw'].includes(newBot.target) || !newEnvironment) return
+  if (!choice.key || !newBot || !['codex', 'claude-code', 'cursor', 'opencode'].includes(newBot.target) || !newEnvironment) return
   const mode: RestartMode = terminalCaseStatuses.has(incident.status) ? 'terminal_new_round' : 'active_reset'
-  const identity = resetRequestIdentity(mode, incident.id, incident.version, choice.key, newBot.target, newEnvironment, selectedFrontendEntryIDs.value, primaryFrontendEntryID.value)
+  const identity = resetRequestIdentity(mode, incident.id, incident.version, choice.key, newBot.target, newEnvironment)
   let request = resetRequests.get(identity)
   if (!request) {
     const newCaseID = freshResetCaseID()
@@ -625,22 +462,20 @@ async function openResetDialog(incident: IncidentCase, choice: StartBotChoice) {
     newBotName: newBot.name?.trim() || newBot.system_id?.trim() || '排障机器人',
     newBotTarget: newBot.target,
     newEnvironment,
-    frontendEntryIDs: [...selectedFrontendEntryIDs.value],
-    primaryFrontendEntryID: primaryFrontendEntryID.value,
     ...request,
   }
   await nextTick()
   resetCancelButton.value?.focus()
 }
 
-function resetRequestIdentity(mode: RestartMode, caseID: string, caseVersion: number, botKey: string, botTarget: string, environment: string, frontendEntryIDs: string[], primaryFrontendEntryID: string): string {
-  return `${mode}:${caseID}:v${caseVersion}:${botKey}:${botTarget}:${environment}:${primaryFrontendEntryID}:${frontendEntryIDs.join(',')}`
+function resetRequestIdentity(mode: RestartMode, caseID: string, caseVersion: number, botKey: string, botTarget: string, environment: string): string {
+  return `${mode}:${caseID}:v${caseVersion}:${botKey}:${botTarget}:${environment}`
 }
 
 function botTargetLabel(target: string): string {
   switch (target) {
     case 'claude-code': return 'Claude Code'
-    case 'openclaw': return 'OpenClaw'
+    case 'opencode': return 'OpenCode'
     case 'codex': return 'Codex'
     default: return target
   }
@@ -718,9 +553,6 @@ async function confirmReset() {
       actor_id: 'desktop-user',
       bot_key: request.newBotKey,
       bot_environment: request.newEnvironment,
-      frontend_entry_id: request.primaryFrontendEntryID,
-      frontend_entry_ids: request.frontendEntryIDs,
-      primary_frontend_entry_id: request.primaryFrontendEntryID,
       input_json: { target_environment: request.newEnvironment },
     }))
     const replacement = result.case
@@ -744,7 +576,7 @@ async function confirmReset() {
   } catch (error) {
     if (isIncidentWorkflowConflict(error)) {
       if (!isCurrentResetRequest()) return
-      const identity = resetRequestIdentity(request.mode, request.caseID, request.caseVersion, request.newBotKey, request.newBotTarget, request.newEnvironment, request.frontendEntryIDs, request.primaryFrontendEntryID)
+      const identity = resetRequestIdentity(request.mode, request.caseID, request.caseVersion, request.newBotKey, request.newBotTarget, request.newEnvironment)
       resetRequests.delete(identity)
       resetting.value = false
       closeResetDialog()
@@ -775,7 +607,7 @@ async function confirmReset() {
       try { await incidentWorkflow.refreshDetail(request.newCaseID) } catch { /* the selected event snapshot remains usable and recoverable */ }
       if (!isCurrentLinkedReplacement(request.newCaseID)) return
       const cause = error instanceof Error ? error.message : String(error)
-      const message = `接替 Case 已创建，但新阶段启动失败：${cause}。请刷新 Case 或重试开始验证。`
+      const message = `接替 Case 已创建，但新阶段启动失败：${cause}。请刷新 Case 或重试开始排障。`
       incidentWorkflow.error.value = message
       toast.error(message)
       return
@@ -793,7 +625,7 @@ async function confirmReset() {
 async function confirmRestart() {
   const request = resetDialog.value
   if (!request || resetting.value || !request.newBotKey) return
-  if (request.mode === 'active_reset' && (displayedCase.value?.id !== request.caseID || displayedCase.value.bug_id !== request.bugID)) {
+  if (request.mode === 'active_reset' && (displayedCase.value?.id !== request.caseID || displayedCase.value.bug_id !== request.bugID || terminalCaseStatuses.has(displayedCase.value.status))) {
     discardResetDialog()
     return
   }
@@ -817,14 +649,10 @@ async function confirmTerminalNewRound(request: ResetDialogSnapshot) {
       bug_id: request.bugID,
       bot_key: request.newBotKey,
       bot_environment: request.newEnvironment,
-      frontend_entry_id: request.primaryFrontendEntryID,
-      frontend_entry_ids: request.frontendEntryIDs,
-      primary_frontend_entry_id: request.primaryFrontendEntryID,
       expected_version: 0,
       idempotency_key: request.idempotencyKey,
       actor_id: 'desktop-user',
       input_json: {
-        mode: 'reproduce',
         expected_behavior: bug.title || '',
         bug_steps: bug.steps || '',
         target_environment: request.newEnvironment,
@@ -883,14 +711,10 @@ async function startNewCase() {
       bug_id: bug.id,
       bot_key: choice.key,
       bot_environment: selectedEnvironment,
-      frontend_entry_id: primaryFrontendEntryID.value,
-      frontend_entry_ids: selectedFrontendEntryIDs.value,
-      primary_frontend_entry_id: primaryFrontendEntryID.value,
       expected_version: 0,
       idempotency_key: `start:${candidate}`,
       actor_id: 'desktop-user',
       input_json: {
-        mode: 'reproduce',
         expected_behavior: bug.title || '',
         bug_steps: bug.steps || '',
         target_environment: selectedEnvironment,
@@ -946,143 +770,6 @@ async function refreshIncidentWorkflow() {
   }
 }
 
-type IncidentBrowserAction = 'login' | 'confirm-login' | 'clear-session' | 'repair-runtime' | 'redeploy-validator' | 'edit-bug-url' | 'manual-reproduce'
-
-const browserKey = (kind: string, detail: NonNullable<typeof displayedDetail.value>) =>
-  `${kind}:${detail.case.id}:${detail.case.current_attempt_id}:v${detail.case.version}`
-
-const browserLoginReady = computed(() => {
-  const detail = displayedDetail.value
-  return Boolean(detail && browserLoginConfirmationKey.value === browserKey('login', detail))
-})
-
-type IncidentBrowserContext = { bugID: string; caseID: string; attemptID: string; version: number }
-
-function isSameBrowserCase(context: IncidentBrowserContext): boolean {
-  return isCurrentBug(context.bugID) && displayedDetail.value?.case.id === context.caseID
-}
-
-function isSameBlockedBrowserAttempt(context: IncidentBrowserContext): boolean {
-  const current = displayedDetail.value?.case
-  return isSameBrowserCase(context) && current?.current_attempt_id === context.attemptID && current.version === context.version
-}
-
-async function refreshBrowserCaseBestEffort(context: IncidentBrowserContext): Promise<boolean> {
-  try {
-    return await refreshCaseSnapshotIfCurrent(context.caseID, () => isSameBrowserCase(context))
-  } catch {
-    if (!isSameBrowserCase(context)) return false
-    const warning = '浏览器操作已完成，但 Case 详情刷新失败；请手动刷新。'
-    workflowNotice.value = warning
-    toast.info(warning)
-    return false
-  }
-}
-
-function clearBrowserLoginConfirmation() {
-  browserLoginConfirmationKey.value = ''
-  if (browserLoginToastID.value !== null) {
-    dismissToast(browserLoginToastID.value)
-    browserLoginToastID.value = null
-  }
-}
-
-async function handleIncidentBrowser(action: IncidentBrowserAction, frontendEntryID?: string) {
-  if (action === 'redeploy-validator') {
-    await router.push('/bots')
-    return
-  }
-  if (action === 'edit-bug-url') {
-    const bugID = tickets.selectedID.value
-    if (bugID) await router.push({ path: '/bugs', query: { bug_id: bugID } })
-    return
-  }
-  const detail = displayedDetail.value
-  if (!detail?.case.current_attempt_id) return
-  const incident = detail.case
-  const context: IncidentBrowserContext = { bugID: tickets.selectedID.value, caseID: incident.id, attemptID: incident.current_attempt_id, version: incident.version }
-  // A user may need more than one manual observation of the same blocked
-  // attempt. Deduplicate concurrent clicks, but do not reuse an earlier
-  // recording as if it were a fresh reproduction.
-  const key = action === 'manual-reproduce'
-    ? `${browserKey(action, detail)}:${frontendEntryID || 'default'}:${Date.now()}`
-    : browserKey(action, detail)
-  const recoveryKey = action === 'confirm-login' ? browserKey('login', detail) : key
-  const input = {
-    case_id: incident.id,
-    attempt_id: incident.current_attempt_id,
-    expected_version: incident.version,
-    idempotency_key: recoveryKey,
-    actor_id: 'desktop-user',
-    ...(action === 'manual-reproduce' && frontendEntryID ? { frontend_entry_id: frontendEntryID } : {}),
-  }
-  incidentWorkflow.error.value = ''
-  workflowNotice.value = ''
-  try {
-    if (action === 'manual-reproduce') {
-      manualReproductionPending.value = true
-      manualReproductionPendingEntryID.value = frontendEntryID || ''
-      let captured: IncidentManualReproductionResult
-      try {
-        captured = await incidentWorkflow.runOnce(key, () => captureIncidentManualReproduction(input))
-      } finally {
-        manualReproductionPending.value = false
-        manualReproductionPendingEntryID.value = ''
-      }
-      if (!isSameBlockedBrowserAttempt(context)) return
-      await refreshCaseSnapshotIfCurrent(context.caseID, () => isSameBrowserCase(context))
-      if (!isSameBlockedBrowserAttempt(context)) return
-      if (captured.all_required_entries_captured) {
-        await nextTick()
-        await lifecycleComponent.value?.openManualReproductionEvidence(captured.summary)
-        toast.success(`所有端均已采集，可确认复现结果（本次 ${captured.screenshot_artifact_ids.length} 张截图、${captured.action_count} 个操作）`)
-      } else {
-        const remaining = captured.remaining_frontend_entry_ids.join('、')
-        toast.success(`已采集${captured.frontend_entry_name || captured.frontend_entry_id}；请继续复现剩余端${remaining ? `（${remaining}）` : ''}`)
-      }
-      return
-    }
-    if (action === 'clear-session') {
-      await incidentWorkflow.runOnce(key, () => clearIncidentBrowserSession(input))
-      if (!isSameBlockedBrowserAttempt(context)) return
-      clearBrowserLoginConfirmation()
-      const refreshed = await refreshBrowserCaseBestEffort(context)
-      if (refreshed && isSameBrowserCase(context)) toast.success('已清除此环境登录态')
-      return
-    }
-    const updated = await incidentWorkflow.runOnce(key, () => action === 'login'
-      ? openIncidentBrowserLogin(input)
-      : action === 'confirm-login'
-        ? confirmIncidentBrowserLogin(input)
-        : repairIncidentBrowserRuntime(input))
-    if (updated.id !== context.caseID) throw new Error('browser recovery returned another Case')
-    if (!isSameBlockedBrowserAttempt(context)) return
-    if (!incidentWorkflow.applyCase(updated)) throw new Error('browser recovery returned stale Case state')
-    if (action === 'login') {
-      browserLoginConfirmationKey.value = recoveryKey
-      if (browserLoginToastID.value !== null) dismissToast(browserLoginToastID.value)
-      browserLoginToastID.value = toast.info('浏览器会话快照已保存（未校验登录），请确认你已完成登录后继续验证。')
-      return
-    }
-    clearBrowserLoginConfirmation()
-    const refreshed = await refreshBrowserCaseBestEffort(context)
-    if (refreshed && isSameBrowserCase(context)) toast.success(action === 'confirm-login' ? '已确认登录，验证已继续' : '浏览器环境已修复，验证已继续')
-  } catch {
-    if (!isSameBlockedBrowserAttempt(context)) return
-    const message = action === 'login'
-      ? '无法完成验证浏览器登录，请刷新 Case 后重试。'
-      : action === 'confirm-login'
-        ? '登录确认失败，验证尚未继续，请刷新 Case 后重试。'
-      : action === 'repair-runtime'
-        ? '浏览器环境修复失败，请稍后重试。'
-        : action === 'manual-reproduce'
-          ? '手动复现现场采集失败，Case 未改变，请关闭残留的验证浏览器后重试。'
-        : '清除浏览器登录态失败，请稍后重试。'
-    incidentWorkflow.error.value = message
-    toast.error(message)
-  }
-}
-
 async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind']; input?: string; evidence?: string; images?: IncidentEvidenceImageInput[]; files?: IncidentEvidenceFileInput[]; rootCauseAttemptID?: string; caseVersion?: number; sourceBaselines?: Record<string, string> }) {
   const detail = displayedDetail.value
   if (!detail) return
@@ -1104,66 +791,47 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
   try {
     const updated = await incidentWorkflow.runOnce(key, async (): Promise<IncidentCase> => {
       const base = { case_id: incident.id, expected_version: incident.version, idempotency_key: key, actor_id: 'desktop-user' }
-      if (payload.kind === 'start_validation') {
-        if (!incident.selected_bot_key) throw new Error('当前 Case 没有绑定排障机器人')
-        return startIncidentCase({ ...base, bug_id: incident.bug_id, bot_key: incident.selected_bot_key, bot_environment: incident.environment, input_json: { mode: 'reproduce', target_environment: incident.environment } })
-      }
-      if (payload.kind === 'confirm_validation') {
-        if (!incident.current_attempt_id) throw new Error('当前没有可确认的验证 Attempt')
-        return confirmIncidentValidation({
-          ...base,
-          idempotency_key: `confirm-validation:${incident.id}:${incident.current_attempt_id}:${incident.version}`,
-          validation_attempt_id: incident.current_attempt_id,
-        })
-      }
-      if (payload.kind === 'revise_validation') {
-        if (!payload.input?.trim()) throw new Error('请说明验证结果或场景理解中的问题')
-        return continueIncidentCase({
-          ...base,
-          idempotency_key: `revise-validation:${incident.id}:${incident.current_attempt_id}:${incident.version}`,
-          ...continuationForDetail(detail, payload.input.trim()),
-        })
-      }
-      if (payload.kind === 'retry_validation') {
-        return continueIncidentCase({ ...base, ...continuationForDetail(detail, '') })
-      }
-      if (payload.kind === 'retry_regression') {
-        return continueIncidentCase({ ...base, phase: 'regression', input_json: { decision: 'retry_current_regression' } })
+      if (payload.kind === 'start_investigation') {
+        return startIncidentCase({ ...base, bug_id: incident.bug_id, bot_key: incident.selected_bot_key, bot_environment: incident.environment })
       }
       if (payload.kind === 'supply_evidence' || payload.kind === 'continue_fix') {
         let supplemental = payload.input?.trim() || ''
+        const artifactIDs: string[] = []
         if (payload.kind === 'supply_evidence' && payload.images?.length) {
           const attemptID = incident.current_attempt_id
-          if (!attemptID) throw new Error('当前 Case 没有可绑定补充证据的验证 Attempt')
+          if (!attemptID) throw new Error('当前 Case 没有可绑定补充证据的排障 Attempt')
           const uploaded = await uploadIncidentEvidenceImages({
             case_id: incident.id,
             attempt_id: attemptID,
             expected_version: incident.version,
             images: payload.images,
           })
-          const imageEvidence = `用户补充了 ${uploaded.length} 张页面截图（EvidenceArtifact: ${uploaded.map(item => item.artifact_id).join(', ')}），重试时必须结合图片核对复现步骤和页面状态。`
+          const imageEvidence = `用户补充了 ${uploaded.length} 张页面截图（EvidenceArtifact: ${uploaded.map(item => item.artifact_id).join(', ')}），排障时结合图片分析问题。`
+          artifactIDs.push(...uploaded.map(item => item.artifact_id))
           supplemental = [supplemental, imageEvidence].filter(Boolean).join('\n')
         }
         if (payload.kind === 'supply_evidence' && payload.files?.length) {
           const attemptID = incident.current_attempt_id
-          if (!attemptID) throw new Error('当前 Case 没有可绑定测试文件的验证 Attempt')
+          if (!attemptID) throw new Error('当前 Case 没有可绑定测试文件的排障 Attempt')
           const uploaded = await uploadIncidentEvidenceFiles({
             case_id: incident.id,
             attempt_id: attemptID,
             expected_version: incident.version,
             files: payload.files,
           })
-          const fileEvidence = `用户补充了 ${uploaded.length} 个复现测试文件（EvidenceArtifact: ${uploaded.map(item => item.artifact_id).join(', ')}）；浏览器计划必须通过受控 file_ref 使用，不得猜测本地路径。`
+          const fileEvidence = `用户补充了 ${uploaded.length} 个排障证据文件（EvidenceArtifact: ${uploaded.map(item => item.artifact_id).join(', ')}）；排障时结合这些证据分析。`
+          artifactIDs.push(...uploaded.map(item => item.artifact_id))
           supplemental = [supplemental, fileEvidence].filter(Boolean).join('\n')
         }
-        return continueIncidentCase({ ...base, ...continuationForDetail(detail, supplemental) })
+        const continuation = continuationForDetail(detail, supplemental)
+        const previousIDs = continuation.input_json.evidence_artifact_ids
+        continuation.input_json.evidence_artifact_ids = [...new Set([...(Array.isArray(previousIDs) ? previousIDs.filter((id): id is string => typeof id === 'string') : []), ...artifactIDs])]
+        return continueIncidentCase({ ...base, ...continuation })
       }
       if (payload.kind === 'supply_merge_decision') {
         return continueIncidentCase({ ...base, phase: 'fix', input_json: { decision: 'resolve_merge_conflict', evidence: payload.input || '' } })
       }
-      if (payload.kind === 'supply_deployment_proof') {
-        return continueIncidentCase({ ...base, phase: 'regression', input_json: { decision: 'retry_deployment_check' } })
-      }
+
       if (payload.kind === 'approve_fix') {
         if (!payload.rootCauseAttemptID || payload.caseVersion === undefined) throw new Error('修复授权缺少对话框中的根因或 Case 版本快照')
         return approveIncidentFix({
@@ -1225,9 +893,7 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
           target_heads: Object.fromEntries(currentChanges.map(change => [change.repo, change.merge_base_head])),
         })
       }
-      if (payload.kind === 'notify_deployed') {
-        return notifyIncidentDeployed({ ...base })
-      }
+
       if (payload.kind === 'cancel_attempt') {
         if (!incident.current_attempt_id) throw new Error('当前没有可停止的阶段')
         return cancelIncidentAttempt({ ...base, attempt_id: incident.current_attempt_id })
@@ -1251,39 +917,13 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
     <header class="incident-header">
       <div>
         <h1>故障闭环</h1>
-        <p>Bug 数据由 Bug 工单统一同步；本页用于选择工单并推进可恢复的验证、排障与修复流程。</p>
+        <p>基于 Bug 工单定位根因、修复代码并提交。</p>
       </div>
     </header>
 
-    <section
-      class="browser-runtime-status"
-      :class="`is-${browserRuntimeStatus.state}`"
-      aria-labelledby="browser-runtime-title"
-      aria-live="polite"
-    >
-      <div>
-        <p class="browser-runtime-eyebrow">Studio 基础工具</p>
-        <h2 id="browser-runtime-title">验证浏览器</h2>
-        <p data-browser-runtime-summary>{{ browserRuntimeSummary }}</p>
-        <progress
-          v-if="browserRuntimeStatus.state === 'installing' && browserRuntimeProgress.total > 0"
-          :value="browserRuntimeProgress.current"
-          :max="browserRuntimeProgress.total"
-        >{{ browserRuntimePercent }}%</progress>
-      </div>
-      <span v-if="browserRuntimeStatus.state === 'ready'" class="browser-runtime-badge">已就绪</span>
-      <button
-        v-else-if="browserRuntimeStatus.state === 'broken'"
-        class="btn"
-        type="button"
-        data-action="prepare-browser-runtime"
-        :disabled="retryingBrowserRuntime"
-        @click="retryBrowserRuntimePreparation"
-      >{{ retryingBrowserRuntime ? '准备中…' : '重新准备' }}</button>
-      <span v-else class="browser-runtime-badge">准备中</span>
-    </section>
 
-    <section class="selection-workspace" data-overflow-safe="true" aria-label="Bug 驱动的故障闭环选择">
+
+    <section class="selection-workspace" :class="{ 'has-case': displayedCase }" data-overflow-safe="true" aria-label="Bug 驱动的故障闭环选择">
       <aside class="selection-panel ticket-list-panel" data-overflow-safe="true">
         <div class="ticket-view-tabs" role="tablist" aria-label="故障闭环 Bug 范围">
           <button type="button" role="tab" data-ticket-view="active" :aria-selected="ticketView === 'active'" :class="{ active: ticketView === 'active' }" @click="selectTicketView('active')">当前未修复 <span>{{ activeBugs.length }}</span></button>
@@ -1301,80 +941,79 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
         />
       </aside>
 
-      <main class="selection-panel ticket-summary-panel" data-overflow-safe="true">
-        <p v-if="invalidURLBug" class="invalid-bug-state" role="status">
-          URL 中的 Bug 不存在。请从左侧选择一条可用工单，页面会更新链接并继续。
-        </p>
-        <IncidentBugSummary :bug="tickets.selectedBug.value" />
-      </main>
+      <div class="case-workspace">
+        <div class="context-toolbar" aria-label="工单与机器人设置">
+          <details :key="`context-${tickets.selectedID.value}`" class="selection-panel ticket-summary-panel context-panel" :open="!displayedCase || invalidURLBug" data-overflow-safe="true">
+            <summary class="context-summary"><span>工单信息</span><strong>{{ tickets.selectedBug.value ? `#${tickets.selectedBug.value.source_id || tickets.selectedID.value}` : '未选择' }}</strong></summary>
+            <div class="context-body">
+              <p v-if="invalidURLBug" class="invalid-bug-state" role="status">
+                URL 中的 Bug 不存在。请从左侧选择一条可用工单，页面会更新链接并继续。
+              </p>
+              <IncidentBugSummary :bug="tickets.selectedBug.value" />
+            </div>
+          </details>
 
-      <aside class="selection-panel bot-panel" data-overflow-safe="true">
-        <BugBotPicker :matches="matches" :selected-key="pickerSelectedBotKey" :loading="matching" @select="rememberSelectedBot" />
-        <p v-if="botError" class="live-error" role="status">{{ botError }}</p>
-        <p v-else-if="selectedBot && !selectedBotSupportsStart" class="support-note">{{ selectedBot.target }} 暂不支持由 Studio 后台启动，请选择 Codex、Claude Code 或 OpenClaw。</p>
-        <section v-if="tickets.selectedBug.value" class="bot-action-panel" aria-label="故障闭环操作">
-          <p class="bot-action-status" role="status">{{ botActionStatus }}</p>
-          <section v-if="frontendResolution?.required" class="frontend-entry-resolution" aria-label="前端验证入口">
-            <p class="frontend-entry-title">涉及端（{{ selectedFrontendEntryIDs.length }}）</p>
-            <fieldset v-if="frontendResolution.candidates?.length" aria-label="选择本次故障涉及的端">
-              <div v-for="candidate in frontendResolution.candidates" :key="candidate.binding.id" class="frontend-entry-option">
-                <label class="frontend-entry-toggle">
-                  <input v-model="selectedFrontendEntryIDs" type="checkbox" :value="candidate.binding.id" />
-                  <span><strong>{{ candidate.binding.name }}</strong></span>
-                </label>
-              </div>
-            </fieldset>
-            <p v-else-if="frontendResolution.status === 'selected' && frontendResolution.selected" class="frontend-entry-selected">
-              {{ frontendResolution.selected.name }}
-            </p>
-            <p v-else class="live-error">{{ frontendResolution.message }}</p>
+          <details :key="`bot-context-${tickets.selectedID.value}`" class="selection-panel bot-panel context-panel" :open="!displayedCase || Boolean(botError) || Boolean(workflowNotice)" data-overflow-safe="true">
+            <summary class="context-summary"><span>机器人设置</span><strong>{{ selectedBot?.name || (matching ? '匹配中…' : '未选择') }}</strong></summary>
+            <div class="context-body">
+              <BugBotPicker
+                :matches="matches"
+                :selected-key="pickerSelectedBotKey"
+                :loading="matching"
+                :empty-text="tickets.selectedBug.value ? undefined : '请先选择一条 Bug，再匹配排障机器人'"
+                @select="rememberSelectedBot"
+              />
+              <p v-if="botError" class="live-error" role="status">{{ botError }}</p>
+              <p v-else-if="selectedBot && !selectedBotSupportsStart" class="support-note">{{ selectedBot.target }} 暂不支持由 Studio 后台启动，请选择 Codex、Claude Code 或 Cursor。</p>
+              <section v-if="tickets.selectedBug.value" class="bot-action-panel" aria-label="故障闭环操作">
+                <p class="bot-action-status" role="status">{{ botActionStatus }}</p>
+
+                <div class="bot-action-controls">
+                  <button v-if="!displayedCase" class="btn primary" type="button" data-action="start-case" :disabled="writeActionDisabled" @click="startNewCase()">
+                    {{ starting ? '开启中…' : '开启故障闭环' }}
+                  </button>
+                  <button v-else class="btn danger-secondary" type="button" data-action="restart-case" :disabled="writeActionDisabled" @click="restartIncidentCase()">
+                    {{ starting || resetting || restartPreparing ? '处理中…' : '重新开始故障闭环' }}
+                  </button>
+                  <button
+                    v-if="canDeleteDisplayedHistory"
+                    class="btn danger-secondary"
+                    type="button"
+                    data-action="delete-incident-history"
+                    :disabled="deletingIncidentHistory"
+                    @click="deleteDisplayedIncidentHistory"
+                  >{{ deletingIncidentHistory ? '删除中…' : '删除闭环历史' }}</button>
+
+            </div>
+              <p v-if="writeActionDisabledReason" class="bot-action-disabled-reason" role="status">{{ writeActionDisabledReason }}</p>
+              <p v-if="workflowNotice" class="workflow-notice" role="status" aria-live="polite">{{ workflowNotice }}</p>
+            </section>
+            </div>
+          </details>
+        </div>
+
+        <div v-if="displayedCase" ref="lifecycleRegion" class="lifecycle-region">
+          <BugCaseLifecycle
+            v-if="displayedDetail"
+            :detail="displayedDetail"
+            :bug-title="tickets.selectedBug.value?.title || ''"
+            :pending="incidentWorkflow.pending.value || starting"
+            :error="incidentWorkflow.error.value"
+            :phase-events="incidentWorkflow.phaseEvents.value[displayedDetail.case.current_attempt_id] || []"
+            :load-fix-branches="listIncidentFixBranches"
+            @refresh="refreshIncidentWorkflow"
+            @primary="handleIncidentPrimary"
+          />
+          <section v-else class="case-loading" aria-live="polite">
+            <p role="status">{{ incidentWorkflow.error.value ? `加载故障闭环失败：${incidentWorkflow.error.value}` : '正在加载故障闭环…' }}</p>
+            <button v-if="incidentWorkflow.error.value" class="btn" type="button" data-action="retry-active-case" :disabled="incidentWorkflow.loading.value" @click="refreshIncidentWorkflow">
+              {{ incidentWorkflow.loading.value ? '重试中…' : '重试加载' }}
+            </button>
           </section>
-          <div class="bot-action-controls">
-            <button v-if="!displayedCase" class="btn primary" type="button" data-action="start-case" :disabled="writeActionDisabled" @click="startNewCase()">
-              {{ starting ? '开启中…' : '开启故障闭环' }}
-            </button>
-            <button v-else class="btn danger-secondary" type="button" data-action="restart-case" :disabled="writeActionDisabled" @click="restartIncidentCase()">
-              {{ starting || resetting || restartPreparing ? '处理中…' : '重新开始故障闭环' }}
-            </button>
-            <button
-              v-if="canDeleteDisplayedHistory"
-              class="btn danger-secondary"
-              type="button"
-              data-action="delete-incident-history"
-              :disabled="deletingIncidentHistory"
-              @click="deleteDisplayedIncidentHistory"
-            >{{ deletingIncidentHistory ? '删除中…' : '删除闭环历史' }}</button>
-          </div>
-          <p v-if="writeActionDisabledReason" class="bot-action-disabled-reason" role="status">{{ writeActionDisabledReason }}</p>
-          <p v-if="workflowNotice" class="workflow-notice" role="status" aria-live="polite">{{ workflowNotice }}</p>
-        </section>
-      </aside>
-    </section>
+        </div>
+      </div>
 
-    <div v-if="displayedCase" ref="lifecycleRegion" class="lifecycle-region">
-      <BugCaseLifecycle
-        v-if="displayedDetail"
-        ref="lifecycleComponent"
-        :detail="displayedDetail"
-        :bug-title="tickets.selectedBug.value?.title || ''"
-        :pending="(incidentWorkflow.pending.value && !manualReproductionPending) || starting"
-        :manual-reproduction-pending="manualReproductionPending"
-        :manual-reproduction-pending-entry-id="manualReproductionPendingEntryID"
-        :error="incidentWorkflow.error.value"
-        :phase-events="incidentWorkflow.phaseEvents.value[displayedDetail.case.current_attempt_id] || []"
-        :browser-login-ready="browserLoginReady"
-        :load-fix-branches="listIncidentFixBranches"
-        @refresh="refreshIncidentWorkflow"
-        @primary="handleIncidentPrimary"
-        @browser="handleIncidentBrowser"
-      />
-      <section v-else class="case-loading" aria-live="polite">
-        <p role="status">{{ incidentWorkflow.error.value ? `加载故障闭环失败：${incidentWorkflow.error.value}` : '正在加载故障闭环…' }}</p>
-        <button v-if="incidentWorkflow.error.value" class="btn" type="button" data-action="retry-active-case" :disabled="incidentWorkflow.loading.value" @click="refreshIncidentWorkflow">
-          {{ incidentWorkflow.loading.value ? '重试中…' : '重试加载' }}
-        </button>
-      </section>
-    </div>
+    </section>
 
     <div v-if="resetDialog" class="reset-dialog-backdrop" @click.self="closeResetDialog" @keydown.esc="closeResetDialog">
       <section ref="resetDialogElement" role="dialog" aria-modal="true" aria-labelledby="reset-dialog-title" aria-describedby="reset-dialog-description" class="reset-dialog" data-overflow-safe="true" tabindex="-1" @keydown="trapResetDialogFocus">
@@ -1382,14 +1021,13 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
           <span>危险操作</span>
           <h2 id="reset-dialog-title">{{ resetDialog.mode === 'active_reset' ? '重新开始故障闭环' : '开启新一轮故障闭环' }}</h2>
         </header>
-        <p v-if="resetDialog.mode === 'active_reset'" id="reset-dialog-description">将停止当前 Agent，保留本轮记录，并使用以下设置从“验证”重新开始。</p>
-        <p v-else id="reset-dialog-description">原记录保持不变，并使用以下设置从“验证”开启新一轮。</p>
-        <p class="reset-warning" role="note">已发生的提交、推送或部署不会自动撤销；已有证据和审计记录会继续保留。</p>
+        <p v-if="resetDialog.mode === 'active_reset'" id="reset-dialog-description">将停止当前 Agent，保留本轮记录，并使用以下设置从“排障”重新开始。</p>
+        <p v-else id="reset-dialog-description">原记录保持不变，并使用以下设置从“排障”开启新一轮。</p>
+        <p class="reset-warning" role="note">已发生的提交和推送不会自动撤销；本轮处理记录会继续保留。</p>
         <dl class="reset-scope">
-          <div><dt>开始阶段</dt><dd>验证</dd></div>
+          <div><dt>开始阶段</dt><dd>排障</dd></div>
           <div><dt>排障机器人</dt><dd>{{ resetDialog.newBotName }} · {{ botTargetLabel(resetDialog.newBotTarget) }}</dd></div>
           <div><dt>目标环境</dt><dd>{{ resetDialog.newEnvironment }}</dd></div>
-          <div v-if="resetDialog.frontendEntryIDs.length"><dt>涉及端</dt><dd>{{ resetDialog.frontendEntryIDs.join('、') }}（起始端：{{ resetDialog.primaryFrontendEntryID }}）</dd></div>
         </dl>
         <p data-reset-error class="reset-live-error" role="status" aria-live="assertive">{{ resetError }}</p>
         <footer>
@@ -1404,22 +1042,10 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
 </template>
 
 <style scoped>
-.incident-workbench-page { min-width: 0; display: grid; gap: var(--sp-3); color: var(--c-text); }
+.incident-workbench-page { container: incident-workbench / inline-size; min-width: 0; display: grid; gap: 18px; color: var(--c-text); font-size: 13px; line-height: 1.6; --c-soft: #f8fafc; --r-md: 8px; --r-lg: 12px; }
 .incident-header { min-width: 0; }
-.incident-header h1 { margin: 0; color: var(--c-ink); font-size: 24px; }
+.incident-header h1 { margin: 0; color: var(--c-ink); font-size: 22px; line-height: 1.35; letter-spacing: -.02em; }
 .incident-header p { max-width: 760px; margin: 4px 0 0; color: var(--c-muted); font-size: var(--fs-sm); line-height: 1.55; }
-.browser-runtime-status { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); padding: var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); }
-.browser-runtime-status > div { min-width: 0; display: grid; gap: 3px; }
-.browser-runtime-status h2, .browser-runtime-status p { margin: 0; }
-.browser-runtime-status h2 { color: var(--c-ink); font-size: var(--fs-base); }
-.browser-runtime-status p { overflow-wrap: anywhere; color: var(--c-muted); font-size: var(--fs-sm); line-height: 1.5; }
-.browser-runtime-status .browser-runtime-eyebrow { color: var(--c-muted); font-size: var(--fs-xs); font-weight: 700; text-transform: uppercase; }
-.browser-runtime-status progress { width: min(420px, 100%); height: 8px; margin-top: var(--sp-1); accent-color: #2563eb; }
-.browser-runtime-status.is-installing { border-color: #bfdbfe; background: #eff6ff; }
-.browser-runtime-status.is-broken { border-color: #fecaca; background: #fef2f2; }
-.browser-runtime-badge { flex: 0 0 auto; padding: 4px 9px; border-radius: 999px; background: var(--c-surf-2); color: var(--c-muted); font-size: var(--fs-xs); font-weight: 700; }
-.is-ready .browser-runtime-badge { background: #dcfce7; color: #166534; }
-.is-installing .browser-runtime-badge { background: #dbeafe; color: #1d4ed8; }
 .btn { min-height: 44px; padding: 0 12px; border: 1px solid var(--c-line-2); border-radius: var(--r-md); background: var(--c-surf); color: var(--c-text); font: inherit; cursor: pointer; }
 .btn:hover:not(:disabled) { border-color: var(--c-accent); background: var(--c-surf-2); }
 .btn:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 2px; }
@@ -1429,16 +1055,30 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
 .btn.danger:hover:not(:disabled) { border-color: #991b1b; background: #991b1b; }
 .danger-secondary { border-color: #fca5a5; background: #fff; color: #b91c1c; }
 .danger-secondary:hover:not(:disabled) { border-color: #dc2626; background: #fef2f2; }
-.selection-workspace { min-width: 0; display: grid; grid-template-columns: minmax(220px, .8fr) minmax(300px, 1.35fr) minmax(240px, .9fr); align-items: start; gap: var(--sp-3); }
-.selection-panel { min-width: 0; padding: var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); }
-.ticket-list-panel { max-height: min(560px, 58vh); overflow: auto; display: grid; gap: var(--sp-2); }
+.selection-workspace { min-width: 0; display: grid; grid-template-columns: clamp(230px, 24%, 300px) minmax(0, 1fr); align-items: start; gap: 16px; padding: 16px; border: 1px solid var(--c-line); border-radius: 16px; background: #f5f7fb; }
+.selection-panel { min-width: 0; padding: 12px; border: 1px solid var(--c-line); border-radius: var(--r-lg); background: var(--c-surf); }
+.ticket-list-panel { position: sticky; top: 16px; max-height: calc(100vh - 164px); box-sizing: border-box; scrollbar-gutter: stable; overflow: auto; display: grid; gap: var(--sp-2); }
 .ticket-view-tabs { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, .65fr); gap: 4px; padding: 4px; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); }
 .ticket-view-tabs button { min-width: 0; min-height: 36px; padding: 0 8px; border: 0; border-radius: calc(var(--r-md) - 3px); background: transparent; color: var(--c-muted); font: inherit; font-size: var(--fs-sm); font-weight: 700; cursor: pointer; }
 .ticket-view-tabs button span { margin-left: 3px; font-size: var(--fs-xs); }
 .ticket-view-tabs button.active { background: var(--c-surf); color: #1d4ed8; box-shadow: 0 1px 3px rgba(15, 23, 42, .12); }
 .ticket-view-tabs button:focus-visible { outline: 2px solid var(--c-accent-hover); outline-offset: 1px; }
-.ticket-summary-panel { display: grid; gap: var(--sp-3); }
-.bot-panel { max-height: min(560px, 58vh); overflow: auto; }
+.case-workspace { min-width: 0; display: grid; align-content: start; gap: 12px; }
+.context-toolbar { min-width: 0; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
+.context-panel { max-width: 100%; padding: 0; box-shadow: 0 1px 2px #0f172a04; border-radius: var(--r-md); }
+.context-panel[open] { flex: 1 1 300px; }
+.context-summary { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 10px; box-sizing: border-box; font-size: 12px; line-height: 20px; cursor: pointer; list-style: none; }
+.context-summary::-webkit-details-marker { display: none; }
+.context-summary > span, .context-summary > strong { display: block; margin: 0; padding: 0; line-height: 20px; }
+.context-summary > span { color: var(--c-muted); }
+.context-summary > strong { min-width: 0; max-width: 180px; color: var(--c-text); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.context-summary > span { flex-shrink: 0; }
+.context-summary:hover { background: var(--c-surf-2); border-radius: inherit; }
+.context-summary::after { content: ''; flex: 0 0 6px; width: 6px; height: 6px; margin: 0 2px 0 auto; border-right: 1.5px solid var(--c-muted); border-bottom: 1.5px solid var(--c-muted); transform: translateY(-1.5px) rotate(45deg); }
+.context-panel[open] > .context-summary::after { transform: translateY(1.5px) rotate(225deg); }
+.context-summary:focus-visible { outline: 2px solid #2563eb; outline-offset: 3px; }
+.context-body { padding: 12px; border-top: 1px solid var(--c-line); max-height: 360px; overflow: auto; }
+
 .invalid-bug-state, .case-loading, .support-note, .live-error, .workflow-notice { min-width: 0; margin: 0; padding: 10px 12px; overflow-wrap: anywhere; border-radius: var(--r-md); font-size: var(--fs-sm); line-height: 1.5; }
 .invalid-bug-state { border: 1px solid #fbbf24; background: #fffbeb; color: #92400e; }
 .case-loading { min-height: 64px; display: grid; place-items: center; border: 1px dashed var(--c-line-2); color: var(--c-muted); }
@@ -1448,19 +1088,6 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
 .workflow-notice { border: 1px solid #bbf7d0; background: #f0fdf4; color: #166534; }
 .bot-action-panel { margin-top: var(--sp-3); padding-top: var(--sp-3); display: grid; gap: var(--sp-2); border-top: 1px solid var(--c-line); }
 .bot-action-status, .bot-action-disabled-reason { min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--c-muted); font-size: var(--fs-sm); line-height: 1.5; }
-.frontend-entry-resolution { min-width: 0; padding: 10px; border: 1px solid var(--c-line); border-radius: var(--r-md); background: var(--c-surf-2); }
-.frontend-entry-title, .frontend-entry-selected { margin: 0; overflow-wrap: anywhere; }
-.frontend-entry-title { color: var(--c-muted); font-size: var(--fs-xs); font-weight: 700; }
-.frontend-entry-selected { margin-top: 4px; color: var(--c-text); font-size: var(--fs-sm); }
-.frontend-entry-resolution fieldset { min-width: 0; display: grid; gap: 2px; margin: 4px 0 0; padding: 0; border: 0; }
-.frontend-entry-option { min-width: 0; padding: 2px; border-radius: 6px; }
-.frontend-entry-option:hover { background: var(--c-surf); }
-.frontend-entry-option > label { min-width: 0; display: flex; align-items: center; gap: 8px; cursor: pointer; }
-.frontend-entry-toggle { min-height: 44px; box-sizing: border-box; align-items: center; gap: 10px !important; padding: 3px 2px; border-radius: 6px; }
-.frontend-entry-toggle input[type="checkbox"] { width: 20px; height: 20px; flex: 0 0 20px; margin: 0; accent-color: #2563eb; cursor: pointer; }
-.frontend-entry-toggle input[type="checkbox"]:focus-visible { outline: 2px solid #1d4ed8; outline-offset: 2px; }
-.frontend-entry-toggle span { flex: 1 1 auto; line-height: 1.35; }
-.frontend-entry-option span { min-width: 0; display: block; overflow-wrap: anywhere; }
 .bot-action-disabled-reason { color: #92400e; }
 .bot-action-controls { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .bot-action-controls .btn { flex: 1 1 160px; min-height: 44px; transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease; }
@@ -1483,20 +1110,33 @@ async function handleIncidentPrimary(payload: { kind: CasePrimaryAction['kind'];
 .reset-live-error:empty { visibility: hidden; }
 .reset-dialog footer { display: flex; justify-content: flex-end; gap: var(--sp-2); }
 .reset-dialog footer .btn { min-width: 112px; min-height: 44px; }
-@media (max-width: 1024px) {
-  .selection-workspace { grid-template-columns: minmax(220px, .8fr) minmax(320px, 1.2fr); }
-  .bot-panel { grid-column: 1 / -1; max-height: none; }
+@container incident-workbench (max-width: 900px) {
+  .selection-workspace { grid-template-columns: 220px minmax(0, 1fr); gap: 12px; padding: 12px; }
 }
-@media (max-width: 700px) {
-  .browser-runtime-status { align-items: stretch; flex-direction: column; }
-  .browser-runtime-status > .btn { width: 100%; }
-  .selection-workspace { grid-template-columns: minmax(0, 1fr); }
-  .bot-panel { grid-column: auto; }
-  .ticket-list-panel, .bot-panel { max-height: none; }
+@container incident-workbench (max-width: 620px) {
+  .selection-workspace { grid-template-columns: minmax(0, 1fr); padding: 10px; }
+  .ticket-list-panel { position: static; max-height: 280px; }
+  .context-panel[open] { flex-basis: 100%; }
   .bot-action-controls { flex-direction: column; }
   .bot-action-controls .btn { width: 100%; flex-basis: auto; }
   .reset-dialog footer { flex-direction: column; }
   .reset-dialog footer .btn { width: 100%; }
 }
+
+/* Shared ticket components keep their other page styles; this workbench uses a compact rail. */
+.ticket-list-panel :deep(.ticket-title) { padding-right: 0; line-height: 1.6; font-weight: 600; }
+.ticket-list-panel :deep(.ticket-row.selected .ticket-title) { padding-right: 42px; }
+.ticket-list-panel :deep(.ticket-row) { padding: 12px; gap: 8px; border-color: transparent; background: #f8fafc; border-radius: 8px; }
+.ticket-list-panel :deep(.ticket-row:hover) { background: #f1f5f9; border-color: #cbd5e1; }
+.ticket-list-panel :deep(.ticket-row.selected) { background: #eff6ff; border-color: #93b4fa; box-shadow: inset 3px 0 #2563eb; }
+.ticket-list-panel :deep(.search-field) { margin: 4px 0; }
+.ticket-list-panel :deep(.search-field input) { min-height: 36px; font-size: 12px; }
+.ticket-list-panel :deep(.ticket-meta span) { border-radius: 4px; }
+.ticket-list-panel :deep(.empty-state) { min-height: 120px; padding: 16px; line-height: 1.7; }
+.context-body :deep(h3) { font-size: 14px; line-height: 1.5; }
+.context-body :deep(.bot-option) { border-radius: 8px; }
+.context-body .bot-action-controls .btn { min-height: 36px; font-size: 12px; }
+@media (pointer: coarse) { .context-summary, .ticket-view-tabs button, .context-body .bot-action-controls .btn { min-height: 44px; } }
+
 @media (prefers-reduced-motion: reduce) { .btn { scroll-behavior: auto; } }
 </style>

@@ -111,7 +111,7 @@ func TestInstallNative_InstallsMultipleClaudeAgents(t *testing.T) {
 	}
 	must(os.MkdirAll(filepath.Join(staging, "agents"), 0o755))
 	must(os.WriteFile(filepath.Join(staging, "agents", "shop-troubleshooter.md"), []byte("---\nname: shop-troubleshooter\n---\n"), 0o644))
-	must(os.WriteFile(filepath.Join(staging, "agents", "shop-validator.md"), []byte("---\nname: shop-validator\n---\n"), 0o644))
+	must(os.WriteFile(filepath.Join(staging, "agents", "shop-fixer.md"), []byte("---\nname: shop-fixer\n---\n"), 0o644))
 	for _, skill := range []string{
 		"api-verifier",
 		"attachment-evidence-verifier",
@@ -126,17 +126,17 @@ func TestInstallNative_InstallsMultipleClaudeAgents(t *testing.T) {
 	}
 	must(os.MkdirAll(filepath.Join(staging, "scripts"), 0o755))
 	must(os.WriteFile(filepath.Join(staging, "scripts", "helper.py"), []byte("# helper\n"), 0o644))
-	must(os.WriteFile(filepath.Join(staging, "tshoot.json"), []byte(`{"schema_version":1,"system_id":"shop","target":"claude-code","agent_id":"shop-troubleshooter","role":"troubleshooter","internal_agents":[{"id":"shop-troubleshooter","role":"troubleshooter"},{"id":"shop-validator","role":"validator"}]}`), 0o644))
+	must(os.WriteFile(filepath.Join(staging, "tshoot.json"), []byte(`{"schema_version":1,"system_id":"shop","target":"claude-code","agent_id":"shop-troubleshooter","role":"troubleshooter","internal_agents":[{"id":"shop-troubleshooter","role":"troubleshooter"},{"id":"shop-fixer","role":"fixer"}]}`), 0o644))
 	must(os.MkdirAll(filepath.Join(staging, "agents-meta", "shop-troubleshooter"), 0o755))
 	must(os.WriteFile(filepath.Join(staging, "agents-meta", "shop-troubleshooter", "tshoot.json"), []byte(`{"schema_version":1,"system_id":"shop","target":"claude-code","agent_id":"shop-troubleshooter","role":"troubleshooter"}`), 0o644))
-	must(os.MkdirAll(filepath.Join(staging, "agents-meta", "shop-validator"), 0o755))
-	must(os.WriteFile(filepath.Join(staging, "agents-meta", "shop-validator", "tshoot.json"), []byte(`{"schema_version":1,"system_id":"shop","target":"claude-code","agent_id":"shop-validator","role":"validator"}`), 0o644))
+	must(os.MkdirAll(filepath.Join(staging, "agents-meta", "shop-fixer"), 0o755))
+	must(os.WriteFile(filepath.Join(staging, "agents-meta", "shop-fixer", "tshoot.json"), []byte(`{"schema_version":1,"system_id":"shop","target":"claude-code","agent_id":"shop-fixer","role":"fixer"}`), 0o644))
 
 	if err := InstallNative(staging, "claude-code"); err != nil {
 		t.Fatal(err)
 	}
 
-	for _, name := range []string{"shop-troubleshooter", "shop-validator"} {
+	for _, name := range []string{"shop-troubleshooter", "shop-fixer"} {
 		if _, err := os.Stat(filepath.Join(fakeHome, ".claude", "agents", name+".md")); err != nil {
 			t.Fatalf("%s agent not installed: %v", name, err)
 		}
@@ -149,7 +149,7 @@ func TestInstallNative_InstallsMultipleClaudeAgents(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s meta missing: %v", name, err)
 			}
-			if !strings.Contains(string(body), `"agent_id":"shop-troubleshooter"`) || !strings.Contains(string(body), `"id":"shop-validator"`) {
+			if !strings.Contains(string(body), `"agent_id":"shop-troubleshooter"`) || !strings.Contains(string(body), `"id":"shop-fixer"`) {
 				t.Fatalf("%s meta wrong: %s", name, body)
 			}
 		} else if !os.IsNotExist(err) {
@@ -175,13 +175,13 @@ func TestInstallNative_InstallsMultipleClaudeAgents(t *testing.T) {
 	assertMissing("shop-troubleshooter/attachment-evidence-verifier")
 	assertMissing("shop-troubleshooter/bug-verifier")
 
-	assertExists("shop-validator/api-verifier")
-	assertExists("shop-validator/attachment-evidence-verifier")
-	assertExists("shop-validator/bug-verifier")
-	assertExists("shop-validator/frontend-repro-investigator")
-	assertExists("shop-validator/postgresql-runtime-query")
-	assertMissing("shop-validator/incident-investigator")
-	assertMissing("shop-validator/recent-changes")
+	assertMissing("shop-fixer/api-verifier")
+	assertMissing("shop-fixer/attachment-evidence-verifier")
+	assertMissing("shop-fixer/bug-verifier")
+	assertExists("shop-fixer/frontend-repro-investigator")
+	assertExists("shop-fixer/postgresql-runtime-query")
+	assertExists("shop-fixer/incident-investigator")
+	assertExists("shop-fixer/recent-changes")
 }
 
 func TestInstallNative_PrimaryAnchorUsesTroubleshooterWhenRootMetaIsLegacy(t *testing.T) {

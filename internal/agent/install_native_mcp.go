@@ -38,8 +38,6 @@ import (
 //   - target=cursor      → ~/.cursor/mcp.json,顶层 mcpServers 字段
 //   - target=codex       → ~/.codex/agents/<name>.toml + ~/.codex/tshoot-runtimes/<name>/config.toml
 //
-// creds 是 env-var-name → value 的 map(跟 InstallNativeOpenclaw 一样的 schema)。
-// 桌面端 wizard 通过 buildOpenclawCreds() 拼出来传过来;CLI 没 creds 时传 nil,
 // 注入的 env 字段值会变成 {{ENV_VAR}} 占位符让用户手填。
 //
 // onProgress(可空)用于 install 链路里"用户感知"的进度回调。当前 install 步骤本身
@@ -143,6 +141,17 @@ func MergeMCPIntoIDESettings(target string, cfg *config.SystemConfig, creds map[
 		CodeGraphBinaryPath: codeGraphBinPath,
 	}, get)
 
+	if t == TargetOpenCode {
+		converted, err := openCodeMCPServers(servers)
+		if err != nil {
+			return err
+		}
+		_, err = mergeOpenCodeMCP(t.MCPConfigPath(home), cfg.MCPKeyPrefix()+"-", converted, mergeOnlyNew)
+		if err != nil {
+			return err
+		}
+		return probeOpenCodeMCP(t.MCPConfigPath(home), cfg.MCPKeyPrefix()+"-", emit)
+	}
 	if t == TargetCodex {
 		// codex 全局 sandbox 默认禁网,workspace-write 也要显式 network_access=true 才放行 —
 		// 没配的话装好后所有 MCP 启动 ENOTFOUND。自动 patch ~/.codex/config.toml,
@@ -438,10 +447,9 @@ func codexAgentNamesForConfig(cfg *config.SystemConfig) []string {
 	if base == "" {
 		base = strings.TrimSuffix(troubleshooter, "-troubleshooter")
 	}
-	validator := base + "-validator"
 	fixer := base + "-fixer"
 	names := []string{troubleshooter}
-	for _, candidate := range []string{validator, fixer} {
+	for _, candidate := range []string{fixer} {
 		if strings.TrimSpace(candidate) == "" || candidate == troubleshooter {
 			continue
 		}

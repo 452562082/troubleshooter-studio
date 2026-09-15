@@ -95,7 +95,7 @@ describe('presentStageAttempt', () => {
       { label: '处置方式', value: '代码修复' },
       { label: '修复对象', value: 'src/user-card.tsx' },
       { label: '修复建议', value: '只渲染 nick_name 作为标题' },
-      { label: '回归方式', value: '重新执行原始搜索场景' },
+      { label: '人工验收建议', value: '重新执行原始搜索场景' },
     ] })
     expect(view.sections[2]).toMatchObject({ title: '置信度', text: '高' })
     expect(view.sections.some(section => section.title === '非阻塞未覆盖')).toBe(false)
@@ -117,7 +117,7 @@ describe('presentStageAttempt', () => {
       validation_gaps: ['Network 缺少响应体'], gaps: ['需要后台登录权限'], unchecked_scopes: ['未查询非关键指标'], evidence: [],
     }, 'failed'))
 
-    expect(view.sections.find(section => section.title === '验证将自动补采')?.items).toEqual(['Network 缺少响应体'])
+    expect(view.sections.find(section => section.title === '历史证据缺口')?.items).toEqual(['Network 缺少响应体'])
     expect(view.sections.find(section => section.title === '需要你补充')?.items).toEqual(['需要后台登录权限'])
     expect(view.sections.find(section => section.title === '非阻塞未覆盖')?.items).toEqual(['未查询非关键指标'])
     expect(view.sections.some(section => section.title === '还需补充')).toBe(false)
@@ -142,7 +142,7 @@ describe('presentStageAttempt', () => {
     }))
 
     expect(view).toMatchObject({ phaseLabel: '修复', resultLabel: '修复已推送', tone: 'success', environment: 'test' })
-    expect(view.sections.map(section => section.title)).toEqual(['部署说明', '代码变更', '测试结果', '分支与提交', '风险', '修复证据'])
+    expect(view.sections.map(section => section.title)).toEqual(['部署说明', '代码变更', '测试结果', '分支与提交', '风险'])
     expect(view.sections[1].groups?.[0]).toContainEqual({ label: '仓库', value: 'api', mono: true })
     expect(view.sections[2].groups?.[0]).toContainEqual({ label: '命令', value: 'go test ./...', mono: true })
   })

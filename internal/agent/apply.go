@@ -1,11 +1,4 @@
-// Package agent 实现阶段 2 的"读-改-部署闭环"：
-// 从 discover 识别到的机器人 (tshoot.json) 出发，用新的 troubleshooter.yaml 重新渲染产物，
-// rsync 回活的 workspace 路径,模板派生文件按最新模板覆盖。
-//
-// 这个包刻意**不**调 install.sh —— install.sh 的职责是"首次 bootstrap + 收凭证"，
-// agent apply 的职责是"系统架构 / 映射表更新"，两者互补：
-//   - 改凭证：编辑 scripts/.env 重跑 install.sh（机制已存在）
-//   - 改环境/仓库/skill/映射：tshoot agent edit + apply（本包提供）
+// Package agent 负责按配置生成并部署三平台排障机器人。
 package agent
 
 import (
@@ -43,7 +36,6 @@ type ApplyOptions struct {
 	// IDECreds 给 claude-code / cursor 安装时,把 mcp.servers 配置注入 ~/.claude.json
 	// (user-scope dotfile,Claude Code CLI 强绑死位置)或 ~/.cursor/mcp.json 用。
 	// key = env-var name(如 NACOS_ADDR_DEV),value = 实际值。
-	// 桌面端 wizard 通过 buildOpenclawCreds() 拼出来传过来;CLI 没收集这个就传 nil,
 	// 注入的 env 字段值会变成 {{NACOS_ADDR_DEV}} 占位符让用户手填。
 	IDECreds map[string]string
 	// OnLog(可空)apply 链路里需要"用户感知"的进度回调,目前主要用在 mcp-grafana
@@ -98,11 +90,9 @@ func PrepareCodeGraphForDeploy(ctx context.Context, cfg *config.SystemConfig, re
 //
 //	ag.Path = 真实部署位置(UI 卡片显示用,~/.claude/skills/<name>/ 之类)
 //	workDir = discover.WorkDirFor(ag) = 实际写产物的位置:
-//	  OpenClaw → 跟 ag.Path 同(单段式)
 //	  Claude Code/Cursor → ~/.tshoot/<target>/<system_id>/ staging 中间包
 //	                       (Apply 写 staging,然后 InstallNative 同步到 ~/.claude / ~/.cursor)
 //
-// 支持 4 种 target：openclaw / claude-code / cursor / embedded。
 // 每种 target 走各自的 generator 方法，然后把相应的产物子树 rsync 到 agent.Path。
 func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 	if len(opts.NewYAML) == 0 {
@@ -137,18 +127,7 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 	}
 
 	// 按 target 渲染
-	switch ag.Meta.Target {
-	case "openclaw":
-		err = g.Generate()
-	case "claude-code":
-		err = g.GenerateClaudeCode()
-	case "cursor":
-		err = g.GenerateCursor()
-	case "codex":
-		err = g.GenerateCodex()
-	default:
-		return nil, fmt.Errorf("unsupported target: %q", ag.Meta.Target)
-	}
+	err = g.GenerateTarget(ag.Meta.Target)
 	if err != nil {
 		return nil, fmt.Errorf("render for target %q: %w", ag.Meta.Target, err)
 	}
@@ -169,7 +148,6 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 		return nil, err
 	}
 	// workDir 是 Apply 的实际写产物目录(staging 中间包,Claude Code/Cursor 双段式必走;
-	// OpenClaw 单段式同 ag.Path)。注意:rsync 全在这里做,跟"卡片显示的 ag.Path"区分开。
 	workDir := discover.WorkDirFor(ag)
 	dstFiles, _ := listRel(workDir)
 
@@ -216,10 +194,9 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 	}
 
 	// claude-code / cursor 是"中间包 → 用户级目录"两段式部署:这里 staging 已 rsync,
-	// 紧接着原生装到 ~/.claude|cursor/。openclaw 仍交给自家 scripts/install.sh。
 	// 注意:本路径同时覆盖"重新 apply"(改了 yaml 后回写)的场景,避免活配置和用户级
 	// 目录脱节。
-	if !opts.DryRun && (ag.Meta.Target == "claude-code" || ag.Meta.Target == "cursor" || ag.Meta.Target == "codex") {
+	if !opts.DryRun && (ag.Meta.Target == "claude-code" || ag.Meta.Target == "cursor" || ag.Meta.Target == "codex" || ag.Meta.Target == "opencode") {
 		if err := installNativeForApply(workDir, ag.Meta.Target); err != nil {
 			return nil, fmt.Errorf("native install (%s): %w", ag.Meta.Target, err)
 		}
@@ -231,7 +208,6 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 			return nil, fmt.Errorf("merge mcp settings (%s): %w", ag.Meta.Target, err)
 		}
 		// kuboard / apollo / consul / env-vars 类型走脚本读 creds.json,**不通过 MCP**。
-		// OpenClaw 写到 ~/.openclaw/<id>-creds.json;IDE 平台没有这文件,镜像写一份到
 		// ~/.tshoot/<id>-creds.json(平台无关位置),resolve_runtime_*.py 已加双路径回退。
 		// creds=nil(regen 等无凭证场景)同样跳过(避免空覆盖)。
 		if opts.IDECreds != nil {
@@ -260,11 +236,14 @@ func Apply(ag discover.DiscoveredAgent, opts ApplyOptions) (*Result, error) {
 // 渲染产物 + 写到 dest。定位是"给已有 yaml 的人跳过 Init 向导 7 步"。
 //
 // 语义分两种：
-//   - target=openclaw：产出完整 dist 包（含 scripts/install.sh），用户仍需手动跑一次
-//     install.sh 完成 agent 注册 + MCP 装配 + 凭证收集（这步 apply 不代替）。
-//   - target in {claude-code, cursor, embedded}：直接 rsync 产物到 dest，可立即使用。
-//     embedded 装完 Studio 扫到 tshoot.json 即可开对话,无独立部署步骤。
+//
+//	  install.sh 完成 agent 注册 + MCP 装配 + 凭证收集（这步 apply 不代替）。
+//	- target in {claude-code, cursor, embedded}：直接 rsync 产物到 dest，可立即使用。
+//	  embedded 装完 Studio 扫到 tshoot.json 即可开对话,无独立部署步骤。
 func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions) (*Result, error) {
+	if _, err := ParseIDETarget(target); err != nil {
+		return nil, err
+	}
 	if destPath == "" {
 		return nil, fmt.Errorf("dest_path required")
 	}
@@ -274,48 +253,6 @@ func ImportAndApply(yamlBytes []byte, target, destPath string, opts ApplyOptions
 	}
 	if err := os.MkdirAll(destPath, 0o755); err != nil {
 		return nil, fmt.Errorf("create dest %s: %w", destPath, err)
-	}
-
-	// openclaw 走完整 gen 出 staging 包(不含 install.sh,native 接管);凭证收集 +
-	// workspace 安装 + openclaw.json 注入由桌面端 RunInstall → InstallNativeOpenclaw 完成。
-	if target == "openclaw" {
-		if opts.DryRun {
-			return &Result{
-				AgentPath:        destPath,
-				Target:           target,
-				FilesWritten:     0,
-				NeedsRestartHint: "dry-run：会生成 openclaw staging 到 " + destPath + "；真部署时桌面端 RunInstall 会调 InstallNativeOpenclaw 收凭证 + 注册 MCP",
-			}, nil
-		}
-		g := generator.New(cfg, opts.TemplateRoot, destPath)
-		g.TshootVersion = opts.TshootVersion
-		g.TroubleshooterYAMLSource = yamlBytes
-		g.RepoLocalPaths = opts.RepoLocalPaths
-		// auto-analyze:用 RepoLocalPaths 跑一遍 dependency_scan / schema_scan,
-		// 把 service-dependency-map.upstream/downstream + data-schema-map.tables 自动填齐;
-		// 路径全空 / 跑失败都不阻塞 gen,只是这两份产物里的字段保持空骨架。OnLog 透传桌面 UI,
-		// auto-analyze 内部 60s timeout 兜底——之前没传 OnLog + 没 timeout, 大仓扫描可让
-		// 部署 UI 永远卡"部署中..."、日志面板看着像死锁。
-		if result, aerr := RunAutoAnalyze(RunAutoAnalyzeOptions{
-			Cfg:       cfg,
-			RepoPaths: opts.RepoLocalPaths,
-			OnLog:     opts.OnLog,
-		}); aerr == nil && result != nil {
-			g.LoadAnalysisResult(result)
-		}
-		if err := g.Generate(); err != nil {
-			return nil, fmt.Errorf("openclaw gen: %w", err)
-		}
-		written := countFilesUnder(destPath)
-		codeGraph := PrepareCodeGraphForDeploy(context.Background(), cfg, opts.RepoLocalPaths, opts.OnLog)
-		return &Result{
-			AgentPath:        destPath,
-			Target:           target,
-			FilesWritten:     written,
-			TSFJSONUpdated:   true,
-			NeedsRestartHint: "已生成 openclaw staging。桌面端下一步会跑 RunInstall(原生 Go,无 bash 依赖)注入 ~/.openclaw/openclaw.json 并安装 workspace。",
-			CodeGraph:        codeGraph,
-		}, nil
 	}
 
 	// 其他 3 target：构造 fake DiscoveredAgent，复用 Apply 的 rsync 逻辑

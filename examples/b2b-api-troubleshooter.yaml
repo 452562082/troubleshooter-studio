@@ -113,7 +113,7 @@ infrastructure:
       readonly_enforced: true
 
 generation:
-  targets: [openclaw]
+  targets: [claude-code]
   skills_whitelist:
     - routing
     - config-executor

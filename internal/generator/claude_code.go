@@ -74,7 +74,6 @@ func (g *Generator) GenerateClaudeCode() error {
 
 // agentSlug 取 ctx.AgentID 作 subagent 文件名 / @name slug。
 // 这个值由 cfg.ResolveID() 算出来:优先 agent.id,空时 <system.id>-troubleshooter。
-// 跟 OpenClaw agents.list[*].id 完全对齐 —— 一份标识贯穿所有 AI 平台。
 // (老代码用 workspace_name 兜底,但 wizard 已经不再 emit workspace_name,
 // 那条路径会回落到 system.id 而不带 -troubleshooter 后缀,跟其他 target 不一致。)
 func agentSlug(ctx *Context) string {
@@ -98,17 +97,14 @@ func agentSlug(ctx *Context) string {
 //	model: 仅当用户显式给 claude-code 配了 target_models.claude-code 才写 ——
 //	       否则 Claude Code 用 IDE 当前选的模型(用户偏好)。
 //
-// 历史 bug:之前直接写 ctx.Agent.Model,但 Agent.Model 是 OpenClaw gateway 专属的
 // LLM 路由 id(可能是 openai-codex/gpt-5.4 之类的非 Claude 模型)。Claude Code 拿到
 // 那个值会把"你以为它会用的 Claude 模型"替换成奇怪字符串(或者忽略 / 报错),用户
-// 体感是"OpenClaw 选什么 Claude Code 也跟着"。修法:Claude Code 只认 target_models.claude-code,
 // 没显式配就不写 model frontmatter。
 //
 // 给 Claude Code subagent 写的原生 prompt。subagent 通过 @<name> 在主 chat 里调用,可以
 // 直接用 Bash / Read / Glob / Grep / WebFetch / TodoWrite 等工具;MCP 已在 ~/.claude.json
 // (user-scope dotfile)自动注册,排障时 agent 直接调对应 mcp_server 即可,Python 脚本通过绝对路径跑。
 //
-// 历史 bug:之前直接写 ctx.Agent.Model,但 Agent.Model 是 OpenClaw gateway 专属的 LLM 路由
 // id(可能是 openai-codex/gpt-5.4 之类的非 Claude 模型)。Claude Code 拿到那个值会让"你以为
 // 它会用的 Claude 模型"被替换或忽略。现在只认 target_models["claude-code"],没显式配就不写
 // model frontmatter,让 Claude Code 用 IDE 当前选的模型。
@@ -125,21 +121,6 @@ func buildClaudeAgentMD(wsRoot string, ctx *Context, agentName string, role Agen
 	fmt.Fprintf(&sb, "# %s\n\n", roleDisplayName(ctx, role))
 	sb.WriteString(claudeProjectOwnershipGate(ctx, agentName))
 
-	if role == AgentRoleValidator {
-		intro := "本 agent 在 Claude Code 通过 `@" + agentName + "` 调用 subagent,负责 **验证 / 主动复现 / 修复后复查**,只输出验证报告,不做原因定位。\n\n" +
-			"运行环境:\n" +
-			"- 可直接用 Bash / Read / Glob / Grep / WebFetch / TodoWrite 工具收集验证证据\n" +
-			"- MCP server 已写入 `~/.claude.json` user-scope dotfile,Claude Code 启动自动加载,需要取日志 / trace / 配置证据时直接调对应 mcp_server\n" +
-			"- skills 脚本用**绝对路径**调用:`python3 ~/.claude/skills/" + agentName + "/<skill>/scripts/<file>.py ...` —— 当前 cwd 不一定在本 agent 的 skills 目录\n" +
-			"- 不读取业务源码定位函数/文件行号/补丁点;代码分析和原因判断交给排障 Agent\n" +
-			"- 第一动作是 Read `~/.claude/skills/" + agentName + "/bug-verifier/SKILL.md`,按其中流程复现、回归并输出验证报告"
-
-		writeIDEValidatorAgentBody(&sb, IDEPlatform{
-			Intro:                  intro,
-			SkillsScriptPathPrefix: "~/.claude/skills/" + agentName,
-		})
-		return sb.String(), nil
-	}
 	if role == AgentRoleFixer {
 		fmt.Fprintf(&sb, "本 agent 在 Claude Code 通过 `@%s` 调用 subagent,负责 **修复 Bug / 创建修复分支 / 提交并推送**,只在用户明确触发修复后执行。\n\n", agentName)
 		sb.WriteString("第一动作是 Read `~/.claude/skills/" + agentName + "/bug-fixer/SKILL.md`,按其中流程执行。\n\n")

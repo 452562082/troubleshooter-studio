@@ -30,8 +30,6 @@ system:
 # ---------------------------------------------------------------------------
 agent:
   name: "AI排障机器人"                 # [required] 机器人显示名
-  workspace_name: "AI排障机器人"       # [required] ~/.openclaw/workspace/<name>
-  model: openai-codex/gpt-5.3-codex  # [required] OpenClaw agents.list 中的 model 标识
 
 # ---------------------------------------------------------------------------
 # 3. 环境清单 —— 生成 env-domain-map.yaml
@@ -308,8 +306,8 @@ infrastructure:
 # 6. 生成偏好 —— 控制产物形态、部署目标、再生成策略
 # ---------------------------------------------------------------------------
 generation:
-  targets:                           # [required] 部署目标列表(openclaw / claude-code / cursor;可多选)
-    - openclaw
+  targets:                           # [required] 部署目标列表(claude-code / cursor / codex / opencode;可多选)
+    - claude-code
   skills_whitelist:                  # [optional] 覆盖默认全量 skills
     - routing                        # 环境/服务路由映射
     - config-executor                # 配置中心读/历史/对比

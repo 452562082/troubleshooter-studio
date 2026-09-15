@@ -32,7 +32,7 @@ func TestDeleteTerminalCaseHistoryForBugPurgesRecordsAndArtifacts(t *testing.T) 
 		AgentTarget: "codex", BotKey: "validator", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
 		StartedAt: closed.Add(-time.Minute), FinishedAt: &closed,
 	}
-	if err := store.CreateAttempt(ctx, attempt); err != nil {
+	if err := store.createAttempt(ctx, attempt, AttemptValidationOptions{AllowLegacyMigration: true}); err != nil {
 		t.Fatal(err)
 	}
 	seedTerminalHistoryRelatedRows(t, store, deletedCase, attempt, closed)
@@ -145,11 +145,11 @@ func seedTerminalHistoryRelatedRows(t *testing.T, store *CaseStore, incident Inc
 		{`INSERT INTO reset_cancellation_operations (reset_key,case_id,attempt_id,request_fingerprint,status,claim_token,outcome_code,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)`,
 			[]any{"reset-delete", incident.ID, attempt.ID, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ResetCancellationSucceeded, "claim", "succeeded", at, at}},
 		{`INSERT INTO browser_recovery_operations (idempotency_key,operation,case_id,attempt_id,expected_error_code,cycle_number,expected_version,actor_id,request_fingerprint,status,claim_token,outcome_code,result_case_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			[]any{"browser-delete", "repair", incident.ID, attempt.ID, "browser_locator_failed", 1, 1, "alice", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", BrowserRecoveryEffectFailed, "claim", "failed", `{}`, at, at}},
+			[]any{"browser-delete", "repair", incident.ID, attempt.ID, "browser_locator_failed", 1, 1, "alice", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "effect_failed", "claim", "failed", `{}`, at, at}},
 		{`INSERT INTO validation_recipes (case_id,scenario_sha256,plan_sha256,plan_json,source_attempt_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?)`,
 			[]any{incident.ID, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", `{}`, attempt.ID, at, at}},
 		{`INSERT INTO browser_decision_steps (attempt_id,step_no,scene_sha256,decision_sha256,action_fingerprint,status,effect_code,before_scene_ref,after_scene_ref,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-			[]any{attempt.ID, 1, strings.Repeat("e", 64), strings.Repeat("f", 64), strings.Repeat("a", 64), BrowserDecisionStepConfirmed, BrowserStepEffectConfirmedCode, "browser-scenes/before.json", "browser-scenes/after.json", at, at}},
+			[]any{attempt.ID, 1, strings.Repeat("e", 64), strings.Repeat("f", 64), strings.Repeat("a", 64), "confirmed", "effect_confirmed", "browser-scenes/before.json", "browser-scenes/after.json", at, at}},
 	}
 	for _, statement := range statements {
 		if _, err := store.db.Exec(statement.query, statement.args...); err != nil {

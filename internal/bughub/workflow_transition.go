@@ -3,27 +3,18 @@ package bughub
 import "fmt"
 
 var allowedCaseTransitions = map[CaseStatus]map[CaseStatus]struct{}{
-	CasePendingValidation:    {CaseValidating: {}, CaseResetArchived: {}},
-	CaseValidating:           {CaseReproduced: {}, CaseWaitingEvidence: {}, CaseNotReproduced: {}, CaseResetArchived: {}},
-	CaseWaitingEvidence:      {CaseValidating: {}, CaseInvestigating: {}, CaseRegressionValidating: {}, CaseResetArchived: {}},
-	CaseReproduced:           {CaseValidating: {}, CaseInvestigating: {}, CaseResetArchived: {}},
-	CaseNotReproduced:        {CaseValidating: {}, CaseResetArchived: {}},
-	CaseInvestigating:        {CaseValidating: {}, CaseRootCauseReady: {}, CaseWaitingEvidence: {}, CaseResetArchived: {}},
+	CasePendingInvestigation: {CaseInvestigating: {}, CaseResetArchived: {}},
+	CaseWaitingEvidence:      {CaseInvestigating: {}, CaseResetArchived: {}},
+	CaseInvestigating:        {CaseRootCauseReady: {}, CaseWaitingEvidence: {}, CaseResetArchived: {}},
 	CaseRootCauseReady:       {CaseWaitingFixApproval: {}, CaseWaitingRemediation: {}, CaseResetArchived: {}},
 	CaseWaitingFixApproval:   {CaseInvestigating: {}, CaseFixing: {}, CaseResetArchived: {}},
-	CaseWaitingRemediation:   {CaseInvestigating: {}, CaseRemediationApplied: {}, CaseResetArchived: {}},
-	CaseRemediationApplied:   {CaseRegressionValidating: {}, CaseWaitingEvidence: {}, CaseResetArchived: {}},
+	CaseWaitingRemediation:   {CaseInvestigating: {}, CaseRemediationRecorded: {}, CaseResetArchived: {}},
 	CaseFixing:               {CaseFixPushed: {}, CaseFixFailed: {}, CaseResetArchived: {}},
 	CaseFixFailed:            {CaseFixing: {}, CaseResetArchived: {}},
 	CaseFixPushed:            {CaseWaitingMergeApproval: {}, CaseResetArchived: {}},
 	CaseWaitingMergeApproval: {CaseInvestigating: {}, CaseMerging: {}, CaseResetArchived: {}},
-	CaseMerging:              {CaseWaitingDeployment: {}, CaseMergeConflict: {}, CaseWaitingMergeApproval: {}, CaseResetArchived: {}},
+	CaseMerging:              {CaseSubmitted: {}, CaseMergeConflict: {}, CaseWaitingMergeApproval: {}, CaseResetArchived: {}},
 	CaseMergeConflict:        {CaseWaitingMergeApproval: {}, CaseResetArchived: {}},
-	CaseWaitingDeployment:    {CaseDeploymentVerified: {}, CaseDeploymentUnverified: {}, CaseResetArchived: {}},
-	CaseDeploymentUnverified: {CaseWaitingDeployment: {}, CaseResetArchived: {}},
-	CaseDeploymentVerified:   {CaseRegressionValidating: {}, CaseWaitingEvidence: {}, CaseResetArchived: {}},
-	CaseRegressionValidating: {CaseFixedVerified: {}, CaseStillReproduces: {}, CaseWaitingEvidence: {}, CaseResetArchived: {}},
-	CaseStillReproduces:      {CaseInvestigating: {}, CaseResetArchived: {}},
 }
 
 func CanTransition(from, to CaseStatus) bool {

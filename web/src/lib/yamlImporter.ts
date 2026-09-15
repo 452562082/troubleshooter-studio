@@ -337,8 +337,6 @@ export async function applyParsedYAMLToWizardState(
     ctx.agent.name = parsed.agent.name ?? ''
     ctx.agent.workspace_name = parsed.agent.workspace_name ?? ''
     ctx.agent.model = parsed.agent.model ?? ctx.agent.model
-    const tm = parsed.agent.target_models || {}
-    ctx.targetModels.openclaw = tm.openclaw || ctx.agent.model
   }
 
   // environments

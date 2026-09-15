@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xiaolong/troubleshooter-studio/internal/browserverify"
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/userconfig"
@@ -68,7 +67,7 @@ func TestGetIncidentCaseAndEmittedSnapshotsHideArtifactPathsAndApplicationURLs(t
 	finished := time.Now().UTC()
 	if err := store.CreateAttempt(context.Background(), bughub.PhaseAttempt{
 		ID: "attempt-public-projection", CaseID: "case-a", CycleNumber: 1,
-		Phase: bughub.PhaseValidation, Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusFailed,
+		Phase: bughub.PhaseInvestigation, Mode: "", Status: bughub.AttemptStatusFailed,
 		AgentTarget: "codex", BotKey: "base|codex", InputJSON: []byte(`{}`),
 		OutputJSON: []byte(`{"error_code":"browser_login_required","application_url":"` + applicationURL + `","application_origin":"https://app.test","login_origin":"https://login.test","nested":{"application_url":"` + applicationURL + `","path_or_reference":"` + artifact.PathOrReference + `"}}`),
 		StartedAt:  finished.Add(-time.Second), FinishedAt: &finished,
@@ -86,7 +85,7 @@ func TestGetIncidentCaseAndEmittedSnapshotsHideArtifactPathsAndApplicationURLs(t
 		t.Fatal(err)
 	}
 	if _, _, err := store.Transition(context.Background(), "case-a", 1, bughub.CaseWaitingEvidence, bughub.TransitionEvent{
-		ID: "event-public-projection", CaseID: "case-a", FromStatus: bughub.CaseValidating, ToStatus: bughub.CaseWaitingEvidence,
+		ID: "event-public-projection", CaseID: "case-a", FromStatus: bughub.CaseInvestigating, ToStatus: bughub.CaseWaitingEvidence,
 		EventType: "phase_completed", ActorType: "agent", ActorID: "validator", IdempotencyKey: "event-public-projection",
 		PayloadJSON: payload, CreatedAt: finished,
 	}); err != nil {
@@ -156,37 +155,6 @@ func TestGetIncidentCaseAndEmittedSnapshotsHideArtifactPathsAndApplicationURLs(t
 	}
 	if phase.Meta["state"] != "completed" || phase.Meta["exit_code"] != 0 {
 		t.Fatalf("public phase event omitted progress meta = %+v", phase.Meta)
-	}
-}
-
-func TestSyncIncidentBugResolutionIsGatedBySuccessfulRegression(t *testing.T) {
-	calls := 0
-	app := &App{workflowResolveBug: func(_ context.Context, incident bughub.IncidentCase) error {
-		calls++
-		if incident.Status != bughub.CaseFixedVerified {
-			t.Fatalf("resolver received status %s", incident.Status)
-		}
-		return nil
-	}}
-
-	for _, status := range []bughub.CaseStatus{
-		bughub.CaseNotReproduced,
-		bughub.CaseInvestigating,
-		bughub.CaseStillReproduces,
-		bughub.CaseRegressionValidating,
-	} {
-		if err := app.syncIncidentBugResolution(context.Background(), bughub.IncidentCase{ID: "case-gate", Status: status}); err != nil {
-			t.Fatalf("status %s: %v", status, err)
-		}
-	}
-	if calls != 0 {
-		t.Fatalf("resolver calls before successful regression = %d", calls)
-	}
-	if err := app.syncIncidentBugResolution(context.Background(), bughub.IncidentCase{ID: "case-gate", Status: bughub.CaseFixedVerified}); err != nil {
-		t.Fatal(err)
-	}
-	if calls != 1 {
-		t.Fatalf("resolver calls after successful regression = %d, want 1", calls)
 	}
 }
 
@@ -319,142 +287,6 @@ unchecked_scopes: []`,
 	}
 }
 
-func TestReconcileIncidentBugResolutionsRecoversAndIsIdempotent(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("HOME", root)
-	remoteStatus := "active"
-	postCount := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Token") != "secret" {
-			t.Fatalf("Token header = %q", r.Header.Get("Token"))
-		}
-		switch r.Method {
-		case http.MethodGet:
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprintf(w, `{"bug":{"id":"840","title":"搜索结果不完整","status":%q}}`, remoteStatus)
-		case http.MethodPost:
-			postCount++
-			remoteStatus = "resolved"
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"result":"success"}`))
-		default:
-			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
-		}
-	}))
-	defer srv.Close()
-
-	platform, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
-		ID: "zentao-main", Name: "Zentao", Type: "zentao", BaseURL: srv.URL,
-		AuthMode: "api_token", Token: "secret", Enabled: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := bugStore().Upsert(bughub.Bug{
-		ID: "zentao-840", Source: "zentao", SourceID: "840", PlatformID: platform.ID,
-		Title: "搜索结果不完整", Status: "active",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	dbPath := filepath.Join(t.TempDir(), "cases.db")
-	app, store, _ := newWorkflowBindingApp(t, dbPath)
-	incident := bughub.IncidentCase{
-		ID: "case-fixed-reconcile", BugID: "zentao-840", Source: "zentao", SystemID: "base",
-		Environment: "test", Status: bughub.CaseFixedVerified, CycleNumber: 2,
-	}
-	if err := store.CreateCase(context.Background(), incident); err != nil {
-		t.Fatal(err)
-	}
-
-	app.reconcileIncidentBugResolutions(context.Background())
-	app.reconcileIncidentBugResolutions(context.Background())
-	if postCount != 1 {
-		t.Fatalf("resolve POST count = %d, want 1", postCount)
-	}
-	stored, found, err := bugStore().Get("zentao-840")
-	if err != nil || !found || stored.Status != "resolved" || stored.InboxState != bughub.BugInboxHistory || stored.ArchivedAt == nil {
-		t.Fatalf("stored Bug = %+v found=%v err=%v", stored, found, err)
-	}
-
-	if err := app.closeIncidentWorkflow(); err != nil {
-		t.Fatal(err)
-	}
-	reopenedApp, _, _ := newWorkflowBindingApp(t, dbPath)
-	remoteStatus = "active"
-	if err := bugStore().Upsert(bughub.Bug{
-		ID: "zentao-840", Source: "zentao", SourceID: "840", PlatformID: platform.ID,
-		Title: "搜索结果不完整", Status: "active", UpdatedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatal(err)
-	}
-	reopenedApp.reconcileIncidentBugResolutions(context.Background())
-	if postCount != 1 {
-		t.Fatalf("reopened Studio resolved a reopened Bug from an old Case: POST count = %d, want 1", postCount)
-	}
-}
-
-func TestReconcileIncidentBugResolutionSkipsSourceChangedAfterRegression(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("HOME", root)
-	postCount := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"bug":{"id":"840","title":"搜索结果不完整","status":"active","openedDate":"2026-07-18T06:58:00Z","activatedDate":"2026-07-23T06:58:09Z"}}`))
-		case http.MethodPost:
-			postCount++
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"result":"success"}`))
-		}
-	}))
-	defer srv.Close()
-	platform, err := bugPlatformStore().Upsert(bughub.PlatformConfig{
-		ID: "zentao-main", Name: "Zentao", Type: "zentao", BaseURL: srv.URL,
-		AuthMode: "api_token", Token: "secret", Enabled: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := bugStore().Upsert(bughub.Bug{
-		ID: "zentao-840", Source: "zentao", SourceID: "840", PlatformID: platform.ID,
-		Title: "搜索结果不完整", Status: "active",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
-	closedAt := time.Date(2026, 7, 23, 5, 4, 59, 0, time.UTC)
-	incident := bughub.IncidentCase{
-		ID: "case-fixed-reopened", BugID: "zentao-840", Source: "zentao", SystemID: "base",
-		Environment: "test", Status: bughub.CaseFixedVerified, CycleNumber: 1,
-		CreatedAt: closedAt.Add(-time.Hour), UpdatedAt: closedAt, ClosedAt: &closedAt,
-	}
-	if err := store.CreateCase(context.Background(), incident); err != nil {
-		t.Fatal(err)
-	}
-
-	app.reconcileIncidentBugResolutions(context.Background())
-	app.reconcileIncidentBugResolutions(context.Background())
-	if postCount != 0 {
-		t.Fatalf("source changed after regression triggered %d resolve POSTs", postCount)
-	}
-	events, err := store.ListEvents(context.Background(), incident.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	foundSkip := false
-	for _, event := range events {
-		if event.EventType == "bug_ticket_resolution_skipped_source_changed" {
-			foundSkip = true
-		}
-	}
-	if !foundSkip {
-		t.Fatalf("events = %+v, want durable source-changed skip marker", events)
-	}
-}
-
 func TestGeneratedWailsIncidentArtifactContractIsPathFree(t *testing.T) {
 	models, err := os.ReadFile(filepath.Join("..", "..", "web", "wailsjs", "go", "models.ts"))
 	if err != nil {
@@ -559,14 +391,11 @@ func newWorkflowBindingApp(t *testing.T, dbPath string) (*App, *bughub.CaseStore
 		t.Fatal(err)
 	}
 	runner := &workflowBindingRunner{}
-	orchestrator := bughub.NewCaseOrchestrator(store, runner, nil, nil)
+	orchestrator := bughub.NewCaseOrchestrator(store, runner, nil)
 	botPath := t.TempDir()
 	app := &App{
 		workflowStore:        store,
 		workflowOrchestrator: orchestrator,
-		workflowBrowser: &fakeIncidentBrowserController{
-			status: browserverify.RuntimeStatus{State: browserverify.RuntimeReady, Version: "1.61.1"},
-		},
 		workflowLoadBug: func(id string) (bughub.Bug, error) {
 			return bughub.Bug{ID: id, Source: "zentao", Title: "checkout fails", Env: "test", SystemID: "base"}, nil
 		},
@@ -585,7 +414,7 @@ func createPendingBindingCase(t *testing.T, store *bughub.CaseStore, id string) 
 	t.Helper()
 	incident := bughub.IncidentCase{
 		ID: id, BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test",
-		Status: bughub.CasePendingValidation, CycleNumber: 1, SelectedBotKey: "base|codex",
+		Status: bughub.CasePendingInvestigation, CycleNumber: 1, SelectedBotKey: "base|codex",
 	}
 	if err := store.CreateCase(context.Background(), incident); err != nil {
 		t.Fatal(err)
@@ -595,59 +424,6 @@ func createPendingBindingCase(t *testing.T, store *bughub.CaseStore, id string) 
 		t.Fatal(err)
 	}
 	return got
-}
-
-func TestInitializeIncidentWorkflowOwnsBrowserController(t *testing.T) {
-	app := &App{workflowRoot: t.TempDir()}
-	t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
-	if err := app.initializeIncidentWorkflow(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if app.workflowBrowser == nil || app.workflowRunner == nil {
-		t.Fatalf("browser=%T runner=%p", app.workflowBrowser, app.workflowRunner)
-	}
-	status := app.workflowBrowser.Status()
-	if status.ErrorCode != "browser_runtime_missing" {
-		t.Fatalf("browser status = %+v", status)
-	}
-}
-
-func TestInitializeIncidentWorkflowAppliesBrowserDecisionRolloutConfig(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	if err := userconfig.Save(&userconfig.Config{BrowserDecisionRollout: &userconfig.BrowserDecisionRolloutConfig{
-		Version: 1, Enabled: true, Percentage: 25,
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	app := &App{workflowRoot: t.TempDir()}
-	t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
-	if err := app.initializeIncidentWorkflow(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	status, err := app.GetIncidentBrowserDecisionRolloutStatus()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !status.Enabled || status.Percentage != 25 || status.Source != "user_config" {
-		t.Fatalf("status=%+v", status)
-	}
-}
-
-func TestInitializeIncidentWorkflowRejectsInvalidBrowserDecisionRolloutConfig(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	if err := userconfig.Save(&userconfig.Config{BrowserDecisionRollout: &userconfig.BrowserDecisionRolloutConfig{
-		Version: 1, Enabled: true, Percentage: 101,
-	}}); err != nil {
-		t.Fatal(err)
-	}
-	app := &App{workflowRoot: t.TempDir()}
-	if err := app.initializeIncidentWorkflow(context.Background()); err == nil || !strings.Contains(err.Error(), "browser_decision_rollout") {
-		t.Fatalf("err=%v", err)
-	}
-	if app.workflowStore != nil || app.workflowRunner != nil {
-		t.Fatal("invalid rollout config initialized a partial workflow runtime")
-	}
 }
 
 func TestListIncidentCasesWorksWithoutWailsContext(t *testing.T) {
@@ -727,149 +503,6 @@ func TestGetIncidentWorkflowMetricsIsReadOnly(t *testing.T) {
 	}
 }
 
-func TestPollWorkflowRemindersUsesLocalWorkflowEvent(t *testing.T) {
-	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "reminder.db"))
-	waitingSince := time.Now().UTC().Add(-25 * time.Hour)
-	incident := bughub.IncidentCase{ID: "case-reminder", BugID: "bug-reminder", SystemID: "base", Environment: "test", Status: bughub.CaseMerging, CycleNumber: 1, Version: 1, CreatedAt: waitingSince.Add(-time.Hour), UpdatedAt: waitingSince}
-	if err := store.CreateCase(context.Background(), incident); err != nil {
-		t.Fatal(err)
-	}
-	event := bughub.TransitionEvent{ID: "wait-reminder", CaseID: incident.ID, FromStatus: bughub.CaseMerging, ToStatus: bughub.CaseWaitingDeployment, EventType: "merge_pushed", ActorType: "git", ActorID: "git", IdempotencyKey: "wait-reminder", PayloadJSON: []byte(`{}`), CreatedAt: waitingSince}
-	if _, _, err := store.Transition(context.Background(), incident.ID, 1, bughub.CaseWaitingDeployment, event); err != nil {
-		t.Fatal(err)
-	}
-	var name string
-	var payload any
-	app.workflowEmit = func(gotName string, gotPayload any) { name, payload = gotName, gotPayload }
-
-	app.pollWorkflowReminders(context.Background())
-
-	reminder, ok := payload.(bughub.WorkflowReminder)
-	if name != incidentWorkflowReminderEvent || !ok || reminder.CaseID != incident.ID {
-		t.Fatalf("event=%q payload=%+v", name, payload)
-	}
-	pending, err := app.ListPendingIncidentWorkflowReminders()
-	if err != nil || len(pending) != 1 || pending[0].ReservationKey != reminder.ReservationKey {
-		t.Fatalf("pending=%+v err=%v", pending, err)
-	}
-	if err := app.AckIncidentWorkflowReminder(AckIncidentWorkflowReminderInput{CaseID: reminder.CaseID, ReservationKey: reminder.ReservationKey, DeliveryAttempt: reminder.DeliveryAttempt, ActorID: "desktop-root"}); err != nil {
-		t.Fatal(err)
-	}
-	pending, err = app.ListPendingIncidentWorkflowReminders()
-	if err != nil || len(pending) != 0 {
-		t.Fatalf("pending after ack=%+v err=%v", pending, err)
-	}
-}
-
-func TestPollWorkflowRemindersWithoutRuntimeRemainsPendingForLateMount(t *testing.T) {
-	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "reminder-no-runtime.db"))
-	waitingSince := time.Now().UTC().Add(-25 * time.Hour)
-	incident := bughub.IncidentCase{ID: "case-no-runtime", BugID: "bug-no-runtime", SystemID: "base", Environment: "test", Status: bughub.CaseMerging, CycleNumber: 1, Version: 1, CreatedAt: waitingSince.Add(-time.Hour), UpdatedAt: waitingSince}
-	if err := store.CreateCase(context.Background(), incident); err != nil {
-		t.Fatal(err)
-	}
-	event := bughub.TransitionEvent{ID: "wait-no-runtime", CaseID: incident.ID, FromStatus: bughub.CaseMerging, ToStatus: bughub.CaseWaitingDeployment, EventType: "merge_pushed", ActorType: "git", ActorID: "git", IdempotencyKey: "wait-no-runtime", PayloadJSON: []byte(`{}`), CreatedAt: waitingSince}
-	if _, _, err := store.Transition(context.Background(), incident.ID, 1, bughub.CaseWaitingDeployment, event); err != nil {
-		t.Fatal(err)
-	}
-
-	app.pollWorkflowReminders(context.Background())
-
-	pending, err := app.ListPendingIncidentWorkflowReminders()
-	if err != nil || len(pending) != 1 {
-		t.Fatalf("pending=%+v err=%v", pending, err)
-	}
-	events, err := store.ListEvents(context.Background(), incident.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	foundFailure := false
-	for _, item := range events {
-		if item.EventType == "deployment_reminder_delivery_failed" {
-			foundFailure = true
-		}
-	}
-	if !foundFailure {
-		t.Fatal("missing durable delivery failure audit")
-	}
-}
-
-func TestPollWorkflowRemindersUsesConfiguredProductionFlagForLiveAndOnline(t *testing.T) {
-	for _, environment := range []string{"live", "online"} {
-		t.Run(environment, func(t *testing.T) {
-			app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "reminder-prod.db"))
-			waitingSince := time.Now().UTC().Add(-25 * time.Hour)
-			incident := bughub.IncidentCase{ID: "case-" + environment, BugID: "bug-" + environment, SystemID: "base", Environment: environment, Status: bughub.CaseMerging, CycleNumber: 1, Version: 1, CreatedAt: waitingSince.Add(-time.Hour), UpdatedAt: waitingSince}
-			if err := store.CreateCase(context.Background(), incident); err != nil {
-				t.Fatal(err)
-			}
-			event := bughub.TransitionEvent{ID: "wait-" + environment, CaseID: incident.ID, FromStatus: bughub.CaseMerging, ToStatus: bughub.CaseWaitingDeployment, EventType: "merge_pushed", ActorType: "git", ActorID: "git", IdempotencyKey: "wait-" + environment, PayloadJSON: []byte(`{}`), CreatedAt: waitingSince}
-			if _, _, err := store.Transition(context.Background(), incident.ID, 1, bughub.CaseWaitingDeployment, event); err != nil {
-				t.Fatal(err)
-			}
-			app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
-				return &config.SystemConfig{System: config.System{ID: "base"}, Environments: []config.Environment{{ID: environment, IsProd: true}}}, nil
-			}
-			app.workflowEmit = func(string, any) { t.Fatal("configured production Case emitted a reminder") }
-
-			app.pollWorkflowReminders(context.Background())
-
-			pending, err := app.ListPendingIncidentWorkflowReminders()
-			if err != nil || len(pending) != 0 {
-				t.Fatalf("pending=%+v err=%v", pending, err)
-			}
-		})
-	}
-}
-
-func TestPollWorkflowRemindersDoesNotTreatEnvironmentNameAsProductionAuthority(t *testing.T) {
-	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "reminder-name.db"))
-	waitingSince := time.Now().UTC().Add(-25 * time.Hour)
-	incident := bughub.IncidentCase{ID: "case-production-name", BugID: "bug-production-name", SystemID: "base", Environment: "production", Status: bughub.CaseMerging, CycleNumber: 1, Version: 1, CreatedAt: waitingSince.Add(-time.Hour), UpdatedAt: waitingSince}
-	if err := store.CreateCase(context.Background(), incident); err != nil {
-		t.Fatal(err)
-	}
-	event := bughub.TransitionEvent{ID: "wait-production-name", CaseID: incident.ID, FromStatus: bughub.CaseMerging, ToStatus: bughub.CaseWaitingDeployment, EventType: "merge_pushed", ActorType: "git", ActorID: "git", IdempotencyKey: "wait-production-name", PayloadJSON: []byte(`{}`), CreatedAt: waitingSince}
-	if _, _, err := store.Transition(context.Background(), incident.ID, 1, bughub.CaseWaitingDeployment, event); err != nil {
-		t.Fatal(err)
-	}
-	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
-		return &config.SystemConfig{System: config.System{ID: "base"}, Environments: []config.Environment{{ID: "production", IsProd: false}}}, nil
-	}
-	delivered := false
-	app.workflowEmit = func(string, any) { delivered = true }
-
-	app.pollWorkflowReminders(context.Background())
-
-	if !delivered {
-		t.Fatal("non-production Case was suppressed by its environment name")
-	}
-}
-
-func TestPollWorkflowRemindersFailsClosedWhenEnvironmentConfigCannotBeResolved(t *testing.T) {
-	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "reminder-unresolved.db"))
-	waitingSince := time.Now().UTC().Add(-25 * time.Hour)
-	incident := bughub.IncidentCase{ID: "case-unresolved", BugID: "bug-unresolved", SystemID: "base", Environment: "test", Status: bughub.CaseMerging, CycleNumber: 1, Version: 1, CreatedAt: waitingSince.Add(-time.Hour), UpdatedAt: waitingSince}
-	if err := store.CreateCase(context.Background(), incident); err != nil {
-		t.Fatal(err)
-	}
-	event := bughub.TransitionEvent{ID: "wait-unresolved", CaseID: incident.ID, FromStatus: bughub.CaseMerging, ToStatus: bughub.CaseWaitingDeployment, EventType: "merge_pushed", ActorType: "git", ActorID: "git", IdempotencyKey: "wait-unresolved", PayloadJSON: []byte(`{}`), CreatedAt: waitingSince}
-	if _, _, err := store.Transition(context.Background(), incident.ID, 1, bughub.CaseWaitingDeployment, event); err != nil {
-		t.Fatal(err)
-	}
-	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
-		return nil, errors.New("configuration unavailable")
-	}
-	app.workflowEmit = func(string, any) { t.Fatal("unresolved Case emitted a reminder") }
-
-	app.pollWorkflowReminders(context.Background())
-
-	pending, err := app.ListPendingIncidentWorkflowReminders()
-	if err != nil || len(pending) != 0 {
-		t.Fatalf("pending=%+v err=%v", pending, err)
-	}
-}
-
 func TestStartIncidentCaseValidatesScalarsBeforeOpeningRuntime(t *testing.T) {
 	rootFile := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(rootFile, []byte("x"), 0o600); err != nil {
@@ -907,12 +540,12 @@ func TestResetIncidentCaseForwardsContextAndEmitsReplacement(t *testing.T) {
 	ctx := context.Background()
 	old := bughub.IncidentCase{
 		ID: "case-reset-old", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test",
-		Status: bughub.CaseValidating, CycleNumber: 1, CurrentAttemptID: "attempt-reset-old", SelectedBotKey: "base|codex",
+		Status: bughub.CaseInvestigating, CycleNumber: 1, CurrentAttemptID: "attempt-reset-old", SelectedBotKey: "base|codex",
 	}
 	if err := store.CreateCase(ctx, old); err != nil {
 		t.Fatal(err)
 	}
-	attempt := bughub.PhaseAttempt{ID: old.CurrentAttemptID, CaseID: old.ID, CycleNumber: 1, Phase: bughub.PhaseValidation, Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusRunning, AgentTarget: "codex", BotKey: old.SelectedBotKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}
+	attempt := bughub.PhaseAttempt{ID: old.CurrentAttemptID, CaseID: old.ID, CycleNumber: 1, Phase: bughub.PhaseInvestigation, Mode: "", Status: bughub.AttemptStatusRunning, AgentTarget: "codex", BotKey: old.SelectedBotKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}
 	if err := store.CreateAttempt(ctx, attempt); err != nil {
 		t.Fatal(err)
 	}
@@ -939,7 +572,7 @@ func TestResetIncidentCaseForwardsContextAndEmitsReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if replacement.ID != input.NewCaseID || replacement.ResetFromCaseID != old.ID || replacement.Status != bughub.CaseValidating || replacement.SelectedBotKey != input.BotKey || replacement.Environment != "prod" {
+	if replacement.ID != input.NewCaseID || replacement.ResetFromCaseID != old.ID || replacement.Status != bughub.CaseInvestigating || replacement.SelectedBotKey != input.BotKey || replacement.Environment != "prod" {
 		t.Fatalf("replacement = %+v", replacement)
 	}
 	if archived.Status != bughub.CaseResetArchived || archived.SupersededByCaseID != replacement.ID {
@@ -961,12 +594,12 @@ func TestResetIncidentCaseWithWarningsReturnsStructuredCancelWarning(t *testing.
 	ctx := context.Background()
 	old := bughub.IncidentCase{
 		ID: "case-reset-warning-old", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test",
-		Status: bughub.CaseValidating, CycleNumber: 1, CurrentAttemptID: "attempt-reset-warning-old", SelectedBotKey: "base|codex",
+		Status: bughub.CaseInvestigating, CycleNumber: 1, CurrentAttemptID: "attempt-reset-warning-old", SelectedBotKey: "base|codex",
 	}
 	if err := store.CreateCase(ctx, old); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateAttempt(ctx, bughub.PhaseAttempt{ID: old.CurrentAttemptID, CaseID: old.ID, CycleNumber: 1, Phase: bughub.PhaseValidation, Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusRunning, AgentTarget: "codex", BotKey: old.SelectedBotKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}); err != nil {
+	if err := store.CreateAttempt(ctx, bughub.PhaseAttempt{ID: old.CurrentAttemptID, CaseID: old.ID, CycleNumber: 1, Phase: bughub.PhaseInvestigation, Mode: "", Status: bughub.AttemptStatusRunning, AgentTarget: "codex", BotKey: old.SelectedBotKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
 	old, err := store.GetCase(ctx, old.ID)
@@ -995,11 +628,11 @@ func TestResetIncidentCaseWithWarningsReturnsStructuredCancelWarning(t *testing.
 func TestResetIncidentCaseWithWarningsResolvesCancelAndReplacementStartWarnings(t *testing.T) {
 	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
 	ctx := context.Background()
-	old := bughub.IncidentCase{ID: "case-reset-double-warning-old", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test", Status: bughub.CaseValidating, CycleNumber: 1, CurrentAttemptID: "attempt-reset-double-warning-old", SelectedBotKey: "base|codex"}
+	old := bughub.IncidentCase{ID: "case-reset-double-warning-old", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test", Status: bughub.CaseInvestigating, CycleNumber: 1, CurrentAttemptID: "attempt-reset-double-warning-old", SelectedBotKey: "base|codex"}
 	if err := store.CreateCase(ctx, old); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CreateAttempt(ctx, bughub.PhaseAttempt{ID: old.CurrentAttemptID, CaseID: old.ID, CycleNumber: 1, Phase: bughub.PhaseValidation, Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusRunning, AgentTarget: "codex", BotKey: old.SelectedBotKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}); err != nil {
+	if err := store.CreateAttempt(ctx, bughub.PhaseAttempt{ID: old.CurrentAttemptID, CaseID: old.ID, CycleNumber: 1, Phase: bughub.PhaseInvestigation, Mode: "", Status: bughub.AttemptStatusRunning, AgentTarget: "codex", BotKey: old.SelectedBotKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
 	old, err := store.GetCase(ctx, old.ID)
@@ -1016,7 +649,7 @@ func TestResetIncidentCaseWithWarningsResolvesCancelAndReplacementStartWarnings(
 	}
 	want := []bughub.WorkflowWarning{
 		{Code: "reset_runner_cancel_failed", Message: "旧阶段 Agent 未能确认停止，请人工检查其运行状态。"},
-		{Code: "reset_replacement_start_failed", Message: "接替 Case 的新阶段未能启动，已保留为可恢复状态；请刷新 Case 或重试开始验证。"},
+		{Code: "reset_replacement_start_failed", Message: "接替 Case 的新阶段未能启动，已保留为可恢复状态；请刷新 Case 或重试开始排障。"},
 	}
 	if result.Case.ID != "case-reset-double-warning-new" || result.Case.Status != bughub.CaseWaitingEvidence || !reflect.DeepEqual(result.Warnings, want) {
 		t.Fatalf("result=%+v", result)
@@ -1029,7 +662,7 @@ func TestResetIncidentCaseWithWarningsResolvesCancelAndReplacementStartWarnings(
 
 func TestResetIncidentCaseWithWarningsReturnsStableConflictCode(t *testing.T) {
 	app, store, _ := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
-	old := bughub.IncidentCase{ID: "case-reset-conflict-code", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test", Status: bughub.CasePendingValidation, CycleNumber: 1, SelectedBotKey: "base|codex"}
+	old := bughub.IncidentCase{ID: "case-reset-conflict-code", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test", Status: bughub.CasePendingInvestigation, CycleNumber: 1, SelectedBotKey: "base|codex"}
 	if err := store.CreateCase(context.Background(), old); err != nil {
 		t.Fatal(err)
 	}
@@ -1045,7 +678,7 @@ func TestResetIncidentCaseWithWarningsReturnsStableConflictCode(t *testing.T) {
 func TestResetIncidentCaseDuplicateCommandSchedulesOnce(t *testing.T) {
 	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
 	ctx := context.Background()
-	old := bughub.IncidentCase{ID: "case-reset-replay", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test", Status: bughub.CasePendingValidation, CycleNumber: 1, SelectedBotKey: "base|codex"}
+	old := bughub.IncidentCase{ID: "case-reset-replay", BugID: "bug-1", Source: "zentao", SystemID: "base", Environment: "test", Status: bughub.CasePendingInvestigation, CycleNumber: 1, SelectedBotKey: "base|codex"}
 	if err := store.CreateCase(ctx, old); err != nil {
 		t.Fatal(err)
 	}
@@ -1079,20 +712,6 @@ func TestApproveIncidentFixRejectsMismatchedDialogScopeBeforeOpeningRuntime(t *t
 	})
 	if err == nil || !strings.Contains(err.Error(), "dialog snapshot scope") {
 		t.Fatalf("err=%v", err)
-	}
-}
-
-func TestConfirmIncidentValidationRejectsMismatchedResultScopeBeforeOpeningRuntime(t *testing.T) {
-	rootFile := filepath.Join(t.TempDir(), "not-a-directory")
-	if err := os.WriteFile(rootFile, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, err := (&App{workflowRoot: rootFile}).ConfirmIncidentValidation(ConfirmIncidentValidationInput{
-		CaseID: "case-1", ExpectedVersion: 3, IdempotencyKey: "wrong",
-		ActorID: "alice", ValidationAttemptID: "validation-1",
-	})
-	if err == nil || !strings.Contains(err.Error(), "confirmation key") {
-		t.Fatalf("error=%v", err)
 	}
 }
 
@@ -1350,9 +969,9 @@ func TestApproveIncidentMergeForwardsTargetHeadsWithoutGrantingAuthority(t *test
 		t.Fatal(err)
 	}
 	git := &workflowBindingGit{}
-	app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, &workflowBindingRunner{}, git, nil)}
+	app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, &workflowBindingRunner{}, git)}
 	got, err := app.ApproveIncidentMerge(ApproveIncidentMergeInput{CaseID: incident.ID, ExpectedVersion: 1, IdempotencyKey: "merge-binding", ActorID: "alice", FixCommits: map[string]string{"api": "caller"}, TargetBranches: map[string]string{"api": "prod"}, TargetHeads: map[string]string{"api": "head-api"}})
-	if err != nil || got.Status != bughub.CaseWaitingDeployment {
+	if err != nil || got.Status != bughub.CaseSubmitted {
 		t.Fatalf("case=%+v err=%v", got, err)
 	}
 	if git.request.TargetHeads["api"] != "head-api" || git.request.FixCommits["api"] != "fix-api" || git.request.TargetBranches["api"] != "test" {
@@ -1383,44 +1002,12 @@ func TestStartIncidentCaseCreatesFirstDurableCase(t *testing.T) {
 		IdempotencyKey: "create-new", ActorID: "user-1", InputJSON: map[string]any{"mode": "reproduce"},
 	}
 	first, err := app.StartIncidentCase(input)
-	if err != nil || first.Status != bughub.CaseValidating || first.BugID != input.BugID {
+	if err != nil || first.Status != bughub.CaseInvestigating || first.BugID != input.BugID {
 		t.Fatalf("first=%+v err=%v", first, err)
 	}
 	second, err := app.StartIncidentCase(input)
 	if err != nil || second != first || runner.count() != 1 {
 		t.Fatalf("second=%+v starts=%d err=%v", second, runner.count(), err)
-	}
-}
-
-func TestStartIncidentCaseRejectsWebCaseUntilHostRuntimeIsReady(t *testing.T) {
-	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
-	app.workflowLoadBug = func(id string) (bughub.Bug, error) {
-		return bughub.Bug{ID: id, Source: "zentao", Title: "用户页面搜索失败", FrontendURL: "https://app.test/users", Env: "test", SystemID: "base"}, nil
-	}
-	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
-		return &config.SystemConfig{
-			System:       config.System{ID: "base"},
-			Environments: []config.Environment{{ID: "test", WebDomain: "https://app.test"}},
-		}, nil
-	}
-	app.workflowBrowser = &fakeIncidentBrowserController{status: browserverify.RuntimeStatus{
-		State: browserverify.RuntimeInstalling, Version: "1.61.1", ErrorCode: "browser_runtime_install_in_progress",
-	}}
-
-	_, err := app.StartIncidentCase(StartIncidentCaseInput{
-		CaseID: "case-runtime-preparing", BugID: "bug-runtime-preparing", BotKey: "base|codex", ExpectedVersion: 0,
-		IdempotencyKey: "create:runtime-preparing", ActorID: "user-1", InputJSON: map[string]any{"mode": "reproduce"},
-	})
-	if err == nil || !strings.Contains(err.Error(), "browser_runtime_preparing") {
-		t.Fatalf("error = %v, want browser_runtime_preparing", err)
-	}
-	if runner.count() != 0 {
-		t.Fatalf("runner starts = %d", runner.count())
-	}
-	if cases, listErr := store.ListCases(context.Background()); listErr != nil {
-		t.Fatal(listErr)
-	} else if len(cases) != 0 {
-		t.Fatalf("Web Case was created while runtime prepared: %+v", cases)
 	}
 }
 
@@ -1454,195 +1041,8 @@ func TestStartIncidentCaseHydratesUIBugFromSelectedBotEnvironment(t *testing.T) 
 		t.Fatalf("persisted SystemID = %q, want base", persisted.SystemID)
 	}
 	startedBug := runner.lastBug()
-	if startedBug.SystemID != "base" || startedBug.FrontendURL != "https://app.test" {
-		t.Fatalf("runner Bug = %+v, want hydrated system and configured Web URL", startedBug)
-	}
-}
-
-func TestStartIncidentCaseRequiresAndPersistsAmbiguousFrontendSelection(t *testing.T) {
-	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
-	app.workflowLoadBug = func(id string) (bughub.Bug, error) {
-		return bughub.Bug{ID: id, Source: "zentao", Title: "页面用户名称展示异常", Env: "test"}, nil
-	}
-	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
-		return &config.SystemConfig{
-			System: config.System{ID: "base"},
-			Environments: []config.Environment{{ID: "test", FrontendEntries: []config.FrontendEntry{
-				{ID: "consumer", Name: "C 端", URL: "https://m.test", Repo: "consumer-web", DeviceProfile: "mobile"},
-				{ID: "admin", Name: "管理端", URL: "https://admin.test", Repo: "admin-web", DeviceProfile: "desktop"},
-			}}},
-		}, nil
-	}
-	resolution, err := app.ResolveIncidentFrontendEntry(ResolveIncidentFrontendEntryInput{BugID: "bug-multi-front", BotKey: "base|codex"})
-	if err != nil || resolution.Status != bughub.FrontendResolutionAmbiguous {
-		t.Fatalf("resolution=%+v err=%v", resolution, err)
-	}
-	base := StartIncidentCaseInput{CaseID: "case-multi-front", BugID: "bug-multi-front", BotKey: "base|codex", ExpectedVersion: 0, IdempotencyKey: "create:multi-front", ActorID: "user-1", InputJSON: map[string]any{"mode": "reproduce"}}
-	if _, err := app.StartIncidentCase(base); err == nil || !strings.Contains(err.Error(), "frontend_entry_selection_required") {
-		t.Fatalf("error=%v", err)
-	}
-	base.FrontendEntryID = "admin"
-	created, err := app.StartIncidentCase(base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if created.FrontendEntry.ID != "admin" || created.FrontendEntry.URL != "https://admin.test/" || created.FrontendEntry.ResolutionSource != "user" {
-		t.Fatalf("created binding=%+v", created.FrontendEntry)
-	}
-	stored, err := store.GetCase(context.Background(), created.ID)
-	if err != nil || stored.FrontendEntry != created.FrontendEntry {
-		t.Fatalf("stored=%+v err=%v", stored.FrontendEntry, err)
-	}
-	startedBug := runner.lastBug()
-	if startedBug.FrontendURL != "https://admin.test/" || startedBug.FrontendRepo != "admin-web" {
-		t.Fatalf("runner bug=%+v", startedBug)
-	}
-}
-
-func TestStartIncidentCasePersistsConfiguredMultiFrontendSelection(t *testing.T) {
-	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
-	app.workflowLoadBug = func(id string) (bughub.Bug, error) {
-		return bughub.Bug{ID: id, Source: "zentao", Title: "管理端下架后 C端仍可播放", Env: "test"}, nil
-	}
-	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
-		return &config.SystemConfig{
-			System: config.System{ID: "base"},
-			Environments: []config.Environment{{ID: "test", FrontendEntries: []config.FrontendEntry{
-				{ID: "consumer", Name: "C 端", URL: "https://m.test", Repo: "consumer-web", Aliases: []string{"C端"}},
-				{ID: "admin", Name: "管理端", URL: "https://admin.test", Repo: "admin-web"},
-			}}},
-		}, nil
-	}
-	created, err := app.StartIncidentCase(StartIncidentCaseInput{
-		CaseID: "case-multi-scope", BugID: "bug-multi-scope", BotKey: "base|codex",
-		FrontendEntryIDs: []string{"consumer", "admin"}, PrimaryFrontendEntryID: "admin",
-		ExpectedVersion: 0, IdempotencyKey: "create:multi-scope", ActorID: "user-1",
-		InputJSON: map[string]any{"mode": "reproduce"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	stored, err := store.GetCase(context.Background(), created.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entries := stored.EffectiveFrontendEntries()
-	if stored.FrontendEntry.ID != "admin" || len(entries) != 2 || entries[0].ID != "admin" || entries[1].ID != "consumer" {
-		t.Fatalf("stored primary=%+v entries=%+v", stored.FrontendEntry, entries)
-	}
-	attempts, err := store.ListAttempts(context.Background(), bughub.AttemptFilter{CaseID: created.ID})
-	if err != nil || len(attempts) != 1 {
-		t.Fatalf("attempts=%+v err=%v", attempts, err)
-	}
-	var input struct {
-		PrimaryFrontendEntryID string                        `json:"primary_frontend_entry_id"`
-		FrontendEntries        []bughub.FrontendEntryBinding `json:"frontend_entries"`
-	}
-	if err := json.Unmarshal(attempts[0].InputJSON, &input); err != nil || input.PrimaryFrontendEntryID != "admin" || len(input.FrontendEntries) != 2 {
-		t.Fatalf("attempt input=%s decoded=%+v err=%v", attempts[0].InputJSON, input, err)
-	}
-	if startedBug := runner.lastBug(); startedBug.FrontendURL != "https://admin.test/" {
-		t.Fatalf("runner bug=%+v", startedBug)
-	}
-}
-
-func TestResolveIncidentRecoveryContextHydratesConfiguredFrontendURL(t *testing.T) {
-	app := &App{}
-	app.workflowLoadBug = func(id string) (bughub.Bug, error) {
-		return bughub.Bug{ID: id, Source: "zentao", Title: "【H5】用户名称重复展示"}, nil
-	}
-	app.workflowLoadBot = func(key string) (bughub.BotRef, error) {
-		return bughub.BotRef{Key: key, Target: "codex", Path: t.TempDir(), SystemID: "base"}, nil
-	}
-	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
-		return &config.SystemConfig{
-			System:       config.System{ID: "base"},
-			Environments: []config.Environment{{ID: "test", WebDomain: "https://app.test"}},
-		}, nil
-	}
-	incident := bughub.IncidentCase{ID: "case-1", BugID: "bug-1", SystemID: "base", Environment: "test"}
-	attempt := bughub.PhaseAttempt{ID: "attempt-refresh", BotKey: "base|codex", AgentTarget: "codex"}
-
-	bug, bot, err := app.resolveIncidentRecoveryContext(context.Background(), incident, attempt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bot.Env != "test" || bug.SystemID != "base" || bug.FrontendURL != "https://app.test" {
-		t.Fatalf("recovery context did not hydrate deployed browser config: bug=%+v bot=%+v", bug, bot)
-	}
-}
-
-func TestStartIncidentCaseRequiresConfiguredFrontendSelectionWhenTicketTextDoesNotMap(t *testing.T) {
-	app, _, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
-	app.workflowLoadBug = func(id string) (bughub.Bug, error) {
-		return bughub.Bug{ID: id, Source: "zentao", Title: "数据库查询超时", Env: "test"}, nil
-	}
-	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
-		return &config.SystemConfig{
-			System: config.System{ID: "base"},
-			Environments: []config.Environment{{ID: "test", FrontendEntries: []config.FrontendEntry{
-				{ID: "consumer", Name: "C端", URL: "https://web.test", Repo: "frontend"},
-				{ID: "admin", Name: "管理端", URL: "https://admin.test", Repo: "frontend"},
-			}}},
-		}, nil
-	}
-
-	input := StartIncidentCaseInput{
-		CaseID: "case-backend-context", BugID: "bug-backend-context", BotKey: "base|codex", ExpectedVersion: 0,
-		IdempotencyKey: "create:backend-context", ActorID: "user-1", InputJSON: map[string]any{"mode": "reproduce"},
-	}
-	if _, err := app.StartIncidentCase(input); err == nil || !strings.Contains(err.Error(), "frontend_entry_selection_required") {
-		t.Fatalf("error=%v, want configured frontend selection", err)
-	}
-	input.FrontendEntryID = "consumer"
-	created, err := app.StartIncidentCase(input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if created.FrontendEntry.ID != "consumer" {
-		t.Fatalf("frontend entry=%+v", created.FrontendEntry)
-	}
-	if startedBug := runner.lastBug(); startedBug.SystemID != "base" || startedBug.FrontendURL != "https://web.test/" {
-		t.Fatalf("runner Bug = %+v, want user-selected configured frontend", startedBug)
-	}
-}
-
-func TestResetIncidentCaseHydratesReplacementBrowserContext(t *testing.T) {
-	app, store, runner := newWorkflowBindingApp(t, filepath.Join(t.TempDir(), "cases.db"))
-	app.workflowLoadBug = func(id string) (bughub.Bug, error) {
-		return bughub.Bug{ID: id, Source: "zentao", Title: "【APP】用户昵称模糊搜索结果不完整", Env: "test"}, nil
-	}
-	app.workflowLoadDeploymentConfig = func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error) {
-		return &config.SystemConfig{
-			System:       config.System{ID: "base"},
-			Environments: []config.Environment{{ID: "test", WebDomain: "https://app.test"}},
-		}, nil
-	}
-	original := bughub.IncidentCase{
-		ID: "case-ui-old", BugID: "bug-ui-reset", Source: "zentao", Environment: "test",
-		Status: bughub.CaseWaitingEvidence, CycleNumber: 1, SelectedBotKey: "base|codex",
-	}
-	if err := store.CreateCase(context.Background(), original); err != nil {
-		t.Fatal(err)
-	}
-	original, err := store.GetCase(context.Background(), original.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	result, err := app.ResetIncidentCaseWithWarnings(ResetIncidentCaseInput{
-		CaseID: original.ID, NewCaseID: "case-ui-replacement", BotKey: "base|codex",
-		ExpectedVersion: original.Version, IdempotencyKey: "reset:ui-context", ActorID: "user-1",
-		InputJSON: map[string]any{"mode": "reproduce"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Case.SystemID != "base" || result.Case.Status != bughub.CaseValidating {
-		t.Fatalf("replacement Case = %+v, want browser-bound validating Case", result.Case)
-	}
-	if startedBug := runner.lastBug(); startedBug.SystemID != "base" || startedBug.FrontendURL != "https://app.test" {
-		t.Fatalf("runner Bug = %+v, want hydrated replacement browser context", startedBug)
+	if startedBug.SystemID != "base" || startedBug.Env != "test" {
+		t.Fatalf("runner Bug = %+v, want hydrated system and selected environment", startedBug)
 	}
 }
 
@@ -1669,7 +1069,7 @@ func TestStartIncidentCaseUsesPlatformMappedEnvironmentAcrossDesktopBinding(t *t
 		t.Fatal(err)
 	}
 	runner := &workflowBindingRunner{}
-	app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil, nil)}
+	app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil)}
 	t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
 
 	matches, err := app.MatchBugBots(bug.ID)
@@ -1744,12 +1144,12 @@ func TestResetIncidentCaseUsesPlatformMappedEnvironmentAcrossDesktopBinding(t *t
 		t.Fatal(err)
 	}
 	runner := &workflowBindingRunner{}
-	app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil, nil)}
+	app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil)}
 	t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
 	ctx := context.Background()
 	original := bughub.IncidentCase{
 		ID: "case-reset-mapped-old", BugID: bug.ID, Source: bug.Source, SystemID: bug.SystemID,
-		Environment: "test", Status: bughub.CaseValidating, CycleNumber: 1,
+		Environment: "test", Status: bughub.CaseInvestigating, CycleNumber: 1,
 		CurrentAttemptID: "attempt-reset-mapped-old", SelectedBotKey: "base|codex",
 	}
 	if err := store.CreateCase(ctx, original); err != nil {
@@ -1757,7 +1157,7 @@ func TestResetIncidentCaseUsesPlatformMappedEnvironmentAcrossDesktopBinding(t *t
 	}
 	if err := store.CreateAttempt(ctx, bughub.PhaseAttempt{
 		ID: original.CurrentAttemptID, CaseID: original.ID, CycleNumber: 1,
-		Phase: bughub.PhaseValidation, Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusRunning,
+		Phase: bughub.PhaseInvestigation, Mode: "", Status: bughub.AttemptStatusRunning,
 		AgentTarget: "codex", BotKey: original.SelectedBotKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
 	}); err != nil {
 		t.Fatal(err)
@@ -1843,13 +1243,17 @@ func TestContinueIncidentCaseKeepsPersistedEnvironmentAcrossPlatformMappingChang
 		t.Fatal(err)
 	}
 	runner := &workflowBindingRunner{}
-	app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil, nil)}
+	app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil)}
 	t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
 	incident := bughub.IncidentCase{
 		ID: "case-continue-persisted", BugID: bug.ID, Source: bug.Source, SystemID: bug.SystemID,
 		Environment: "test", Status: bughub.CaseWaitingEvidence, CycleNumber: 1, SelectedBotKey: botKey,
 	}
+	incident.CurrentAttemptID = incident.ID + "-previous"
 	if err := store.CreateCase(context.Background(), incident); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateAttempt(context.Background(), bughub.PhaseAttempt{ID: incident.CurrentAttemptID, CaseID: incident.ID, CycleNumber: 1, Phase: bughub.PhaseInvestigation, Status: bughub.AttemptStatusFailed, AgentTarget: "claude-code", BotKey: botKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}); err != nil {
 		t.Fatal(err)
 	}
 	incident, err = store.GetCase(context.Background(), incident.ID)
@@ -1894,7 +1298,7 @@ func TestStartIncidentCaseWithoutBotMappingKeepsBugEnvironmentFallback(t *testin
 		t.Fatal(err)
 	}
 	runner := &workflowBindingRunner{}
-	app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil, nil)}
+	app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil)}
 	t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
 
 	created, err := app.StartIncidentCase(StartIncidentCaseInput{
@@ -1984,10 +1388,14 @@ func TestPersistedIncidentCommandsIgnoreMalformedPlatformConfiguration(t *testin
 			t.Fatal(err)
 		}
 		runner := &workflowBindingRunner{}
-		app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil, nil)}
+		app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil)}
 		t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
 		incident := bughub.IncidentCase{ID: "case-malformed-continue", BugID: bug.ID, Source: bug.Source, SystemID: bug.SystemID, Environment: "test", Status: bughub.CaseWaitingEvidence, CycleNumber: 1, SelectedBotKey: botKey}
+		incident.CurrentAttemptID = incident.ID + "-previous"
 		if err := store.CreateCase(context.Background(), incident); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.CreateAttempt(context.Background(), bughub.PhaseAttempt{ID: incident.CurrentAttemptID, CaseID: incident.ID, CycleNumber: 1, Phase: bughub.PhaseInvestigation, Status: bughub.AttemptStatusFailed, AgentTarget: "claude-code", BotKey: botKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}); err != nil {
 			t.Fatal(err)
 		}
 		incident, err = store.GetCase(context.Background(), incident.ID)
@@ -2024,9 +1432,9 @@ func TestPersistedIncidentCommandsIgnoreMalformedPlatformConfiguration(t *testin
 			t.Fatal(err)
 		}
 		runner := &workflowBindingRunner{}
-		app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil, nil)}
+		app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil)}
 		t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
-		incident := bughub.IncidentCase{ID: "case-malformed-pending", BugID: bug.ID, Source: bug.Source, SystemID: bug.SystemID, Environment: "test", Status: bughub.CasePendingValidation, CycleNumber: 1, SelectedBotKey: botKey}
+		incident := bughub.IncidentCase{ID: "case-malformed-pending", BugID: bug.ID, Source: bug.Source, SystemID: bug.SystemID, Environment: "test", Status: bughub.CasePendingInvestigation, CycleNumber: 1, SelectedBotKey: botKey}
 		if err := store.CreateCase(context.Background(), incident); err != nil {
 			t.Fatal(err)
 		}
@@ -2070,11 +1478,11 @@ func TestPersistedIncidentCommandsIgnoreMalformedPlatformConfiguration(t *testin
 		if err != nil {
 			t.Fatal(err)
 		}
-		incident := bughub.IncidentCase{ID: "case-malformed-recovery", BugID: bug.ID, Source: bug.Source, SystemID: bug.SystemID, Environment: "test", Status: bughub.CasePendingValidation, CycleNumber: 1, SelectedBotKey: botKey}
+		incident := bughub.IncidentCase{ID: "case-malformed-recovery", BugID: bug.ID, Source: bug.Source, SystemID: bug.SystemID, Environment: "test", Status: bughub.CasePendingInvestigation, CycleNumber: 1, SelectedBotKey: botKey}
 		if err := store.CreateCase(context.Background(), incident); err != nil {
 			t.Fatal(err)
 		}
-		attempt := bughub.PhaseAttempt{ID: "attempt-malformed-recovery", CaseID: incident.ID, CycleNumber: 1, Phase: bughub.PhaseValidation, Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusQueued, AgentTarget: "claude-code", BotKey: botKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}
+		attempt := bughub.PhaseAttempt{ID: "attempt-malformed-recovery", CaseID: incident.ID, CycleNumber: 1, Phase: bughub.PhaseInvestigation, Mode: "", Status: bughub.AttemptStatusQueued, AgentTarget: "claude-code", BotKey: botKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}
 		if err := store.CreateAttempt(context.Background(), attempt); err != nil {
 			t.Fatal(err)
 		}
@@ -2088,7 +1496,7 @@ func TestPersistedIncidentCommandsIgnoreMalformedPlatformConfiguration(t *testin
 		app := &App{
 			workflowRoot: workflowRoot,
 			workflowRuntimeFactory: func(store *bughub.CaseStore, _ *bughub.InvestigationStore) incidentWorkflowRuntime {
-				return incidentWorkflowRuntime{orchestrator: bughub.NewCaseOrchestrator(store, runner, nil, nil)}
+				return incidentWorkflowRuntime{orchestrator: bughub.NewCaseOrchestrator(store, runner, nil)}
 			},
 		}
 		if err := app.initializeIncidentWorkflow(context.Background()); err != nil {
@@ -2114,7 +1522,7 @@ func TestStartIncidentCaseRejectsUnrecognizedEnvironmentSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &workflowBindingRunner{}
-	app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil, nil)}
+	app := &App{workflowStore: store, workflowOrchestrator: bughub.NewCaseOrchestrator(store, runner, nil)}
 	t.Cleanup(func() { _ = app.closeIncidentWorkflow() })
 
 	_, err = app.StartIncidentCase(StartIncidentCaseInput{CaseID: "case-invalid-environment", BugID: bug.ID, BotKey: botKey, BotEnvironment: "forged", IdempotencyKey: "start:invalid-environment", ActorID: "user-1"})
@@ -2155,7 +1563,7 @@ func TestStartIncidentCaseContinuesLegacyArchiveAsNewCase(t *testing.T) {
 		CaseID: archived.ID, BugID: archived.BugID, BotKey: "base|codex", ExpectedVersion: archived.Version,
 		IdempotencyKey: "continue-legacy", ActorID: "user-1", InputJSON: map[string]any{"mode": "reproduce"},
 	})
-	if err != nil || continued.ID == archived.ID || continued.CycleNumber != 2 || continued.Status != bughub.CaseValidating {
+	if err != nil || continued.ID == archived.ID || continued.CycleNumber != 2 || continued.Status != bughub.CaseInvestigating {
 		t.Fatalf("continued=%+v err=%v", continued, err)
 	}
 	unchanged, _ := store.GetCase(context.Background(), archived.ID)
@@ -2261,7 +1669,7 @@ func TestIncidentWorkflowRestartReloadsPersistedCase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Case.Status != bughub.CasePendingValidation || got.Case.Version != 1 {
+	if got.Case.Status != bughub.CasePendingInvestigation || got.Case.Version != 1 {
 		t.Fatalf("reloaded case = %+v", got.Case)
 	}
 }
@@ -2300,14 +1708,14 @@ func TestIncidentWorkflowStartupRecoversTerminalCurrentAttempt(t *testing.T) {
 	finished := time.Now().UTC()
 	incident := bughub.IncidentCase{
 		ID: "case-recover", BugID: "bug-recover", Source: "zentao", SystemID: "base", Environment: "test",
-		Status: bughub.CaseValidating, CycleNumber: 1, CurrentAttemptID: "attempt-recover", SelectedBotKey: "base|codex",
+		Status: bughub.CaseInvestigating, CycleNumber: 1, CurrentAttemptID: "attempt-recover", SelectedBotKey: "base|codex",
 	}
 	if err := store.CreateCase(context.Background(), incident); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.CreateAttempt(context.Background(), bughub.PhaseAttempt{
-		ID: "attempt-recover", CaseID: incident.ID, CycleNumber: 1, Phase: bughub.PhaseValidation,
-		Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusFailed, AgentTarget: "codex", BotKey: "base|codex",
+		ID: "attempt-recover", CaseID: incident.ID, CycleNumber: 1, Phase: bughub.PhaseInvestigation,
+		Mode: "", Status: bughub.AttemptStatusFailed, AgentTarget: "codex", BotKey: "base|codex",
 		InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`), StartedAt: finished.Add(-time.Second), FinishedAt: &finished,
 		ErrorCode: "process_failed", ErrorMessage: "interrupted before callback",
 	}); err != nil {
@@ -2338,19 +1746,19 @@ func TestIncidentWorkflowStartupRecoveryLoadsWorkspaceForQueuedAndRunningAttempt
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	queuedCase := bughub.IncidentCase{ID: "case-queued-context", BugID: "bug-context", Source: "zentao", SystemID: "base", Environment: "test", Status: bughub.CasePendingValidation, CycleNumber: 1, SelectedBotKey: "base|codex"}
+	queuedCase := bughub.IncidentCase{ID: "case-queued-context", BugID: "bug-context", Source: "zentao", SystemID: "base", Environment: "test", Status: bughub.CasePendingInvestigation, CycleNumber: 1, SelectedBotKey: "base|codex"}
 	if err := store.CreateCase(ctx, queuedCase); err != nil {
 		t.Fatal(err)
 	}
-	queued := bughub.PhaseAttempt{ID: "attempt-queued-context", CaseID: queuedCase.ID, CycleNumber: 1, Phase: bughub.PhaseValidation, Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusQueued, AgentTarget: "codex", BotKey: "base|codex", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}
+	queued := bughub.PhaseAttempt{ID: "attempt-queued-context", CaseID: queuedCase.ID, CycleNumber: 1, Phase: bughub.PhaseInvestigation, Mode: "", Status: bughub.AttemptStatusQueued, AgentTarget: "codex", BotKey: "base|codex", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}
 	if err := store.CreateAttempt(ctx, queued); err != nil {
 		t.Fatal(err)
 	}
-	runningCase := bughub.IncidentCase{ID: "case-running-context", BugID: "bug-context", Source: "zentao", SystemID: "base", Environment: "test", Status: bughub.CaseValidating, CycleNumber: 1, CurrentAttemptID: "attempt-running-context", SelectedBotKey: "base|codex"}
+	runningCase := bughub.IncidentCase{ID: "case-running-context", BugID: "bug-context", Source: "zentao", SystemID: "base", Environment: "test", Status: bughub.CaseInvestigating, CycleNumber: 1, CurrentAttemptID: "attempt-running-context", SelectedBotKey: "base|codex"}
 	if err := store.CreateCase(ctx, runningCase); err != nil {
 		t.Fatal(err)
 	}
-	running := bughub.PhaseAttempt{ID: runningCase.CurrentAttemptID, CaseID: runningCase.ID, CycleNumber: 1, Phase: bughub.PhaseValidation, Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusRunning, AgentTarget: "codex", BotKey: "base|codex", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}
+	running := bughub.PhaseAttempt{ID: runningCase.CurrentAttemptID, CaseID: runningCase.ID, CycleNumber: 1, Phase: bughub.PhaseInvestigation, Mode: "", Status: bughub.AttemptStatusRunning, AgentTarget: "codex", BotKey: "base|codex", InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`)}
 	if err := store.CreateAttempt(ctx, running); err != nil {
 		t.Fatal(err)
 	}
@@ -2368,7 +1776,7 @@ func TestIncidentWorkflowStartupRecoveryLoadsWorkspaceForQueuedAndRunningAttempt
 			return bughub.BotRef{Key: key, Target: "codex", Path: "/installed/base-workspace", Env: "test"}, nil
 		},
 		workflowRuntimeFactory: func(store *bughub.CaseStore, _ *bughub.InvestigationStore) incidentWorkflowRuntime {
-			return incidentWorkflowRuntime{orchestrator: bughub.NewCaseOrchestrator(store, runner, nil, nil)}
+			return incidentWorkflowRuntime{orchestrator: bughub.NewCaseOrchestrator(store, runner, nil)}
 		},
 	}
 	if err := app.initializeIncidentWorkflow(ctx); err != nil {
@@ -2396,14 +1804,14 @@ func TestIncidentWorkflowStartupRecoveryRetriesSameRuntimeAfterContextPreflightF
 	for index, id := range []string{"case-recovery-first", "case-recovery-second"} {
 		incident := bughub.IncidentCase{
 			ID: id, BugID: "bug-" + id, Source: "zentao", SystemID: "base", Environment: "test",
-			Status: bughub.CasePendingValidation, CycleNumber: 1, SelectedBotKey: fmt.Sprintf("base|codex-%d", index),
+			Status: bughub.CasePendingInvestigation, CycleNumber: 1, SelectedBotKey: fmt.Sprintf("base|codex-%d", index),
 		}
 		if err := store.CreateCase(ctx, incident); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.CreateAttempt(ctx, bughub.PhaseAttempt{
-			ID: id + "-attempt", CaseID: id, CycleNumber: 1, Phase: bughub.PhaseValidation,
-			Mode: bughub.AttemptReproduce, Status: bughub.AttemptStatusQueued, AgentTarget: "codex",
+			ID: id + "-attempt", CaseID: id, CycleNumber: 1, Phase: bughub.PhaseInvestigation,
+			Mode: "", Status: bughub.AttemptStatusQueued, AgentTarget: "codex",
 			BotKey: incident.SelectedBotKey, InputJSON: []byte(`{}`), OutputJSON: []byte(`{}`),
 		}); err != nil {
 			t.Fatal(err)
@@ -2429,7 +1837,7 @@ func TestIncidentWorkflowStartupRecoveryRetriesSameRuntimeAfterContextPreflightF
 		},
 		workflowRuntimeFactory: func(store *bughub.CaseStore, _ *bughub.InvestigationStore) incidentWorkflowRuntime {
 			factoryCalls++
-			return incidentWorkflowRuntime{orchestrator: bughub.NewCaseOrchestrator(store, runner, nil, nil)}
+			return incidentWorkflowRuntime{orchestrator: bughub.NewCaseOrchestrator(store, runner, nil)}
 		},
 	}
 	if err := app.initializeIncidentWorkflow(ctx); err == nil {

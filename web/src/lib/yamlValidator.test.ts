@@ -9,7 +9,7 @@ function makeCtx(overrides: Partial<ValidatorContext> = {}): ValidatorContext {
     step: 2,
     system: { id: 'shop', name: 'Shop' },
     agent: { name: 'Shop bot' },
-    enabledTargets: { openclaw: true },
+    enabledTargets: { 'claude-code': true },
     targetModels: { openclaw: 'anthropic/claude-sonnet-4-6' },
     anyTargetSelected: true,
     environments: [{ id: 'dev', api_domain: 'api-dev.shop' }],
@@ -54,17 +54,17 @@ describe('computeStepErrors', () => {
     expect(computeStepErrors(makeCtx({ step: 2, system: { id: 'shop-x', name: 'X' } })).has('system.id')).toBe(false)
   })
 
-  it('step 3 flags missing agent.name + targets + openclaw model', () => {
+  it('step 3 flags missing agent.name + targets', () => {
     const errs = computeStepErrors(makeCtx({
       step: 3, agent: { name: '' }, anyTargetSelected: false,
       targetModels: { openclaw: '' },
     }))
     expect(errs.has('agent.name')).toBe(true)
     expect(errs.has('targets.none')).toBe(true)
-    expect(errs.has('model.openclaw')).toBe(true)
+    expect(errs.has('model.openclaw')).toBe(false)
   })
 
-  it('step 3 skips model check when openclaw not selected', () => {
+  it('step 3 skips model check for supported targets', () => {
     const errs = computeStepErrors(makeCtx({
       step: 3, enabledTargets: { 'claude-code': true }, targetModels: {},
     }))
@@ -230,6 +230,17 @@ describe('computeStepErrors', () => {
     expect(errs.has('obs.tempo.needs_grafana')).toBe(true)
   })
 
+  it('requires authenticated Grafana discovery even when the health endpoint is reachable', () => {
+    const ctx = makeCtx({step:8, enabledObservability:{grafana:true}, requireObsProbe:true,
+      OBS_TOOL_SPECS:[{key:'grafana',fields:[]}], toolKeyFor:(c,t,e,f)=>`${c}:${t}:${e}:${f}`,
+      obsProbeKey:(t,e)=>`${t}:${e}`, obsProbeResults:{'grafana:dev':{status:'ok'}}})
+    for (const dsListStatus of ['idle','loading','fail']) {
+      ctx.lokiMappingByEnv={dev:{dsListStatus}}
+      expect(computeStepErrors(ctx).has('obs.grafana.dev.discovery')).toBe(true)
+    }
+    ctx.lokiMappingByEnv={dev:{dsListStatus:'ok'}}
+    expect(computeStepErrors(ctx).size).toBe(0)
+  })
   it('step 8 grafana on => loki/prom/tempo OK', () => {
     expect(computeStepErrors(makeCtx({
       step: 8,

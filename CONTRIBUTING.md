@@ -26,7 +26,6 @@ git status --short
 | `api/` | HTTP handler | 改 router/handler 加 `api/handler_test.go` |
 | `internal/agent/` | install、self-test、MCP builder | 改 MCP 必看 decisions 里的软约束和 probe |
 | `internal/bughub/` | Bug 工单、Case 状态机、阶段编排、Git 与恢复 | 改命令或状态必须补幂等、非法跳转和 SQLite reopen 测试 |
-| `internal/browserverify/` | 固定 Chromium runtime、BrowserPlan 和宿主证据 | 改协议必须同步 Worker、严格宿主校验、semantic probe 与 runtime revision |
 | `internal/generator/` | yaml 到 workspace 渲染 | 改模板跑 generator 测试 |
 | `internal/config/` | yaml schema 与校验 | 改 schema 同步 `schema/` 和 examples |
 | `internal/cchub/` | 配置中心客户端 | nacos 逻辑看 plan D 决策 |
@@ -51,7 +50,7 @@ CodeGraph 还必须固定 release version 和逐平台 SHA256；升级前先运�
 
 ```bash
 go test ./internal/agent/ -run TestBuildMCPServers
-go test ./internal/agent/ -run TestSelfTestOpenclaw
+go test ./internal/agent/ -run TestProbeMCP
 ```
 
 ### 加 SKILL
@@ -108,15 +107,7 @@ go test ./internal/generator -run TestGenerate_Nacos_Shop
 make audit
 ```
 
-`scripts/test-skill-scripts.sh` 需要 `pytest`、`PyYAML` 和 `uv`（Nacos MCP 专项测试用 `uv` 隔离安装 `mcp/httpx/respx/pytest-asyncio`），并会通过 `scripts/test-browser-worker.sh` 运行不下载浏览器的 Node worker 离线测试。固定 Playwright/Chromium 的真实宿主链路不进默认测试；有 Node/npm 网络访问的机器只显式运行一次：
-
-```bash
-TSHOOT_BROWSER_SMOKE=1 scripts/test-browser-worker.sh
-```
-
-真实 smoke 会让 Studio runtime manager 安装固定版本 Playwright/Chromium 并执行 launch + 本地页面截图 probe，然后验证最终 PNG、脱敏 Network/console 和 `browser-actions.json`。不得让默认测试下载浏览器、访问业务环境或修改真实登录态；发布前该 smoke 未通过时必须保留为明确 release gate，不能用离线 worker 测试替代。
-
-`make desktop-app` / `make desktop-dmg` 也是联网发布门禁：它们会把通过同一 RuntimeManager 真实 probe 的固定 Chromium runtime 缓存在 `.cache/desktop-browser-runtime`，并打入 App Resources。正式桌面包不得通过跳过该步骤来缩小产物；用户首次启动只做本地原子导入，开发用 `make desktop` 裸二进制才保留联网兜底。
+`scripts/test-skill-scripts.sh` 需要 `pytest`、`PyYAML` 和 `uv`。桌面包不再安装或捆绑 Chromium。工程测试及 MCP runtime probe 继续作为质量门禁。
 
 覆盖率门槛：
 
@@ -140,16 +131,11 @@ TSHOOT_BROWSER_SMOKE=1 scripts/test-browser-worker.sh
 持久化故障闭环的改动还必须满足：
 
 - 状态增删或语义变化要更新完整 transition-table 测试，同时覆盖代表性非法跳转。
-- 每个按钮、Agent 回调和外部副作用都要有幂等测试，证明重复请求不会重复 attempt、merge、push、部署观察或回归。
+- 每个按钮、Agent 回调和外部副作用都要有幂等测试，证明重复请求不会重复 attempt、merge、push。
 - 跨事务或进程边界的改动要覆盖 SQLite reopen/crash recovery，副作用阶段恢复前必须检查外部状态。
 - Git 集成测试只使用 `t.TempDir()` 的本地仓库和 bare remote；可以用 test-only URL rewrite 模拟 SSH，禁止连接真实远端、force push 或修改开发者工作区。
-- 部署测试只能使用 fake verifier、`httptest` 或 fake K8s reader；测试和 Studio 都不得执行真实应用部署。
-- 证据、事件、迁移和 verifier 错误测试必须包含 token、Cookie、Authorization、password 和 URL userinfo 等脱敏 fixture，并断言数据库及 artifact 中不含原值。
-- 完整闭环至少覆盖两次独立授权、部署观察 gate、版本可得/不可得/明确不匹配三条路径、新鲜回归证据、多仓库部分完成、重复通知以及重启后继续。
-- Web validation / regression 必须覆盖 planner → fake HostVerifier → evaluator、一次 locator 修正上限、最终截图 gate、登录父链 continuation、加密 session/内存降级、runtime 系统错误和 reservation/result manifest 重启恢复；默认测试只能使用 fake runtime 或离线 worker。
-- BrowserPlan 或 Worker 协议、内嵌脚本字节、semantic probe 合同变化时必须递增 `internal/browserverify/runtime.go` 的 runtime revision；不得原地复用旧 runtime 目录。
-- 受控文件上传必须覆盖合法 Case `file_ref`、缺失/越权引用、任意路径、符号链接、MIME/扩展名/大小/SHA256 不匹配、登录模式上传和生产上传等 negative test，并断言临时文件在 Worker 退出后清除。
-- 浏览器安全测试必须断言禁止动作、生产交互、越权/重绑定 URL、password 截图、原始 trace/HAR 和秘密 artifact 被拒绝；真实 Chromium 只通过上面的显式 smoke 命令执行，不得访问业务环境或真实登录态。
+- 证据、事件、迁移和执行器错误测试必须包含 token、Cookie、Authorization、password 和 URL userinfo 等脱敏 fixture，并断言数据库及 artifact 中不含原值。
+- 完整流程至少覆盖两次独立授权、提交后等待人工验收、多仓库部分完成、重复命令及重启后继续；旧阶段升级归档后必须能读取历史。
 
 跨仓库服务拓扑还有以下回归要求：
 
@@ -165,7 +151,7 @@ TSHOOT_BROWSER_SMOKE=1 scripts/test-browser-worker.sh
 
 ```text
 fix nacos 接入彻底回归方案 B(HTTP API 主路径)
-feat P1.1: MCP probe 工程化进 self_test_openclaw
+feat P1.1: MCP probe 工程化进 self_test_mcp_probe
 refactor P1.3: 拆 install_native_mcp_common.go
 docs P1.2: README TOC + docs/decisions.md 决策演进记录
 ```

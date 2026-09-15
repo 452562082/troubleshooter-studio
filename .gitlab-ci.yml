@@ -148,22 +148,6 @@ skill-scripts:
   script:
     - scripts/test-skill-scripts.sh
 
-# ── Browser collector real smoke:手动触发,安装 Chromium 后跑真实 Playwright 路径 ─────
-browser-smoke:
-  stage: test
-  image: node:20.19.0
-  interruptible: true
-  rules:
-    - when: manual
-      allow_failure: true
-  before_script:
-    - apt-get update
-    - apt-get install -y --no-install-recommends python3
-    - npm install --no-save --no-package-lock playwright
-    - npx playwright install --with-deps chromium
-  script:
-    - scripts/test-browser-smoke.sh
-
 # ── Web:vue-tsc 类型检查 + vite 产物构建 ─────────────────────────────────
 # artifact 给 desktop job 复用,desktop 不再重跑 web build。
 web:
@@ -234,14 +218,6 @@ desktop:
   stage: build
   tags:
     - macos
-  cache:
-    key:
-      prefix: "desktop-browser-v1"
-      files:
-        - internal/browserverify/runtime.go
-        - internal/browserverify/worker/browser_worker.mjs
-    paths:
-      - .cache/desktop-browser-runtime
   # 复用 web 已 build 的 internal/webui/dist,跳过 npm ci + vite build(原来重复跑 ~2-3 min)
   needs:
     - job: web
@@ -268,12 +244,6 @@ desktop:
     - test -f dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio
     - test -f dist/TroubleshooterStudio.app/Contents/Info.plist
     - test -f dist/TroubleshooterStudio.app/Contents/Resources/icon.icns
-    - |
-      runtime_root=dist/TroubleshooterStudio.app/Contents/Resources/browser-runtime
-      test "$(find "$runtime_root" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" = 1
-      runtime_dir="$(find "$runtime_root" -mindepth 1 -maxdepth 1 -type d)"
-      test -f "$runtime_dir/.runtime-ready.json"
-      test -d "$runtime_dir/browsers"
     - file dist/TroubleshooterStudio.app/Contents/MacOS/TroubleshooterStudio
     - echo "✓ .app bundle structure OK"
   artifacts:

@@ -10,7 +10,6 @@ import {
   uninstallBot,
   forgetGhostBot,
 } from '../lib/bridge'
-import { Target } from '../lib/constants'
 import type { ApplyResult, DiscoveredBot } from '../lib/bridge'
 import { toast, toastError } from '../lib/toast'
 import { confirmDialog } from '../lib/confirm'
@@ -191,7 +190,6 @@ async function regen(b: DiscoveredBot) {
   try {
     const yamlText = b.meta.troubleshooter_yaml
     if (!yamlText) throw new Error('tshoot.json 里没 troubleshooter_yaml 字段,无法重新生成')
-    // dryRun=false → 真写盘到 b.path(claude-code/cursor/codex 走 Apply,openclaw 同样)
     const res = await applyBot(b.path, yamlText, false) as any
     const written = res?.files_written ?? 0
     const removed = (res?.files_removed || []).length
@@ -209,9 +207,7 @@ async function regen(b: DiscoveredBot) {
 async function uninstall(b: DiscoveredBot) {
   const k = regenKey(b)
   const target = b.meta.target
-  const message = target === Target.Openclaw
-    ? `workspace 移到 ~/.Trash;摘掉 ~/.openclaw/openclaw.json 里的 agents.list 条目;清 creds.json。MCP servers(可能被多 agent 共享)保留。`
-    : `已部署目录 ${b.path} 移到 ~/.Trash;同时清掉同根下的 agents/<name>.md 与 scripts/<name>/(自定义安装目录也会一并清);staging 中间包 ~/.tshoot/${target}/<id>/ 一并删除。`
+  const message = `已部署目录 ${b.path} 移到 ~/.Trash;同时清掉同根下的 agents/<name>.md 与 scripts/<name>/(自定义安装目录也会一并清);staging 中间包 ~/.tshoot/${target}/<id>/ 一并删除。`
   const ok = await confirmDialog({
     title: `卸载 "${b.meta.system_id}" (${target})?`,
     message,
@@ -319,10 +315,10 @@ async function runApply(b: DiscoveredBot, dryRun: boolean) {
 
 function targetLabel(t: string): string {
   const map: Record<string, string> = {
-    openclaw: 'OpenClaw',
     'claude-code': 'Claude Code',
     cursor: 'Cursor',
     codex: 'Codex CLI',
+ opencode: 'OpenCode',
   }
   return map[t] ?? t
 }
@@ -352,9 +348,7 @@ onActivated(() => { scan() })
     </header>
 
 
-    <!-- 扫描路径已下线 —— 默认 3 条路径(`~/.openclaw/workspace` / `~/.claude/skills` /
-         `~/.cursor/skills`)覆盖 99% 用户级部署。极少数"装项目根"场景走 CLI 传 extraRoots
-         参数,不污染主 UI。详见 internal/discover/scan.go::DefaultRoots(). -->
+
 
 
     <div v-if="error" class="alert error">⚠️ {{ error }}</div>

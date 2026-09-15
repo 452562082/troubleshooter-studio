@@ -10,25 +10,14 @@ import (
 
 func TestCanTransition(t *testing.T) {
 	allowedEdges := [][2]CaseStatus{
-		{CasePendingValidation, CaseValidating},
-		{CaseValidating, CaseReproduced},
-		{CaseValidating, CaseWaitingEvidence},
-		{CaseValidating, CaseNotReproduced},
-		{CaseWaitingEvidence, CaseValidating},
+		{CasePendingInvestigation, CaseInvestigating},
 		{CaseWaitingEvidence, CaseInvestigating},
-		{CaseWaitingEvidence, CaseRegressionValidating},
-		{CaseReproduced, CaseValidating},
-		{CaseReproduced, CaseInvestigating},
-		{CaseNotReproduced, CaseValidating},
-		{CaseInvestigating, CaseValidating},
 		{CaseInvestigating, CaseRootCauseReady},
 		{CaseInvestigating, CaseWaitingEvidence},
 		{CaseRootCauseReady, CaseWaitingFixApproval},
 		{CaseRootCauseReady, CaseWaitingRemediation},
 		{CaseWaitingRemediation, CaseInvestigating},
-		{CaseWaitingRemediation, CaseRemediationApplied},
-		{CaseRemediationApplied, CaseRegressionValidating},
-		{CaseRemediationApplied, CaseWaitingEvidence},
+		{CaseWaitingRemediation, CaseRemediationRecorded},
 		{CaseWaitingFixApproval, CaseInvestigating},
 		{CaseWaitingFixApproval, CaseFixing},
 		{CaseFixing, CaseFixPushed},
@@ -37,25 +26,16 @@ func TestCanTransition(t *testing.T) {
 		{CaseFixPushed, CaseWaitingMergeApproval},
 		{CaseWaitingMergeApproval, CaseInvestigating},
 		{CaseWaitingMergeApproval, CaseMerging},
-		{CaseMerging, CaseWaitingDeployment},
+		{CaseMerging, CaseSubmitted},
 		{CaseMerging, CaseMergeConflict},
 		{CaseMerging, CaseWaitingMergeApproval},
 		{CaseMergeConflict, CaseWaitingMergeApproval},
-		{CaseWaitingDeployment, CaseDeploymentVerified},
-		{CaseWaitingDeployment, CaseDeploymentUnverified},
-		{CaseDeploymentUnverified, CaseWaitingDeployment},
-		{CaseDeploymentVerified, CaseRegressionValidating},
-		{CaseDeploymentVerified, CaseWaitingEvidence},
-		{CaseRegressionValidating, CaseFixedVerified},
-		{CaseRegressionValidating, CaseStillReproduces},
-		{CaseRegressionValidating, CaseWaitingEvidence},
-		{CaseStillReproduces, CaseInvestigating},
 	}
 	allowed := make(map[[2]CaseStatus]struct{}, len(allowedEdges))
 	for _, edge := range allowedEdges {
 		allowed[edge] = struct{}{}
 	}
-	statuses := []CaseStatus{
+	statuses := []CaseStatus{CasePendingInvestigation, CaseSubmitted, CaseRemediationRecorded,
 		CasePendingValidation,
 		CaseValidating,
 		CaseWaitingEvidence,
@@ -82,10 +62,8 @@ func TestCanTransition(t *testing.T) {
 		CaseResetArchived,
 		CaseStatus("unknown"),
 	}
-	for _, from := range statuses {
-		if from.valid() && !IsTerminalCaseStatus(from) {
-			allowed[[2]CaseStatus{from, CaseResetArchived}] = struct{}{}
-		}
+	for _, from := range []CaseStatus{CasePendingInvestigation, CaseWaitingEvidence, CaseInvestigating, CaseRootCauseReady, CaseWaitingFixApproval, CaseWaitingRemediation, CaseFixing, CaseFixFailed, CaseFixPushed, CaseWaitingMergeApproval, CaseMerging, CaseMergeConflict} {
+		allowed[[2]CaseStatus{from, CaseResetArchived}] = struct{}{}
 	}
 	for _, from := range statuses {
 		for _, to := range statuses {
@@ -98,25 +76,12 @@ func TestCanTransition(t *testing.T) {
 }
 
 func TestResetArchiveTransitions(t *testing.T) {
-	for _, from := range []CaseStatus{
-		CasePendingValidation,
-		CaseValidating,
-		CaseWaitingEvidence,
-		CaseInvestigating,
-		CaseWaitingFixApproval,
-		CaseWaitingRemediation,
-		CaseRemediationApplied,
-		CaseFixing,
-		CaseWaitingMergeApproval,
-		CaseMerging,
-		CaseWaitingDeployment,
-		CaseRegressionValidating,
-	} {
+	for _, from := range []CaseStatus{CasePendingInvestigation, CaseWaitingEvidence, CaseInvestigating, CaseRootCauseReady, CaseWaitingFixApproval, CaseWaitingRemediation, CaseFixing, CaseFixFailed, CaseFixPushed, CaseWaitingMergeApproval, CaseMerging, CaseMergeConflict} {
 		if !CanTransition(from, CaseResetArchived) {
 			t.Fatalf("%s must reset", from)
 		}
 	}
-	for _, from := range []CaseStatus{CaseFixedVerified, CaseLegacyArchived, CaseResetArchived} {
+	for _, from := range []CaseStatus{CaseSubmitted, CaseRemediationRecorded, CaseFixedVerified, CaseLegacyArchived, CaseResetArchived} {
 		if CanTransition(from, CaseResetArchived) {
 			t.Fatalf("terminal %s reset unexpectedly", from)
 		}
@@ -129,7 +94,7 @@ func TestResetArchiveTransitions(t *testing.T) {
 }
 
 func TestIsTerminalCaseStatus(t *testing.T) {
-	for _, status := range []CaseStatus{CaseFixedVerified, CaseLegacyArchived, CaseResetArchived} {
+	for _, status := range []CaseStatus{CaseSubmitted, CaseRemediationRecorded, CaseFixedVerified, CaseLegacyArchived, CaseResetArchived} {
 		if !IsTerminalCaseStatus(status) {
 			t.Fatalf("%s must be terminal", status)
 		}
@@ -146,10 +111,10 @@ func TestValidateWorkflow(t *testing.T) {
 		incident := IncidentCase{
 			ID:          "case-1",
 			BugID:       "zentao-909",
-			Status:      CasePendingValidation,
+			Status:      CasePendingInvestigation,
 			CycleNumber: 1,
 		}
-		if err := ValidateTransition(incident, CaseValidating); err != nil {
+		if err := ValidateTransition(incident, CaseInvestigating); err != nil {
 			t.Fatalf("ValidateTransition() error = %v", err)
 		}
 	})
@@ -174,19 +139,19 @@ func TestValidateWorkflow(t *testing.T) {
 	}{
 		{
 			name:     "case ID is required",
-			incident: IncidentCase{BugID: "zentao-909", Status: CasePendingValidation, CycleNumber: 1},
+			incident: IncidentCase{BugID: "zentao-909", Status: CasePendingInvestigation, CycleNumber: 1},
 		},
 		{
 			name:     "case ID cannot be whitespace",
-			incident: IncidentCase{ID: " ", BugID: "zentao-909", Status: CasePendingValidation, CycleNumber: 1},
+			incident: IncidentCase{ID: " ", BugID: "zentao-909", Status: CasePendingInvestigation, CycleNumber: 1},
 		},
 		{
 			name:     "bug ID is required",
-			incident: IncidentCase{ID: "case-1", Status: CasePendingValidation, CycleNumber: 1},
+			incident: IncidentCase{ID: "case-1", Status: CasePendingInvestigation, CycleNumber: 1},
 		},
 		{
 			name:     "positive cycle number is required",
-			incident: IncidentCase{ID: "case-1", BugID: "zentao-909", Status: CasePendingValidation},
+			incident: IncidentCase{ID: "case-1", BugID: "zentao-909", Status: CasePendingInvestigation},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -201,8 +166,8 @@ func TestValidateWorkflow(t *testing.T) {
 			ID:          "attempt-1",
 			CaseID:      "case-1",
 			CycleNumber: 1,
-			Phase:       PhaseValidation,
-			Mode:        AttemptReproduce,
+			Phase:       PhaseInvestigation,
+			Mode:        "",
 			Status:      AttemptStatusRunning,
 			InputJSON:   json.RawMessage(`{}`),
 			OutputJSON:  json.RawMessage(`{}`),
@@ -356,8 +321,6 @@ func TestValidateWorkflowAttemptContract(t *testing.T) {
 		OutputJSON:  json.RawMessage(`{}`),
 	}
 	valid := []PhaseAttempt{
-		func() PhaseAttempt { a := base; a.Phase = PhaseValidation; a.Mode = AttemptReproduce; return a }(),
-		func() PhaseAttempt { a := base; a.Phase = PhaseRegression; a.Mode = AttemptRegression; return a }(),
 		func() PhaseAttempt { a := base; a.Phase = PhaseInvestigation; return a }(),
 		func() PhaseAttempt { a := base; a.Phase = PhaseFix; return a }(),
 	}
@@ -598,8 +561,8 @@ func TestValidateWorkflowPersistedRecords(t *testing.T) {
 	event := TransitionEvent{
 		ID:             "event-1",
 		CaseID:         "case-1",
-		FromStatus:     CasePendingValidation,
-		ToStatus:       CaseValidating,
+		FromStatus:     CasePendingInvestigation,
+		ToStatus:       CaseInvestigating,
 		EventType:      "validation_started",
 		ActorType:      "user",
 		ActorID:        "user-1",

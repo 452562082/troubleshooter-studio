@@ -9,9 +9,12 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
@@ -288,7 +291,7 @@ func canonicalFrontendTicketURL(raw string) (string, error) {
 	if !strings.Contains(raw, "://") {
 		raw = "https://" + raw
 	}
-	canonical, _, err := canonicalBrowserURL(raw)
+	canonical, _, err := canonicalFrontendURL(raw)
 	return canonical, err
 }
 
@@ -432,4 +435,59 @@ func ticketAttachmentDeviceProfile(attachments []Attachment) string {
 		return "desktop"
 	}
 	return ""
+}
+
+func canonicalFrontendURL(raw string) (string, string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !parsed.IsAbs() || parsed.User != nil || parsed.Fragment != "" || parsed.RawFragment != "" {
+		return "", "", errors.New("browser start URL is invalid")
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", "", errors.New("browser start URL is invalid")
+	}
+	query, err := url.ParseQuery(parsed.RawQuery)
+	if err != nil {
+		return "", "", errors.New("browser start URL query is invalid")
+	}
+	for key, values := range query {
+		if containsSensitiveData([]byte(key)) || strings.EqualFold(key, "code") || strings.EqualFold(key, "session") {
+			return "", "", errors.New("browser start URL contains credential material")
+		}
+		for _, value := range values {
+			if containsSensitiveData([]byte(value)) {
+				return "", "", errors.New("browser start URL contains credential material")
+			}
+		}
+	}
+	hostname := strings.ToLower(strings.TrimRight(parsed.Hostname(), "."))
+	if hostname == "" || strings.Contains(hostname, "%") || strings.HasSuffix(parsed.Host, ":") {
+		return "", "", errors.New("browser start URL host is invalid")
+	}
+	if address, addressErr := netip.ParseAddr(hostname); addressErr == nil {
+		if address.Zone() != "" {
+			return "", "", errors.New("browser start URL host is invalid")
+		}
+		hostname = address.String()
+	}
+	port := parsed.Port()
+	if port != "" {
+		numericPort, portErr := strconv.ParseUint(port, 10, 16)
+		if portErr != nil || numericPort == 0 {
+			return "", "", errors.New("browser start URL port is invalid")
+		}
+		port = strconv.FormatUint(numericPort, 10)
+	}
+	if (parsed.Scheme == "https" && port == "443") || (parsed.Scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		parsed.Host = net.JoinHostPort(hostname, port)
+	} else if strings.Contains(hostname, ":") {
+		parsed.Host = "[" + hostname + "]"
+	} else {
+		parsed.Host = hostname
+	}
+	origin := parsed.Scheme + "://" + parsed.Host
+	return parsed.String(), origin, nil
 }

@@ -9,7 +9,7 @@
 | 层级 | 说明 |
 |---|---|
 | 本仓库 | 研制环境：CLI `tshoot`、桌面 app、HTTP server 三入口共享 `internal/`，负责 yaml 建模、仓库扫描、校验、生成、部署 |
-| 产出物 | `tshoot apply` 生成的独立排障机器人：skills、MCP、话术，安装到 OpenClaw / Claude Code / Cursor / Codex CLI |
+| 产出物 | `tshoot apply` 生成的独立排障机器人：skills、MCP、话术，安装到 Claude Code / Cursor / Codex CLI / OpenCode |
 
 ## 改动前必读
 
@@ -66,7 +66,7 @@ nacos 不属于方案 B。当前 nacos 走自研本地 MCP `templates/.../script
 | 文件 | 作用 |
 |---|---|
 | `internal/agent/self_test_mcp_probe.go` | install 后 probe MCP 是否能启动和列工具 |
-| `internal/agent/self_test_openclaw_probes.go::requiredMCPKeys` | 期望注册的 MCP 清单 |
+| `internal/agent/self_test_infrastructure.go::requiredMCPKeys` | 期望注册的 MCP 清单 |
 | `api/handler_test.go` | HTTP 入口测试 |
 | `internal/generator/preserve_test.go` | yaml prior overrides 保护测试 |
 | `examples/*-troubleshooter.yaml` | config_center 类型 fixture |
@@ -88,7 +88,7 @@ go test ./... -race
 
 # 关键模块
 go test ./internal/agent/ -run TestBuildMCPServers
-go test ./internal/agent/ -run TestSelfTestOpenclaw
+go test ./internal/agent/ -run TestProbeMCP
 go test ./internal/generator/ -run TestGenerate
 go test ./api/
 

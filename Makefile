@@ -52,6 +52,7 @@ web:
 		cd $(WEB_SRC) && npm ci --ignore-scripts --silent && npm run build && cd - >/dev/null; \
 		rm -rf $(WEB_DIST); \
 		mkdir -p $(WEB_DIST); \
+		touch $(WEB_DIST)/.gitkeep; \
 		cp -R $(WEB_SRC)/dist/. $(WEB_DIST)/; \
 		echo "✓ web embedded"; \
 	fi
@@ -133,23 +134,12 @@ desktop-dev: web
 BUNDLE_NAME  := TroubleshooterStudio
 BUNDLE_DIR   := dist/$(BUNDLE_NAME).app
 BUNDLE_ID    := studio.troubleshooter.desktop
-BROWSER_RUNTIME_STAGE ?= .cache/desktop-browser-runtime
 .PHONY: desktop-app
 desktop-app: desktop
-	@echo "▶ preparing pinned Chromium for the desktop bundle"
-	@runtime_src="$$(go run ./cmd/tshoot-browser-runtime --root "$(BROWSER_RUNTIME_STAGE)")" || { \
-	  echo "✗ pinned Chromium preparation failed; desktop bundle was not packaged" >&2; \
-	  exit 1; \
-	 }; \
-	 [ -n "$$runtime_src" ] || { \
-	  echo "✗ pinned Chromium preparation returned no runtime directory" >&2; \
-	  exit 1; \
-	 }; \
-	 icon_src="cmd/tshoot-desktop/build/appicon.png"; \
+	@icon_src="cmd/tshoot-desktop/build/appicon.png"; \
 	 [ -f "cmd/tshoot-desktop/build/appicon.macos.png" ] && icon_src="cmd/tshoot-desktop/build/appicon.macos.png"; \
 	 BIN=$(DESKTOP_BIN) BUNDLE_DIR=$(BUNDLE_DIR) BUNDLE_NAME=$(BUNDLE_NAME) \
 	 BUNDLE_ID=$(BUNDLE_ID) VERSION=$(VERSION) \
-	 BROWSER_RUNTIME_SRC="$$runtime_src" \
 	 ICON_SRC="$$icon_src" \
 	 bash scripts/package-macos.sh
 
@@ -235,7 +225,7 @@ audit:
 .PHONY: lint
 lint:
 	go vet ./...
-	@out="$$(git ls-files -z '*.go' | xargs -0 gofmt -l)"; \
+	@out="$$(git ls-files --cached --others --exclude-standard -z '*.go' | xargs -0 sh -c 'for f do if [ -f "$$f" ]; then gofmt -l "$$f" || exit; fi; done' sh)" || exit $$?; \
 	if [ -n "$$out" ]; then \
 	  echo "gofmt 未通过:"; echo "$$out"; exit 1; \
 	fi

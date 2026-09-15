@@ -1,42 +1,6 @@
 package bughub
 
-import (
-	"errors"
-	"os"
-	"path/filepath"
-	"testing"
-)
-
-func TestExecutionBotForPhaseUsesValidatorForValidationAndRegression(t *testing.T) {
-	root := t.TempDir()
-	selectedPath := filepath.Join(root, "base-troubleshooter")
-	validatorPath := filepath.Join(root, "base-validator")
-	for _, path := range []string{selectedPath, validatorPath} {
-		if err := os.MkdirAll(path, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	selected := BotRef{
-		Key:      "base|codex",
-		Target:   "codex",
-		Path:     selectedPath,
-		SystemID: "base",
-		Role:     "troubleshooter",
-		InternalAgents: []BotInternalAgent{
-			{ID: "base-validator", Role: "validator"},
-		},
-	}
-
-	for _, phase := range []Phase{PhaseValidation, PhaseRegression} {
-		got, err := ExecutionBotForPhase(phase, selected)
-		if err != nil {
-			t.Fatalf("phase %s: %v", phase, err)
-		}
-		if got.Role != "validator" || got.Path != validatorPath || got.Key != "base|codex#validator" {
-			t.Fatalf("phase %s resolved %+v", phase, got)
-		}
-	}
-}
+import "testing"
 
 func TestExecutionBotForPhaseKeepsSelectedBotForInvestigationAndFix(t *testing.T) {
 	selected := BotRef{Key: "base|codex", Target: "codex", Path: t.TempDir(), SystemID: "base", Role: "troubleshooter"}
@@ -48,28 +12,10 @@ func TestExecutionBotForPhaseKeepsSelectedBotForInvestigationAndFix(t *testing.T
 	}
 }
 
-func TestExecutionBotForPhaseUsesConfiguredOpenClawAgentForInternalValidator(t *testing.T) {
-	selected := BotRef{
-		Key: "base|openclaw", Target: "openclaw", Path: t.TempDir(), SystemID: "base",
-		AgentID: "base-troubleshooter", Role: "troubleshooter",
-		InternalAgents: []BotInternalAgent{
-			{ID: "base-troubleshooter", Role: "troubleshooter"},
-			{ID: "base-validator", Role: "validator"},
-		},
-	}
-	got, err := ExecutionBotForPhase(PhaseValidation, selected)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Role != "validator" || got.AgentID != "base-troubleshooter" || got.Path != selected.Path {
-		t.Fatalf("OpenClaw validator execution bot = %+v", got)
-	}
-}
-
-func TestExecutionBotForPhaseRejectsMissingValidator(t *testing.T) {
-	selected := BotRef{Key: "base|codex", Target: "codex", Path: t.TempDir(), SystemID: "base", Role: "troubleshooter"}
-	_, err := ExecutionBotForPhase(PhaseValidation, selected)
-	if !errors.Is(err, ErrValidatorNotInstalled) {
-		t.Fatalf("err = %v", err)
+func TestExecutionBotRejectsRetiredPhases(t *testing.T) {
+	for _, phase := range []Phase{PhaseValidation, PhaseRegression, PhaseLegacy} {
+		if _, err := ExecutionBotForPhase(phase, BotRef{Key: "base|codex"}); err == nil {
+			t.Fatalf("accepted retired phase %s", phase)
+		}
 	}
 }

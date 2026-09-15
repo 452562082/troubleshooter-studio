@@ -72,63 +72,17 @@ func (o *CaseOrchestrator) CompleteRemediation(ctx context.Context, cmd Complete
 		BindingID:          bindingID,
 	}
 	approval := Approval{ID: stableID("approval", cmd.IdempotencyKey), CaseID: incident.ID, Kind: ApprovalCompleteRemediation, Actor: cmd.ActorID, CaseVersion: incident.Version, ScopeJSON: mustJSON(scope)}
-	reservation := DeploymentReservation{
-		ReservationID:           stableID("deployment-reservation", cmd.IdempotencyKey),
-		ReservationKey:          cmd.IdempotencyKey,
-		CallerIdempotencyKey:    cmd.IdempotencyKey,
-		ActorID:                 cmd.ActorID,
-		OriginalExpectedVersion: cmd.ExpectedVersion,
-		CycleNumber:             incident.CycleNumber,
-		Environment:             incident.Environment,
-		ExpectedCommits:         map[string]string{},
-		RemediationBindingID:    bindingID,
-		RemediationType:         result.RootCauseType,
-		RemediationSummary:      cmd.Summary,
-		Bug:                     cmd.Bug,
-		Bot:                     cmd.Bot,
-		VerifierInput: DeploymentVerificationRequest{
-			CaseID:          incident.ID,
-			Environment:     incident.Environment,
-			ExpectedCommits: map[string]string{},
-			Source:          "manual-remediation",
-		},
-	}
 	now := time.Now().UTC()
-	observation := DeploymentObservation{
-		ID:                 stableID("deployment", reservation.ReservationKey),
-		CaseID:             incident.ID,
-		Environment:        incident.Environment,
-		ExpectedCommits:    map[string]string{},
-		UserNotifiedAt:     &now,
-		VerificationSource: "manual-remediation",
-		ObservedAt:         now,
-		DiagnosticCode:     "remediation_completed",
-		DiagnosticMessage:  "非代码处置已由操作人确认，等待业务回归验证",
-		Result:             DeploymentResultUnavailable,
-	}
-	payload := mustJSON(reservation)
+	payload := mustJSON(scope)
 	mutation, err := o.store.ApplyCaseMutation(ctx, CaseMutation{
 		CaseID: cmd.CaseID, ExpectedVersion: cmd.ExpectedVersion, IdempotencyKey: cmd.IdempotencyKey,
-		RequestJSON: mustJSON(cmd), Approvals: []Approval{approval}, Observations: []DeploymentObservation{observation},
-		Steps: []CaseMutationStep{{To: CaseRemediationApplied, Event: TransitionEvent{ID: stableID("event", cmd.IdempotencyKey), EventType: "remediation_regression_reserved", ActorType: "user", ActorID: cmd.ActorID, PayloadJSON: payload}}},
+		Snapshot: CaseSnapshotUpdate{ClosedAtSet: true, ClosedAt: &now}, RequestJSON: mustJSON(cmd), Approvals: []Approval{approval},
+		Steps: []CaseMutationStep{{To: CaseRemediationRecorded, Event: TransitionEvent{ID: stableID("event", cmd.IdempotencyKey), EventType: "remediation_recorded", ActorType: "user", ActorID: cmd.ActorID, PayloadJSON: payload}}},
 	})
 	if err != nil {
 		return IncidentCase{}, err
 	}
-	current, err := o.store.GetCase(ctx, mutation.Case.ID)
-	if err != nil {
-		return IncidentCase{}, err
-	}
-	if current.Status == CaseRemediationApplied {
-		if _, startErr := o.StartRegression(ctx, current.ID, current.Version); startErr != nil && !errors.Is(startErr, ErrRegressionDuplicate) {
-			if waiting, handled, readinessErr := o.failSafeRegressionReadiness(ctx, current, startErr); handled {
-				return waiting, readinessErr
-			}
-			return current, startErr
-		}
-		current, err = o.store.GetCase(ctx, current.ID)
-	}
-	return current, err
+	return mutation.Case, nil
 }
 
 func (o *CaseOrchestrator) replayCompleteRemediation(ctx context.Context, cmd CompleteRemediationCommand) (IncidentCase, error) {

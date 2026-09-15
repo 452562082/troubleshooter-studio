@@ -73,7 +73,7 @@ agent 通过 `scripts/k8s_query.py` 跑(同包内,Python 实现 Kuboard v4 HTTP 
 
 | 平台 | 脚本绝对路径 |
 |--|--|
-| OpenClaw | `~/.openclaw/workspace/<workspace>/skills/k8s-runtime-query/scripts/k8s_query.py` |
+| AI 客户端 | `~/.tshoot/workspace/<workspace>/skills/k8s-runtime-query/scripts/k8s_query.py` |
 | Claude Code | `~/.claude/skills/<agent-name>/k8s-runtime-query/scripts/k8s_query.py` |
 | Cursor | `~/.cursor/skills/<agent-name>/k8s-runtime-query/scripts/k8s_query.py` |
 
@@ -83,7 +83,7 @@ agent 通过 `scripts/k8s_query.py` 跑(同包内,Python 实现 Kuboard v4 HTTP 
 
 ```bash
 python3 -m pip install --user -r ~/.claude/skills/<agent-name>/requirements.txt
-# 或 OpenClaw / Cursor 走对应路径
+# 或 AI 客户端 / Cursor 走对应路径
 ```
 
 脚本若 `import requests` 失败会直接输出 `{"error":"requests-not-installed","hint":"pip3 install requests"}`,

@@ -4,7 +4,7 @@
 
 # troubleshooter-studio
 
-用 `troubleshooter.yaml` 描述系统，生成可安装到 OpenClaw、Claude Code、Cursor 和 Codex CLI 的 AI 排障机器人。
+用 `troubleshooter.yaml` 描述系统，生成可安装到 Claude Code、Cursor、Codex CLI 和 OpenCode 的 AI 排障机器人。
 
 | 层级 | 职责 |
 |---|---|
@@ -39,8 +39,8 @@ tshoot --help
 tshoot init -o troubleshooter.yaml
 tshoot validate -i troubleshooter.yaml
 tshoot analyze -i troubleshooter.yaml --repos-root ./repos -o analysis.json
-tshoot gen -i troubleshooter.yaml --analysis analysis.json
-tshoot install --path dist/<id> --target openclaw
+tshoot gen -i troubleshooter.yaml -o dist/bot --analysis analysis.json
+tshoot install --path dist/bot-claude-code --target claude-code
 ```
 
 ## 使用入口
@@ -57,25 +57,25 @@ tshoot install --path dist/<id> --target openclaw
 
 | 平台 | 安装位置 |
 |---|---|
-| OpenClaw | `~/.openclaw/workspace/<name>/` |
 | Claude Code | `~/.claude/agents/`、`~/.claude/skills/` |
 | Cursor | `~/.cursor/agents/`、`~/.cursor/skills/` |
 | Codex CLI | `~/.codex/agents/`、`~/.codex/skills/` |
+| OpenCode | `~/.config/opencode/agents/`、`~/.config/opencode/skills/`（支持 `XDG_CONFIG_HOME`）|
 
-OpenClaw 凭据保存在 `~/.openclaw/<id>-creds.json`，其余平台保存在 `~/.tshoot/<id>-creds.json`。Studio 会安装共享 `tshoot-router`，按当前仓库路径和 Git remote 确定机器人；无法唯一归属时停止，不按故障关键词猜测。
+运行时凭据保存在 `~/.tshoot/<id>-creds.json`。Studio 会安装共享 `tshoot-router`，按当前仓库路径和 Git remote 确定机器人；无法唯一归属时停止，不按故障关键词猜测。
 
 ## 故障闭环
 
 Studio 用持久化 Case 编排：
 
 ```text
-验证 → 方案评估 → 修复/人工处置 → 合并 → 人工部署 → 回归
+排障 → 修复授权 → 修复与工程测试 → 合并授权 → 提交 → 人工验收
 ```
 
 - SQLite 是 Case、证据、授权和事件的真源。
 - Agent 一次只执行一个阶段；合并由 Studio 执行，应用部署由人或外部平台执行。
-- 代码修复和合并分别授权；回归失败在同一 Case 中进入下一轮排障。
-- 验证与回归复用同一场景和浏览器协议，但回归必须采集新证据。
+- 代码修复和合并分别授权；提交后显示“已提交，待人工验证”，不自动解决外部 Bug。
+- 工单直接进入排障，使用已有附件和运行时证据；已移除自动复现、浏览器验证及回归。
 - 用户可以补证、重试、质疑根因、重评方案、重新修复或重置 Case。
 
 详见[故障闭环与 Agent 工作流](docs/incident-workflow.md)。排障 Agent 的取证方法见[排障链路](docs/troubleshooting-flow.md)。
@@ -177,3 +177,22 @@ Linux 和 Windows 当前只提供 CLI。
 - macOS app 未签名/公证，首次打开可能需要清除 quarantine。
 - 代码、拓扑和 schema 扫描基于模式识别，复杂包装或冷门框架需要人工补充。
 - Serverless / FaaS 暂无专用运行时适配，可通过 HTTP、日志或外部可观测性接入。
+
+### OpenCode
+
+创建向导选择 OpenCode，或在 YAML 的 `generation.targets` 添加 `opencode`，生成后部署：
+
+```bash
+tshoot gen -i examples/shop-troubleshooter.yaml
+tshoot install --path <output_dir>-opencode --target opencode
+```
+
+先在 OpenCode 中配置模型账号（`opencode auth login`），模型沿用其默认配置，也可用 YAML 的 `agent.target_models.opencode: provider/model` 指定。部署后在 Bug 工单的平台映射中添加该机器人，即可在故障闭环执行排障、修复，提交仍由 Studio 授权控制。工作台不会从其他平台复制登录凭据。
+
+安装默认使用 `~/.config/opencode`，遵循 `XDG_CONFIG_HOME`；MCP 写入全局 `opencode.json` 或已有的 `opencode.jsonc`，保留无关配置并运行 MCP 自检。本机已用 OpenCode 1.2.22 验证 CLI 协议。
+
+开发者可用本地模拟服务运行真实 CLI 的隔离集成测试，无需模型账号：
+
+```bash
+TSHOOT_LIVE_OPENCODE_PROTOCOL=1 go test ./internal/agent ./internal/bughub -run 'TestOpenCode(MCPProtocolLive|LocalProtocolLive)' -v
+```

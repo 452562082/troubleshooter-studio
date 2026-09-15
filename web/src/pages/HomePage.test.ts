@@ -14,7 +14,7 @@ afterEach(() => {
 describe('HomePage workflow navigation', () => {
   it.each([
     ['/bugs', 'Bug 工单', '同步工单平台，查看完整 Bug 详情'],
-    ['/incidents', '故障闭环', '选择 Bug，完成验证、排障、修复和回归'],
+    ['/incidents', '故障闭环', '选择 Bug，排障、修复和提交'],
   ])('offers a keyboard-reachable %s card with the final copy', async (path, label, desc) => {
     const wrapper = mount(HomePage)
     const card = wrapper.get(`[data-path="${path}"]`)

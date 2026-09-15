@@ -14,7 +14,7 @@
 //   - main.go             入口 + App struct + wails.Run + 模板解析
 //   - bindings_core.go    Version / Validate / Gen / Plan / Diff / Analyze / Doctor / DiscoverBots
 //   - bindings_apply.go   ApplyBot / ImportAndDeploy
-//   - bindings_deploy.go  ScanInstallPrompts / ReadEnv / RunInstall / RevealInFinder
+//   - bindings_deploy.go  UninstallBot / ForgetGhostBot / RevealInFinder
 //   - dialogs.go          OpenYAML / OpenDir / SaveYAML + 原生对话框 helpers
 package main
 
@@ -39,7 +39,6 @@ import (
 
 	tshoot "github.com/xiaolong/troubleshooter-studio"
 	"github.com/xiaolong/troubleshooter-studio/api"
-	"github.com/xiaolong/troubleshooter-studio/internal/browserverify"
 	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 	"github.com/xiaolong/troubleshooter-studio/internal/config"
 	"github.com/xiaolong/troubleshooter-studio/internal/webui"
@@ -63,14 +62,6 @@ type App struct {
 	ctxMu sync.RWMutex
 	ctx   context.Context
 
-	// installMu 保护 installCancel 字段；install 和 cancel 是不同 Wails goroutine
-	// 过来的,没锁会 race。
-	installMu sync.Mutex
-	// installCancel 是当前正在跑的 install.sh 的 cancel 函数,nil=没有 install 在跑。
-	// RunInstall 赋值并 defer 清空;CancelInstall 读取并调用。同一时刻只允许一个
-	// install 跑,前端 UI 会禁用"部署"按钮避免并发。
-	installCancel context.CancelFunc
-
 	// analyzeMu/analyzeCancel 保护代码扫描长任务。Analyze 和 CancelAnalyze 来自不同
 	// Wails goroutine,必须加锁避免 race。
 	analyzeMu     sync.Mutex
@@ -89,35 +80,24 @@ type App struct {
 	// workflowMu protects the single durable workflow runtime owned by this App.
 	// Bindings only adapt commands to this runtime; persistence and transitions
 	// remain inside bughub's CaseStore and CaseOrchestrator.
-	workflowMu                                sync.Mutex
-	workflowReminderOnce                      sync.Once
-	workflowBugResolutionOnce                 sync.Once
-	workflowBugResolutionMu                   sync.Mutex
-	workflowRoot                              string
-	workflowStore                             *bughub.CaseStore
-	workflowOrchestrator                      *bughub.CaseOrchestrator
-	workflowRunner                            *bughub.AgentPhaseRunner
-	workflowBrowserInitMu                     sync.Mutex
-	workflowBrowserMu                         sync.Mutex
-	workflowBrowser                           incidentBrowserController
-	workflowBrowserPrepareOnce                sync.Once
-	workflowBrowserPrepare                    func(context.Context, func(bughub.BrowserProgress)) error
-	workflowBrowserPreparationStarted         bool
-	workflowBrowserPreparationFinished        bool
-	workflowRecoveryPending                   bool
-	workflowBrowserRecoveryBeforeOutcome      func() error
-	workflowBrowserRecoveryBeforeContinuation func() error
-	workflowBrowserDecisionPolicy             bughub.BrowserDecisionRolloutPolicy
-	workflowBrowserDecisionConfigured         bool
-	workflowInitErr                           error
-	workflowLoadBug                           func(string) (bughub.Bug, error)
-	workflowLoadBot                           func(string) (bughub.BotRef, error)
-	workflowLoadDeploymentConfig              func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error)
-	workflowResolveBug                        func(context.Context, bughub.IncidentCase) error
-	workflowK8sReaderFactory                  func(context.Context, *config.SystemConfig, config.Environment) (bughub.K8sDeploymentReader, error)
-	workflowSaveArtifact                      func(string, string, context.Context) (string, error)
-	workflowEmit                              func(string, any)
-	workflowRuntimeFactory                    func(*bughub.CaseStore, *bughub.InvestigationStore) incidentWorkflowRuntime
+	workflowMu                   sync.Mutex
+	workflowBugResolutionOnce    sync.Once
+	workflowBugResolutionMu      sync.Mutex
+	workflowRoot                 string
+	workflowStore                *bughub.CaseStore
+	workflowOrchestrator         *bughub.CaseOrchestrator
+	workflowRunner               *bughub.AgentPhaseRunner
+	workflowRecoveryPending      bool
+	workflowInitErr              error
+	workflowLoadBug              func(string) (bughub.Bug, error)
+	workflowLoadBot              func(string) (bughub.BotRef, error)
+	workflowLoadDeploymentConfig func(context.Context, bughub.IncidentCase) (*config.SystemConfig, error)
+	workflowResolveBug           func(context.Context, bughub.IncidentCase) error
+	workflowK8sReaderFactory     func(context.Context, *config.SystemConfig, config.Environment) (bughub.K8sDeploymentReader, error)
+	workflowPickEvidence         func(context.Context) ([]string, error)
+	workflowSaveArtifact         func(string, string, context.Context) (string, error)
+	workflowEmit                 func(string, any)
+	workflowRuntimeFactory       func(*bughub.CaseStore, *bughub.InvestigationStore) incidentWorkflowRuntime
 }
 
 var startDesktopTray = startTray
@@ -127,7 +107,6 @@ var desktopExecutablePath = os.Executable
 // startup 由 Wails 在窗口创建完成时调用，注入 runtime ctx。私有也能被 Wails 识别。
 func (a *App) startup(ctx context.Context) {
 	a.setRuntimeContext(ctx)
-	a.startIncidentBrowserPreparation(workflowContext(ctx))
 	_ = a.startIncidentWorkflow(workflowContext(ctx))
 	a.trayOnce.Do(func() {
 		startDesktopTray(a)
@@ -222,7 +201,6 @@ func (a *App) QuitApp() {
 }
 
 // fixGUIPath 修 macOS 桌面 app 由 launchd / Finder 启动时 PATH 被精简到
-// /usr/bin:/bin:/usr/sbin:/sbin 的问题——self-test、install 子进程、findOpenclawCLI
 // 都依赖能看见用户装的 uvx / npx / brew 工具。靠 fallback 候选路径(brew prefix /
 // cargo bin / asdf shims / nvm ...) 永远列不全，干脆 shell-out 拿用户 login shell
 // 的完整 PATH 写回进程 env。
@@ -315,22 +293,6 @@ func resolveTemplateDir() string {
 		return ""
 	}
 	return dst
-}
-
-// resolveBundledBrowserRuntimeDir returns the versioned runtime shipped inside
-// a desktop release. Development binaries and historical app bundles simply
-// return an empty path and retain the first-launch network fallback.
-func resolveBundledBrowserRuntimeDir() string {
-	executable, err := desktopExecutablePath()
-	if err != nil {
-		return ""
-	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(executable), "..", "Resources", "browser-runtime", browserverify.BrowserRuntimeVersion))
-	info, err := os.Lstat(root)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return ""
-	}
-	return root
 }
 
 // extractEmbedded 把 embed.FS 里 rootSub 下的内容平铺到 dst（跳过 .DS_Store，

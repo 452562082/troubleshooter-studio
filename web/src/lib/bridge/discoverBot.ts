@@ -15,15 +15,10 @@ export async function discoverBots(extraRoots: string[] = []): Promise<Discovere
   return Array.isArray(r) ? r : []
 }
 
-/** UninstallBot 卸载已装机器人:按 target 分派(openclaw / claude-code / cursor)。
- *  - openclaw:workspace 移 ~/.Trash + 摘 openclaw.json agents.list + 清 creds.json
- *  - claude-code / cursor:中间包移 ~/.Trash + 清 ~/.claude|cursor/{agents,skills,scripts}/<name>
- *  返回结果含日志,前端展示给用户看动了哪些资源。仅桌面 app 可用。 */
+
 export type UninstallBotResult = {
   target: string,
-  // openclaw 专属
   workspace_moved_to?: string,
-  openclaw_json_clean?: boolean,
   creds_removed?: boolean,
   // claude-code / cursor 专属
   staging_moved_to?: string,

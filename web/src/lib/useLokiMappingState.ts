@@ -40,14 +40,29 @@ export function makeEmptyLokiMappingPerEnv(): LokiMappingPerEnv {
   }
 }
 
+/** Labels and service matches belong to the selected datasource. */
+export function setLokiDatasource(mapping: LokiMappingPerEnv, uid: string) {
+  if (mapping.dsUID === uid) return
+  mapping.dsUID = uid
+  mapping.labels = []
+  mapping.envLabelValues = []
+  mapping.serviceLabelValues = []
+  mapping.envValue = ''
+  mapping.serviceValues = {}
+  mapping.serviceMatchTried = {}
+  mapping.labelStatus = 'idle'
+  mapping.labelError = undefined
+}
+
 export function useLokiMappingState(initial?: Record<string, LokiMappingPerEnv>) {
   // saved 里可能存的是切走时的瞬态 'loading'(watcher 在 await 中途触发的快照),
   // 重 mount 后状态卡死成 'loading' 永远转圈。这里在恢复时把所有瞬态 status 一律
   // 重置成 'idle',让 onMounted/triggerStep7Init 重新拉一次。
+  // 旧的成功结果也不能替代本次账号检查；保留候选与选择，但重新确认连接可用。
   const seed = initial ?? {}
   for (const m of Object.values(seed)) {
     if (!m) continue
-    if (m.dsListStatus === 'loading') m.dsListStatus = 'idle'
+    if (m.dsListStatus === 'loading' || m.dsListStatus === 'ok') m.dsListStatus = 'idle'
     if (m.labelStatus === 'loading') m.labelStatus = 'idle'
   }
   const lokiMappingByEnv = reactive<Record<string, LokiMappingPerEnv>>(seed)

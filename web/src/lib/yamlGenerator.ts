@@ -4,7 +4,6 @@
 //       不必 mount Vue 组件。
 
 import yaml from 'js-yaml'
-import { Target } from './constants'
 import type { CredField } from './credFields'
 import { yamlStr, hasAnyLokiMapping, emitLokiLabelMapping, type LokiEnvMapping } from './yamlEmit'
 import { isEffectiveObsFieldHidden, resolveObsFieldValue } from './obsConnection'
@@ -239,25 +238,8 @@ export function generateYAML(ctx: YAMLGenContext, options: YAMLGenOptions = {}):
   lines.push('agent:')
   // agent.id 空时推导 "<system.id>-troubleshooter",跟历史命名兼容。
   const agentID = (ctx.agent.id || '').trim() || `${ctx.system.id || 'my-system'}-troubleshooter`
-  lines.push(`  id: ${agentID}            # AI 平台里的稳定标识(OpenClaw agents.list / Claude Code / Cursor subagent 名)`)
+  lines.push(`  id: ${agentID}            # AI 平台里的稳定标识(Claude Code / Cursor subagent 名)`)
   lines.push(`  name: ${yamlStr(ctx.agent.name || ctx.agentNameDefault)}`)
-  // model 是 openclaw 专属;workspace_name 不再单独 emit(Go 端 ResolveWorkspaceName 用 agent.id 当目录名)
-  if (ctx.enabledTargets[Target.Openclaw]) {
-    lines.push(`  model: ${ctx.agent.model}    # OpenClaw gateway 路由用的 LLM model id`)
-    const tmEntries: [string, string][] = []
-    for (const t of ctx.modelConsumingTargets) {
-      if (!ctx.enabledTargets[t]) continue
-      const v = (ctx.targetModels[t] || '').trim()
-      if (v && v !== ctx.agent.model) tmEntries.push([t, v])
-    }
-    if (tmEntries.length > 0) {
-      lines.push('  target_models:     # per-target 模型覆盖;key 只认 openclaw(其它 target 不消费)')
-      for (const [t, m] of tmEntries) {
-        lines.push(`    ${t}: ${m}`)
-      }
-    }
-  }
-
   // environments
   lines.push('')
   lines.push('# environments：声明系统的所有环境。每个 env 会注册一套独立的 MCP 实例')
@@ -777,7 +759,7 @@ export function generateYAML(ctx: YAMLGenContext, options: YAMLGenOptions = {}):
   // output_dir 故意不写:CLI `tshoot gen` 才会读它,桌面 ImportAndDeploy 走 ~/.tshoot/...,
   // wizard 用户不需要;CLI 用户可以手动加这一行覆盖默认 ./dist。
   const selectedTargets = ctx.targetOptions.filter(t => ctx.enabledTargets[t])
-  const targetList = selectedTargets.length ? selectedTargets : ['openclaw']
+  const targetList = selectedTargets.length ? selectedTargets : ['claude-code']
   lines.push('  targets:                             # 每个 target 产出一份机器人产物（同一份 troubleshooter.yaml）')
   for (const t of targetList) {
     lines.push(`    - ${t}`)

@@ -11,6 +11,9 @@ import (
 type CaseStatus string
 
 const (
+	CasePendingInvestigation CaseStatus = "pending_investigation"
+	CaseSubmitted            CaseStatus = "submitted"
+	CaseRemediationRecorded  CaseStatus = "remediation_recorded"
 	CasePendingValidation    CaseStatus = "pending_validation"
 	CaseValidating           CaseStatus = "validating"
 	CaseWaitingEvidence      CaseStatus = "waiting_evidence"
@@ -39,7 +42,7 @@ const (
 
 func (s CaseStatus) valid() bool {
 	switch s {
-	case CasePendingValidation,
+	case CasePendingInvestigation, CaseSubmitted, CaseRemediationRecorded, CasePendingValidation,
 		CaseValidating,
 		CaseWaitingEvidence,
 		CaseReproduced,
@@ -70,7 +73,7 @@ func (s CaseStatus) valid() bool {
 }
 
 func IsTerminalCaseStatus(status CaseStatus) bool {
-	return status == CaseFixedVerified || status == CaseLegacyArchived || status == CaseResetArchived
+	return status == CaseSubmitted || status == CaseRemediationRecorded || status == CaseFixedVerified || status == CaseLegacyArchived || status == CaseResetArchived
 }
 
 type Phase string
@@ -292,10 +295,16 @@ func (a PhaseAttempt) ValidateWithOptions(options AttemptValidationOptions) erro
 	}
 	switch a.Phase {
 	case PhaseValidation:
+		if !options.AllowLegacyMigration {
+			return fmt.Errorf("validation phase has been retired")
+		}
 		if a.Mode != AttemptReproduce {
 			return fmt.Errorf("validation phase requires reproduce mode")
 		}
 	case PhaseRegression:
+		if !options.AllowLegacyMigration {
+			return fmt.Errorf("regression phase has been retired")
+		}
 		if a.Mode != AttemptRegression {
 			return fmt.Errorf("regression phase requires regression mode")
 		}

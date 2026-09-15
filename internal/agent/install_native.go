@@ -9,7 +9,6 @@
 //     官方文档 https://developers.openai.com/codex/subagents
 //
 // 凭证 / MCP server 写入由 install_native_mcp.go + install_native_creds.go 负责,
-// 这里只管纯文件分发。openclaw 走 install_native_openclaw.go,模型不同不通用。
 package agent
 
 import (
@@ -28,7 +27,6 @@ import (
 )
 
 // InstallNative 把 stagingDir 里的产物分发到 ~/.<target>/{agents,skills,scripts}/。
-// target 必须是三家 IDETarget 之一(openclaw 走专门入口)。
 //
 // 落地位置:固定 $HOME/.<target>/。三家 IDE(claude-code/cursor/codex)各自的扩展目录
 // 都是 hardcoded —— Claude Code CLI 启动只读 ~/.claude/agents/,Cursor 只读 ~/.cursor/,
@@ -64,6 +62,9 @@ func InstallNative(stagingDir, target string) error {
 	if primaryAgentName == "" {
 		primaryAgentName = primaryAgentNameFromFiles(stagingDir, agentFiles)
 	}
+	if err := retireNativeValidators(root, stagingDir, primaryAgentName, t.UserAgentExt()); err != nil {
+		return err
+	}
 	for _, ag := range agentFiles {
 		if err := installOneNativeAgent(stagingDir, root, t, ag, primaryAgentName); err != nil {
 			return err
@@ -93,7 +94,16 @@ func installOneNativeAgent(stagingDir, root string, t IDETarget, ag stagingAgent
 	// codex 特殊:staging toml 里 [[skills.config]].path 用 generator.CodexPlaceholderSkillsRoot 占位,
 	// 装机时替换成 <root>/skills/<name>/ 的实际绝对路径(codex 不解析 ~ / $HOME)。
 	// MCP servers 段的 {{MCP_SERVERS}} 占位由 MergeMCPIntoIDESettingsAt 时填,这里保留原样。
-	if t == TargetCodex {
+	if t == TargetOpenCode {
+		raw, err := os.ReadFile(ag.File)
+		if err != nil {
+			return err
+		}
+		patched := strings.ReplaceAll(string(raw), generator.OpenCodeSkillsRoot, filepath.ToSlash(filepath.Join(root, "skills")))
+		if err := os.WriteFile(dstAgent, []byte(patched), 0644); err != nil {
+			return err
+		}
+	} else if t == TargetCodex {
 		raw, rerr := os.ReadFile(ag.File)
 		if rerr != nil {
 			return fmt.Errorf("read staging codex toml: %w", rerr)
@@ -136,7 +146,7 @@ func installOneNativeAgent(stagingDir, root string, t IDETarget, ag stagingAgent
 	if ag.Name == primaryAgentName {
 		stagingMeta := filepath.Join(stagingDir, discover.MetaFilename)
 		if _, err := os.Stat(stagingMeta); err == nil {
-			if err := copyFileSimple(stagingMeta, dstMeta); err != nil {
+			if err := copyActiveAgentMeta(stagingMeta, dstMeta); err != nil {
 				return fmt.Errorf("install tshoot.json anchor for %s: %w", ag.Name, err)
 			}
 		}
@@ -285,6 +295,9 @@ func findStagingAgentFiles(stagingDir string, t IDETarget) ([]stagingAgentFile, 
 		}
 		n := e.Name()
 		if strings.Contains(n, ".bak.") || !strings.HasSuffix(n, ext) {
+			continue
+		}
+		if stagingAgentRole(stagingDir, strings.TrimSuffix(n, ext)) == generator.AgentRoleValidator {
 			continue
 		}
 		matches = append(matches, stagingAgentFile{

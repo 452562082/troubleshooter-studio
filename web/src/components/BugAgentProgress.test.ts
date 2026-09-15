@@ -8,7 +8,7 @@ function attempt(phase: 'investigation' | 'fix' = 'investigation', status: Phase
 }
 
 describe('BugAgentProgress', () => {
-  it('shows live commands, tool calls, and Agent messages for an active investigation', () => {
+  it('keeps technical details collapsed while showing the latest analysis', async () => {
     const events: IncidentPhaseEvent[] = [
       { at: '2026-07-18T10:00:00Z', type: 'turn_started', message: '开始排障', meta: {} },
       { at: '2026-07-18T10:00:01Z', type: 'command_execution', message: 'rg -n navigation web/src', meta: { state: 'started' } },
@@ -21,6 +21,11 @@ describe('BugAgentProgress', () => {
 
     expect(wrapper.get('[data-agent-phase="investigation"]').text()).toContain('排障 Agent 正在执行')
     expect(wrapper.text()).toContain('codex · 实时更新')
+    expect(wrapper.text()).toContain('已定位到布局计算逻辑')
+    expect(wrapper.find('.agent-progress-events').exists()).toBe(false)
+    const details = wrapper.get('details').element as HTMLDetailsElement
+    details.open = true
+    await wrapper.get('details').trigger('toggle')
     expect(wrapper.text()).toContain('正在执行命令')
     expect(wrapper.text()).toContain('命令执行完成 · exit 0')
     expect(wrapper.text()).toContain('正在调用工具')
@@ -61,11 +66,11 @@ describe('BugAgentProgress', () => {
     const wrapper = mount(BugAgentProgress, { props: { attempt: attempt(), events } })
 
     expect(wrapper.get('.investigation-step-progress').text()).toContain('第 3/7 步 · 运行时')
-    expect(wrapper.get('.investigation-step-progress').text()).toContain('验证证据')
-    expect(wrapper.get('.investigation-step-progress').text()).not.toContain('复现证据')
+    expect(wrapper.get('.investigation-step-progress').text()).toContain('工单分析')
+    expect(wrapper.get('.investigation-step-progress').text()).not.toContain('验证证据')
     expect(wrapper.get('[aria-current="step"]').text()).toContain('运行时')
     expect(wrapper.findAll('.investigation-step-progress li.is-complete')).toHaveLength(2)
-    expect(wrapper.text()).toContain('kubectl get pods')
+    expect(wrapper.find('.agent-progress-events').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('untrusted label')
   })
 

@@ -89,7 +89,7 @@ infrastructure:
       enabled: false
 
 generation:
-  targets: [openclaw]
+  targets: [claude-code]
   skills_whitelist:
     - routing
     - config-executor

@@ -14,7 +14,7 @@ func TestGenerateContextIncludesBugAndBot(t *testing.T) {
 		TraceIDs:    []string{"trace-1"},
 		Attachments: []Attachment{{Name: "network.har", LocalPath: "/tmp/network.har"}},
 	}
-	bot := BotRef{Key: "/bots/shop|openclaw", SystemID: "shop", Target: "openclaw", Path: "/bots/shop", Env: "test"}
+	bot := BotRef{Key: "/bots/shop|claude-code", SystemID: "shop", Target: "claude-code", Path: "/bots/shop", Env: "test"}
 
 	ctx := GenerateContext(bug, bot)
 
@@ -28,7 +28,7 @@ func TestGenerateContextIncludesBugAndBot(t *testing.T) {
 		"trace-1",
 		"network.har",
 		"shop",
-		"openclaw",
+		"claude-code",
 	} {
 		if !strings.Contains(ctx, want) {
 			t.Fatalf("context missing %q:\n%s", want, ctx)

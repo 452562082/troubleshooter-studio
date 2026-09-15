@@ -16,7 +16,7 @@ func minimalValid() SystemConfig {
 		Environments: []Environment{
 			{ID: "dev", APIDomain: "api-dev.example.com", IsProd: false},
 		},
-		Generation: Generation{TargetHost: "openclaw"},
+		Generation: Generation{TargetHost: "claude-code"},
 		Meta:       Meta{SchemaVersion: "0.1"},
 	}
 }
@@ -33,7 +33,7 @@ func TestLoadRepoServiceEntries(t *testing.T) {
 system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments: [{id: dev, api_domain: x}]
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 repos:
   - name: base-frontend
@@ -70,7 +70,6 @@ func TestValidate_MissingRequired(t *testing.T) {
 			c.Agent.ID = ""
 			c.System.ID = ""
 		}, "system.id required"},
-		{"no_agent_model", func(c *SystemConfig) { c.Agent.Model = "" }, "agent.model required"},
 		{"empty_environments", func(c *SystemConfig) { c.Environments = nil }, "environments must have"},
 		{"invalid_target", func(c *SystemConfig) { c.Generation.Targets = []string{"invalid"} }, "not supported"},
 		{"no_schema_version", func(c *SystemConfig) { c.Meta.SchemaVersion = "" }, "meta.schema_version required"},
@@ -216,7 +215,7 @@ environments:
   - id: dev
     api_domain: x
     is_prod: false
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 repos:
   - name: r
@@ -248,7 +247,7 @@ system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments:
   - {id: dev, api_domain: x, is_prod: false}
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 repos:
   - {name: r, url: g, role: backend, stack: go, env_branches: {dev: main}}
@@ -286,7 +285,7 @@ system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments:
   - {id: dev, api_domain: x, is_prod: false}
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 infrastructure:
   config_centers:
@@ -318,7 +317,7 @@ agent: {name: a, workspace_name: a, model: m}
 environments:
   - {id: dev, api_domain: x, is_prod: false}
   - {id: prod, api_domain: y, is_prod: true}
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.2"}
 repos:
   - {name: monorepo, url: g, role: backend, stack: go, service_names: [order], env_branches: {dev: main, prod: main}}
@@ -362,7 +361,7 @@ func TestResourceCatalog_RejectsUnknownReferences(t *testing.T) {
 system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments: [{id: dev, api_domain: x, is_prod: false}]
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.2"}
 repos: [{name: repo, url: g, role: backend, stack: go, service_names: [order], env_branches: {dev: main}}]
 resource_catalog:
@@ -430,7 +429,7 @@ system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments:
   - {id: dev, api_domain: x, is_prod: false}
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 infrastructure:
   config_centers:
@@ -464,7 +463,7 @@ system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments:
   - {id: dev, api_domain: x, is_prod: false}
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 infrastructure:
   config_centers:
@@ -489,7 +488,7 @@ system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments:
   - {id: dev, api_domain: x, is_prod: false}
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 infrastructure:
   config_centers:
@@ -510,7 +509,7 @@ system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments:
   - {id: dev, api_domain: x, is_prod: false}
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 infrastructure:
   config_centers:
@@ -530,7 +529,7 @@ system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments:
   - {id: dev, api_domain: x, is_prod: false}
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 infrastructure:
   config_centers:
@@ -551,7 +550,7 @@ system: {id: shop, name: Shop}
 agent: {name: a, workspace_name: a, model: m}
 environments:
   - {id: dev, api_domain: x, is_prod: false}
-generation: {target_host: openclaw}
+generation: {target_host: claude-code}
 meta: {schema_version: "0.1"}
 infrastructure:
   config_centers:
@@ -573,5 +572,24 @@ func TestPrimaryConfigCenter(t *testing.T) {
 	c.Infrastructure.ConfigCenters = []ConfigCenter{{ID: "x", Type: "nacos"}}
 	if got := c.Infrastructure.PrimaryConfigCenter().Type; got != "nacos" {
 		t.Errorf("有源时应返回首个,got %q", got)
+	}
+}
+
+func TestGenerationTargetsRetireOpenClaw(t *testing.T) {
+	for _, target := range []string{"claude-code", "cursor", "codex"} {
+		cfg := minimalValid()
+		cfg.Generation.Targets = []string{target}
+		cfg.Agent.Model = ""
+		if err := Validate(&cfg); err != nil {
+			t.Fatalf("%s: %v", target, err)
+		}
+	}
+	cfg := minimalValid()
+	cfg.Generation.Targets = []string{"openclaw"}
+	if err := Validate(&cfg); err == nil {
+		t.Fatal("retired target accepted")
+	}
+	if got := (Generation{}).ResolvedTargets(); len(got) != 1 || got[0] != "claude-code" {
+		t.Fatalf("default: %v", got)
 	}
 }

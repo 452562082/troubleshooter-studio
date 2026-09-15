@@ -12,7 +12,7 @@ defineEmits<{
   <div class="card lg welcome-card">
     <h2>开始创建机器人</h2>
     <p class="help-text" style="margin-bottom: 24px;">
-      本向导帮你生成 troubleshooter.yaml 配置 + 一键部署到 OpenClaw / Claude Code / Cursor / Codex CLI。
+      本向导帮你生成 troubleshooter.yaml 配置 + 一键部署到 Claude Code / Cursor / Codex CLI / OpenCode。
       选下方任一方式开始 —— 草稿会自动保存,中途可关闭 app 下次继续。
     </p>
     <div class="welcome-choices">

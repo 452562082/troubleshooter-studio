@@ -15,7 +15,7 @@ function makeCtx(overrides: Partial<YAMLGenContext> = {}): YAMLGenContext {
     agent: { id: '', name: '', workspace_name: '', model: 'anthropic/claude-sonnet-4-6' },
     agentNameDefault: 'Shop 排障机器人',
     targetModels: { openclaw: 'anthropic/claude-sonnet-4-6' },
-    enabledTargets: { openclaw: true, 'claude-code': false, cursor: false, codex: false },
+    enabledTargets: { 'claude-code': true, cursor: false, codex: false },
     codeIntelligence: { enabled: false, provider: 'codegraph' },
     serviceTopology: { overrides: [] },
     enabledObservability: {},
@@ -39,8 +39,8 @@ function makeCtx(overrides: Partial<YAMLGenContext> = {}): YAMLGenContext {
     activeSourceTypes: ['nacos'],
     allServiceNames: ['order-service'],
     isMultiSource: false,
-    targetOptions: ['openclaw', 'claude-code', 'cursor', 'codex'],
-    modelConsumingTargets: ['openclaw'],
+    targetOptions: ['claude-code', 'cursor', 'codex'],
+    modelConsumingTargets: ['claude-code'],
     OBS_TOOL_SPECS: [],
     CC_FIELDS_BY_TYPE: {
       nacos: [
@@ -285,7 +285,7 @@ describe('generateYAML', () => {
     expect(parsed.environments[0].id).toBe('dev')
     expect(parsed.repos[0].name).toBe('order-service')
     expect(parsed.infrastructure.config_centers[0]).toMatchObject({ id: 'nacos', type: 'nacos' })
-    expect(parsed.generation.targets).toEqual(['openclaw'])
+    expect(parsed.generation.targets).toEqual(['claude-code'])
     // preserve_on_regenerate 已删除;SOUL/USER/CHECKLIST 是模板派生、必须跟模板走
     expect(parsed.generation.preserve_on_regenerate).toBeUndefined()
   })
@@ -365,7 +365,7 @@ describe('generateYAML', () => {
     // preserve_on_regenerate 已彻底删除。SOUL/USER/CHECKLIST 是模板渲染产物,
     // 整文件 preserve 反而让模板更新被静默吞掉,改成始终按模板覆盖。
     const out = generateYAML(makeCtx({
-      enabledTargets: { openclaw: false, 'claude-code': true, cursor: false, codex: false },
+      enabledTargets: { 'claude-code': true, cursor: false, codex: false },
     }))
     const parsed = yaml.load(out) as any
     expect(parsed.generation.targets).toEqual(['claude-code'])
@@ -378,7 +378,7 @@ describe('generateYAML', () => {
     expect(parsed.infrastructure.config_center.type).toBe('none')
   })
 
-  it('emits target_models only when openclaw value differs from agent.model', () => {
+  it('does not emit retired runtime model settings from old drafts', () => {
     const ctxSame = makeCtx({
       agent: { id: '', name: '', workspace_name: '', model: 'anthropic/claude-opus-4' },
       targetModels: { openclaw: 'anthropic/claude-opus-4' },
@@ -391,7 +391,8 @@ describe('generateYAML', () => {
       targetModels: { openclaw: 'anthropic/claude-sonnet-4' },
     })
     const diffYaml = yaml.load(generateYAML(ctxDiff)) as any
-    expect(diffYaml.agent.target_models.openclaw).toBe('anthropic/claude-sonnet-4')
+    expect(diffYaml.agent.target_models).toBeUndefined()
+    expect(diffYaml.agent.model).toBeUndefined()
   })
 
   it('emits one2all k8s_runtime provider from tool inputs', () => {

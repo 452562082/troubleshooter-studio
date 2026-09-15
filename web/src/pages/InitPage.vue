@@ -25,13 +25,14 @@ import { Target, type TargetId } from '../lib/constants'
 import type { CredField } from '../lib/credFields'
 import { isCredFieldHidden, resolveCredFieldDisplay } from '../lib/credFields'
 import RepoListItem from '../components/RepoListItem.vue'
+import RepoEnvBranches from '../components/RepoEnvBranches.vue'
 import CodeIntelligenceToggle from '../components/CodeIntelligenceToggle.vue'
 import ServiceTopologyPanel from '../components/ServiceTopologyPanel.vue'
 import ConfigSourceStep from '../components/ConfigSourceStep.vue'
 import ObservabilityStep from '../components/ObservabilityStep.vue'
 import DataStoreStep from '../components/DataStoreStep.vue'
 import BotIdentityStep from '../components/BotIdentityStep.vue'
-import WelcomeStep from '../components/WelcomeStep.vue'
+import { JOURNEY, normalizeJourneyStep, journeyPhase, phaseSections, resolveSystemID } from '../lib/wizardJourney'
 import SystemBasicInfoStep from '../components/SystemBasicInfoStep.vue'
 import YamlPreviewStep from '../components/YamlPreviewStep.vue'
 import OneClickDeployStep from '../components/OneClickDeployStep.vue'
@@ -49,7 +50,6 @@ import {
 import { computeStepErrors as libComputeStepErrors, labelForErrorKey as libLabelForErrorKey, type ValidatorContext } from '../lib/yamlValidator'
 import { prepareEnvironmentForWizard, type ApplyImportContext } from '../lib/yamlImporter'
 import { copyToClipboard } from '../lib/clipboard'
-import { useOpenClawDetect } from '../lib/useOpenClawDetect'
 import { useURLProbe } from '../lib/useURLProbe'
 import { useReposRoot } from '../lib/useReposRoot'
 import { useAITools } from '../lib/useAITools'
@@ -116,19 +116,14 @@ const savedKuboardState = loadInitKuboardState()
 // null / 越界 / 0 / 负数等)。行为跟原 inline 表达式严格等价 —— 不引入额外下限
 // clamp(那是 InitPage 自己的 clampCurrentStep 兜底职责),避免任何运行时行为漂移。
 const totalSteps = 10
-const currentStep = ref<number>(migrateSavedStep(saved?.currentStep, saved?.wizardSchema, totalSteps))
-const stepTitles = [
-  '开始',          // Step 1:欢迎页(导入 yaml / 从零开始)
-  '系统基本信息',
-  '机器人身份',
-  '环境列表',
-  '代码仓库',
-  '配置源',
-  '数据层',
-  '可观测性',
-  '预览 + 生成',
-  '一键部署',
-]
+const currentStep = ref<number>(normalizeJourneyStep(migrateSavedStep(saved?.currentStep, saved?.wizardSchema, totalSteps)))
+const activePhase = computed(() => journeyPhase(currentStep.value))
+const capabilitiesOpen = ref(false)
+watch(currentStep, step => {
+  const normalized = normalizeJourneyStep(step)
+  if (normalized !== step) currentStep.value = normalized
+})
+
 
 const validationErrors = ref<Set<string>>(new Set())
 
@@ -140,11 +135,8 @@ const system = reactive({
 })
 
 // ── Step 2: 机器人身份 ──
-// agent.model 是"默认模型"(兜底值,schema 要求非空)。
-// agent.target_models 是 per-target 的覆盖 —— 仅 openclaw 这一个 target 消费模型
-// (claude-code / cursor 由用户在各自客户端里挑,填这儿没意义)。
+// 模型由客户端选择；保留旧草稿字段以兼容历史导入。
 const agent = reactive({
-  // id 是机器人在 AI 平台里的稳定标识(OpenClaw agents.list[*].id /
   // claude-code / cursor 用 subagent 名)。空时 yaml emit 自动写 ${system.id}-troubleshooter,
   // 部署期 Go 端 ResolveID() 也走同一推导,跟老命名 100% 兼容。
   id: saved?.agent?.id ?? '',
@@ -153,7 +145,6 @@ const agent = reactive({
   model: saved?.agent?.model ?? 'anthropic/claude-sonnet-4-6',
 })
 const targetModels = reactive<Record<string, string>>({
-  openclaw: saved?.agent?.target_models?.openclaw ?? (saved?.agent?.model ?? 'anthropic/claude-sonnet-4-6'),
 })
 const codeIntelligence = reactive<CodeIntelligenceState>({
   enabled: saved?.codeIntelligence?.enabled ?? false,
@@ -162,124 +153,7 @@ const codeIntelligence = reactive<CodeIntelligenceState>({
 const serviceTopology = reactive<ServiceTopologyState>({
   overrides: saved?.serviceTopology?.overrides ?? [],
 })
-const modelConsumingTargets = [Target.Openclaw] as const
-
-// ── Model presets ──────────────────────────────────────────────
-// 按提供商分组；自定义项让用户填任意字符串（保留企业内部网关 / 新模型的灵活性）。
-interface ModelOption { value: string; label: string; hint?: string }
-interface ModelGroup { group: string; items: ModelOption[] }
-const MODEL_CUSTOM = '__custom__'
-// 模型预设(2026-04 更新 — 跟各家 provider 当前主力模型对齐)
-// 规则:
-//   - 每家只列该 provider 当下在官方 API 上主推的 2-4 个型号;历史 / 弃用的不列
-//   - 顺序:旗舰 → 性价比 → 细分(推理 / 编码 / 多模态)
-//   - 用户想用没列出的 id(企业网关 / 新模型 / 私有 fine-tune),走"自定义"选项手填任意字符串
-//
-// 扩展新 provider 时:这里 + internal/llmchat/providers.go 注册表同步加一条
-const modelGroups: ModelGroup[] = [
-  {
-    group: 'Anthropic (Claude 系列)',
-    items: [
-      { value: 'anthropic/claude-opus-4-7',   label: 'Claude Opus 4.7 — 最强、偏贵' },
-      { value: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4.6 — 默认推荐,性价比最高' },
-      { value: 'anthropic/claude-haiku-4-5',  label: 'Claude Haiku 4.5 — 便宜、快,适合高频轻量' },
-    ],
-  },
-  {
-    group: 'OpenAI',
-    items: [
-      { value: 'openai/gpt-5',         label: 'GPT-5 — 旗舰多模态' },
-      { value: 'openai/gpt-5-mini',    label: 'GPT-5 mini — 便宜、快' },
-      { value: 'openai/gpt-5-codex',   label: 'GPT-5 Codex — 编码专用' },
-      { value: 'openai/o3',            label: 'o3 — 深度推理' },
-      { value: 'openai/o3-mini',       label: 'o3 mini — 推理、便宜' },
-      { value: 'openai/gpt-4o',        label: 'GPT-4o — 上一代,仍可用' },
-    ],
-  },
-  {
-    group: 'DeepSeek',
-    items: [
-      // deepseek-chat / deepseek-reasoner 是官方 API 上"永远指向最新" V3 / R1 的稳定别名
-      { value: 'deepseek/deepseek-chat',     label: 'DeepSeek Chat — V3 系列,通用对话' },
-      { value: 'deepseek/deepseek-reasoner', label: 'DeepSeek Reasoner — R1 系列,推理' },
-    ],
-  },
-  {
-    group: '通义千问 (Qwen)',
-    items: [
-      { value: 'qwen/qwen3-max',    label: 'Qwen3 Max — 旗舰' },
-      { value: 'qwen/qwen3-coder',  label: 'Qwen3 Coder — 编码专用' },
-      { value: 'qwen/qwen-plus',    label: 'Qwen Plus — 性价比' },
-      { value: 'qwen/qwen-vl-max',  label: 'Qwen VL Max — 多模态(视觉)' },
-    ],
-  },
-  {
-    group: 'MiniMax',
-    items: [
-      { value: 'minimax/MiniMax-M2',      label: 'MiniMax M2 — 最新旗舰' },
-      { value: 'minimax/MiniMax-M1',      label: 'MiniMax M1 — 推理' },
-      { value: 'minimax/MiniMax-Text-01', label: 'MiniMax Text-01 — 长上下文' },
-    ],
-  },
-  {
-    group: 'Moonshot (Kimi)',
-    items: [
-      { value: 'moonshot/kimi-k2',           label: 'Kimi K2 — 最新旗舰' },
-      { value: 'moonshot/kimi-latest',       label: 'Kimi Latest — 自动跟随最新' },
-      { value: 'moonshot/moonshot-v1-128k',  label: 'Moonshot v1 128k — 长上下文(legacy)' },
-    ],
-  },
-  {
-    group: '智谱 (GLM)',
-    items: [
-      { value: 'zhipu/glm-4-plus',        label: 'GLM-4 Plus — 旗舰' },
-      { value: 'zhipu/glm-4-air',         label: 'GLM-4 Air — 性价比' },
-      { value: 'zhipu/glm-4-long',        label: 'GLM-4 Long — 长上下文' },
-      { value: 'zhipu/glm-zero-preview',  label: 'GLM Zero — 推理预览' },
-    ],
-  },
-  {
-    group: '本地 / 自部署 (Ollama)',
-    items: [
-      { value: 'ollama/llama3.3',      label: 'Llama 3.3 (Meta)' },
-      { value: 'ollama/qwen3',         label: 'Qwen3 (Alibaba)' },
-      { value: 'ollama/qwen2.5-coder', label: 'Qwen2.5 Coder — 编码' },
-      { value: 'ollama/deepseek-r1',   label: 'DeepSeek R1 — 推理' },
-      { value: 'ollama/mistral-nemo',  label: 'Mistral Nemo' },
-    ],
-  },
-]
-const allPresetModels = modelGroups.flatMap(g => g.items.map(i => i.value))
-
-function onModelChange(t: string, e: Event) {
-  const v = (e.target as HTMLSelectElement).value
-  if (v === MODEL_CUSTOM) {
-    // 切自定义:清空当前 preset 值,让用户在下面 input 里填
-    if (allPresetModels.includes(targetModels[t])) targetModels[t] = ''
-  } else {
-    targetModels[t] = v
-  }
-  // 顺手更新 agent.model 作为"默认"(给 schema 的必填兜底):
-  // openclaw 是唯一消费模型的 target;它的值覆盖 agent.model,保 yaml 里 agent.model 永远非空。
-  if (targetModels[Target.Openclaw]) agent.model = targetModels[Target.Openclaw]
-  // openclaw 用户手挑过一次后,不再被探测出的 detected 列表自动覆盖(见 watch 注释)
-  if (t === Target.Openclaw) onOpenclawModelChanged()
-}
-
-// ── OpenClaw 模型探测(只给 openclaw target 卡用) ──
-// 勾上 openclaw → detect(默认 ~/.openclaw 或用户选目录)→ 成功填模型下拉 / 失败给"选目录"按钮 / 兜底回落 hardcoded modelGroups
-// 完整逻辑在 lib/useOpenClawDetect.ts。InitPage 只负责把 saved 反填,以及把返回字段塞到模板/save。
-const {
-  openclawInstallDir,
-  openclawDetectStatus,
-  openclawDetectedModels,
-  openclawDetectError,
-  openclawResolvedDir,
-  openclawVersion,
-  openclawAuthProviders,
-  runOpenClawDetect,
-  pickOpenClawInstallDir,
-} = useOpenClawDetect(saved?.openclawInstallDir ?? '')
+const modelConsumingTargets = [] as const
 
 // Claude Code / Cursor / Codex 检测在 lib/useAITools.ts。onMounted 自动 refreshAITools。
 // detector 只做"提示"角色:扫到给绿勾,没扫到 badge 警告但 checkbox 仍可勾(信任用户)。
@@ -309,12 +183,6 @@ watch(() => system.id, (val, old) => {
   }
 })
 
-// id 派生闭环(slugify / markIdManual / resetIdAuto / watch+onMounted)已收进
-// SystemBasicInfoStep.vue。InitPage 这里只剩 idManualOverride 引用 —— 它要参与
-// localStorage 草稿持久化(line ~4858 的 save()),所以走 v-model:idManualOverride
-// 跟子组件双向绑定,父端持有 ref。
-const idManualOverride = ref<boolean>(saved?.idManualOverride ?? false)
-
 const agentNameDefault = computed(() => `${system.name}排障机器人`)
 // agent.id:AI 平台里的稳定标识。默认 <system.id>-troubleshooter,跟历史命名兼容。
 // workspace 目录名跟它共用,不再单独 emit workspace_name(Go 端 ResolveWorkspaceName 兜底)。
@@ -338,7 +206,6 @@ const environments = reactive<EnvItem[]>(
     ? saved.environments.map(prepareEnvironmentForWizard)
     : [
         { id: 'dev', api_domain: '', web_domain: '', frontend_entries: [], is_prod: false },
-        { id: 'prod', api_domain: '', web_domain: '', frontend_entries: [], is_prod: true },
       ]
 )
 
@@ -1022,7 +889,7 @@ type SourceData = {
 const ALL_SOURCE_TYPES = ['nacos', 'apollo', 'consul', 'kuboard', 'one2all', 'env-vars'] as const
 
 const enabledSourceTypes = reactive<Record<string, boolean>>(
-  saved?.enabledSourceTypes ?? { nacos: true },
+  saved?.enabledSourceTypes ?? { [saved?.configCenterType || 'none']: true },
 )
 // 老 draft 兼容:有 configCenterType / extraConfigSources 没有 enabledSourceTypes 时迁移
 if (!saved?.enabledSourceTypes && saved?.configCenterType) {
@@ -1036,7 +903,7 @@ const enabledSourceOrder = reactive<string[]>(
     : ALL_SOURCE_TYPES.filter(t => enabledSourceTypes[t]),
 )
 // 修补:enabledSourceTypes 里有但 order 里漏掉的(老 draft、import yaml 走老路径) → 追加到末尾
-for (const t of ALL_SOURCE_TYPES) {
+for (const t of [...ALL_SOURCE_TYPES, 'none']) {
   if (enabledSourceTypes[t] && !enabledSourceOrder.includes(t)) enabledSourceOrder.push(t)
 }
 function toggleSourceType(t: string, checked: boolean) {
@@ -1382,7 +1249,7 @@ function setServiceSource(svc: string, t: string, envID?: string) {
 // 兼容 legacy 模板/代码用:configCenterType 仍然存在,反映"主源"(第一个激活的)。
 // 老 ccCredInputs 也保留(yaml 老 emit 用),由 watch 从 sourceCreds[primary] 同步过来。
 const configCenterType = computed<string>({
-  get: () => activeSourceInstances.value[0]?.type || 'nacos',
+  get: () => activeSourceInstances.value[0]?.type || 'none',
   set: (v: string) => {
     // 单选模式 -> 多选模式过渡:setter 只清旧、设新(很少被用)
     for (const t of ALL_SOURCE_TYPES) enabledSourceTypes[t] = false
@@ -2342,12 +2209,13 @@ const {
   dsImportStatus, dsImportStats, dsAutoFilled,
   scannedDS, dataStoreTypes, dataStoreType, dsScanState, dsProbeResults,
   scanStateKey, scanStateOf,
-  removeScannedDS,
+  removeScannedDS, addManualDataStore, manualEntries,
   recomputeEnabledDataStoresFromScanned,
 } = useDataStoreState(
   {
     scannedDS: saved?.scannedDS,
     dsScanState: saved?.dsScanState,
+    manualEntries: saved?.manualDataStoreEntries,
   },
   dataStoreOptions,
   enabledDataStores,
@@ -2367,7 +2235,7 @@ const {
   autoImportDataStores,
   enumerateDataStoreProbeTargets,
 } = useDataStoreScan({
-  scannedDS, dsScanState, dsProbeResults,
+  scannedDS, dsScanState, dsProbeResults, manualEntries,
   dsImportStatus, dsImportStats, dsAutoFilled,
   enabledDataStores,
   dataStoreTypes, dataStoreType,
@@ -2377,6 +2245,18 @@ const {
   enabledSourceTypes, activeSourceTypes, sourceInstances: activeSourceInstances,
   ccCredInputs, ccKeyFor, sourceCreds, kuboardSvcMap, one2allSvcMap,
 })
+function addDatabaseConnection(envID: string, services: string[], type: string) {
+  const spec = DS_TOOL_SPECS.find(s => s.key === type)
+  if (!spec || !environments.some(e => e.id === envID) || !services.length || services.some(s => !allServiceNames.value.includes(s))) return
+  const id = addManualDataStore(envID, services[0], type, spec.fields.map(f => f.key))
+  if (!id) return
+  for (const svc of services.slice(1)) {
+    scannedDS[envID][svc] ||= {}
+    scannedDS[envID][svc][id] = { ...scannedDS[envID][services[0]][id] }
+    manualEntries[probeKey(envID, svc, id)] = true
+  }
+}
+
 // UI helper:DS_TOOL_SPECS 查 spec
 function dsSpecByKey(key: string) {
   return DS_TOOL_SPECS.find(s => s.key === dataStoreType(key))
@@ -2419,58 +2299,47 @@ const resourceCoverage = computed(() => buildResourceCoverage({
 // ── Step 7: 输出目标 ──
 // (历史上有 embedded 这个 target,后已下线;若 saved draft 里残留 enabledTargets.embedded
 //  会被忽略,生成 yaml / 校验都不再考虑它)
-const targetOptions: readonly TargetId[] = [Target.Openclaw, Target.ClaudeCode, Target.Cursor, Target.Codex]
+const targetOptions: readonly TargetId[] = [Target.ClaudeCode, Target.Cursor, Target.Codex, Target.OpenCode]
 const targetDescriptions: Record<TargetId, string> = {
-  [Target.Openclaw]: 'OpenClaw agent(~/.openclaw/workspace/<workspace_name>/,OpenClaw 内选 agent 切换)',
-  [Target.ClaudeCode]: 'Claude Code 用户级 subagent(~/.claude/agents/<name>.md,@<name> 调用)',
-  [Target.Cursor]: 'Cursor 用户级 Custom Agent(~/.cursor/agents/<name>.md,AI 侧栏选用)',
-  [Target.Codex]: 'OpenAI Codex CLI subagent(~/.codex/agents/<name>.toml,主 chat 里说 "spawn the <name> agent" 派生)',
+  [Target.OpenCode]: '使用 OpenCode 配置的模型进行排障和修复',
+  [Target.ClaudeCode]: '使用 Claude Code 进行排障和修复',
+  [Target.Cursor]: '使用 Cursor Agent 进行排障和修复',
+  [Target.Codex]: '使用 Codex CLI 进行排障和修复',
 }
 const targetLabels: Record<TargetId, string> = {
-  [Target.Openclaw]: 'OpenClaw',
+  [Target.OpenCode]: 'OpenCode',
   [Target.ClaudeCode]: 'Claude Code',
   [Target.Cursor]: 'Cursor IDE',
   [Target.Codex]: 'Codex CLI',
 }
 const enabledTargets = reactive<Record<string, boolean>>({
-  ...Object.fromEntries(targetOptions.map(k => [k, true])),
+  ...Object.fromEntries(targetOptions.map(k => [k, false])),
   ...(saved?.enabledTargets ?? {}),
 })
 // 任一目标勾选 / 无目标勾选:Step 1 校验 + 后续步骤按需隐藏字段
 const anyTargetSelected = computed(() => targetOptions.some(t => enabledTargets[t]))
 
 // targetDetectedInstalled(t) — 该 target 是否被本机探测到已装。
-//   openclaw     → openclawDetectStatus === 'ok'
 //   claude-code  → aitoolsResult.claude_code.installed
 //   cursor       → aitoolsResult.cursor.installed
 //   codex        → aitoolsResult.codex.installed
-// 探测还没跑(aitoolsResult / openclawDetectStatus 为初始) → 返回 null(unknown),
 // UI 据此显示"扫描中…"而不是"未检测到"。
 function targetDetectedInstalled(t: string): boolean | null {
-  if (t === Target.Openclaw) {
-    if (openclawDetectStatus.value === 'idle' || openclawDetectStatus.value === 'loading') return null
-    return openclawDetectStatus.value === 'ok'
-  }
+  if (!isDesktop()) return null
+
   if (!aitoolsResult.value) return null
   if (t === Target.ClaudeCode) return !!aitoolsResult.value.claude_code?.installed
   if (t === Target.Cursor) return !!aitoolsResult.value.cursor?.installed
+  if (t === Target.OpenCode) return !!aitoolsResult.value.opencode?.installed
   if (t === Target.Codex) return !!aitoolsResult.value.codex?.installed
   return null
 }
 // targetBadgeProps(t) — 把 4 家 target 异构的 detect 结果归一成 <TargetInstallBadge> 三个 prop。
-// undefined detected = 完全不渲染 badge(对应原来 openclaw idle 不出徽章 + aitoolsResult 还没回的 ide 三家)。
 function targetBadgeProps(t: string): { detected: boolean | null | undefined; versionText?: string; title?: string } {
-  if (t === Target.Openclaw) {
-    if (openclawDetectStatus.value === 'idle') return { detected: undefined }
-    if (openclawDetectStatus.value === 'loading') return { detected: null, title: openclawDetectError.value || '' }
-    return {
-      detected: openclawDetectStatus.value === 'ok',
-      versionText: openclawDetectStatus.value === 'ok' ? openclawVersion.value : undefined,
-      title: openclawDetectError.value || '',
-    }
-  }
+  if (!isDesktop()) return { detected: undefined, title: '在桌面工作台检查本机平台' }
+
   if (!aitoolsResult.value) return { detected: undefined }
-  const k = t === Target.ClaudeCode ? 'claude_code' : t === Target.Cursor ? 'cursor' : t === Target.Codex ? 'codex' : null
+  const k = t === Target.ClaudeCode ? 'claude_code' : t === Target.Cursor ? 'cursor' : t === Target.Codex ? 'codex' : t === Target.OpenCode ? 'opencode' : null
   if (!k) return { detected: undefined }
   const r = (aitoolsResult.value as any)[k] as { installed?: boolean; version?: string; note?: string; path?: string } | undefined
   if (!r) return { detected: undefined }
@@ -2480,61 +2349,22 @@ function targetBadgeProps(t: string): { detected: boolean | null | undefined; ve
     title: r.note || r.path || '',
   }
 }
-// 勾上 openclaw 时触发一次 openclaw 配置探测(还没跑过 / 上次失败都重试)。
-// Why: 这段 watch / onMounted 必须放在 enabledTargets 声明之后 ——  放前面会 TDZ
-//      触发 getter,读未初始化的 enabledTargets 报错。
-watch(() => enabledTargets[Target.Openclaw], (on) => {
-  if (on && openclawDetectStatus.value === 'idle') {
-    runOpenClawDetect()
-  }
-})
-// 进入向导即探一次 OpenClaw,跟 detectAITools (claude-code/cursor) 一起填卡片头徽章。
-// 不依赖 enabledTargets[Target.Openclaw] —— 即使没勾,头部也能看到"v2026.4.9 / ⚠ 未检测到"。
-onMounted(() => {
-  if (openclawDetectStatus.value === 'idle') {
-    runOpenClawDetect()
-  }
-})
-
-// 探测出 openclaw 可用模型后,把"当前默认值不在该实例可用列表里"的情况自动改成 primary。
-// 触发条件:status 变 ok + detected 非空 + 当前 targetModels.openclaw 不在 detected.id 集合内。
-// 典型场景:
-//   - 老 saved draft 留的 anthropic/claude-sonnet-4-6,但本机 openclaw 只配了 openai-codex/gpt-5.4
-//     → 用户进 Step 2 看到默认是个不存在的模型,部署后 OpenClaw 报错"unknown model"
-//   - 新用户首次进 + 本机刚装的 openclaw 没 anthropic 凭证 → 同上
-// 用户已手挑过且仍在 detected 列表里 → 不覆盖;手挑了一个不在的 → 也不覆盖(尊重用户显式选择,
-// 由部署期 OpenClaw 自己报错)。判定"用户手挑过":sourcedraft 里 target_models.openclaw
-// 字段已存在(saved.agent.target_models.openclaw 非 undefined)→ 视为已挑过。
-const openclawModelManuallyPicked = ref<boolean>(saved?.agent?.target_models?.openclaw !== undefined)
-function onOpenclawModelChanged() {
-  openclawModelManuallyPicked.value = true
-}
-watch([openclawDetectStatus, openclawDetectedModels], () => {
-  if (openclawDetectStatus.value !== 'ok') return
-  const detected = openclawDetectedModels.value
-  if (!detected || detected.length === 0) return
-  const ids = new Set(detected.map(m => m.id))
-  if (ids.has(targetModels[Target.Openclaw])) return // 当前选择在 detected 里,不动
-  if (openclawModelManuallyPicked.value && targetModels[Target.Openclaw]) {
-    // 用户显式挑过一个不在 detected 的 model(企业网关 / 自部署 / 临时未注册),不强制覆盖
-    return
-  }
-  // 默认到 primary;没标 primary 就用第一项
-  const pick = detected.find(m => m.primary) ?? detected[0]
-  targetModels[Target.Openclaw] = pick.id
-  agent.model = pick.id // 同步 agent.model(yaml schema 必填兜底)
-}, { flush: 'post' })
-
 // 探测结果回填后,把"未装"的 target 自动取消勾选 ——
 // 默认 enabledTargets 全 true 是"探测前先假设都装着",真探测出来未装就回退到未勾。
 // 用户看到 badge 警告后可以再主动勾(checkbox 不 disabled);此 watch 只防"默认勾选 +
 // 实际未装 = 静默装到孤儿目录"这种坏 case。
-watch([aitoolsResult, openclawDetectStatus], () => {
+let selectSuggestedTarget = !saved?.enabledTargets
+watch([aitoolsResult], () => {
   for (const t of targetOptions) {
     const det = targetDetectedInstalled(t)
     if (det === false && enabledTargets[t]) {
       enabledTargets[t] = false
     }
+  }
+  if (selectSuggestedTarget && aitoolsResult.value) {
+    const recommended = targetOptions.find(t => targetDetectedInstalled(t))
+    if (recommended) enabledTargets[recommended] = true
+    selectSuggestedTarget = false
   }
 }, { flush: 'post' })
 
@@ -2595,12 +2425,15 @@ watch(() => environments.map(e => e.id).join('|'), () => {
 useSourceTypeReset({
   configCenterType, importInProgress,
   envNamespaces, serviceConfigSel, serviceConfigGroup, ccHubStateByEnv,
-  scannedDS, dsScanState, dsAutoFilled, dsImportStatus, dsImportStats,
+  scannedDS, dsScanState, dsAutoFilled, dsImportStatus, dsImportStats, manualEntries,
 })
 
 // 自动保存草稿用的"上次保存时间"。Why: InitPage 不进 keep-alive,每次 mount
 // 重建,有 saved 草稿时 badge 应直接显示"✓ 自动保存"——挂载时占位 Date.now,
 // 用户改字段后由 auto-save watch 覆盖成真实时间。
+const draftSaveError = ref('')
+const lastDeploymentAt = ref(saved?.lastDeployAt)
+const lastDeploymentTargets = ref(saved?.lastDeployedTargets || [])
 const lastSavedAt = ref<number | null>(saved ? Date.now() : null)
 // autosave debounce:用户连续输入时,reactive 每个字符都触发本 watch,deep: true 会
 // 把整个 30+ key 的 reactive 树 stringify 一遍 + 写 localStorage(已撞过 quota
@@ -2763,6 +2596,7 @@ function flushPersist() {
   try {
     localStorage.setItem(STORAGE_KEY, payload)
     lastSavedAt.value = Date.now()
+    draftSaveError.value = ''
     return
   } catch (e: any) {
     pushLog('cchub', 'warn',
@@ -2789,7 +2623,10 @@ function flushPersist() {
     payload = stringify(slim)
     localStorage.setItem(STORAGE_KEY, payload)
     lastSavedAt.value = Date.now()
+    draftSaveError.value = ''
   } catch (e2: any) {
+    lastPersistVal = val
+    draftSaveError.value = '草稿保存失败，请保留当前页面并重试'
     pushLog('cchub', 'error',
       `瘦身后写入仍失败: ${String(e2?.message || e2)};你刚改的字段没存到本地`,
       {})
@@ -2800,6 +2637,8 @@ watch(
   () => ({
     wizardSchema: 2, // 见 currentStep 上方注释:标记本 draft 已是新 step 编号(欢迎页+9 配置步)
     currentStep: currentStep.value,
+    lastDeployAt: lastDeploymentAt.value,
+    lastDeployedTargets: lastDeploymentTargets.value,
     system,
     agent,
     targetModels,
@@ -2846,6 +2685,7 @@ watch(
     dsAutoFilled,
     // Step 7 每个服务识别出的数据层配置(env → service → dsKey → fields)
     scannedDS,
+    manualDataStoreEntries: manualEntries,
     dataStoreTypes,
     // Step 7 每个 (env, service) 的扫描状态(ok/empty/skipped/error)
     dsScanState,
@@ -2855,8 +2695,6 @@ watch(
     enabledObservability,
     enabledDataStores,
     enabledTargets,
-    idManualOverride: idManualOverride.value,
-    openclawInstallDir: openclawInstallDir.value,
   }),
   (val) => {
     lastPersistVal = val
@@ -2885,7 +2723,7 @@ async function clearDraft() {
   // UI 线程),结果 confirm 永远返回 false。用自建 modal。
   const ok = await confirmDialog({
     title: '清空草稿',
-    message: '确定清空当前草稿并重置向导吗?localStorage 里存的 7 步进度会全部删除,不可恢复。',
+    message: '确定清空当前草稿并重置向导吗?当前项目的填写内容会清空，已部署的机器人不受影响。',
     confirmText: '清空',
     danger: true,
   })
@@ -2900,8 +2738,10 @@ async function clearDraft() {
   // WKWebView 在 reload 的卸载阶段会把 Vue watcher 触发的任何 throw 向外报成
   // "Script error. at :0:0"(跨 origin 风格的匿名错),用户看到一脸懵。
   // 改成原地重置各 reactive 状态,把向导拉回 Step 1 —— 视觉等价,且没有 reload 副作用。
-  currentStep.value = 1
+  currentStep.value = 5
   validationErrors.value = new Set()
+  lastDeploymentAt.value = undefined
+  lastDeploymentTargets.value = []
   system.id = ''
   system.name = ''
   system.description = ''
@@ -2915,13 +2755,12 @@ async function clearDraft() {
   // 环境 / 仓库回到初始 1 条
   environments.splice(0, environments.length,
     { id: 'dev', api_domain: '', web_domain: '', frontend_entries: [], is_prod: false },
-    { id: 'prod', api_domain: '', web_domain: '', frontend_entries: [], is_prod: true },
   )
   repos.splice(0, repos.length, makeEmptyRepo())
   repoBranchesMap.value = {}
   // 配置源:type 回到默认,输入值清空(clear draft 意图 = 全 reset 输入;
   // 钥匙串里的值不动,用户需显式点 🗑 删按钮才清钥匙串)
-  configCenterType.value = 'nacos'
+  configCenterType.value = 'none'
   for (const k of Object.keys(ccCredInputs)) delete ccCredInputs[k]
   // 清掉 env↔namespace 和 service↔dataId 的全部映射(跟 ccCredInputs 同语义)
   for (const k of Object.keys(envNamespaces)) delete envNamespaces[k]
@@ -2939,6 +2778,7 @@ async function clearDraft() {
   // 清掉 CCHub 扫描缓存 + 数据层自动识别标记
   for (const k of Object.keys(ccHubStateByEnv)) delete ccHubStateByEnv[k]
   for (const k of Object.keys(dsAutoFilled)) delete dsAutoFilled[k]
+  for (const k of Object.keys(manualEntries)) delete manualEntries[k]
   for (const k of Object.keys(scannedDS)) delete scannedDS[k]
   for (const k of Object.keys(dsScanState)) delete dsScanState[k]
   for (const k of Object.keys(lokiMappingByEnv)) delete lokiMappingByEnv[k]
@@ -2951,7 +2791,9 @@ async function clearDraft() {
   // 清所有工具字段输入(跟 ccCredInputs 一致的语义)
   for (const k of Object.keys(toolInputs)) delete toolInputs[k]
   // targets:默认 4 个都开
-  for (const k of targetOptions) enabledTargets[k] = true
+  for (const k of targetOptions) enabledTargets[k] = false
+  const recommended = targetOptions.find(t => targetDetectedInstalled(t))
+  if (recommended) enabledTargets[recommended] = true
   // Analyze 块的瞬态也清(reposRoot 输入清掉;per-repo _scanning/_scanError
   // 跟着 repos 重置一起走,单独处理即可)
   reposRootInput.value = ''
@@ -2998,8 +2840,11 @@ const {
 })
 
 
-// ── Step 7: Preview / generate ──
+// ── Step 9: Preview / generate ──
 const yamlOutput = ref('')
+// 部署链路继续使用只含占位符的 yamlOutput，避免明文凭据落入草稿、
+// tshoot.json 或其它部署元数据。第 9 步按用户预期单独展示可直接部署的明文版。
+const yamlPreviewOutput = ref('')
 const validateResult = ref<{ ok: boolean; message: string } | null>(null)
 const validateLoading = ref(false)
 const copySuccess = ref(false)
@@ -3010,29 +2855,54 @@ const copySuccess = ref(false)
 //
 // 关键 1:try/catch 不能丢 —— generateYAML 在某些 saved 状态下读到尚未初始化的字段
 // 抛错会直接让 Vue setup 失败,整个 InitPage 白屏。捕获后给个空字符串兜底,
-// 用户至少能看到 Step 8 容器框,顶上显示"yaml 生成失败,详见日志"。
+// 用户至少能看到 Step 9 容器框,顶上显示"yaml 生成失败,详见日志"。
 //
 // 关键 2:**不能用 immediate: true**。watch 同步触发会发生在 setup 流程中,
 // 此时 `const` 还在按顺序声明的过程中,generateYAML / 它的 helper 调用到的某个
 // 后置 const 就会撞 TDZ("Cannot access 'X' before initialization")。
 // 改用 onMounted 兜底首次触发(跟 line 2259-2260 的 triggerStep7Init 同款),
-// 这时所有 const 都已 ready。watch 自身只处理"用户 next 进 Step 8"的非首次情况。
+// 这时所有 const 都已 ready。watch 自身只处理"用户 next 进 Step 9"的非首次情况。
 // Step 9 = yaml 预览(总步数最后一步是 Step 10 部署,所以 yaml 不再 ===  totalSteps)
 const YAML_PREVIEW_STEP = 9
-const runYAMLGen = (s: number) => {
-  // 进 Step 8 / Step 9 都触发(部署期也可能要看 yaml 内容);其它步直接 return
+let yamlGenerationRun = 0
+const runYAMLGen = async (s: number) => {
+  // 进 Step 9 / Step 10 都触发(部署期也要用 yaml 内容);其它步直接 return
   if (s !== YAML_PREVIEW_STEP && s !== totalSteps) return
+  const run = ++yamlGenerationRun
   try {
     yamlOutput.value = generateYAML()
   } catch (e) {
     console.error('[generateYAML] failed:', e)
     yamlOutput.value = `# yaml 生成失败,详见日志面板\n# error: ${String((e as any)?.message || e)}\n`
+    yamlPreviewOutput.value = yamlOutput.value
     try {
       pushLog('cchub', 'error', `yaml 生成失败: ${String((e as any)?.message || e)}`)
     } catch { /* pushLog 自身可能在 setup 期间还没初始化好,吞掉避免连锁失败 */ }
+    return
+  }
+
+  // 草稿里不持久化 secret，重启后进预览页要先从钥匙串恢复，
+  // 再生成“所见即所得”的明文配置。钥匙串暂时不可读时仍使用当前内存值，
+  // 不能因预览失败破坏已生成的脱敏部署 YAML。
+  try {
+    await hydrateInfraSecrets()
+  } catch (e) {
+    try {
+      pushLog('cchub', 'warn', `预览时系统钥匙串读取失败: ${String((e as any)?.message || e)}`)
+    } catch { /* 仅记录，继续用当前内存值生成 */ }
+  }
+  if (run !== yamlGenerationRun) return
+  try {
+    yamlPreviewOutput.value = generateYAML({ includeSecrets: true })
+  } catch (e) {
+    console.error('[generatePortableYAML] failed:', e)
+    yamlPreviewOutput.value = `# 可部署 yaml 生成失败,详见日志面板\n# error: ${String((e as any)?.message || e)}\n`
+    try {
+      pushLog('cchub', 'error', `可部署 yaml 生成失败: ${String((e as any)?.message || e)}`)
+    } catch { /* 同上 */ }
   }
 }
-// watch 用 nextTick 包一层 —— 用户从 Step 7 → Step 8 切换时,setup 可能还在执行某些后续的
+// watch 用 nextTick 包一层 —— 用户从 Step 8 → Step 9 切换时,setup 可能还在执行某些后续的
 // const 声明(影响 generateYAML 用到的 helper)。同步触发会撞已知的 TDZ;让它进 microtask
 // 队列,等当前 sync 调用栈结束、所有 const 都 ready 再跑。
 watch(currentStep, (s) => {
@@ -3160,12 +3030,20 @@ async function scanAllRepos() {
   }
 }
 
+watch(() => repos.find(repo => hasRepoSource(repo))?.name, name => {
+  if (name && !system.name.trim()) system.name = name
+})
+// Also repair invalid legacy/imported IDs. A legacy manual-override flag must not
+// leave an invisible required field blocking the wizard; valid IDs never change.
+watch(() => [system.id, system.name, repos.find(repo => hasRepoSource(repo))?.name || ''], ([id, name, repo]) => {
+  const resolved = resolveSystemID(id, repo, name)
+  if (resolved !== id) system.id = resolved
+}, { immediate: true })
+
 // ── 校验 ─────────────────────────────────────────────────────────────
 // computed:每次字段变动立刻重算 errors,模板按 key 显示红框,按钮按 size 决定 disabled。
 // validate 规则:
 //   Step 1:system.id / name(workspace_name / model 移到 Step 2)
-//   Step 2:agent.name、≥1 个 target、勾 openclaw 要 workspace_name、
-//          勾 openclaw/embedded 要对应 model
 //   Step 3:env.id + api_domain
 //   Step 4:每个 repo:name + (remote 要 url,local 要 _localPath)
 //   Step 5:所选 type 的 non-optional 字段 per env 必填(optional 的可以留空让 install.sh 问)
@@ -3179,18 +3057,18 @@ function labelForErrorKey(k: string): string {
 // 当前步骤的错误集合:computed,字段改了立即重算
 const currentStepErrors = computed<Set<string>>(() => {
   try {
-    return computeStepErrors()
+    return new Set(phaseSections(activePhase.value).flatMap(step => [...computeStepErrors(step)]))
   } catch (e) {
     // 校验内部抛错(罕见,通常是某个 reactive 字段值异常)→ 返回空集合,避免阻塞用户。
     // 错误进日志,模板上让用户能继续(自由前进总比白屏强)。
     try { pushLog('cchub', 'error', `currentStepErrors 异常: ${String((e as any)?.message || e)}`) } catch {}
-    return new Set<string>()
+    return new Set<string>(['configuration.check'])
   }
 })
 // computeStepErrors 主体在 lib/yamlValidator.ts;此处 thin shim 注入 reactive deps。
-function computeStepErrors(): Set<string> {
+function computeStepErrors(step = currentStep.value): Set<string> {
   const ctx: ValidatorContext = {
-    step: currentStep.value,
+    step,
     system, agent,
     enabledTargets, targetModels,
     anyTargetSelected: anyTargetSelected.value,
@@ -3223,7 +3101,7 @@ function computeStepErrors(): Set<string> {
 }
 
 // 能不能点"下一步":当前步无 error + 不是最后一步
-const canGoNext = computed(() => currentStepErrors.value.size === 0 && currentStep.value < totalSteps)
+const canGoNext = computed(() => currentStepErrors.value.size === 0 && activePhase.value < JOURNEY.length - 1)
 // 给按钮 title 用的"还差什么"提示
 const nextBlockedHint = computed(() => {
   if (canGoNext.value) return ''
@@ -3247,52 +3125,61 @@ function hasError(field: string): boolean {
 // 越界保护:无论怎么进入,都把 currentStep 钳在 [1, totalSteps] —— 防止异常状态(比如 saved
 // draft 损坏)让 v-if 全部 false 导致内容区白屏。
 function clampCurrentStep() {
-  if (typeof currentStep.value !== 'number' || isNaN(currentStep.value)) {
-    currentStep.value = 1
-    return
-  }
-  if (currentStep.value < 1) currentStep.value = 1
-  else if (currentStep.value > totalSteps) currentStep.value = totalSteps
+  currentStep.value = normalizeJourneyStep(currentStep.value)
 }
-
 function nextStep() {
-  try {
-    if (!canGoNext.value) return
-    if (currentStep.value < totalSteps) {
-      currentStep.value++
-    }
-    clampCurrentStep()
-  } catch (e) {
-    pushLog('cchub', 'error', `nextStep 失败: ${String((e as any)?.message || e)}`)
-    clampCurrentStep()
-  }
+  if (!canGoNext.value || deployLoading.value) return
+  goToPhase(activePhase.value + 1)
 }
-
 function prevStep() {
-  try {
-    // 回退不校验,自由退
-    if (currentStep.value > 1) currentStep.value--
-    clampCurrentStep()
-  } catch (e) {
-    pushLog('cchub', 'error', `prevStep 失败: ${String((e as any)?.message || e)}`)
-    clampCurrentStep()
+  goToPhase(activePhase.value - 1)
+}
+function goToPhase(phase: number) {
+  if (deployLoading.value || codeGraphRetrying.value || !JOURNEY[phase]) return
+  // Check every earlier section when jumping forward, including imported drafts.
+  if (phase > activePhase.value) {
+    for (let index = 0; index < phase; index++) {
+      if (phaseSections(index).some(step => computeStepErrors(step).size)) {
+        currentStep.value = phaseSections(index).find(step => computeStepErrors(step).size) === 7 ? 7 : JOURNEY[index].step
+        if (index === 2) { currentStep.value = phaseSections(index).find(step => computeStepErrors(step).size) || 6; capabilitiesOpen.value = true }
+        toast.info('请先完成本阶段标出的项目')
+        return
+      }
+    }
   }
+  capabilitiesOpen.value = false
+  currentStep.value = JOURNEY[phase].step
+  nextTick(() => document.querySelector('.init-page')?.scrollIntoView({ block: 'start' }))
+}
+function reuseRuntimeConnection(provider: 'kuboard' | 'one2all') {
+  const alreadyEnabled = enabledObservability.k8s_runtime
+  enabledObservability.k8s_runtime = true
+  for (const env of environments) {
+    const providerKey = toolKeyFor('obs', 'k8s_runtime', env.id, 'provider')
+    // An existing independent runtime connection is kept intact.
+    if (alreadyEnabled && (toolInputs[providerKey] || toolInputs[toolKeyFor('obs', 'k8s_runtime', env.id, 'url')])) continue
+    toolInputs[providerKey] = provider
+    if (provider === 'kuboard') {
+      const authKey = toolKeyFor('obs', 'k8s_runtime', env.id, 'auth_mode')
+      if (!toolInputs[authKey] && sourceCreds.kuboard?.creds?.[env.id]?.auth_mode) toolInputs[authKey] = sourceCreds.kuboard.creds[env.id].auth_mode
+    }
+    const mappings = allServiceNames.value.map(svc => provider === 'one2all' ? one2allSvcMap[svcKey(env.id, svc)] : kuboardSvcMap[svcKey(env.id, svc)]).filter(Boolean)
+    const locations = mappings.map(m => ({ namespace: m.namespace, ...(provider === 'one2all' ? { cluster: '', cluster_id: (m as One2AllSvcLocator).cluster_id } : { cluster_id: '', cluster: (m as KuboardSvcLocator).cluster }) }))
+    if (!k8sRuntimeEnvLoc[env.id]?.namespace && locations.length && locations.every(l => JSON.stringify(l) === JSON.stringify(locations[0]))) k8sRuntimeEnvLoc[env.id] = locations[0]
+  }
+  openCapability(8)
+}
+const dataConnectionCount = computed(() => enumerateDataStoreProbeTargets().length)
+const hasOptionalConnections = computed(() => activeSourceTypes.value.some(t => t !== 'none') || dataConnectionCount.value > 0 || Object.values(enabledObservability).some(Boolean))
+function capabilityStatus(section: number, count: number) {
+  const errors = computeStepErrors(section).size
+  if (errors) return `待完善 · ${errors} 项需补充或检查`
+  return count ? `已配置 · ${count} 项` : '未添加 · 可跳过'
 }
 
-function goToStep(step: number) {
-  try {
-    // 倒退随意;前进必须当前步无 error
-    if (step < currentStep.value) {
-      currentStep.value = step
-    } else if (step > currentStep.value && canGoNext.value) {
-      // 允许跳多步,但中间每步都得满足(这里只检查当前步;严谨版可以逐步 validate,先简单化)
-      currentStep.value = step
-    }
-    clampCurrentStep()
-  } catch (e) {
-    pushLog('cchub', 'error', `goToStep(${step}) 失败: ${String((e as any)?.message || e)}`)
-    clampCurrentStep()
-  }
+function openCapability(step: number) {
+  currentStep.value = step
+  capabilitiesOpen.value = true
 }
 
 // 防白屏兜底:子组件 / step 模板渲染抛错时,Vue 默认把整个 InitPage 子树清空,
@@ -3318,15 +3205,15 @@ function dismissRenderError() {
 }
 function recoverToStep1() {
   renderError.value = null
-  currentStep.value = 1
+  currentStep.value = 5
 }
 
-// ── Step 7 actions ──
+// ── Step 9 actions ──
 async function validateYAML() {
   validateLoading.value = true
   validateResult.value = null
   try {
-    const r = await bridgeValidate(yamlOutput.value)
+    const r = await bridgeValidate(yamlPreviewOutput.value)
     validateResult.value = {
       ok: true,
       message: `验证通过：${r.name || r.system}（${r.envs} 环境 / ${r.repos} 仓库）`,
@@ -3339,7 +3226,7 @@ async function validateYAML() {
 }
 
 async function copyYAML() {
-  await copyToClipboard(yamlOutput.value)
+  await copyToClipboard(yamlPreviewOutput.value)
   copySuccess.value = true
   setTimeout(() => (copySuccess.value = false), 2000)
 }
@@ -3380,7 +3267,6 @@ async function downloadYAML() {
 }
 
 // ── Step 10 一键部署 ──
-// runOneClickDeploy / buildOpenclawCreds / installEnvVarName / deploySummary /
 // targetDeployPaths / targetDeployPathHints 全收口在 lib/useDeployFlow.ts。
 // 实例化点必须在 yamlOutput / resolveCloneDest / resolvedReposRoot 之后(它们在 useRepoScan /
 // useReposRoot 暴露,本行之前已 ready)。
@@ -3395,11 +3281,14 @@ const {
   codeGraphRetryState,
   targetDeployPaths,
   targetDeployPathHints,
+  targetStates, deployComplete,
   runOneClickDeploy,
   retryCodeGraph,
 } = useDeployFlow({
+  onComplete: targets => { lastDeploymentAt.value = Date.now(); lastDeploymentTargets.value = targets },
   agent, system, targetModels,
   enabledTargets, targetOptions, targetLabels, homeDir,
+  openCodeConfigRoot: computed(() => aitoolsResult.value?.opencode?.config_root || ''),
   activeSourceTypes, sourceInstances: activeSourceInstances, sourceCreds, environments,
   enabledDataStores, scannedDS, dataStoreTypes,
   enabledObservability, toolInputs, OBS_TOOL_SPECS, DS_TOOL_SPECS,
@@ -3472,6 +3361,13 @@ function updateServiceTopologyOverrides(value: ServiceTopologyState['overrides']
 
 async function runOneClickDeployExclusively() {
   if (serviceTopologyLoading.value) return
+  const invalid = [0, 1, 2].find(phase => phaseSections(phase).some(step => computeStepErrors(step).size))
+  if (invalid !== undefined) {
+    goToPhase(invalid)
+    toast.error('请完成标出的配置和连接检查后再创建')
+    return
+  }
+  await runYAMLGen(9)
   await runOneClickDeploy()
 }
 
@@ -3530,7 +3426,7 @@ provide(WizardStoreKey, {
       <div class="render-error-msg">{{ renderError.message }}</div>
       <pre v-if="renderError.stack" class="render-error-stack">{{ renderError.stack }}</pre>
       <div class="render-error-actions">
-        <button type="button" class="btn" @click="recoverToStep1">↺ 回到 Step 1</button>
+        <button type="button" class="btn" @click="recoverToStep1">回到选择项目</button>
         <button type="button" class="btn" @click="dismissRenderError">关闭(我知道了)</button>
       </div>
     </div>
@@ -3540,16 +3436,18 @@ provide(WizardStoreKey, {
     <div class="card lg init-header-card">
       <div class="page-header">
         <div>
-          <h1>初始化向导</h1>
-          <p class="subtitle">通过可视化表单生成 troubleshooter.yaml 配置文件(草稿会自动保存到本地)</p>
+          <h1>创建排障机器人</h1>
+          <p class="subtitle">从代码仓库开始，按需连接数据和日志，创建后即可接入故障闭环。</p>
         </div>
         <div class="header-actions">
           <!-- 自动保存徽章:让用户感知到"改动一直在存"(类似 Notion/Google Docs 的风格) -->
-          <span class="autosave-badge" :class="{ idle: lastSavedAt === null }" :title="lastSavedAt === null ? '尚未触发自动保存;做任何改动后会自动保存到浏览器 localStorage' : '草稿存在浏览器 localStorage,切换页面不丢;清空草稿按钮可重置'">
+          <span class="autosave-badge" :class="{ idle: lastSavedAt === null }" :title="draftSaveError || '填写内容自动保存在本机，下次打开可以继续'">
             <span class="autosave-dot" />
-            {{ lastSavedAt === null ? '草稿空' : `✓ 自动保存 · ${savedAgoLabel}` }}
+            {{ draftSaveError || (lastSavedAt === null ? '填写后自动保存' : `✓ 已保存 · ${savedAgoLabel}`) }}
           </span>
-          <button class="btn link" @click="clearDraft">清空草稿</button>
+          <button v-if="draftSaveError" class="btn link" @click="flushPersist">重试保存</button>
+          <button class="btn link" :disabled="deployLoading" @click="openImportDialog">导入已有配置</button>
+          <button class="btn link" :disabled="deployLoading" @click="clearDraft">重新开始</button>
         </div>
       </div>
 
@@ -3589,44 +3487,16 @@ provide(WizardStoreKey, {
       </div>
     </div>
 
-      <!-- Guidance info box(嵌在 header 卡里,info-box 的浅蓝边框 + 卡片白底叠出层级) -->
-      <div class="info-box init-header-info">
-        <p><strong>本向导帮助你快速生成 troubleshooter.yaml 配置文件</strong></p>
-        <p>troubleshooter.yaml 描述你的系统架构(仓库、环境、配置中心、基础组件),tshoot 据此生成并部署定制化的 AI 排障机器人</p>
-        <p>完成后可「验证」确保格式正确,然后「下载」到本地</p>
-      </div>
-
-      <!-- Step indicator(8 步骤进度条,跟标题 + info-box 同 card) -->
-      <div class="step-indicator init-header-progress">
-        <div
-          v-for="s in totalSteps"
-          :key="s"
-          class="step-dot-group"
-          :class="{ clickable: s < currentStep }"
-          @click="goToStep(s)"
-        >
-          <div class="step-dot" :class="{ active: s === currentStep, done: s < currentStep }">
-            {{ s }}
-          </div>
-          <div class="step-label" :class="{ active: s === currentStep }">{{ stepTitles[s - 1] }}</div>
-          <div v-if="s < totalSteps" class="step-line" :class="{ done: s < currentStep }" />
-        </div>
-      </div>
+      <nav class="journey-progress" aria-label="创建进度">
+        <button v-for="(phase, index) in JOURNEY" :key="phase.step" type="button"
+          :class="{ active: index === activePhase, done: index < activePhase }"
+          :aria-current="index === activePhase ? 'step' : undefined"
+          :disabled="deployLoading || codeGraphRetrying" @click="goToPhase(index)">
+          <span class="journey-number">{{ index + 1 }}</span>
+          <span><strong>{{ phase.title }}</strong><small>{{ phase.description }}</small></span>
+        </button>
+      </nav>
     </div>
-
-    <!-- Step 1: 欢迎页 - 选导入 yaml 还是从零开始 -->
-    <WelcomeStep
-      v-if="currentStep === 1"
-      @start="goToStep(2)"
-      @import="openImportDialog"
-    />
-
-    <SystemBasicInfoStep
-      v-if="currentStep === 2"
-      v-model:id-manual-override="idManualOverride"
-      :system="system"
-      :has-error="hasError"
-    />
 
     <!-- Step 2 -->
     <BotIdentityStep
@@ -3645,22 +3515,12 @@ provide(WizardStoreKey, {
       :target-deploy-path-hints="targetDeployPathHints"
       :any-target-selected="anyTargetSelected"
       :target-models="targetModels"
-      :openclaw-detect-status="openclawDetectStatus"
-      :openclaw-detect-error="openclawDetectError"
-      :openclaw-detected-models="openclawDetectedModels"
-      :openclaw-resolved-dir="openclawResolvedDir"
-      :openclaw-version="openclawVersion"
-      :openclaw-auth-providers="openclawAuthProviders"
-      :openclaw-install-dir="openclawInstallDir"
       :aitools-refreshing="aitoolsRefreshing"
       @refresh-a-i-tools="manualRefreshAITools"
-      @pick-open-claw-install-dir="pickOpenClawInstallDir"
-      @run-open-claw-detect="runOpenClawDetect"
-      @model-change="onModelChange"
     />
 
     <EnvListStep
-      v-if="currentStep === 4"
+      v-if="currentStep === 3"
       :environments="environments"
       :url-probe-results="urlProbeResults"
       :url-probe-key="urlProbeKey"
@@ -3670,6 +3530,15 @@ provide(WizardStoreKey, {
       @add="addEnv"
     />
 
+    <section v-if="currentStep === 3" class="card lg">
+      <h2>确认环境使用的代码分支</h2>
+      <p class="help-text">扫描结果作为建议；新增或修改环境后，请确认对应分支。</p>
+      <div v-for="repo in repos" :key="repo.name">
+        <h3>{{ repo.name }}</h3>
+        <RepoEnvBranches :repo="repo" :environments="environments" :repo-branches-map="repoBranchesMap"
+          :branch-has-options="branchHasOptions" :branch-options-for="branchOptionsFor" />
+      </div>
+    </section>
     <!-- Step 4 -->
     <div v-if="currentStep === 5" class="card lg">
       <h2>代码仓库</h2>
@@ -3677,6 +3546,7 @@ provide(WizardStoreKey, {
         填业务的代码仓库:可以选本地已 clone 的目录,也可以填远程 URL 让 Studio 帮你拉下来。扫描后会自动识别技术栈、服务名和分支。
       </p>
 
+      <details class="wizard-advanced"><summary>仓库下载位置</summary>
       <GlobalReposRootBlock
         :repos-root-input="reposRootInput"
         :resolved-repos-root="resolvedReposRoot"
@@ -3685,6 +3555,7 @@ provide(WizardStoreKey, {
         @pick="pickReposRoot"
         @save="saveAsGlobalDefault"
       />
+      </details>
 
       <div class="repo-batch-toolbar">
         <div>
@@ -3746,6 +3617,7 @@ provide(WizardStoreKey, {
         @add-service-name="(r, idx) => addServiceName(r, idx)"
       />
       <button class="btn" @click="addRepo">+ 添加仓库</button>
+      <details class="wizard-advanced"><summary>高级设置：前端关联与代码分析</summary>
       <FrontendRepoBindings :environments="environments" :repos="repos" />
       <CodeIntelligenceToggle v-model="codeIntelligence.enabled" />
       <ServiceTopologyPanel
@@ -3759,11 +3631,42 @@ provide(WizardStoreKey, {
         @update:overrides="updateServiceTopologyOverrides"
         @refresh="refreshServiceTopology"
       />
+      </details>
     </div>
 
+    <SystemBasicInfoStep v-if="currentStep === 5"
+      :system="system" :has-error="hasError" />
+
+    <section v-if="activePhase === 2" class="card lg capability-picker">
+      <h2>连接排障所需的数据</h2>
+      <p class="help-text">代码分析已包含。按需添加连接，获得配置、数据和运行状态查询能力，也可以直接继续创建。</p>
+      <div class="capability-grid">
+        <button type="button" :class="{ selected: capabilitiesOpen && currentStep === 6 }" @click="openCapability(6)">
+          <strong>读取运行配置</strong><span>连接配置中心，定位配置差异</span>
+          <small>{{ capabilityStatus(6, activeSourceInstances.filter(s => s.type !== 'none').length) }}</small>
+        </button>
+        <button type="button" :class="{ selected: capabilitiesOpen && currentStep === 7 }" @click="openCapability(7)">
+          <strong>数据库与缓存</strong><span>自动识别或直接添加连接</span>
+          <small>{{ capabilityStatus(7, dataConnectionCount) }}</small>
+        </button>
+        <button type="button" :class="{ selected: capabilitiesOpen && currentStep === 8 }" @click="openCapability(8)">
+          <strong>查看日志与服务状态</strong><span>连接日志、链路和运行平台</span>
+          <small>{{ capabilityStatus(8, Object.values(enabledObservability).filter(Boolean).length) }}</small>
+        </button>
+      </div>
+      <div v-if="currentStepErrors.size" class="capability-issues">
+        <span>已启用的连接还有待完成项目：</span>
+        <button v-for="section in [6, 7, 8].filter(s => computeStepErrors(s).size)" :key="section" class="btn link" @click="openCapability(section)">
+          {{ section === 6 ? '配置源' : section === 7 ? '业务数据' : '日志与服务状态' }} · {{ computeStepErrors(section).size }} 项
+        </button>
+      </div>
+      <button v-if="capabilitiesOpen" class="btn link" @click="capabilitiesOpen = false">收起连接设置</button>
+    </section>
+    <div v-show="capabilitiesOpen">
     <!-- Step 5 -->
     <ConfigSourceStep
       v-if="currentStep === 6"
+      @use-runtime-connection="reuseRuntimeConnection"
       :config-type-options="configTypeOptions"
       :config-type-descriptions="configTypeDescriptions"
       :enabled-source-types="enabledSourceTypes"
@@ -3849,6 +3752,11 @@ provide(WizardStoreKey, {
 
     <DataStoreStep
       v-if="currentStep === DATA_STORE_STEP"
+      :store-specs="DS_TOOL_SPECS"
+      :data-store-type="dataStoreType"
+      @add-connection="addDatabaseConnection"
+      @open-config="openCapability(6)"
+      @dismiss-scan-error="(env, svc) => delete dsScanState[scanStateKey(env, svc)]"
       :ds-import-status="dsImportStatus"
       :ds-import-stats="dsImportStats"
       :can-auto-import-d-s="canAutoImportDS"
@@ -3869,9 +3777,11 @@ provide(WizardStoreKey, {
       @probe-d-s="(envID, svc, dsKey) => probeOneDS(envID, svc, dsKey)"
     />
 
+    </div>
+
     <YamlPreviewStep
       v-if="currentStep === 9"
-      :yaml-output="yamlOutput"
+      :yaml-output="yamlPreviewOutput"
       :validate-loading="validateLoading"
       :validate-result="validateResult"
       :copy-success="copySuccess"
@@ -3880,14 +3790,17 @@ provide(WizardStoreKey, {
       :target-labels="targetLabels"
       :any-target-selected="anyTargetSelected"
       :resource-coverage="resourceCoverage"
+      :system-name="system.name" :environment-names="environments.map(env => env.id)" :repo-names="repos.map(repo => repo.name)"
       @validate="validateYAML"
       @copy="copyYAML"
       @download="downloadYAML"
     />
 
     <OneClickDeployStep
-      v-if="currentStep === 10"
+      v-if="currentStep === 9"
       :deploy-summary="deploySummary"
+      :target-states="targetStates" :deploy-complete="deployComplete"
+      @open-bugs="router.push('/bugs')" @open-incidents="router.push('/incidents')"
       :deploy-loading="deployLoading"
       :deploy-progress-line="deployProgressLine"
       :deploy-error="deployError"
@@ -3901,17 +3814,18 @@ provide(WizardStoreKey, {
 
     <!-- Navigation buttons - 欢迎页(Step 1)隐藏,因为它有两个大选择按钮做导航,
          底部再加"下一步"会跟那两个 CTA 视觉混淆。-->
-    <div v-if="currentStep > 1" class="nav-buttons">
-      <button class="btn" @click="prevStep">上一步</button>
-      <div v-if="currentStep < totalSteps" class="next-wrap">
+    <div class="nav-buttons journey-footer">
+      <button v-if="activePhase > 0" class="btn" :disabled="deployLoading || codeGraphRetrying" @click="prevStep">上一步</button>
+      <span class="help-text">{{ activePhase + 1 }} / 4 · {{ JOURNEY[activePhase].title }}</span>
+      <div v-if="activePhase < 3" class="next-wrap">
         <!-- 未过校验时在按钮上方显示"还差什么",用户一眼看出要填啥 -->
         <div v-if="!canGoNext" class="next-block-hint">{{ nextBlockedHint }}</div>
         <button
           class="btn primary"
-          :disabled="!canGoNext"
+          :disabled="!canGoNext || deployLoading"
           :title="nextBlockedHint || ''"
           @click="nextStep"
-        >下一步</button>
+        >{{ activePhase === 2 ? (hasOptionalConnections ? '查看摘要' : '暂不连接，继续创建') : `继续：${JOURNEY[activePhase + 1].title}` }}</button>
       </div>
     </div>
   </div>
@@ -5046,16 +4960,7 @@ select.cc-input {
   display: grid; grid-template-columns: 1fr; gap: 8px;
 }
 
-/* OpenClaw 探测失败/警告块 */
-.openclaw-warn {
-  padding: 10px 12px;
-  background: #fffbeb; border: 1px solid #fde68a; border-left: 3px solid #f59e0b;
-  border-radius: 6px; font-size: 12px; color: #78350f; line-height: 1.5;
-}
-.openclaw-warn code { background: #fef3c7; padding: 1px 4px; border-radius: 3px; font-size: 11px; }
-.openclaw-warn-actions {
-  display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap;
-}
+
 
 /* Step 7 顶部只读展示本次部署目标(不给改,改回 Step 1) */
 .target-readonly-row {
@@ -5735,4 +5640,48 @@ select.cc-input {
   font-size: 12px;
   color: #64748b;
 }
+</style>
+
+<style>
+/* Scoped by the page root because configuration sections are child components. */
+.init-page { max-width: 1240px; margin-inline: auto; padding-bottom: 20px; font-size: 14px; color: #334155; }
+.init-page .card.lg { padding: 22px 24px; border-radius: 14px; box-shadow: none; margin-bottom: 16px; }
+.init-page h1 { font-size: 24px; line-height: 1.4; }
+.init-page h2 { font-size: 18px; line-height: 1.5; margin: 0 0 8px; }
+.init-page h3 { font-size: 15px; }
+.init-page .subtitle, .init-page .help-text, .init-page input, .init-page select, .init-page textarea, .init-page .btn { font-size: 14px; line-height: 1.5; }
+.init-page .help-text { color: #64748b; margin-bottom: 14px; }
+.init-page input:not([type=checkbox]):not([type=radio]), .init-page select { min-height: 38px; padding: 8px 10px; }
+.init-page .btn { min-height: 38px; padding: 8px 16px; display: inline-flex; align-items: center; justify-content: center; }
+.init-page button:focus-visible, .init-page summary:focus-visible { outline: 2px solid #2563eb; outline-offset: 3px; }
+.journey-progress { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 8px; margin-top: 24px; }
+.journey-progress button { display: flex; align-items: center; gap: 10px; padding: 12px; border: 1px solid transparent; border-radius: 10px; background: #f8fafc; color: #64748b; text-align: left; cursor: pointer; }
+.journey-progress button.active { color: #1d4ed8; border-color: #bfdbfe; background: #eff6ff; }
+.journey-number { display: grid; place-items: center; flex: 0 0 28px; height: 28px; background: #e2e8f0; border-radius: 50%; font-weight: 600; }
+.journey-progress .active .journey-number { background: #2563eb; color: white; }
+.journey-progress strong { display: block; font-size: 14px; }
+.journey-progress small { display: block; margin-top: 4px; font-size: 12px; line-height: 1.5; }
+.init-page .wizard-advanced { margin: 14px 0 0; padding: 12px 0; border-top: 1px solid #e2e8f0; }
+.init-page .wizard-advanced summary { cursor: pointer; font-size: 13px; color: #64748b; }
+.init-page .wizard-advanced[open] summary { margin-bottom: 14px; }
+.capability-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; margin: 20px 0 4px; }
+.capability-grid button { display: flex; flex-direction: column; gap: 10px; text-align: left; background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 18px; cursor: pointer; color: #334155; }
+.capability-grid button:hover, .capability-grid button.selected { border-color: #60a5fa; background: #eff6ff; }
+.capability-grid strong { font-size: 15px; }
+.capability-grid span { font-size: 13px; line-height: 1.6; }
+.capability-grid small { font-size: 12px; color: #64748b; }
+.wizard-summary { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; margin: 20px 0; }
+.wizard-summary div { background: #f8fafc; padding: 14px; border-radius: 8px; min-width: 0; }
+.wizard-summary dt { font-size: 12px; color: #64748b; margin-bottom: 8px; }
+.wizard-summary dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.init-page .journey-footer { position: sticky; bottom: 0; z-index: 5; background: #ffffffed; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 18px; gap: 12px; backdrop-filter: blur(8px); }
+.init-page .journey-footer .help-text { margin: 0; }
+.init-page .journey-footer .next-wrap { margin-left: auto; }
+.init-page .target-grid { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+.init-page .target-card { padding: 16px; }
+.init-page .target-title { font-size: 15px; }
+.init-page .target-hint { font-size: 13px; }
+.init-page .autosave-badge { max-width: 320px; white-space: normal; }
+@media (max-width: 900px) { .journey-progress { grid-template-columns: repeat(2,minmax(0,1fr)); } .capability-grid, .wizard-summary { grid-template-columns: 1fr; } }
+@media (max-width: 600px) { .init-page .target-grid { grid-template-columns: 1fr; } .journey-progress small { display:none; } .init-page .card.lg { padding: 16px; } }
 </style>

@@ -13,7 +13,6 @@ import (
 )
 
 // writeTshootMeta 写产物根下的 tshoot.json 锚点，discover 靠这个文件识别机器人。
-// dir 是"产物根"——对 openclaw 是 <OutputDir>/templates/workspace-template/，
 // 对 claude-code/cursor/embedded 是各自的输出目录。
 //
 // 字段取自 g.Ctx（system.id / name）+ g.TshootVersion + g.TroubleshooterYAMLSource。
@@ -81,7 +80,6 @@ func (g *Generator) writeIDEAgentMetas(dir, target string) error {
 func internalAgentsForMeta(ctx *Context) []discover.InternalAgent {
 	return []discover.InternalAgent{
 		{ID: agentIDForRole(ctx, AgentRoleTroubleshooter), Role: string(AgentRoleTroubleshooter)},
-		{ID: agentIDForRole(ctx, AgentRoleValidator), Role: string(AgentRoleValidator)},
 		{ID: agentIDForRole(ctx, AgentRoleFixer), Role: string(AgentRoleFixer)},
 	}
 }

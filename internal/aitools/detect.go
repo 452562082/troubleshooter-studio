@@ -1,5 +1,4 @@
 // Package aitools 探测本机是否装了 Claude Code / Cursor IDE,用于向导 Step 2 target
-// 卡片的"已安装 ✓ / 未安装 ⚠"状态标。跟 OpenClaw 不一样:这俩 target 不从它们的
 // 配置读模型(claude-code 靠 --model CLI flag,cursor 由自家 subscription 管),
 // 所以这里只做"装了没 + 什么版本"的信息展示,不抓 model 列表。
 //
@@ -26,8 +25,9 @@ import (
 
 // Result 单一工具的探测结果。Installed=false 时其它字段可能空。
 type Result struct {
-	Installed bool   `json:"installed"`
-	Version   string `json:"version,omitempty"`
+	ConfigRoot string `json:"config_root,omitempty"`
+	Installed  bool   `json:"installed"`
+	Version    string `json:"version,omitempty"`
 	// Path 能定位到的"权威位置":
 	//   Claude Code → claude 二进制绝对路径
 	//   Claude Desktop → Claude.app 绝对路径

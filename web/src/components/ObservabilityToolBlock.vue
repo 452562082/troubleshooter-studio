@@ -26,6 +26,7 @@ interface ToolSpec {
 }
 
 defineProps<{
+  connectionReuseLabel?: string
   envID: string
   spec: ToolSpec
   /** 'via_grafana' / 'direct'(只对 loki/prometheus/jaeger/tempo/elk 有意义,其它工具固定 direct) */
@@ -76,10 +77,10 @@ const emit = defineEmits<{
          注:之前误用 `!accessToggleable || accessMode === 'direct'` — accessToggleable 锁成 false
          后 `!accessToggleable=true` 永远成立,via_grafana 的 loki/prometheus/tempo 也会让用户白填
          URL 字段。改成只看 accessMode 一个条件,跟 useObsAccessMode 的锁死规则对齐。 -->
-    <div
-      v-if="accessMode === 'direct'"
-      class="ds-item-fields"
-    >
+    <details v-if="accessMode === 'direct'" :open="!connectionReuseLabel" class="connection-credentials">
+      <summary>{{ connectionReuseLabel ? connectionReuseLabel + ' · 无需重复填写' : '连接信息' }}</summary>
+      <p v-if="connectionReuseLabel">保留空白即可使用已有连接。需要独立连接时，可在此覆盖。</p>
+      <div class="ds-item-fields">
       <CredentialField
         v-for="f in spec.fields"
         :key="f.key"
@@ -93,13 +94,17 @@ const emit = defineEmits<{
         @toggle-reveal="emit('toggleReveal', toolKeyFor('obs', spec.key, envID, f.key))"
         @clear="emit('clearInput', toolKeyFor('obs', spec.key, envID, f.key))"
       />
-    </div>
+      </div>
+    </details>
     <!-- 工具特定的尾部内容:k8s_runtime / via_grafana ds 选择器 / loki 标签映射 -->
     <slot />
   </div>
 </template>
 
 <style scoped>
+.connection-credentials { margin-top:12px; }
+.connection-credentials summary { cursor:pointer; color:#475569; font-size:13px; min-height:36px; }
+.connection-credentials p { color:#64748b; font-size:12px; }
 .access-mode-select {
   min-width: 190px;
 }

@@ -140,6 +140,6 @@ agent 看到 `diff_risks` 对应 hint 已经说明"为什么危险 / 用户怎�
 - 凭证敏感:
   - **nacos** 凭证从 `<workspace>/scripts/.env` 读(`CC_ADDR_<ENV>` / `CC_USER_<ENV>` / `CC_PASS_<ENV>`)
     — LLM 调脚本前必须先 `source scripts/.env`,否则 nacos history 这一路 silent 跳过
-  - **apollo / k8s** 凭证从 `~/.openclaw/<agent-id>-creds.json` 读(脚本按 --agent-id --env 自取)
+  - **apollo / k8s** 凭证从 `~/.tshoot/<agent-id>-creds.json` 读(脚本按 --agent-id --env 自取)
   - 脚本不会把 token 打进输出
 - 时间统一 UTC ISO 格式,避免不同来源时区混乱

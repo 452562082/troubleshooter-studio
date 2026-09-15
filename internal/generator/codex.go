@@ -237,15 +237,7 @@ func buildCodexAgentDescription(ctx *Context, _ int, role AgentRole) string {
 // 系统给不同的入口 skill 名)。
 func buildCodexDeveloperInstructions(_ string, ctx *Context, agentName string, role AgentRole) string {
 	gate := codexProjectOwnershipGate(ctx, agentName)
-	if role == AgentRoleValidator {
-		return gate + fmt.Sprintf(`你是 **%s 验证机器人**,从 codex 主 chat spawn 出来做 **验证 / 主动复现 / 修复后复查**,只输出验证报告,不做原因定位。
 
-第一步:Read `+"`~/.codex/skills/%s/bug-verifier/SKILL.md`"+` —— 那里有复现、回归、证据收集、状态枚举和验证报告结构。信息不足时列阻塞项,不要猜测。
-
-边界:不读取业务源码定位函数/文件行号/补丁点;只收集可复查证据和交接摘要,代码分析与原因判断交给排障 Agent。
-
-`, ctx.System.Name, agentName)
-	}
 	if role == AgentRoleFixer {
 		return gate + fmt.Sprintf(`你是 **%s 修复机器人**,从 codex 主 chat spawn 出来做 Bug 修复落地。只有用户明确要求修复时才执行。
 
@@ -280,7 +272,6 @@ func codexSubSkillsForRole(subSkills []string, role AgentRole) []string {
 // 真正在排障时再 read 这份 SKILL.md 把规则装进 thread context。
 //
 // 内容覆盖:运行环境 / 行为规则 / 排障入口路由 / 输出形态 / 子 skill 列表 / 故障快报模板。
-// 跟 OpenClaw AGENTS.md 同款信息但 codex 视角(无 OpenClaw 命令 / 进度条说法保留)。
 func buildCodexRootSkillMD(wsRoot string, ctx *Context, agentName string) (string, error) {
 	subSkills, err := listCodexSubSkills(wsRoot)
 	if err != nil {

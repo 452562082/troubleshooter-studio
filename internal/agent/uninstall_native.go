@@ -3,8 +3,6 @@
 // 职责:从 ~/.claude/{agents,skills,scripts}/(或 ~/.cursor/...)摘掉已装机器人,
 // 同时清掉中间包 ~/.tshoot/<target>/<id>/。两端都得清:中间包不清,BotsPage 仍能扫到。
 //
-// 跟 uninstall_native_openclaw.go 的区别:
-//   - openclaw 装在 ~/.openclaw/workspace/<name>/ + ~/.openclaw/openclaw.json agents.list
 //   - claude-code / cursor 装在用户级 ~/.claude|.cursor/{agents,skills,scripts}/<name>
 //   - 共同:都需要清中间包 ~/.tshoot/<target>/<system_id>/
 package agent
@@ -291,6 +289,13 @@ func deriveInstallRoot(installedDir string, t IDETarget, home string) string {
 // 也命中,迁移期顺手清)。返回真删了哪些 keys 给 UI 展示。
 func cleanIDEMCPServers(t IDETarget, home, root, systemID string, logf func(format string, a ...any)) []string {
 	prefix := systemID + "-"
+	if t == TargetOpenCode {
+		removed, err := mergeOpenCodeMCP(t.MCPConfigPath(home), prefix, nil, false)
+		if err != nil {
+			logf("[warn] OpenCode MCP 清理失败: %v", err)
+		}
+		return removed
+	}
 	if t == TargetCodex {
 		codexBin, err := exec.LookPath("codex")
 		if err != nil {

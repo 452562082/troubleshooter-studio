@@ -3,38 +3,8 @@ package main
 import (
 	"context"
 	"net/http"
-	"os"
-	"path/filepath"
 	"testing"
-	"time"
-
-	"github.com/xiaolong/troubleshooter-studio/internal/browserverify"
-	"github.com/xiaolong/troubleshooter-studio/internal/bughub"
 )
-
-func TestResolveBundledBrowserRuntimeDirFromAppResources(t *testing.T) {
-	app := t.TempDir()
-	executable := filepath.Join(app, "TroubleshooterStudio.app", "Contents", "MacOS", "TroubleshooterStudio")
-	runtimeRoot := filepath.Join(app, "TroubleshooterStudio.app", "Contents", "Resources", "browser-runtime", browserverify.BrowserRuntimeVersion)
-	if err := os.MkdirAll(runtimeRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	previous := desktopExecutablePath
-	desktopExecutablePath = func() (string, error) { return executable, nil }
-	t.Cleanup(func() { desktopExecutablePath = previous })
-	if got := resolveBundledBrowserRuntimeDir(); got != runtimeRoot {
-		t.Fatalf("runtime dir = %q, want %q", got, runtimeRoot)
-	}
-}
-
-func TestResolveBundledBrowserRuntimeDirFallsBackWhenBundleIsMissing(t *testing.T) {
-	previous := desktopExecutablePath
-	desktopExecutablePath = func() (string, error) { return filepath.Join(t.TempDir(), "tshoot-desktop"), nil }
-	t.Cleanup(func() { desktopExecutablePath = previous })
-	if got := resolveBundledBrowserRuntimeDir(); got != "" {
-		t.Fatalf("runtime dir = %q, want empty fallback", got)
-	}
-}
 
 func TestNewDesktopOptionsRunsInBackgroundOnClose(t *testing.T) {
 	appState := &App{workflowRoot: t.TempDir()}
@@ -82,14 +52,9 @@ func TestStartupStartsTrayAfterContextIsSet(t *testing.T) {
 		startDesktopBugPoller = prevPoller
 	})
 
-	prepared := make(chan struct{})
 	appState := &App{
 		workflowRoot: t.TempDir(),
 		workflowEmit: func(string, any) {},
-		workflowBrowserPrepare: func(context.Context, func(bughub.BrowserProgress)) error {
-			close(prepared)
-			return nil
-		},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); _ = appState.closeIncidentWorkflow() })
@@ -104,9 +69,5 @@ func TestStartupStartsTrayAfterContextIsSet(t *testing.T) {
 	if !pollerCalled {
 		t.Fatal("startup did not start bug poller")
 	}
-	select {
-	case <-prepared:
-	case <-time.After(time.Second):
-		t.Fatal("startup did not prepare the browser runtime outside a Case")
-	}
+
 }

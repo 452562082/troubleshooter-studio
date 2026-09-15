@@ -1,5 +1,3 @@
-// install_prompts.go —— 从 troubleshooter.yaml 推导 openclaw 部署需要哪些凭证字段。
-//
 // 多源 schema:遍历 cfg.Infrastructure.ConfigCenters,每个源独立产 prompt 集合,
 // 命名空间通过 envVar(prefix, source.id, env) 区隔。详见 install_naming.go。
 //
@@ -137,10 +135,6 @@ func DerivePrompts(cfg *config.SystemConfig) []deploy.Prompt {
 			add("ELK_ES_URL_"+up, "Elasticsearch URL ("+e.ID+") [http://es-xxx:9200]: ", false)
 		}
 	}
-
-	// ── 模型 ──
-	defaultModel := cfg.Agent.ModelForTarget("openclaw")
-	add("MODEL", "Agent 模型 ["+defaultModel+"]: ", false)
 
 	// ── messaging:lark ──
 	// LARK_DOMAIN(可选):留空 → lark-mcp 默认 https://open.feishu.cn(国内飞书);

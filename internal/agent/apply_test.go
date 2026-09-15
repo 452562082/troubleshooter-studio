@@ -30,7 +30,7 @@ func projectRoot(t *testing.T) string {
 	return filepath.Clean(filepath.Join(wd, "..", ".."))
 }
 
-// genExisting 在 dir 下 gen 出一份完整的 openclaw 产物,给 Apply 测试当"已装 agent"。
+// genExisting 在 dir 下 gen 出一份完整的 Claude Code 产物,给 Apply 测试当"已装 agent"。
 // 返回 agent.Path(即 workspace-template 目录,含 tshoot.json)。
 func genExisting(t *testing.T, dir string) (string, []byte) {
 	t.Helper()
@@ -46,13 +46,18 @@ func genExisting(t *testing.T, dir string) (string, []byte) {
 	g := generator.New(cfg, tr, dir)
 	g.TshootVersion = "test"
 	g.TroubleshooterYAMLSource = yamlBytes
-	if err := g.Generate(); err != nil {
+	if err := g.GenerateClaudeCode(); err != nil {
 		t.Fatal(err)
 	}
-	return filepath.Join(dir, "templates", "workspace-template"), yamlBytes
+	work := filepath.Join(os.Getenv("HOME"), ".tshoot", "claude-code", cfg.System.ID)
+	if err := copyDirAll(dir+"-claude-code", work); err != nil {
+		t.Fatal(err)
+	}
+	return work, yamlBytes
 }
 
 func TestWriteTSFMetaIncludesInternalAgentContract(t *testing.T) {
+	isolateApplyInstall(t)
 	dir := t.TempDir()
 	cfg := &config.SystemConfig{}
 	cfg.System.ID = "base"
@@ -74,10 +79,10 @@ func TestWriteTSFMetaIncludesInternalAgentContract(t *testing.T) {
 	if meta.AgentID != "base-troubleshooter" || meta.Role != discover.RoleTroubleshooter {
 		t.Fatalf("meta missing primary agent fields: %+v", meta)
 	}
-	if len(meta.InternalAgents) != 3 {
+	if len(meta.InternalAgents) != 2 {
 		t.Fatalf("internal agents = %+v", meta.InternalAgents)
 	}
-	if meta.InternalAgents[1].ID != "base-validator" || meta.InternalAgents[2].ID != "base-fixer" {
+	if meta.InternalAgents[1].ID != "base-fixer" {
 		t.Fatalf("internal agents wrong: %+v", meta.InternalAgents)
 	}
 	if meta.SchemaVersion != 2 || len(meta.ProjectRepositories) != 1 {
@@ -89,6 +94,7 @@ func TestWriteTSFMetaIncludesInternalAgentContract(t *testing.T) {
 }
 
 func TestApplyDryRun_NoDiskWrites(t *testing.T) {
+	isolateApplyInstall(t)
 	// 场景:agent 已装,用户改了 SOUL.md,用原 yaml 跑 Apply --dry-run,
 	// 不应写盘(用户手改先保留),也不更新 tshoot.json。
 	// 注:整文件 preserve 机制已删 —— 真 apply 会按模板覆盖 SOUL.md,
@@ -96,14 +102,14 @@ func TestApplyDryRun_NoDiskWrites(t *testing.T) {
 	stage := t.TempDir()
 	agentPath, yamlBytes := genExisting(t, stage)
 
-	soulPath := filepath.Join(agentPath, "SOUL.md")
+	soulPath := filepath.Join(agentPath, "agents/shop-troubleshooter.md")
 	userEdit := "# USER HAND-EDITED SOUL\n"
 	if err := os.WriteFile(soulPath, []byte(userEdit), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	ag := discover.DiscoveredAgent{
-		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "openclaw"},
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "claude-code"},
 		Path: agentPath,
 	}
 	res, err := Apply(ag, ApplyOptions{
@@ -115,7 +121,7 @@ func TestApplyDryRun_NoDiskWrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	if res.Target != "openclaw" {
+	if res.Target != "claude-code" {
 		t.Errorf("target wrong: %s", res.Target)
 	}
 	// dry-run 不写盘,用户手改必须还在
@@ -130,17 +136,18 @@ func TestApplyDryRun_NoDiskWrites(t *testing.T) {
 }
 
 func TestApplyRealOverwritesAndUpdatesMeta(t *testing.T) {
+	isolateApplyInstall(t)
 	// 场景:真 apply(非 dry-run),所有模板派生文件按模板覆盖,tshoot.json 被更新。
 	// 整文件 preserve 已删 —— 模板更新不再被 SOUL/USER/CHECKLIST 阻塞。
 	stage := t.TempDir()
 	agentPath, yamlBytes := genExisting(t, stage)
 
-	soulPath := filepath.Join(agentPath, "SOUL.md")
+	soulPath := filepath.Join(agentPath, "agents/shop-troubleshooter.md")
 	userEdit := "# user custom soul\n"
 	_ = os.WriteFile(soulPath, []byte(userEdit), 0o644)
 
 	ag := discover.DiscoveredAgent{
-		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "openclaw"},
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "claude-code"},
 		Path: agentPath,
 	}
 	res, err := Apply(ag, ApplyOptions{
@@ -178,10 +185,11 @@ func TestApplyRealOverwritesAndUpdatesMeta(t *testing.T) {
 }
 
 func TestApplyRejectsInvalidYAML(t *testing.T) {
+	isolateApplyInstall(t)
 	stage := t.TempDir()
 	agentPath, _ := genExisting(t, stage)
 	ag := discover.DiscoveredAgent{
-		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", Target: "openclaw"},
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", Target: "claude-code"},
 		Path: agentPath,
 	}
 	_, err := Apply(ag, ApplyOptions{
@@ -194,8 +202,9 @@ func TestApplyRejectsInvalidYAML(t *testing.T) {
 }
 
 func TestApplyRejectsEmptyYAML(t *testing.T) {
+	isolateApplyInstall(t)
 	ag := discover.DiscoveredAgent{
-		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", Target: "openclaw"},
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", Target: "claude-code"},
 		Path: t.TempDir(),
 	}
 	_, err := Apply(ag, ApplyOptions{NewYAML: nil})
@@ -205,6 +214,7 @@ func TestApplyRejectsEmptyYAML(t *testing.T) {
 }
 
 func TestApplyUnknownTarget(t *testing.T) {
+	isolateApplyInstall(t)
 	stage := t.TempDir()
 	agentPath, yamlBytes := genExisting(t, stage)
 	ag := discover.DiscoveredAgent{
@@ -220,34 +230,8 @@ func TestApplyUnknownTarget(t *testing.T) {
 	}
 }
 
-func TestImportAndApply_OpenclawProducesStaging(t *testing.T) {
-	// 场景:从零 import 到 openclaw target,产物应该是 staging 包(workspace
-	// 模板 + tshoot.json + self-test/uninstall 辅助脚本)。
-	// 注:install.sh 已迁到 InstallNativeOpenclaw,不在产物里。
-	dest := t.TempDir()
-	yamlBytes, err := os.ReadFile(filepath.Join(projectRoot(t), "examples", "shop-troubleshooter.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	res, err := ImportAndApply(yamlBytes, "openclaw", dest, ApplyOptions{
-		TemplateRoot:  filepath.Join(projectRoot(t), "templates"),
-		TshootVersion: "test",
-	})
-	if err != nil {
-		t.Fatalf("import: %v", err)
-	}
-	if res.AgentPath != dest {
-		t.Errorf("agent_path:want %s got %s", dest, res.AgentPath)
-	}
-	// workspace-template 下应该有 tshoot.json(InstallNativeOpenclaw 既从这里
-	// 反读 cfg,也是 cp 过去后被 discover.Scan 识别的锚点)
-	meta := filepath.Join(dest, "templates", "workspace-template", "tshoot.json")
-	if _, err := os.Stat(meta); err != nil {
-		t.Errorf("tshoot.json 没生成: %v", err)
-	}
-}
-
 func TestApply_AutoAnalyzeTopologyReachesGeneratedWorkspace(t *testing.T) {
+	isolateApplyInstall(t)
 	yamlBytes, repoPaths := applyTopologyFixture(t)
 	cfg, err := config.LoadFromBytes(yamlBytes)
 	if err != nil {
@@ -256,13 +240,13 @@ func TestApply_AutoAnalyzeTopologyReachesGeneratedWorkspace(t *testing.T) {
 	stage := t.TempDir()
 	g := generator.New(cfg, filepath.Join(projectRoot(t), "templates"), stage)
 	g.TroubleshooterYAMLSource = yamlBytes
-	if err := g.Generate(); err != nil {
+	if err := g.GenerateClaudeCode(); err != nil {
 		t.Fatal(err)
 	}
-	agentPath := filepath.Join(stage, "templates", "workspace-template")
+	agentPath := filepath.Join(os.Getenv("HOME"), ".tshoot", "claude-code", cfg.System.ID)
 
 	_, err = Apply(discover.DiscoveredAgent{
-		Meta: discover.Meta{SchemaVersion: 1, SystemID: "mall", SystemName: "Mall", Target: "openclaw"},
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "mall", SystemName: "Mall", Target: "claude-code"},
 		Path: agentPath,
 	}, ApplyOptions{
 		NewYAML:        yamlBytes,
@@ -279,16 +263,17 @@ func TestApply_AutoAnalyzeTopologyReachesGeneratedWorkspace(t *testing.T) {
 }
 
 func TestImportAndApply_AutoAnalyzeTopologyReachesGeneratedStaging(t *testing.T) {
+	isolateApplyInstall(t)
 	yamlBytes, repoPaths := applyTopologyFixture(t)
 	dest := t.TempDir()
-	_, err := ImportAndApply(yamlBytes, "openclaw", dest, ApplyOptions{
+	_, err := ImportAndApply(yamlBytes, "claude-code", dest, ApplyOptions{
 		TemplateRoot:   filepath.Join(projectRoot(t), "templates"),
 		RepoLocalPaths: repoPaths,
 	})
 	if err != nil {
 		t.Fatalf("ImportAndApply: %v", err)
 	}
-	workspace := filepath.Join(dest, "templates", "workspace-template")
+	workspace := filepath.Join(os.Getenv("HOME"), ".tshoot", "claude-code", "mall")
 	refs := filepath.Join(workspace, "skills", "routing", "references")
 	assertGeneratedTopologyEdge(t, filepath.Join(refs, "service-topology.yaml"))
 	assertGeneratedTopologyEvidence(t, filepath.Join(refs, "endpoint-evidence.yaml"))
@@ -421,9 +406,10 @@ func assertGeneratedTopologySource(t *testing.T, path string, source []byte) {
 }
 
 func TestImportAndApply_DryRunNoWrite(t *testing.T) {
+	isolateApplyInstall(t)
 	dest := t.TempDir()
 	yamlBytes, _ := os.ReadFile(filepath.Join(projectRoot(t), "examples", "shop-troubleshooter.yaml"))
-	res, err := ImportAndApply(yamlBytes, "openclaw", dest, ApplyOptions{
+	res, err := ImportAndApply(yamlBytes, "claude-code", dest, ApplyOptions{
 		TemplateRoot: filepath.Join(projectRoot(t), "templates"),
 		DryRun:       true,
 	})
@@ -432,7 +418,7 @@ func TestImportAndApply_DryRunNoWrite(t *testing.T) {
 	}
 	// dry-run 目录应该基本为空(只有 tempdir 自己)
 	entries, _ := os.ReadDir(dest)
-	// openclaw 的 DryRun 分支 ImportAndApply 早退,但会先 MkdirAll(dest),所以 dest 目录本身会存在
+	// DryRun 分支可创建目标目录，但不能安装文件。
 	// 但不应该有 scripts/ / templates/ 子目录
 	for _, e := range entries {
 		if e.Name() == "scripts" || e.Name() == "templates" {
@@ -445,10 +431,11 @@ func TestImportAndApply_DryRunNoWrite(t *testing.T) {
 }
 
 func TestApply_CodeGraphDisabledDoesNothing(t *testing.T) {
+	isolateApplyInstall(t)
 	stage := t.TempDir()
 	agentPath, yamlBytes := genExisting(t, stage)
 	ag := discover.DiscoveredAgent{
-		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "openclaw"},
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "claude-code"},
 		Path: agentPath,
 	}
 	previousEnsure := ensureCodeGraphForDeploy
@@ -479,11 +466,12 @@ func TestApply_CodeGraphDisabledDoesNothing(t *testing.T) {
 }
 
 func TestApply_CodeGraphFailureWarnsAndStillDeploys(t *testing.T) {
+	isolateApplyInstall(t)
 	stage := t.TempDir()
 	agentPath, yamlBytes := genExisting(t, stage)
 	yamlBytes = enableCodeGraphForApplyTest(t, yamlBytes)
 	ag := discover.DiscoveredAgent{
-		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "openclaw"},
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "claude-code"},
 		Path: agentPath,
 	}
 	previousEnsure := ensureCodeGraphForDeploy
@@ -522,11 +510,12 @@ func TestApply_CodeGraphFailureWarnsAndStillDeploys(t *testing.T) {
 }
 
 func TestApply_CodeGraphReportReturned(t *testing.T) {
+	isolateApplyInstall(t)
 	stage := t.TempDir()
 	agentPath, yamlBytes := genExisting(t, stage)
 	yamlBytes = enableCodeGraphForApplyTest(t, yamlBytes)
 	ag := discover.DiscoveredAgent{
-		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "openclaw"},
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "claude-code"},
 		Path: agentPath,
 	}
 	previousEnsure := ensureCodeGraphForDeploy
@@ -579,11 +568,12 @@ func TestApply_CodeGraphReportReturned(t *testing.T) {
 }
 
 func TestApply_CodeGraphDryRunDoesNothing(t *testing.T) {
+	isolateApplyInstall(t)
 	stage := t.TempDir()
 	agentPath, yamlBytes := genExisting(t, stage)
 	yamlBytes = enableCodeGraphForApplyTest(t, yamlBytes)
 	ag := discover.DiscoveredAgent{
-		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "openclaw"},
+		Meta: discover.Meta{SchemaVersion: 1, SystemID: "shop", SystemName: "Shop", Target: "claude-code"},
 		Path: agentPath,
 	}
 	previousEnsure := ensureCodeGraphForDeploy
@@ -615,6 +605,7 @@ func TestApply_CodeGraphDryRunDoesNothing(t *testing.T) {
 }
 
 func TestImportAndApply_MultiTargetCacheAvoidsSecondIndex(t *testing.T) {
+	isolateApplyInstall(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	yamlBytes, err := os.ReadFile(filepath.Join(projectRoot(t), "examples", "shop-troubleshooter.yaml"))
@@ -642,16 +633,16 @@ func TestImportAndApply_MultiTargetCacheAvoidsSecondIndex(t *testing.T) {
 	prepareCodeGraphForDeploy = PrepareCodeGraphIndexes
 	var nativeInstalls atomic.Int32
 	installNativeForApply = func(_ string, target string) error {
-		if target != "claude-code" {
-			t.Fatalf("native install target = %q, want claude-code", target)
+		if target != "claude-code" && target != "cursor" {
+			t.Fatalf("native install target = %q, want claude-code or cursor", target)
 		}
 		nativeInstalls.Add(1)
 		return nil
 	}
 	var mcpMerges atomic.Int32
 	mergeMCPIntoIDESettingsForApply = func(target string, _ *config.SystemConfig, _ map[string]string, _ func(string)) error {
-		if target != "claude-code" {
-			t.Fatalf("MCP merge target = %q, want claude-code", target)
+		if target != "claude-code" && target != "cursor" {
+			t.Fatalf("MCP merge target = %q, want claude-code or cursor", target)
 		}
 		mcpMerges.Add(1)
 		return nil
@@ -679,7 +670,7 @@ func TestImportAndApply_MultiTargetCacheAvoidsSecondIndex(t *testing.T) {
 		TemplateRoot:   filepath.Join(projectRoot(t), "templates"),
 		RepoLocalPaths: map[string]string{"order-service": repoRoot},
 	}
-	first, err := ImportAndApply(yamlBytes, "openclaw", t.TempDir(), opts)
+	first, err := ImportAndApply(yamlBytes, "claude-code", t.TempDir(), opts)
 	if err != nil {
 		t.Fatalf("first ImportAndApply() error = %v", err)
 	}
@@ -687,15 +678,15 @@ func TestImportAndApply_MultiTargetCacheAvoidsSecondIndex(t *testing.T) {
 	if firstCommandCount == 0 || first.CodeGraph == nil || first.CodeGraph.Ready != 1 {
 		t.Fatalf("first result = %#v, commands = %d", first, firstCommandCount)
 	}
-	second, err := ImportAndApply(yamlBytes, "claude-code", t.TempDir(), opts)
+	second, err := ImportAndApply(yamlBytes, "cursor", t.TempDir(), opts)
 	if err != nil {
 		t.Fatalf("second ImportAndApply() error = %v", err)
 	}
-	if first.Target != "openclaw" || second.Target != "claude-code" {
+	if first.Target != "claude-code" || second.Target != "cursor" {
 		t.Fatalf("deployment targets = %q then %q", first.Target, second.Target)
 	}
-	if nativeInstalls.Load() != 1 || mcpMerges.Load() != 1 {
-		t.Fatalf("IDE seams called native=%d mcp=%d, want 1 each", nativeInstalls.Load(), mcpMerges.Load())
+	if nativeInstalls.Load() != 2 || mcpMerges.Load() != 2 {
+		t.Fatalf("IDE seams called native=%d mcp=%d, want 2 each", nativeInstalls.Load(), mcpMerges.Load())
 	}
 	for _, userConfigPath := range []string{filepath.Join(home, ".claude"), filepath.Join(home, ".claude.json")} {
 		if _, err := os.Stat(userConfigPath); !os.IsNotExist(err) {
@@ -718,4 +709,24 @@ func enableCodeGraphForApplyTest(t *testing.T, yamlBytes []byte) []byte {
 		t.Fatal("test fixture does not contain disabled code_intelligence block")
 	}
 	return []byte(strings.Replace(string(yamlBytes), disabled, enabled, 1))
+}
+
+func isolateApplyInstall(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	oldInstall, oldMerge := installNativeForApply, mergeMCPIntoIDESettingsForApply
+	installNativeForApply = func(string, string) error { return nil }
+	mergeMCPIntoIDESettingsForApply = func(string, *config.SystemConfig, map[string]string, func(string)) error { return nil }
+	t.Cleanup(func() { installNativeForApply, mergeMCPIntoIDESettingsForApply = oldInstall, oldMerge })
+}
+
+func TestRetiredTargetCannotCreateDeployment(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "must-not-create")
+	_, err := ImportAndApply([]byte("invalid yaml"), "openclaw", dest, ApplyOptions{})
+	if err == nil {
+		t.Fatal("retired target accepted")
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("destination mutated: %v", err)
+	}
 }

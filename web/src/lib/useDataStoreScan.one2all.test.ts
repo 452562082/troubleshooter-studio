@@ -66,7 +66,7 @@ tasks:
     ])
     mocks.probeDataStore.mockResolvedValue({ ok: true, latency: '1ms', detail: 'ok' })
 
-    const scannedDS = reactive<Record<string, any>>({})
+    const scannedDS = reactive<Record<string, any>>({dev:{'base-backend-base':{'mysql-2':{dsn:'manual-only'}}}})
     const dsScanState = reactive<Record<string, any>>({})
     const dsProbeResults = reactive<Record<string, any>>({})
     const enabledDataStores = reactive<Record<string, boolean>>({})
@@ -75,6 +75,7 @@ tasks:
 
     const scan = useDataStoreScan({
       scannedDS,
+      manualEntries: {'dev::base-backend-base::mysql-2':true},
       dsScanState,
       dsProbeResults,
       dsImportStatus: ref('idle') as any,
@@ -117,7 +118,17 @@ tasks:
     expect(dsScanState['dev::base-backend-base']).toEqual({ status: 'ok' })
     expect(scannedDS.dev['base-backend-base'].redis.url).toBe('redis://cache:6379/0')
     expect(scannedDS.dev['base-backend-base'].mongodb.uri).toBe('mongodb://mongo:27017/app')
+    expect(scannedDS.dev['base-backend-base']['mysql-2']).toEqual({dsn:'manual-only'})
     expect(enabledDataStores.redis).toBe(true)
     expect(enabledDataStores.mongodb).toBe(true)
+    let resolveProbe!: (value: {ok:boolean}) => void
+    mocks.probeDataStore.mockImplementationOnce(() => new Promise(resolve => { resolveProbe = resolve }))
+    const pending = scan.probeOneDS('dev', 'base-backend-base', 'redis')
+    scannedDS.dev['base-backend-base'].redis.url = 'redis://updated:6379'
+    delete dsProbeResults['dev::base-backend-base::redis']
+    resolveProbe({ok:true})
+    await pending
+    expect(dsProbeResults['dev::base-backend-base::redis']).toBeUndefined()
+
   })
 })

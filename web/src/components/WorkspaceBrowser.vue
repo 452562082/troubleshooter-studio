@@ -6,7 +6,7 @@
 // 但不想动 troubleshooter.yaml / 重新部署"的快速迭代场景.
 //
 // 范围限制:rootPath 必须是 discover.Scan 出来的真实部署根(后端 binding 强制校验);
-// generator 管理的 tshoot.json / .clawhub/lock.json 后端拒写,UI 直接显示只读.
+// generator 管理的 tshoot.json 后端拒写,UI 直接显示只读.
 //
 // 持久化未保存提示:editor 内容跟磁盘内容比对,不同时给红点 + 关闭前确认,避免误丢编辑.
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
@@ -53,11 +53,8 @@ const isReadOnly = computed(() => {
   if (!selectedPath.value) return false
   const base = selectedPath.value.split('/').pop() || ''
   if (base === 'tshoot.json') return true
-  if (selectedPath.value === '.clawhub/lock.json') return true
   return false
 })
-
-// hidden 文件折叠展示(.clawhub/.openclaw 这类元数据目录默认折叠减少视觉干扰)
 const showHidden = ref(false)
 const scopedAgentID = computed(() => props.agentScope || agentIDFromInitialPath(props.initialPath || ''))
 const scopedSkillRoot = computed(() => skillRootFromInitialPath(props.initialPath || '', scopedAgentID.value))
@@ -283,7 +280,7 @@ function fmtSize(n: number): string {
           <span class="ws-path muted" :title="rootPath">{{ rootPath }}</span>
         </div>
         <div class="ws-header-actions">
-          <label class="ws-toggle" title="勾上后展示 . 开头的隐藏文件/目录(.clawhub / .openclaw 等元数据)">
+          <label class="ws-toggle" title="勾上后展示 . 开头的隐藏文件/目录">
             <input type="checkbox" v-model="showHidden" />
             显示隐藏文件
           </label>
@@ -381,7 +378,6 @@ function fmtSize(n: number): string {
   font-size: 10px; padding: 1px 6px; border-radius: 3px; font-weight: 600;
   background: #e0e7ff; color: #3730a3;
 }
-.ws-target-tag[data-target="openclaw"] { background: #fce7f3; color: #9f1239; }
 .ws-target-tag[data-target="claude-code"] { background: #fef3c7; color: #92400e; }
 .ws-target-tag[data-target="cursor"] { background: #dbeafe; color: #1e40af; }
 .ws-target-tag[data-target="codex"] { background: #d1fae5; color: #065f46; }

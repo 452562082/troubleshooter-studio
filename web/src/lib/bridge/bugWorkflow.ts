@@ -4,7 +4,7 @@ import { isDesktop } from './shared'
 
 const desktopOnly = 'Incident Case 工作流只在桌面 app 可用'
 
-export type CaseStatus = 'pending_validation' | 'validating' | 'waiting_evidence' | 'reproduced' |
+export type CaseStatus = 'pending_investigation' | 'submitted' | 'remediation_recorded' | 'pending_validation' | 'validating' | 'waiting_evidence' | 'reproduced' |
   'not_reproduced' | 'investigating' | 'root_cause_ready' | 'waiting_fix_approval' |
   'waiting_remediation' | 'remediation_applied' |
   'fixing' | 'fix_failed' | 'fix_pushed' | 'waiting_merge_approval' | 'merging' |
@@ -39,16 +39,6 @@ export interface IncidentCase {
 export interface FrontendEntryBinding {
   id: string; name: string; url: string; config_url?: string; repo?: string; device_profile?: string
   resolution_source: string; score?: number; reason?: string; config_sha256?: string
-}
-export interface FrontendEntryCandidate { binding: FrontendEntryBinding; score: number; reasons: string[] }
-export interface FrontendEntryResolution {
-  status: 'selected' | 'ambiguous' | 'unavailable'
-  required: boolean
-  selected?: FrontendEntryBinding
-  selected_entries?: FrontendEntryBinding[]
-  suggested_entry_ids?: string[]
-  candidates?: FrontendEntryCandidate[]
-  message?: string
 }
 
 export interface PhaseAttempt {
@@ -90,14 +80,6 @@ export interface WorkflowMetrics {
   first_regression_success_rate: number
   still_reproduces_rate: number
 }
-export interface WorkflowReminder { case_id: string; bug_id: string; environment: string; waiting_since: string; waiting_age: number; sequence: number; reservation_key: string; delivery_attempt: number }
-export type IncidentBrowserRuntimeState = 'ready' | 'installing' | 'broken'
-export interface IncidentBrowserRuntimeStatus {
-  state: IncidentBrowserRuntimeState
-  version: string
-  error_code: string
-  message: string
-}
 
 export interface IncidentCaseDetail {
   case: IncidentCase
@@ -108,19 +90,7 @@ export interface IncidentCaseDetail {
   code_changes: CodeChange[]
   deployment_observations: DeploymentObservation[]
   events: TransitionEvent[]
-  deployment_verification?: { provider: 'manual' | 'http' | 'k8s' | 'unavailable'; available: boolean; hint: string }
   bug_ticket_resolution?: { state: 'not_ready' | 'pending' | 'resolved' | 'unknown'; source_status?: string }
-  manual_reproduction_segments?: IncidentManualReproductionSegment[]
-}
-
-export interface IncidentManualReproductionSegment {
-  frontend_entry_id: string
-  frontend_entry_name: string
-  start_url: string
-  final_url: string
-  title: string
-  action_count: number
-  captured_at: string
 }
 
 export interface IncidentPhaseEvent {
@@ -130,32 +100,6 @@ export interface IncidentPhaseEvent {
   raw?: unknown
   meta: Record<string, unknown>
 }
-
-export const incidentBrowserProgressCodes = [
-  'browser_launching',
-  'browser_context_preparing',
-  'browser_evidence_preparing',
-  'browser_starting',
-  'browser_action_started',
-  'browser_action_completed',
-  'browser_plan_generating',
-  'browser_repair_generating',
-  'browser_result_evaluating',
-  'browser_login_opened',
-  'browser_login_completed',
-  'browser_manual_recording_opened',
-  'browser_manual_recording_completed',
-  'browser_runtime_installing',
-  'browser_runtime_importing',
-  'browser_runtime_dependencies_installing',
-  'browser_runtime_downloading',
-  'browser_runtime_probing',
-  'browser_runtime_ready',
-  'action_started',
-  'action_completed',
-  'runtime_preparing',
-] as const
-export type IncidentBrowserProgressCode = typeof incidentBrowserProgressCodes[number]
 
 export type IncidentCaseEventPayload = {
   kind: 'snapshot'
@@ -168,23 +112,9 @@ export type IncidentCaseEventPayload = {
 }
 
 export interface WorkflowCommandInput { case_id: string; expected_version: number; idempotency_key: string; actor_id: string }
-export interface IncidentBrowserCommandInput extends WorkflowCommandInput { attempt_id: string; frontend_entry_id?: string }
 export interface IncidentArtifactPreview { artifact_id: string; mime_type: 'image/png'; base64_data: string; size: number }
-export interface IncidentManualReproductionResult {
-  artifact_ids: string[]
-  screenshot_artifact_ids: string[]
-  frontend_entry_id: string
-  frontend_entry_name: string
-  captured_frontend_entry_ids: string[]
-  remaining_frontend_entry_ids: string[]
-  all_required_entries_captured: boolean
-  action_count: number
-  final_url: string
-  title: string
-  summary: string
-}
-export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: string; bot_key?: string; bot_environment?: string; frontend_entry_id?: string; frontend_entry_ids?: string[]; primary_frontend_entry_id?: string; input_json?: Record<string, unknown> }
-export interface ResetIncidentCaseInput extends WorkflowCommandInput { new_case_id: string; bot_key: string; bot_environment?: string; frontend_entry_id?: string; frontend_entry_ids?: string[]; primary_frontend_entry_id?: string; input_json?: Record<string, unknown> }
+export interface StartIncidentCaseInput extends WorkflowCommandInput { bug_id?: string; bot_key?: string; bot_environment?: string; input_json?: Record<string, unknown> }
+export interface ResetIncidentCaseInput extends WorkflowCommandInput { new_case_id: string; bot_key: string; bot_environment?: string; input_json?: Record<string, unknown> }
 export interface WorkflowWarning { code: string; message: string }
 export interface ResetIncidentCaseResult { case: IncidentCase; warnings: WorkflowWarning[] }
 export type IncidentWorkflowConflictCode = 'case_version_conflict' | 'idempotency_conflict'
@@ -210,7 +140,6 @@ export function isIncidentWorkflowConflict(error: unknown): boolean {
   return incidentWorkflowConflictCode(error) !== ''
 }
 export interface ContinueIncidentCaseInput extends WorkflowCommandInput { phase: Phase; input_json?: Record<string, unknown> }
-export interface ConfirmIncidentValidationInput extends WorkflowCommandInput { validation_attempt_id: string }
 export interface IncidentEvidenceImageInput { name: string; mime_type: 'image/png' | 'image/jpeg'; base64_data: string }
 export interface UploadIncidentEvidenceImagesInput { case_id: string; attempt_id: string; expected_version: number; images: IncidentEvidenceImageInput[] }
 export interface IncidentEvidenceImage { artifact_id: string; name: string; mime_type: 'image/png'; size: number }
@@ -222,7 +151,6 @@ export interface ReconsiderIncidentRemediationInput extends WorkflowCommandInput
 export interface DisputeIncidentRootCauseInput extends WorkflowCommandInput { root_cause_attempt_id: string; reason: string; evidence_artifact_ids?: string[] }
 export interface CompleteIncidentRemediationInput extends WorkflowCommandInput { root_cause_attempt_id: string; summary: string; evidence: string }
 export interface ApproveIncidentMergeInput extends WorkflowCommandInput { fix_commits: Record<string, string>; target_branches: Record<string, string>; target_heads?: Record<string, string> }
-export interface NotifyIncidentDeployedInput extends WorkflowCommandInput { observed_version?: string; observed_commits?: Record<string, string>; version_source?: string; notification_text?: string; input_json?: Record<string, unknown> }
 export interface CancelIncidentAttemptInput extends WorkflowCommandInput { attempt_id: string }
 export interface DeleteIncidentHistoryInput { case_id: string; bug_id: string }
 export interface DeleteIncidentHistoryResult { bug_id: string; case_ids: string[]; cleanup_warning?: string }
@@ -248,27 +176,6 @@ export async function getIncidentWorkflowMetrics(): Promise<WorkflowMetrics> {
   return { ...emptyWorkflowMetrics(), ...(await App.GetIncidentWorkflowMetrics()) } as WorkflowMetrics
 }
 
-export async function listPendingIncidentWorkflowReminders(): Promise<WorkflowReminder[]> {
-  if (!isDesktop()) return []
-  const result = await App.ListPendingIncidentWorkflowReminders()
-  return Array.isArray(result) ? result as WorkflowReminder[] : []
-}
-
-export async function getIncidentBrowserRuntimeStatus(): Promise<IncidentBrowserRuntimeStatus> {
-  if (!isDesktop()) return { state: 'ready', version: 'preview', error_code: '', message: '' }
-  return normalizeIncidentBrowserRuntimeStatus(await App.GetIncidentBrowserRuntimeStatus())
-}
-
-export async function prepareIncidentBrowserRuntime(): Promise<void> {
-  if (!isDesktop()) throw new Error(desktopOnly)
-  await App.PrepareIncidentBrowserRuntime()
-}
-
-export async function ackIncidentWorkflowReminder(input: { case_id: string; reservation_key: string; delivery_attempt: number; actor_id: string }): Promise<void> {
-  if (!isDesktop()) throw new Error(desktopOnly)
-  await App.AckIncidentWorkflowReminder(input)
-}
-
 export async function getIncidentCase(caseID: string): Promise<IncidentCaseDetail> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeDetail(await App.GetIncidentCase(caseID))
@@ -287,10 +194,6 @@ export async function listIncidentFixBranches(caseID: string, rootCauseAttemptID
 export async function startIncidentCase(input: StartIncidentCaseInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.StartIncidentCase(input))
-}
-export async function resolveIncidentFrontendEntry(input: { bug_id: string; bot_key: string; bot_environment?: string; frontend_entry_id?: string; frontend_entry_ids?: string[]; primary_frontend_entry_id?: string }): Promise<FrontendEntryResolution> {
-  if (!isDesktop()) return { status: 'unavailable', required: true, message: desktopOnly }
-  return await App.ResolveIncidentFrontendEntry(input) as FrontendEntryResolution
 }
 export async function resetIncidentCase(input: ResetIncidentCaseInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
@@ -318,10 +221,6 @@ export async function resetIncidentCaseWithWarnings(input: ResetIncidentCaseInpu
 export async function continueIncidentCase(input: ContinueIncidentCaseInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.ContinueIncidentCase(input))
-}
-export async function confirmIncidentValidation(input: ConfirmIncidentValidationInput): Promise<IncidentCase> {
-  if (!isDesktop()) throw new Error(desktopOnly)
-  return normalizeCase(await App.ConfirmIncidentValidation(input))
 }
 export async function uploadIncidentEvidenceImages(input: UploadIncidentEvidenceImagesInput): Promise<IncidentEvidenceImage[]> {
   if (!isDesktop()) throw new Error(desktopOnly)
@@ -369,51 +268,9 @@ export async function approveIncidentMerge(input: ApproveIncidentMergeInput): Pr
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.ApproveIncidentMerge({ ...input, target_heads: input.target_heads || {} }))
 }
-export async function notifyIncidentDeployed(input: NotifyIncidentDeployedInput): Promise<IncidentCase> {
-  if (!isDesktop()) throw new Error(desktopOnly)
-  return normalizeCase(await App.NotifyIncidentDeployed({ ...input, observed_version: input.observed_version || '', observed_commits: input.observed_commits || {} }))
-}
 export async function cancelIncidentAttempt(input: CancelIncidentAttemptInput): Promise<IncidentCase> {
   if (!isDesktop()) throw new Error(desktopOnly)
   return normalizeCase(await App.CancelIncidentAttempt(input))
-}
-export async function openIncidentBrowserLogin(input: IncidentBrowserCommandInput): Promise<IncidentCase> {
-  if (!isDesktop()) throw new Error(desktopOnly)
-  return normalizeCase(await App.OpenIncidentBrowserLogin(input))
-}
-export async function confirmIncidentBrowserLogin(input: IncidentBrowserCommandInput): Promise<IncidentCase> {
-  if (!isDesktop()) throw new Error(desktopOnly)
-  return normalizeCase(await App.ConfirmIncidentBrowserLogin(input))
-}
-export async function repairIncidentBrowserRuntime(input: IncidentBrowserCommandInput): Promise<IncidentCase> {
-  if (!isDesktop()) throw new Error(desktopOnly)
-  return normalizeCase(await App.RepairIncidentBrowserRuntime(input))
-}
-export async function clearIncidentBrowserSession(input: IncidentBrowserCommandInput): Promise<void> {
-  if (!isDesktop()) throw new Error(desktopOnly)
-  await App.ClearIncidentBrowserSession(input)
-}
-export async function captureIncidentManualReproduction(input: IncidentBrowserCommandInput): Promise<IncidentManualReproductionResult> {
-  if (!isDesktop()) throw new Error(desktopOnly)
-  const raw = record(await App.CaptureIncidentManualReproduction(input))
-  const artifactIDs = Array.isArray(raw.artifact_ids) ? raw.artifact_ids.filter(value => typeof value === 'string') : []
-  const screenshotIDs = Array.isArray(raw.screenshot_artifact_ids) ? raw.screenshot_artifact_ids.filter(value => typeof value === 'string') : []
-  if (typeof raw.summary !== 'string' || !raw.summary.trim() || artifactIDs.length === 0 || screenshotIDs.length === 0) {
-    throw new Error('手动复现没有生成完整证据')
-  }
-  return {
-    artifact_ids: artifactIDs,
-    screenshot_artifact_ids: screenshotIDs,
-    frontend_entry_id: typeof raw.frontend_entry_id === 'string' ? raw.frontend_entry_id : '',
-    frontend_entry_name: typeof raw.frontend_entry_name === 'string' ? raw.frontend_entry_name : '',
-    captured_frontend_entry_ids: Array.isArray(raw.captured_frontend_entry_ids) ? raw.captured_frontend_entry_ids.map(String) : [],
-    remaining_frontend_entry_ids: Array.isArray(raw.remaining_frontend_entry_ids) ? raw.remaining_frontend_entry_ids.map(String) : [],
-    all_required_entries_captured: raw.all_required_entries_captured === true,
-    action_count: typeof raw.action_count === 'number' ? raw.action_count : 0,
-    final_url: typeof raw.final_url === 'string' ? raw.final_url : '',
-    title: typeof raw.title === 'string' ? raw.title : '',
-    summary: raw.summary,
-  }
 }
 export async function getIncidentArtifactPreview(caseID: string, artifactID: string): Promise<IncidentArtifactPreview> {
   if (!isDesktop()) throw new Error(desktopOnly)
@@ -442,19 +299,6 @@ export async function saveIncidentArtifact(caseID: string, artifactID: string): 
 
 function record(raw: unknown): Record<string, unknown> {
   return raw !== null && typeof raw === 'object' ? raw as Record<string, unknown> : {}
-}
-
-export function normalizeIncidentBrowserRuntimeStatus(raw: unknown): IncidentBrowserRuntimeStatus {
-  const source = record(raw)
-  const state = source.state === 'ready' || source.state === 'installing' || source.state === 'broken'
-    ? source.state
-    : 'broken'
-  return {
-    state,
-    version: typeof source.version === 'string' ? source.version : '',
-    error_code: typeof source.error_code === 'string' ? source.error_code : '',
-    message: typeof source.message === 'string' ? source.message : '',
-  }
 }
 
 function emptyWorkflowMetrics(): WorkflowMetrics {
@@ -497,7 +341,6 @@ function normalizeArtifact(raw: unknown): IncidentArtifact {
 
 function normalizeDetail(raw: unknown): IncidentCaseDetail {
   const source = record(raw)
-  const deploymentVerification = record(source.deployment_verification)
   return {
     case: normalizeCase(source.case),
     attempts: Array.isArray(source.attempts) ? source.attempts as PhaseAttempt[] : [],
@@ -515,33 +358,12 @@ function normalizeDetail(raw: unknown): IncidentCaseDetail {
     code_changes: Array.isArray(source.code_changes) ? source.code_changes as CodeChange[] : [],
     deployment_observations: Array.isArray(source.deployment_observations) ? source.deployment_observations as DeploymentObservation[] : [],
     events: Array.isArray(source.events) ? source.events as TransitionEvent[] : [],
-    deployment_verification: {
-      provider: ['manual', 'http', 'k8s', 'unavailable'].includes(String(deploymentVerification.provider))
-        ? String(deploymentVerification.provider) as 'manual' | 'http' | 'k8s' | 'unavailable'
-        : 'unavailable',
-      available: deploymentVerification.available === true,
-      hint: String(deploymentVerification.hint ?? ''),
-    },
     bug_ticket_resolution: {
       state: ['not_ready', 'pending', 'resolved', 'unknown'].includes(String(record(source.bug_ticket_resolution).state))
         ? String(record(source.bug_ticket_resolution).state) as 'not_ready' | 'pending' | 'resolved' | 'unknown'
         : 'unknown',
       source_status: String(record(source.bug_ticket_resolution).source_status ?? ''),
     },
-    manual_reproduction_segments: Array.isArray(source.manual_reproduction_segments)
-      ? source.manual_reproduction_segments.map(item => {
-        const segment = record(item)
-        return {
-          frontend_entry_id: String(segment.frontend_entry_id ?? ''),
-          frontend_entry_name: String(segment.frontend_entry_name ?? ''),
-          start_url: String(segment.start_url ?? ''),
-          final_url: String(segment.final_url ?? ''),
-          title: String(segment.title ?? ''),
-          action_count: typeof segment.action_count === 'number' ? segment.action_count : 0,
-          captured_at: String(segment.captured_at ?? ''),
-        }
-      })
-      : [],
   }
 }
 
@@ -564,4 +386,15 @@ export function normalizeIncidentCaseEvent(raw: unknown): IncidentCaseEventPaylo
     snapshot: normalizeDetail(source.snapshot),
     ...(source.phase_event ? { phase_event: { ...phase, meta: record(phase.meta) } } : {}),
   }
+}
+
+export interface IncidentEvidenceSelection { images: IncidentEvidenceImageInput[]; files: IncidentEvidenceFileInput[] }
+export async function selectIncidentEvidence(): Promise<IncidentEvidenceSelection> {
+  if (!isDesktop()) throw new Error(desktopOnly)
+  const result = await App.SelectIncidentEvidence()
+  const images = (result?.images || []).map((image): IncidentEvidenceImageInput => {
+    if (image.mime_type !== 'image/png' && image.mime_type !== 'image/jpeg') throw new Error('截图格式不受支持')
+    return { name: image.name, mime_type: image.mime_type, base64_data: image.base64_data }
+  })
+  return { images, files: result?.files || [] }
 }

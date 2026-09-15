@@ -1,39 +1,7 @@
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
-import {
-  approveIncidentFix,
-  approveIncidentMerge,
-  captureIncidentManualReproduction,
-  clearIncidentBrowserSession,
-  completeIncidentRemediation,
-  confirmIncidentBrowserLogin,
-  confirmIncidentValidation,
-  continueIncidentCase,
-  deleteIncidentHistory,
-  disputeIncidentRootCause,
-  getIncidentBrowserRuntimeStatus,
-  getIncidentCase,
-  listBugs,
-  listIncidentFixBranches,
-  listIncidentCases,
-  matchBugBots,
-  notifyIncidentDeployed,
-  openIncidentBrowserLogin,
-  prepareIncidentBrowserRuntime,
-  reconsiderIncidentRemediation,
-  repairIncidentBrowserRuntime,
-  resolveIncidentFrontendEntry,
-  IncidentWorkflowCommandError,
-  resetIncidentCaseWithWarnings,
-  saveBugSelectedBot,
-  startIncidentCase,
-  uploadIncidentEvidenceFiles,
-  uploadIncidentEvidenceImages,
-  type CaseStatus,
-  type IncidentCase,
-  type IncidentCaseDetail,
-} from '../lib/bridge'
+import { approveIncidentFix, approveIncidentMerge, completeIncidentRemediation, continueIncidentCase, deleteIncidentHistory, disputeIncidentRootCause, getIncidentCase, listBugs, listIncidentFixBranches, listIncidentCases, matchBugBots, reconsiderIncidentRemediation, IncidentWorkflowCommandError, resetIncidentCaseWithWarnings, saveBugSelectedBot, startIncidentCase, uploadIncidentEvidenceFiles, uploadIncidentEvidenceImages, type CaseStatus, type IncidentCase, type IncidentCaseDetail } from '../lib/bridge'
 import { confirmDialog } from '../lib/confirm'
 import BugCaseLifecycle from '../components/BugCaseLifecycle.vue'
 import IncidentWorkbenchPage from './IncidentWorkbenchPage.vue'
@@ -50,47 +18,24 @@ const notifications = vi.hoisted(() => ({
 }))
 const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
 
-function manualReproductionGate(attemptID: string) {
-  return {
-    version: 1,
-    code: 'browser_manual_reproduction_available',
-    attempt_id: attemptID,
-    scene_id: 'scene-proof',
-    scenario_contract_sha256: 'a'.repeat(64),
-    frontend_entry_id: 'admin',
-    decision_sha256: 'b'.repeat(64),
-    exhausted_channels: ['safe_exploration', 'semantic_grounding', 'structured_grounding'],
-  }
-}
-
 vi.mock('vue-router', () => ({ useRoute: () => route, useRouter: () => router }))
 vi.mock('../../wailsjs/runtime/runtime', () => ({ EventsOn: runtime.EventsOn }))
 vi.mock('../lib/bridge', async importOriginal => ({
   ...(await importOriginal<typeof import('../lib/bridge')>()),
   approveIncidentFix: vi.fn(),
   approveIncidentMerge: vi.fn(),
-  captureIncidentManualReproduction: vi.fn(),
   cancelIncidentAttempt: vi.fn(),
-  clearIncidentBrowserSession: vi.fn(),
   completeIncidentRemediation: vi.fn(),
-  confirmIncidentBrowserLogin: vi.fn(),
-  confirmIncidentValidation: vi.fn(),
   continueIncidentCase: vi.fn(),
   deleteIncidentHistory: vi.fn(),
   disputeIncidentRootCause: vi.fn(),
   fetchBugByID: vi.fn(),
-  getIncidentBrowserRuntimeStatus: vi.fn().mockResolvedValue({ state: 'ready', version: '1.61.1', error_code: '', message: '' }),
   getIncidentCase: vi.fn(),
   listBugs: vi.fn().mockResolvedValue([]),
   listIncidentFixBranches: vi.fn().mockResolvedValue({ 'admin-web': ['feature/new-navigation'], api: ['feature/work'] }),
   listIncidentCases: vi.fn().mockResolvedValue([]),
   matchBugBots: vi.fn().mockResolvedValue([]),
-  notifyIncidentDeployed: vi.fn(),
-  openIncidentBrowserLogin: vi.fn(),
-  prepareIncidentBrowserRuntime: vi.fn(),
   reconsiderIncidentRemediation: vi.fn(),
-  repairIncidentBrowserRuntime: vi.fn(),
-  resolveIncidentFrontendEntry: vi.fn().mockResolvedValue({ status: 'selected', required: true, selected: { id: 'default-web', name: '默认 Web 入口', url: 'https://app.test/', resolution_source: 'only_candidate' } }),
   resetIncidentCaseWithWarnings: vi.fn(),
   saveBugSelectedBot: vi.fn(),
   startIncidentCase: vi.fn(),
@@ -212,14 +157,9 @@ afterEach(() => {
   vi.mocked(listIncidentFixBranches).mockReset().mockResolvedValue({ 'admin-web': ['feature/new-navigation'], api: ['feature/work'] })
   vi.mocked(listIncidentCases).mockReset().mockResolvedValue([])
   vi.mocked(getIncidentCase).mockReset()
-  vi.mocked(resolveIncidentFrontendEntry).mockReset().mockResolvedValue({ status: 'selected', required: true, selected: { id: 'default-web', name: '默认 Web 入口', url: 'https://app.test/', resolution_source: 'only_candidate' } })
-  vi.mocked(getIncidentBrowserRuntimeStatus).mockReset().mockResolvedValue({ state: 'ready', version: '1.61.1', error_code: '', message: '' })
   vi.mocked(matchBugBots).mockReset().mockResolvedValue([botMatch])
   vi.mocked(saveBugSelectedBot).mockReset().mockResolvedValue(bugA as any)
   vi.mocked(startIncidentCase).mockReset()
-  vi.mocked(captureIncidentManualReproduction).mockReset()
-  vi.mocked(confirmIncidentValidation).mockReset()
-  vi.mocked(confirmIncidentBrowserLogin).mockReset()
   vi.mocked(uploadIncidentEvidenceFiles).mockReset()
   vi.mocked(uploadIncidentEvidenceImages).mockReset()
   vi.mocked(continueIncidentCase).mockReset()
@@ -228,11 +168,6 @@ afterEach(() => {
   vi.mocked(approveIncidentFix).mockReset()
   vi.mocked(reconsiderIncidentRemediation).mockReset()
   vi.mocked(approveIncidentMerge).mockReset()
-  vi.mocked(notifyIncidentDeployed).mockReset()
-  vi.mocked(openIncidentBrowserLogin).mockReset()
-  vi.mocked(prepareIncidentBrowserRuntime).mockReset().mockResolvedValue()
-  vi.mocked(repairIncidentBrowserRuntime).mockReset()
-  vi.mocked(clearIncidentBrowserSession).mockReset()
   vi.mocked(completeIncidentRemediation).mockReset()
   vi.mocked(resetIncidentCaseWithWarnings).mockReset()
   notifications.error.mockReset()
@@ -244,68 +179,6 @@ afterEach(() => {
 })
 
 describe('IncidentWorkbenchPage', () => {
-  it('prepares Chromium outside the Case, reports download progress, and blocks only Web starts until ready', async () => {
-    route.query = { bug_id: 'bug-a' }
-    const webBug = { ...bugA, frontend_url: 'https://test.example.com/search' }
-    vi.mocked(listBugs).mockResolvedValue([webBug])
-    vi.mocked(matchBugBots).mockResolvedValue([botMatch])
-    vi.mocked(getIncidentBrowserRuntimeStatus).mockResolvedValue({
-      state: 'installing', version: '1.61.1', error_code: 'browser_runtime_install_in_progress', message: '',
-    })
-
-    const wrapper = await mountedPage()
-
-    const start = wrapper.get<HTMLButtonElement>('[data-action="start-case"]')
-    expect(start.element.disabled).toBe(true)
-    expect(wrapper.get('[data-browser-runtime-summary]').text()).toContain('初始化验证浏览器基础工具')
-    expect(wrapper.text()).toContain('完成后才能启动 Web 验证')
-
-    const registration = runtime.EventsOn.mock.calls.find(call => call[0] === 'browser-runtime:status')
-    expect(registration).toBeTruthy()
-    registration?.[1]({
-      status: { state: 'installing', version: '1.61.1', error_code: 'browser_runtime_install_in_progress' },
-      code: 'browser_runtime_downloading', current: 40, total: 100,
-    })
-    await flushPromises()
-
-    expect(wrapper.get('[data-browser-runtime-summary]').text()).toContain('40%')
-    expect(wrapper.get('progress').attributes('value')).toBe('40')
-    await start.trigger('click')
-    expect(startIncidentCase).not.toHaveBeenCalled()
-  })
-
-  it('reports bundled Chromium import as a local first-launch step', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([{ ...bugA, frontend_url: 'https://test.example.com/search' }])
-    vi.mocked(matchBugBots).mockResolvedValue([botMatch])
-    vi.mocked(getIncidentBrowserRuntimeStatus).mockResolvedValue({
-      state: 'installing', version: '1.61.1', error_code: '', message: '',
-    })
-    const wrapper = await mountedPage()
-    const registration = runtime.EventsOn.mock.calls.find(call => call[0] === 'browser-runtime:status')
-    registration?.[1]({
-      status: { state: 'installing', version: '1.61.1' },
-      code: 'browser_runtime_importing', current: 0, total: 0,
-    })
-    await flushPromises()
-    expect(wrapper.get('[data-browser-runtime-summary]').text()).toContain('App 内置 Chromium')
-    expect(wrapper.get('[data-browser-runtime-summary]').text()).toContain('无需联网下载')
-  })
-
-  it('retries a broken Studio browser runtime without creating a Case', async () => {
-    vi.mocked(getIncidentBrowserRuntimeStatus)
-      .mockResolvedValueOnce({ state: 'broken', version: '1.61.1', error_code: 'browser_runtime_install_failed', message: '' })
-      .mockResolvedValue({ state: 'ready', version: '1.61.1', error_code: '', message: '' })
-
-    const wrapper = await mountedPage()
-    await wrapper.get('[data-action="prepare-browser-runtime"]').trigger('click')
-    await flushPromises()
-    await flushPromises()
-
-    expect(prepareIncidentBrowserRuntime).toHaveBeenCalledTimes(1)
-    expect(startIncidentCase).not.toHaveBeenCalled()
-    expect(wrapper.get('[data-browser-runtime-summary]').text()).toContain('Web 验证可直接执行')
-  })
 
   it('loads locally stored Bugs on mount without exposing a duplicate refresh action', async () => {
     vi.mocked(listBugs).mockResolvedValue([bugA])
@@ -339,6 +212,60 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.find('[data-ticket-id="bug-a"]').exists()).toBe(false)
     expect(wrapper.get('[data-ticket-id="bug-b"]').text()).toContain('已解决')
     expect(router.replace).toHaveBeenCalledWith({ query: { bug_id: 'bug-b', view: 'history' } })
+  })
+
+  it('clears matching when only historical Bugs exist and can match after selecting history', async () => {
+    vi.mocked(listBugs).mockResolvedValue([{ ...bugA, inbox_state: 'history', status: 'resolved' }])
+    const pendingMatches = deferred<(typeof botMatch)[]>()
+    vi.mocked(matchBugBots).mockReturnValue(pendingMatches.promise)
+
+    const wrapper = await mountedPage()
+
+    expect(wrapper.get('[data-ticket-view="active"]').text()).toContain('0')
+    expect(wrapper.get('.bot-picker').text()).toContain('请先选择一条 Bug，再匹配排障机器人')
+    expect(wrapper.get('.bot-picker').attributes('disabled')).toBeUndefined()
+    expect(wrapper.get('.bot-picker').text()).not.toContain('匹配中')
+
+    pendingMatches.resolve([botMatch])
+    await flushPromises()
+    expect(wrapper.find('.bot-option').exists()).toBe(false)
+
+    await wrapper.get('[data-ticket-view="history"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.bot-option').text()).toContain('Base')
+    expect(wrapper.get('.bot-picker').text()).not.toContain('匹配中')
+    wrapper.unmount()
+  })
+
+  it.each(['resolve', 'reject'] as const)('ignores an old match %s after leaving and reselecting the same Bug', async outcome => {
+    route.query = { bug_id: 'bug-a', view: 'history' }
+    vi.mocked(listBugs).mockResolvedValue([{ ...bugA, inbox_state: 'history', status: 'resolved' }])
+    const oldMatches = deferred<(typeof botMatch)[]>()
+    vi.mocked(matchBugBots).mockReturnValue(oldMatches.promise)
+    const wrapper = await mountedPage()
+
+    await wrapper.get('[data-ticket-view="active"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.bot-picker').text()).not.toContain('匹配中')
+
+    const newMatches = deferred<(typeof botMatch)[]>()
+    vi.mocked(matchBugBots).mockReturnValue(newMatches.promise)
+    await wrapper.get('[data-ticket-view="history"]').trigger('click')
+    await flushPromises()
+
+    if (outcome === 'resolve') oldMatches.resolve([replacementBotMatch])
+    else oldMatches.reject(new Error('outdated match failure'))
+    await flushPromises()
+    expect(wrapper.get('.bot-picker').text()).toContain('匹配中')
+    expect(wrapper.find('.bot-option').exists()).toBe(false)
+    expect(notifications.toastError).not.toHaveBeenCalled()
+
+    newMatches.resolve([botMatch])
+    await flushPromises()
+    expect(wrapper.get('.bot-option').text()).toContain('Base')
+    expect(wrapper.get('.bot-option').text()).not.toContain('Base Prod')
+    expect(wrapper.get('.bot-picker').text()).not.toContain('匹配中')
+    wrapper.unmount()
   })
 
   it('renders the selected Bug as a compact incident summary', async () => {
@@ -526,7 +453,7 @@ describe('IncidentWorkbenchPage', () => {
 
     expect(wrapper.get('.bot-action-status').text()).toBe('历史故障闭环')
     expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe(terminal.id)
-    expect(wrapper.get('.workflow-loop-hint').text()).toContain('Bug 工单已转为已解决')
+    expect(wrapper.text()).toContain('历史')
     expect(wrapper.get('[data-action="restart-case"]').text()).toContain('重新开始故障闭环')
   })
 
@@ -576,17 +503,17 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.text()).not.toContain(terminal.id)
   })
 
-  it('moves a Bug to history as soon as successful regression resolution is synchronized', async () => {
+  it('keeps a submitted Bug unresolved for human acceptance', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs)
       .mockResolvedValueOnce([bugA])
       .mockResolvedValue([{ ...bugA, inbox_state: 'history', status: 'resolved' }])
-    const active = incident('case-live-resolved', 'regression_validating', '2026-07-13T00:00:00Z')
+    const active = incident('case-live-resolved', 'merging', '2026-07-13T00:00:00Z')
     vi.mocked(listIncidentCases).mockResolvedValue([active])
     mockCaseDetails(detail(active))
     const wrapper = await mountedPage()
 
-    const terminal = { ...active, status: 'fixed_verified' as const, version: active.version + 2, updated_at: '2026-07-13T00:02:00Z' }
+    const terminal = { ...active, status: 'submitted' as const, version: active.version + 2, updated_at: '2026-07-13T00:02:00Z' }
     const eventHandler = runtime.EventsOn.mock.calls.find(call => call[0] === 'incident-case:event')?.[1]
     eventHandler?.({
       kind: 'snapshot',
@@ -596,42 +523,10 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
     await flushPromises()
 
-    expect(listBugs).toHaveBeenCalledTimes(2)
-    expect(wrapper.get('[data-ticket-view="active"]').text()).toContain('0')
-    expect(wrapper.get('[data-ticket-view="history"]').text()).toContain('1')
-    expect(wrapper.get('[data-ticket-view="history"]').attributes('aria-selected')).toBe('true')
-    expect(router.replace).toHaveBeenCalledWith({ query: { bug_id: 'bug-a', view: 'history' } })
-    expect(wrapper.get('.workflow-loop-hint').text()).toContain('Bug 工单已转为已解决')
-  })
-
-  it('retries a failed regression with the persisted regression binding', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-regression-retry', 'waiting_evidence', '2026-07-13T00:00:00Z', {
-      current_attempt_id: 'regression-failed',
-    })
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    mockCaseDetails(detail(item, {
-      attempts: [{
-        id: 'regression-failed', case_id: item.id, cycle_number: 1, phase: 'regression', mode: 'regression', status: 'failed',
-        agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'regression', regression_binding: { validation_attempt_id: 'validation-1' } },
-        output_json: { error_code: 'network_temporarily_unavailable' }, parent_attempt_id: 'deploy-1', started_at: '',
-        error_code: 'network_temporarily_unavailable', error_message: '', usage: {},
-      }],
-    }))
-    vi.mocked(continueIncidentCase).mockResolvedValue({ ...item, status: 'regression_validating', version: item.version + 1 })
-    const wrapper = await mountedPage()
-
-    expect(wrapper.get('.primary-action').text()).toBe('重试当前回归')
-    await wrapper.get('.primary-action').trigger('click')
-    await flushPromises()
-
-    expect(continueIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
-      case_id: item.id,
-      expected_version: item.version,
-      phase: 'regression',
-      input_json: { decision: 'retry_current_regression' },
-    }))
+    expect(listBugs).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[data-ticket-view="active"]').text()).toContain('1')
+    expect(wrapper.get('[data-ticket-view="active"]').attributes('aria-selected')).toBe('true')
+    expect(wrapper.text()).toContain('已提交，待人工验证')
   })
 
   it('automatically closes restart confirmation when the active Case becomes terminal', async () => {
@@ -796,7 +691,7 @@ describe('IncidentWorkbenchPage', () => {
 
   it.each([
     ['no selected Bot', [], '请选择排障机器人'],
-    ['unsupported target', [{ bot: { ...botMatch.bot, key: 'base|cursor', target: 'cursor' }, score: 8, reasons: [] }], '暂不支持由 Studio 后台启动'],
+    ['unsupported target', [{ bot: { ...botMatch.bot, key: 'base|embedded', target: 'embedded' }, score: 8, reasons: [] }], '暂不支持由 Studio 后台启动'],
     ['empty environment', [{ bot: { ...botMatch.bot, env: '' }, score: 8, reasons: [] }], '缺少目标环境'],
   ] as const)('keeps the active workflow visible but disables restart for %s', async (_label, availableMatches, reason) => {
     route.query = { bug_id: 'bug-a' }
@@ -816,7 +711,7 @@ describe('IncidentWorkbenchPage', () => {
 
   it.each([
     ['no selected Bot', [], '请选择排障机器人'],
-    ['unsupported target', [{ bot: { ...botMatch.bot, key: 'base|cursor', target: 'cursor' }, score: 8, reasons: [] }], '暂不支持由 Studio 后台启动'],
+    ['unsupported target', [{ bot: { ...botMatch.bot, key: 'base|embedded', target: 'embedded' }, score: 8, reasons: [] }], '暂不支持由 Studio 后台启动'],
     ['empty environment', [{ bot: { ...botMatch.bot, env: '' }, score: 8, reasons: [] }], '缺少目标环境'],
   ] as const)('disables open for a no-Case Bug with %s', async (_label, availableMatches, reason) => {
     route.query = { bug_id: 'bug-a' }
@@ -842,109 +737,6 @@ describe('IncidentWorkbenchPage', () => {
 
     pendingMatches.resolve([botMatch])
     await flushPromises()
-  })
-
-  it('requires an explicit frontend choice when ticket evidence is ambiguous and freezes it into Start', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([{
-      ...bugA,
-      title: '【测试环境】【PC端】媒资全部下架后内容仍可进入',
-      frontend_url: '',
-      frontend_repo: '',
-      browser: '',
-    }])
-    vi.mocked(resolveIncidentFrontendEntry).mockResolvedValue({
-      status: 'ambiguous',
-      required: true,
-      message: '工单证据无法唯一确定前端入口，请选择本次验证对应的应用',
-      candidates: [
-        { binding: { id: 'consumer', name: 'C 端 H5', url: 'https://m.test/', resolution_source: '' }, score: 0, reasons: [] },
-        { binding: { id: 'admin', name: '管理端', url: 'https://admin.test/', resolution_source: '' }, score: 0, reasons: [] },
-      ],
-    })
-    const opened = incident('case-admin-frontend', 'validating', '2026-07-13T00:01:00Z', {
-      version: 1,
-      frontend_entry: { id: 'admin', name: '管理端', url: 'https://admin.test/', resolution_source: 'user' },
-    })
-    vi.mocked(startIncidentCase).mockResolvedValue(opened)
-    mockCaseDetails(detail(opened))
-
-    const wrapper = await mountedPage()
-
-    const start = wrapper.get<HTMLButtonElement>('[data-action="start-case"]')
-    expect(start.element.disabled).toBe(true)
-    expect(wrapper.findAll('.frontend-entry-toggle').map(toggle => toggle.text())).toEqual(['C 端 H5', '管理端'])
-    expect(wrapper.get('.frontend-entry-resolution').text()).not.toContain('请选择本次验证对应的应用')
-
-    const admin = wrapper.findAll<HTMLInputElement>('.frontend-entry-option input').find(input => input.element.value === 'admin')
-    expect(admin).toBeTruthy()
-    await admin!.setValue(true)
-    expect(start.element.disabled).toBe(false)
-
-    await start.trigger('click')
-    await flushPromises()
-
-    expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({ frontend_entry_id: 'admin' }))
-  })
-
-  it('selects every affected configured end and freezes the chosen start end', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([{
-      ...bugA,
-      title: '管理端下架后 C端仍可播放',
-      frontend_url: '',
-      frontend_repo: '',
-      browser: '',
-    }])
-    vi.mocked(resolveIncidentFrontendEntry).mockResolvedValue({
-      status: 'ambiguous',
-      required: true,
-      message: '请确认本次验证涉及的应用',
-      suggested_entry_ids: ['admin', 'consumer'],
-      candidates: [
-        { binding: { id: 'admin', name: '管理端', url: 'https://admin.test/', resolution_source: '' }, score: 20, reasons: ['工单文本命中入口名称/别名'] },
-        { binding: { id: 'consumer', name: 'C 端', url: 'https://m.test/', resolution_source: '' }, score: 20, reasons: ['工单文本命中入口名称/别名'] },
-      ],
-    })
-    const opened = incident('case-multi-frontend', 'validating', '2026-07-13T00:01:00Z', {
-      version: 1,
-      frontend_entry: { id: 'admin', name: '管理端', url: 'https://admin.test/', resolution_source: 'user' },
-      frontend_entries: [
-        { id: 'admin', name: '管理端', url: 'https://admin.test/', resolution_source: 'user' },
-        { id: 'consumer', name: 'C 端', url: 'https://m.test/', resolution_source: 'user' },
-      ],
-    })
-    vi.mocked(startIncidentCase).mockResolvedValue(opened)
-    mockCaseDetails(detail(opened))
-
-    const wrapper = await mountedPage()
-    expect(wrapper.text()).toContain('涉及端（2）')
-    const endpointToggles = wrapper.findAll('.frontend-entry-toggle')
-    expect(endpointToggles).toHaveLength(2)
-    expect(endpointToggles.map(toggle => toggle.text())).toEqual(['管理端', 'C 端'])
-    const endpointPanel = wrapper.get('.frontend-entry-resolution')
-    expect(endpointPanel.find('input[type="radio"]').exists()).toBe(false)
-    expect(endpointPanel.text()).not.toContain('https://admin.test/')
-    expect(endpointPanel.text()).not.toContain('https://m.test/')
-    expect(endpointPanel.text()).not.toContain('工单文本命中入口名称/别名')
-    expect(endpointPanel.text()).not.toContain('起始端')
-    await wrapper.get('[data-action="start-case"]').trigger('click')
-    await flushPromises()
-
-    expect(startIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
-      frontend_entry_id: 'admin',
-      frontend_entry_ids: ['admin', 'consumer'],
-      primary_frontend_entry_id: 'admin',
-    }))
-  })
-
-  it('gives endpoint checkboxes a centered visual control and a full touch target', () => {
-    const source = readFileSync('src/pages/IncidentWorkbenchPage.vue', 'utf8')
-
-    expect(source).toContain('class="frontend-entry-toggle"')
-    expect(source).toMatch(/\.frontend-entry-toggle\s*\{[^}]*min-height:\s*44px[^}]*align-items:\s*center/)
-    expect(source).toMatch(/\.frontend-entry-toggle input\[type="checkbox"\]\s*\{[^}]*width:\s*20px[^}]*height:\s*20px/)
-    expect(source).toMatch(/\.frontend-entry-toggle input\[type="checkbox"\][^}]*margin:\s*0/)
   })
 
   it('clears Start pending before scrolling and focusing the opened Case', async () => {
@@ -1004,11 +796,12 @@ describe('IncidentWorkbenchPage', () => {
     expect(wrapper.find('.primary-action').exists()).toBe(true)
   })
 
-  it('uses an existing Case returned by the backend', async () => {
+  it.each(['codex', 'claude-code', 'cursor', 'opencode'])('uses an existing Case returned by the backend for %s', async (target) => {
+    vi.mocked(matchBugBots).mockResolvedValue([{ ...botMatch, bot: { ...botMatch.bot, key: `base|${target}`, target } }])
     const scrollIntoView = stubIncidentEntry()
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
-    const existing = incident('case-existing', 'validating', '2026-07-13T00:00:00Z', { version: 4 })
+    const existing = incident('case-existing', 'investigating', '2026-07-13T00:00:00Z', { version: 4 })
     vi.mocked(startIncidentCase).mockResolvedValue(existing)
     mockCaseDetails(detail(existing))
     const wrapper = mount(IncidentWorkbenchPage, { attachTo: document.body })
@@ -1022,7 +815,7 @@ describe('IncidentWorkbenchPage', () => {
 
     const input = vi.mocked(startIncidentCase).mock.calls[0][0]
     expect(input.case_id).not.toBe('case-existing')
-    expect(input).toMatchObject({ bug_id: 'bug-a', bot_key: 'base|codex', expected_version: 0, actor_id: 'desktop-user' })
+    expect(input).toMatchObject({ bug_id: 'bug-a', bot_key: `base|${target}`, expected_version: 0, actor_id: 'desktop-user' })
     expect(getIncidentCase).toHaveBeenCalledWith('case-existing')
     expect(wrapper.text()).toContain('已打开现有闭环')
     expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: 'smooth', block: 'start' })
@@ -1222,7 +1015,7 @@ describe('IncidentWorkbenchPage', () => {
     vi.mocked(matchBugBots).mockResolvedValue([botMatch, replacementBotMatch])
     const item = incident('case-1', 'waiting_evidence', '2026-07-13T00:00:00Z')
     const archived = { ...item, status: 'reset_archived' as const, version: 8, superseded_by_case_id: 'case-reset-replacement' }
-    const replacement = incident('case-reset-replacement', 'pending_validation', '2026-07-13T00:01:00Z', {
+    const replacement = incident('case-reset-replacement', 'pending_investigation', '2026-07-13T00:01:00Z', {
       version: 1,
       current_attempt_id: '',
       reset_from_case_id: 'case-1',
@@ -1243,9 +1036,9 @@ describe('IncidentWorkbenchPage', () => {
     expect(dialog.attributes('aria-modal')).toBe('true')
     expect(dialog.attributes('aria-labelledby')).toBeTruthy()
     expect(dialog.attributes('aria-describedby')).toBeTruthy()
-    expect(dialog.text()).toContain('已发生的提交、推送或部署不会自动撤销')
-    expect(dialog.text()).toContain('已有证据和审计记录会继续保留')
-    expect(dialog.text()).toContain('开始阶段验证')
+    expect(dialog.text()).toContain('已发生的提交和推送不会自动撤销')
+    expect(dialog.text()).toContain('本轮处理记录会继续保留')
+    expect(dialog.text()).toContain('开始阶段排障')
     expect(dialog.text()).toContain('排障机器人Base Prod · Claude Code')
     expect(dialog.text()).toContain('prod')
     expect(dialog.text()).not.toContain('base|codex')
@@ -1374,7 +1167,7 @@ describe('IncidentWorkbenchPage', () => {
 
     await wrapper.get('[data-action="restart-case"]').trigger('click')
     const secondDialog = wrapper.get('[role="dialog"]')
-    expect(secondDialog.text()).toContain('从“验证”重新开始')
+    expect(secondDialog.text()).toContain('从“排障”重新开始')
     expect(secondDialog.text()).not.toContain('v8')
     expect(secondDialog.text()).not.toContain('case-reset-conflict')
     expect(secondDialog.text()).not.toContain(firstReplacementID)
@@ -1391,7 +1184,7 @@ describe('IncidentWorkbenchPage', () => {
       case: replacement,
       warnings: [
         { code: 'reset_runner_cancel_failed', message: '旧阶段 Agent 未能确认停止，请人工检查其运行状态。' },
-        { code: 'reset_replacement_start_failed', message: '接替 Case 的新阶段未能启动，已保留为可恢复状态；请刷新 Case 或重试开始验证。' },
+        { code: 'reset_replacement_start_failed', message: '接替 Case 的新阶段未能启动，已保留为可恢复状态；请刷新 Case 或重试开始排障。' },
       ],
     })
     const wrapper = await mountedPage()
@@ -1417,7 +1210,7 @@ describe('IncidentWorkbenchPage', () => {
     vi.mocked(resetIncidentCaseWithWarnings).mockReturnValue(pendingReset.promise)
     vi.mocked(getIncidentCase).mockImplementation(async caseID => {
       if (caseID === item.id) return detail(item)
-      const replacement = incident(caseID, 'pending_validation', '2026-07-13T00:01:00Z', {
+      const replacement = incident(caseID, 'pending_investigation', '2026-07-13T00:01:00Z', {
         version: 1,
         current_attempt_id: '',
         reset_from_case_id: item.id,
@@ -1429,7 +1222,7 @@ describe('IncidentWorkbenchPage', () => {
     await wrapper.get('[data-action="restart-case"]').trigger('click')
     await wrapper.get('[data-reset-confirm]').trigger('click')
     const input = vi.mocked(resetIncidentCaseWithWarnings).mock.calls[0][0]
-    const replacement = incident(input.new_case_id, 'pending_validation', '2026-07-13T00:01:00Z', {
+    const replacement = incident(input.new_case_id, 'pending_investigation', '2026-07-13T00:01:00Z', {
       version: 1,
       current_attempt_id: '',
       reset_from_case_id: item.id,
@@ -1466,7 +1259,7 @@ describe('IncidentWorkbenchPage', () => {
     vi.mocked(resetIncidentCaseWithWarnings).mockReturnValue(pendingReset.promise)
     vi.mocked(getIncidentCase).mockImplementation(async caseID => {
       if (caseID === item.id) return detail(item)
-      return detail(incident(caseID, 'pending_validation', '2026-07-13T00:01:00Z', {
+      return detail(incident(caseID, 'pending_investigation', '2026-07-13T00:01:00Z', {
         version: 1,
         current_attempt_id: '',
         reset_from_case_id: item.id,
@@ -1477,7 +1270,7 @@ describe('IncidentWorkbenchPage', () => {
     await wrapper.get('[data-action="restart-case"]').trigger('click')
     await wrapper.get('[data-reset-confirm]').trigger('click')
     const input = vi.mocked(resetIncidentCaseWithWarnings).mock.calls[0][0]
-    const replacement = incident(input.new_case_id, 'pending_validation', '2026-07-13T00:01:00Z', {
+    const replacement = incident(input.new_case_id, 'pending_investigation', '2026-07-13T00:01:00Z', {
       version: 1,
       current_attempt_id: '',
       reset_from_case_id: item.id,
@@ -1501,7 +1294,7 @@ describe('IncidentWorkbenchPage', () => {
     expect(vi.mocked(getIncidentCase).mock.calls.filter(([caseID]) => caseID === replacement.id)).toHaveLength(2)
     expect(wrapper.get('.live-error').text()).toContain('接替 Case 已创建，但新阶段启动失败')
     expect(wrapper.get('.live-error').text()).toContain('validation phase schedule failed')
-    expect(wrapper.get('.live-error').text()).toContain('请刷新 Case 或重试开始验证')
+    expect(wrapper.get('.live-error').text()).toContain('请刷新 Case 或重试开始排障')
     expect(notifications.error).toHaveBeenCalledWith(expect.stringContaining('接替 Case 已创建，但新阶段启动失败'))
     expect(notifications.toastError).not.toHaveBeenCalledWith('重置故障 Case', expect.anything())
     expect(notifications.success).not.toHaveBeenCalled()
@@ -1611,7 +1404,7 @@ describe('IncidentWorkbenchPage', () => {
     await flushPromises()
     vi.mocked(getIncidentCase).mockClear()
     notifications.success.mockClear()
-    pendingReset.resolve({ case: incident('case-reset-stale', 'pending_validation', '2026-07-13T00:01:00Z', { version: 1, reset_from_case_id: 'case-a' }), warnings: [] })
+    pendingReset.resolve({ case: incident('case-reset-stale', 'pending_investigation', '2026-07-13T00:01:00Z', { version: 1, reset_from_case_id: 'case-a' }), warnings: [] })
     await flushPromises()
     await flushPromises()
 
@@ -1738,552 +1531,17 @@ describe('IncidentWorkbenchPage', () => {
     }))
   })
 
-  it.each([
-    ['merge_conflict', approveIncidentMerge, 'resolve_merge_conflict', 'fix'],
-    ['deployment_unverified', notifyIncidentDeployed, 'update_deployment_proof', 'regression'],
-  ] as const)('uses ContinueIncidentCase for %s recovery before the gated action', async (status, forbidden, decision, phase) => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-1', status, '2026-07-13T00:00:00Z')
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    mockCaseDetails(detail(item))
-    vi.mocked(continueIncidentCase).mockResolvedValue({ ...item, status: status === 'merge_conflict' ? 'waiting_merge_approval' : 'waiting_deployment', version: 8 })
-    const wrapper = await mountedPage()
-
-    await wrapper.get('.primary-action').trigger('click')
-    if (status === 'merge_conflict') {
-      await wrapper.get('[role="dialog"] textarea').setValue('人工确认已处理')
-      await wrapper.get('[data-confirm]').trigger('click')
-    }
-    await flushPromises()
-
-    const inputJSON = status === 'merge_conflict'
-      ? { decision, evidence: '人工确认已处理' }
-      : { decision: 'retry_deployment_check' }
-    expect(continueIncidentCase).toHaveBeenCalledWith(expect.objectContaining({ phase, input_json: inputJSON }))
-    expect(forbidden).not.toHaveBeenCalled()
-  })
-
-  it('renders same-version browser progress events without waiting for a Case version change', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-browser-progress', 'validating', '2026-07-15T10:00:00Z', { version: 3, current_attempt_id: 'attempt-browser' })
-    const snapshot = detail(item, {
-      attempts: [{ id: 'attempt-browser', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
-    })
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    mockCaseDetails(snapshot)
-    const wrapper = await mountedPage()
-    const eventHandler = runtime.EventsOn.mock.calls.find(call => call[0] === 'incident-case:event')?.[1]
-
-    eventHandler?.({
-      kind: 'snapshot', case: item, snapshot,
-      phase_event: { type: 'browser_progress', message: 'Cookie: sid=secret /Users/alice/private/trace.zip', raw: { Authorization: 'Bearer secret', storageState: 'secret' }, meta: { case_id: item.id, attempt_id: 'attempt-browser', browser_code: 'runtime_preparing' } },
-    })
-    eventHandler?.({
-      kind: 'snapshot', case: item, snapshot,
-      phase_event: { type: 'browser_progress', message: 'password=hunter2', meta: { case_id: item.id, attempt_id: 'attempt-browser', browser_code: 'action_started', action_id: '/private/open-users', current: 2, total: 4 } },
-    })
-    await flushPromises()
-
-    expect(wrapper.get('[data-browser-state="progress"]').text()).toContain('准备验证浏览器')
-    expect(wrapper.get('[data-browser-state="progress"]').text()).toContain('执行 2/4：开始页面操作')
-    expect(wrapper.html()).not.toMatch(/Cookie|Authorization|password|storageState|hunter2|private/)
-    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe(item.id)
-  })
-
-  it('captures login once, waits for explicit confirmation, then refreshes the continued snapshot', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-browser-login', 'waiting_evidence', '2026-07-15T10:00:00Z', { version: 7, current_attempt_id: 'attempt-login' })
-    const blocked = detail(item, {
-      attempts: [{ id: 'attempt-login', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_login_required', application_origin: 'https://app.test', login_origin: 'https://login.test' }, parent_attempt_id: '', started_at: '', error_code: 'browser_login_required', error_message: '', usage: {} }],
-    })
-    const continued = { ...item, status: 'validating' as const, version: 8, current_attempt_id: 'attempt-login-next' }
-    const refreshed = detail(continued, {
-      attempts: [{ ...blocked.attempts[0], id: 'attempt-login-next', status: 'running', error_code: '', output_json: {}, parent_attempt_id: 'attempt-login' }],
-      artifacts: [{ id: 'recovery-evidence', case_id: item.id, attempt_id: 'attempt-login-next', kind: 'log', sha256: 'a', size: 1, captured_at: '', environment: 'test', version: '8', request_id: '', trace_id: '' }],
-    })
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    let recoveryCompleted = false
-    vi.mocked(getIncidentCase).mockImplementation(async () => recoveryCompleted ? refreshed : blocked)
-    const pending = deferred<IncidentCase>()
-    vi.mocked(openIncidentBrowserLogin).mockReturnValue(pending.promise)
-    vi.mocked(confirmIncidentBrowserLogin).mockImplementation(async () => {
-      recoveryCompleted = true
-      return continued
-    })
-    const wrapper = await mountedPage()
-    const initialReads = vi.mocked(getIncidentCase).mock.calls.length
-
-    const login = wrapper.get<HTMLButtonElement>('[data-browser-action="login"]')
-    await login.trigger('click')
-    await login.trigger('click')
-    expect(openIncidentBrowserLogin).toHaveBeenCalledTimes(1)
-    expect(openIncidentBrowserLogin).toHaveBeenCalledWith({
-      case_id: item.id,
-      attempt_id: 'attempt-login',
-      expected_version: 7,
-      idempotency_key: 'login:case-browser-login:attempt-login:v7',
-      actor_id: 'desktop-user',
-    })
-
-    pending.resolve(item)
-    await flushPromises()
-    await flushPromises()
-
-    expect(wrapper.get('.status-pill').text()).toBe('等待证据')
-    expect(wrapper.get('[data-browser-action="confirm-login"]').text()).toBe('我已完成登录，继续验证')
-    expect(getIncidentCase).toHaveBeenCalledTimes(initialReads)
-
-    await wrapper.get('[data-browser-action="confirm-login"]').trigger('click')
-    await flushPromises()
-    await flushPromises()
-
-    expect(confirmIncidentBrowserLogin).toHaveBeenCalledWith({
-      case_id: item.id,
-      attempt_id: 'attempt-login',
-      expected_version: 7,
-      idempotency_key: 'login:case-browser-login:attempt-login:v7',
-      actor_id: 'desktop-user',
-    })
-    expect(getIncidentCase).toHaveBeenLastCalledWith(item.id)
-    expect(wrapper.get('.status-pill').text()).toBe('验证中')
-    expect(wrapper.find('[data-artifact-id="recovery-evidence"]').exists()).toBe(true)
-  })
-
-  it('keeps manual recording distinct from automatic validation and opens an explicit outcome dialog', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-manual-reproduction', 'waiting_evidence', '2026-07-31T18:00:00Z', {
-      version: 9, current_attempt_id: 'attempt-manual',
-      frontend_entry: { id: 'admin', name: '管理端', url: 'https://app.test/', resolution_source: 'user' },
-    })
-    const blocked = detail(item, {
-      attempts: [{
-        id: 'attempt-manual', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed',
-        agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_capability_gap', manual_reproduction_gate: manualReproductionGate('attempt-manual') },
-        parent_attempt_id: '', started_at: '', error_code: 'browser_capability_gap', error_message: '', usage: {},
-      }],
-    })
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    vi.mocked(getIncidentCase).mockResolvedValue(blocked)
-    const pending = deferred<Awaited<ReturnType<typeof captureIncidentManualReproduction>>>()
-    vi.mocked(captureIncidentManualReproduction).mockReturnValue(pending.promise)
-    const wrapper = await mountedPage()
-
-    await wrapper.get('[data-browser-action="manual-reproduce"]').trigger('click')
-    await flushPromises()
-
-    expect(wrapper.get('[data-browser-action="manual-reproduce"]').text()).toBe('正在记录复现…')
-    expect(wrapper.get('.primary-action').text()).toBe('重试当前验证')
-    expect(captureIncidentManualReproduction).toHaveBeenCalledWith(expect.objectContaining({
-      case_id: item.id,
-      attempt_id: 'attempt-manual',
-      expected_version: 9,
-      actor_id: 'desktop-user',
-      frontend_entry_id: 'admin',
-      idempotency_key: expect.stringMatching(/^manual-reproduce:case-manual-reproduction:attempt-manual:v9:admin:\d+$/),
-    }))
-
-    pending.resolve({
-      artifact_ids: ['manual-scene'], screenshot_artifact_ids: ['manual-scene'], action_count: 3,
-      frontend_entry_id: 'admin', frontend_entry_name: '管理端', captured_frontend_entry_ids: ['admin'],
-      remaining_frontend_entry_ids: [], all_required_entries_captured: true,
-      final_url: 'https://app.test/content', title: '内容管理', summary: '已记录 3 个操作和 1 张截图。',
-    })
-    await flushPromises()
-    await flushPromises()
-
-    expect(wrapper.get('[role="dialog"]').text()).toContain('确认手动复现结果')
-    expect(wrapper.get('[role="dialog"]').text()).toContain('已复现')
-    expect(wrapper.get('[role="dialog"]').text()).toContain('未复现')
-    expect(wrapper.get('[role="dialog"]').text()).toContain('无法判断')
-  })
-
-  it('collects every selected frontend before opening the combined manual outcome', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const admin = { id: 'admin', name: '管理端', url: 'https://admin.test/', resolution_source: 'user' as const }
-    const consumer = { id: 'consumer', name: 'C端', url: 'https://web.test/', resolution_source: 'user' as const }
-    const item = incident('case-multi-manual-reproduction', 'waiting_evidence', '2026-08-03T10:00:00Z', {
-      version: 9,
-      current_attempt_id: 'attempt-multi-manual',
-      frontend_entry: admin,
-      frontend_entries: [admin, consumer],
-    })
-    const attempt = {
-      id: 'attempt-multi-manual', case_id: item.id, cycle_number: 1, phase: 'validation' as const, mode: 'reproduce' as const, status: 'failed' as const,
-      agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_capability_gap', manual_reproduction_gate: manualReproductionGate('attempt-multi-manual') },
-      parent_attempt_id: '', started_at: '', error_code: 'browser_capability_gap', error_message: '', usage: {},
-    }
-    const adminSegment = {
-      frontend_entry_id: 'admin', frontend_entry_name: '管理端', start_url: admin.url, final_url: `${admin.url}content`,
-      title: '内容管理', action_count: 4, captured_at: '2026-08-03T10:01:00Z',
-    }
-    const consumerSegment = {
-      frontend_entry_id: 'consumer', frontend_entry_name: 'C端', start_url: consumer.url, final_url: `${consumer.url}search`,
-      title: '内容搜索', action_count: 3, captured_at: '2026-08-03T10:02:00Z',
-    }
-    let current = detail(item, { attempts: [attempt], manual_reproduction_segments: [] })
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    vi.mocked(getIncidentCase).mockImplementation(async () => current)
-    vi.mocked(captureIncidentManualReproduction).mockImplementation(async input => {
-      if (input.frontend_entry_id === 'admin') {
-        current = detail(item, { attempts: [attempt], manual_reproduction_segments: [adminSegment] })
-        return {
-          artifact_ids: ['admin-recipe'], screenshot_artifact_ids: ['admin-scene'], action_count: 4,
-          frontend_entry_id: 'admin', frontend_entry_name: '管理端', captured_frontend_entry_ids: ['admin'],
-          remaining_frontend_entry_ids: ['consumer'], all_required_entries_captured: false,
-          final_url: adminSegment.final_url, title: adminSegment.title, summary: '管理端已采集。',
-        }
-      }
-      current = detail(item, { attempts: [attempt], manual_reproduction_segments: [adminSegment, consumerSegment] })
-      return {
-        artifact_ids: ['consumer-recipe'], screenshot_artifact_ids: ['consumer-scene'], action_count: 3,
-        frontend_entry_id: 'consumer', frontend_entry_name: 'C端', captured_frontend_entry_ids: ['admin', 'consumer'],
-        remaining_frontend_entry_ids: [], all_required_entries_captured: true,
-        final_url: consumerSegment.final_url, title: consumerSegment.title, summary: '管理端和 C 端均已采集。',
-      }
-    })
-    const wrapper = await mountedPage()
-
-    await wrapper.get('[data-frontend-entry-id="admin"]').trigger('click')
-    await flushPromises()
-    await flushPromises()
-
-    expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
-    expect(wrapper.get('[data-frontend-entry-id="admin"]').text()).toContain('已采集')
-    expect(wrapper.get('[data-frontend-entry-id="consumer"]').text()).toBe('复现C端')
-
-    await wrapper.get('[data-frontend-entry-id="consumer"]').trigger('click')
-    await flushPromises()
-    await flushPromises()
-
-    expect(captureIncidentManualReproduction).toHaveBeenNthCalledWith(1, expect.objectContaining({ frontend_entry_id: 'admin' }))
-    expect(captureIncidentManualReproduction).toHaveBeenNthCalledWith(2, expect.objectContaining({ frontend_entry_id: 'consumer' }))
-    expect(wrapper.get('[role="dialog"]').text()).toContain('确认手动复现结果')
-    expect(wrapper.get('[role="dialog"]').text()).toContain('管理端和 C 端均已采集')
-  })
-
-  it('repairs the browser runtime with the exact key and refreshes only the current Case', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-browser-runtime', 'waiting_evidence', '2026-07-15T10:00:00Z', { version: 11, current_attempt_id: 'attempt-runtime' })
-    const blocked = detail(item, {
-      attempts: [{ id: 'attempt-runtime', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_runtime_broken' }, parent_attempt_id: '', started_at: '', error_code: 'browser_runtime_broken', error_message: '', usage: {} }],
-    })
-    const continued = { ...item, status: 'validating' as const, version: 12, current_attempt_id: 'attempt-runtime-next' }
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    let recoveryCompleted = false
-    vi.mocked(getIncidentCase).mockImplementation(async () => recoveryCompleted ? detail(continued) : blocked)
-    vi.mocked(repairIncidentBrowserRuntime).mockImplementation(async () => {
-      recoveryCompleted = true
-      return continued
-    })
-    const wrapper = await mountedPage()
-
-    await wrapper.get('[data-browser-action="repair-runtime"]').trigger('click')
-    await flushPromises()
-    await flushPromises()
-
-    expect(repairIncidentBrowserRuntime).toHaveBeenCalledWith({
-      case_id: item.id,
-      attempt_id: 'attempt-runtime',
-      expected_version: 11,
-      idempotency_key: 'repair-runtime:case-browser-runtime:attempt-runtime:v11',
-      actor_id: 'desktop-user',
-    })
-    expect(getIncidentCase).toHaveBeenLastCalledWith(item.id)
-  })
-
-  it('applies a successful recovery before refresh and reports refresh failure only as a local warning', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-browser-refresh-warning', 'waiting_evidence', '2026-07-15T10:00:00Z', { version: 7, current_attempt_id: 'attempt-login' })
-    const blocked = detail(item, {
-      attempts: [{ id: 'attempt-login', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_login_required', application_origin: 'https://app.test', login_origin: 'https://login.test' }, parent_attempt_id: '', started_at: '', error_code: 'browser_login_required', error_message: '', usage: {} }],
-    })
-    const continued = { ...item, status: 'validating' as const, version: 8, current_attempt_id: 'attempt-login-next' }
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    let recoveryCompleted = false
-    vi.mocked(getIncidentCase).mockImplementation(async () => {
-      if (recoveryCompleted) throw new Error('Cookie: secret /private/detail')
-      return blocked
-    })
-    vi.mocked(openIncidentBrowserLogin).mockResolvedValue(item)
-    vi.mocked(confirmIncidentBrowserLogin).mockImplementation(async () => {
-      recoveryCompleted = true
-      return continued
-    })
-    const wrapper = await mountedPage()
-
-    await wrapper.get('[data-browser-action="login"]').trigger('click')
-    await flushPromises()
-    await wrapper.get('[data-browser-action="confirm-login"]').trigger('click')
-    await flushPromises()
-
-    expect(getIncidentCase).toHaveBeenLastCalledWith(item.id)
-    expect(wrapper.get('.status-pill').text()).toBe('验证中')
-    expect(wrapper.text()).toContain('浏览器操作已完成，但 Case 详情刷新失败')
-    expect(wrapper.text()).not.toMatch(/Cookie|private\/detail|无法完成验证浏览器登录/)
-    expect(notifications.error).not.toHaveBeenCalled()
-  })
-
-  it('rejects a cross-Case recovery result without refreshing or changing the captured Case', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-browser-cross-result', 'waiting_evidence', '2026-07-15T10:00:00Z', { version: 7, current_attempt_id: 'attempt-login' })
-    const blocked = detail(item, {
-      attempts: [{ id: 'attempt-login', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_login_required', application_origin: 'https://app.test', login_origin: 'https://login.test' }, parent_attempt_id: '', started_at: '', error_code: 'browser_login_required', error_message: '', usage: {} }],
-    })
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    mockCaseDetails(blocked)
-    vi.mocked(openIncidentBrowserLogin).mockResolvedValue({ ...item, id: 'case-other', status: 'validating', version: 8 })
-    const wrapper = await mountedPage()
-    const initialReads = vi.mocked(getIncidentCase).mock.calls.length
-
-    await wrapper.get('[data-browser-action="login"]').trigger('click')
-    await flushPromises()
-
-    expect(getIncidentCase).toHaveBeenCalledTimes(initialReads)
-    expect(getIncidentCase).not.toHaveBeenCalledWith('case-other')
-    expect(wrapper.get('.status-pill').text()).toBe('等待证据')
-    expect(wrapper.text()).toContain('无法完成验证浏览器登录')
-  })
-
-  it('does not surface a recovery error after the captured attempt or version changes', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-browser-stale-error', 'waiting_evidence', '2026-07-15T10:00:00Z', { version: 7, current_attempt_id: 'attempt-login' })
-    const blocked = detail(item, {
-      attempts: [{ id: 'attempt-login', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_login_required', application_origin: 'https://app.test', login_origin: 'https://login.test' }, parent_attempt_id: '', started_at: '', error_code: 'browser_login_required', error_message: '', usage: {} }],
-    })
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    mockCaseDetails(blocked)
-    const pending = deferred<IncidentCase>()
-    vi.mocked(openIncidentBrowserLogin).mockReturnValue(pending.promise)
-    const wrapper = await mountedPage()
-    const eventHandler = runtime.EventsOn.mock.calls.find(call => call[0] === 'incident-case:event')?.[1]
-
-    await wrapper.get('[data-browser-action="login"]').trigger('click')
-    const advanced = { ...item, version: 8, current_attempt_id: 'attempt-next' }
-    eventHandler?.({ kind: 'snapshot', case: advanced, snapshot: detail(advanced, { attempts: [{ ...blocked.attempts[0], id: 'attempt-next' }] }) })
-    await flushPromises()
-    pending.reject(new Error('Authorization: Bearer secret /private/login'))
-    await flushPromises()
-
-    expect(wrapper.get('.case-heading').attributes('data-case-id')).toBe(item.id)
-    expect(wrapper.text()).not.toMatch(/无法完成验证浏览器登录|Authorization|private\/login/)
-    expect(notifications.error).not.toHaveBeenCalled()
-  })
-
-  it('clears the exact blocked session idempotently and refreshes only after success', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-browser-clear', 'waiting_evidence', '2026-07-15T10:00:00Z', { version: 5, current_attempt_id: 'attempt-login' })
-    const blocked = detail(item, {
-      attempts: [{ id: 'attempt-login', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_login_required', application_origin: 'https://app.test', login_origin: 'https://login.test' }, parent_attempt_id: '', started_at: '', error_code: 'browser_login_required', error_message: '', usage: {} }],
-    })
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    vi.mocked(getIncidentCase).mockResolvedValue(blocked)
-    const pending = deferred<void>()
-    vi.mocked(clearIncidentBrowserSession).mockReturnValue(pending.promise)
-    const wrapper = await mountedPage()
-    const initialReads = vi.mocked(getIncidentCase).mock.calls.length
-
-    const clear = wrapper.get<HTMLButtonElement>('[data-browser-action="clear-session"]')
-    await clear.trigger('click')
-    await clear.trigger('click')
-    expect(clearIncidentBrowserSession).toHaveBeenCalledTimes(1)
-    expect(getIncidentCase).toHaveBeenCalledTimes(initialReads)
-    expect(clearIncidentBrowserSession).toHaveBeenCalledWith({
-      case_id: item.id,
-      attempt_id: 'attempt-login',
-      expected_version: 5,
-      idempotency_key: 'clear-session:case-browser-clear:attempt-login:v5',
-      actor_id: 'desktop-user',
-    })
-
-    pending.resolve()
-    await flushPromises()
-    await flushPromises()
-    expect(getIncidentCase).toHaveBeenCalledTimes(initialReads + 1)
-  })
-
-  it('clears the captured-login confirmation and dismisses its stale success notice', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-browser-clear-captured', 'waiting_evidence', '2026-07-15T10:00:00Z', { version: 5, current_attempt_id: 'attempt-login' })
-    const blocked = detail(item, {
-      attempts: [{ id: 'attempt-login', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_login_required', application_origin: 'https://app.test', login_origin: 'https://login.test' }, parent_attempt_id: '', started_at: '', error_code: 'browser_login_required', error_message: '', usage: {} }],
-    })
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    vi.mocked(getIncidentCase).mockResolvedValue(blocked)
-    vi.mocked(openIncidentBrowserLogin).mockResolvedValue(item)
-    vi.mocked(clearIncidentBrowserSession).mockResolvedValue()
-    notifications.info.mockReturnValue(73)
-    const wrapper = await mountedPage()
-
-    await wrapper.get('[data-browser-action="login"]').trigger('click')
-    await flushPromises()
-    expect(wrapper.find('[data-browser-action="confirm-login"]').exists()).toBe(true)
-
-    await wrapper.get('[data-browser-action="clear-session"]').trigger('click')
-    await flushPromises()
-    await flushPromises()
-
-    expect(notifications.dismiss).toHaveBeenCalledWith(73)
-    expect(wrapper.find('[data-browser-action="confirm-login"]').exists()).toBe(false)
-    expect(wrapper.find('[data-browser-action="login"]').exists()).toBe(true)
-    expect(notifications.success).toHaveBeenCalledWith('已清除此环境登录态')
-  })
-
-  it('keeps clear-session success separate from a captured-Case refresh failure', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-browser-clear-warning', 'waiting_evidence', '2026-07-15T10:00:00Z', { version: 5, current_attempt_id: 'attempt-login' })
-    const blocked = detail(item, {
-      attempts: [{ id: 'attempt-login', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_login_required', application_origin: 'https://app.test', login_origin: 'https://login.test' }, parent_attempt_id: '', started_at: '', error_code: 'browser_login_required', error_message: '', usage: {} }],
-    })
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    let clearCompleted = false
-    vi.mocked(getIncidentCase).mockImplementation(async () => {
-      if (clearCompleted) throw new Error('storageState /private/session')
-      return blocked
-    })
-    vi.mocked(clearIncidentBrowserSession).mockImplementation(async () => { clearCompleted = true })
-    const wrapper = await mountedPage()
-
-    await wrapper.get('[data-browser-action="clear-session"]').trigger('click')
-    await flushPromises()
-    await flushPromises()
-
-    expect(getIncidentCase).toHaveBeenLastCalledWith(item.id)
-    expect(wrapper.text()).toContain('浏览器操作已完成，但 Case 详情刷新失败')
-    expect(wrapper.text()).not.toMatch(/清除浏览器登录态失败|storageState|private\/session/)
-    expect(notifications.error).not.toHaveBeenCalled()
-  })
-
-  it('routes validator recovery to deployed robot management without exposing backend errors', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-validator-missing', 'waiting_evidence', '2026-07-15T10:00:00Z', { current_attempt_id: 'attempt-validator' })
-    const snapshot = detail(item, {
-      attempts: [{ id: 'attempt-validator', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'validator_not_installed' }, parent_attempt_id: '', started_at: '', error_code: 'validator_not_installed', error_message: '/Users/alice/private/validator workspace', usage: {} }],
-    })
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    mockCaseDetails(snapshot)
-    const wrapper = await mountedPage()
-
-    await wrapper.get('[data-browser-action="redeploy-validator"]').trigger('click')
-
-    expect(router.push).toHaveBeenCalledWith('/bots')
-    expect(wrapper.text()).not.toContain('/Users/alice/private/validator workspace')
-  })
-
-  it('routes a missing frontend URL to the selected Bug sync flow without evidence continuation', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-url-required', 'waiting_evidence', '2026-07-15T10:00:00Z', { current_attempt_id: 'attempt-url' })
-    const snapshot = detail(item, {
-      attempts: [{ id: 'attempt-url', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: { error_code: 'browser_url_required' }, parent_attempt_id: '', started_at: '', error_code: 'browser_url_required', error_message: '/private/raw URL error', usage: {} }],
-    })
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    mockCaseDetails(snapshot)
-    const wrapper = await mountedPage()
-
-    expect(wrapper.find('.primary-action').exists()).toBe(false)
-    expect(wrapper.find('#case-supplement').exists()).toBe(false)
-    await wrapper.get('[data-browser-action="edit-bug-url"]').trigger('click')
-
-    expect(router.push).toHaveBeenCalledWith({ path: '/bugs', query: { bug_id: 'bug-a' } })
-    expect(continueIncidentCase).not.toHaveBeenCalled()
-    expect(wrapper.text()).not.toContain('/private/raw URL error')
-  })
-
-  it('confirms a reproduced validation result before starting investigation', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-validation-review', 'reproduced', '2026-07-15T10:00:00Z', { current_attempt_id: 'attempt-validation', version: 7 })
-    const snapshot = detail(item, {
-      attempts: [{
-        id: 'attempt-validation', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'succeeded',
-        agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'reproduce', target_environment: 'test' },
-        output_json: { verification_status: 'reproduced', observed_behavior: '重复提交', expected_behavior: '只提交一次', evidence: [], gaps: [] },
-        parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {},
-      }],
-    })
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    mockCaseDetails(snapshot)
-    vi.mocked(confirmIncidentValidation).mockResolvedValue({ ...item, status: 'investigating', version: 8 })
-    const wrapper = await mountedPage()
-
-    await wrapper.get('.primary-action').trigger('click')
-    await flushPromises()
-
-    expect(confirmIncidentValidation).toHaveBeenCalledWith({
-      case_id: item.id,
-      expected_version: 7,
-      idempotency_key: `confirm-validation:${item.id}:attempt-validation:7`,
-      actor_id: 'desktop-user',
-      validation_attempt_id: 'attempt-validation',
-    })
-    expect(continueIncidentCase).not.toHaveBeenCalled()
-  })
-
-  it('carries validation feedback into a forced scenario contract revision', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-validation-revise', 'reproduced', '2026-07-15T10:00:00Z', { current_attempt_id: 'attempt-validation', version: 7 })
-    const snapshot = detail(item, {
-      attempts: [{
-        id: 'attempt-validation', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'succeeded',
-        agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'reproduce', target_environment: 'test' },
-        output_json: { verification_status: 'reproduced', observed_behavior: '重复提交', expected_behavior: '只提交一次', evidence: [], gaps: [] },
-        parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {},
-      }],
-    })
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    mockCaseDetails(snapshot)
-    vi.mocked(continueIncidentCase).mockResolvedValue({ ...item, status: 'validating', version: 8 })
-    const wrapper = await mountedPage()
-
-    wrapper.getComponent(BugCaseLifecycle).vm.$emit('primary', {
-      kind: 'revise_validation',
-      input: '不存在第二次提交，选择文件后会自动上传。',
-    })
-    await flushPromises()
-
-    expect(continueIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
-      case_id: item.id,
-      expected_version: 7,
-      idempotency_key: `revise-validation:${item.id}:attempt-validation:7`,
-      phase: 'validation',
-      input_json: {
-        mode: 'reproduce',
-        target_environment: 'test',
-        user_input: '不存在第二次提交，选择文件后会自动上传。',
-        force_browser_replan: true,
-        scenario_contract_revision: {
-          reason: 'user_feedback',
-          source_attempt_id: 'attempt-validation',
-        },
-      },
-    }))
-  })
-
   it('uploads supplemental screenshots before retrying the current validation Attempt', async () => {
     route.query = { bug_id: 'bug-a' }
     vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-image-evidence', 'not_reproduced', '2026-07-15T10:00:00Z', { current_attempt_id: 'attempt-validation', version: 7 })
+    const item = incident('case-image-evidence', 'waiting_evidence', '2026-07-15T10:00:00Z', { current_attempt_id: 'attempt-validation', version: 7 })
     const snapshot = detail(item, {
-      attempts: [{ id: 'attempt-validation', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'reproduce', target_environment: 'test' }, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
+      attempts: [{ id: 'attempt-validation', case_id: item.id, cycle_number: 1, phase: 'investigation', mode: '', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: { target_environment: 'test' }, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
     })
     vi.mocked(listIncidentCases).mockResolvedValue([item])
     mockCaseDetails(snapshot)
     vi.mocked(uploadIncidentEvidenceImages).mockResolvedValue([{ artifact_id: 'artifact-shot-1', name: 'search-result.png', mime_type: 'image/png', size: 128 }])
-    vi.mocked(continueIncidentCase).mockResolvedValue({ ...item, status: 'validating', version: 8 })
+    vi.mocked(continueIncidentCase).mockResolvedValue({ ...item, status: 'investigating', version: 8 })
     const wrapper = await mountedPage()
 
     wrapper.getComponent(BugCaseLifecycle).vm.$emit('primary', {
@@ -2303,9 +1561,9 @@ describe('IncidentWorkbenchPage', () => {
     expect(continueIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
       case_id: item.id,
       expected_version: 7,
-      phase: 'validation',
+      phase: 'investigation',
       input_json: expect.objectContaining({
-        user_input: expect.stringContaining('artifact-shot-1'),
+        evidence_artifact_ids: ['artifact-shot-1'],
       }),
     }))
     expect(vi.mocked(uploadIncidentEvidenceImages).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(continueIncidentCase).mock.invocationCallOrder[0])
@@ -2316,7 +1574,7 @@ describe('IncidentWorkbenchPage', () => {
     vi.mocked(listBugs).mockResolvedValue([bugA])
     const item = incident('case-file-evidence', 'waiting_evidence', '2026-07-15T10:00:00Z', { current_attempt_id: 'attempt-validation', version: 7 })
     const snapshot = detail(item, {
-      attempts: [{ id: 'attempt-validation', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'reproduce', target_environment: 'test' }, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
+      attempts: [{ id: 'attempt-validation', case_id: item.id, cycle_number: 1, phase: 'investigation', mode: '', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: { target_environment: 'test' }, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }],
     })
     vi.mocked(listIncidentCases).mockResolvedValue([item])
     mockCaseDetails(snapshot)
@@ -2326,7 +1584,7 @@ describe('IncidentWorkbenchPage', () => {
       mime_type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       size: 128,
     }])
-    vi.mocked(continueIncidentCase).mockResolvedValue({ ...item, status: 'validating', version: 8 })
+    vi.mocked(continueIncidentCase).mockResolvedValue({ ...item, status: 'investigating', version: 8 })
     const wrapper = await mountedPage()
 
     wrapper.getComponent(BugCaseLifecycle).vm.$emit('primary', {
@@ -2354,37 +1612,12 @@ describe('IncidentWorkbenchPage', () => {
     expect(continueIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
       case_id: item.id,
       expected_version: 7,
-      phase: 'validation',
+      phase: 'investigation',
       input_json: expect.objectContaining({
-        user_input: expect.stringContaining('artifact-file-1'),
+        evidence_artifact_ids: ['artifact-file-1'],
       }),
     }))
     expect(vi.mocked(uploadIncidentEvidenceFiles).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(continueIncidentCase).mock.invocationCallOrder[0])
-  })
-
-  it('regenerates an invalid browser plan in the current Case instead of resetting the workflow', async () => {
-    route.query = { bug_id: 'bug-a' }
-    vi.mocked(listBugs).mockResolvedValue([bugA])
-    const item = incident('case-plan-invalid', 'waiting_evidence', '2026-07-15T10:00:00Z', { current_attempt_id: 'attempt-plan', version: 7 })
-    const snapshot = detail(item, {
-      attempts: [{ id: 'attempt-plan', case_id: item.id, cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: { mode: 'reproduce', target_environment: 'test' }, output_json: { error_code: 'browser_validator_plan_invalid' }, parent_attempt_id: '', started_at: '', error_code: 'browser_validator_plan_invalid', error_message: 'rejected raw plan', usage: {} }],
-    })
-    vi.mocked(listIncidentCases).mockResolvedValue([item])
-    mockCaseDetails(snapshot)
-    vi.mocked(continueIncidentCase).mockResolvedValue({ ...item, status: 'validating', version: 8 })
-    const wrapper = await mountedPage()
-
-    await wrapper.get('.primary-action').trigger('click')
-    await flushPromises()
-
-    expect(continueIncidentCase).toHaveBeenCalledWith(expect.objectContaining({
-      case_id: item.id,
-      expected_version: 7,
-      phase: 'validation',
-      input_json: { mode: 'reproduce', target_environment: 'test', user_input: '' },
-    }))
-    expect(resetIncidentCaseWithWarnings).not.toHaveBeenCalled()
-    expect(wrapper.text()).not.toContain('rejected raw plan')
   })
 
 })

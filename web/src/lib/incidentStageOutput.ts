@@ -113,7 +113,7 @@ function remediationSection(value: unknown): StageSection | undefined {
     { label: '修复对象', value: stringValue(plan.target) },
     { label: '修复建议', value: stringValue(plan.summary) },
     { label: '回退方案', value: stringValue(plan.rollback) },
-    { label: '回归方式', value: stringValue(plan.verification) },
+    { label: '人工验收建议', value: stringValue(plan.verification) },
   ].filter(field => field.value)
   return fields.length ? { title: '建议修复方向', fields } : undefined
 }
@@ -137,11 +137,20 @@ function presentInvestigation(attempt: PhaseAttempt, output: DataRecord): StageA
     textSection('根因结论', output.root_cause),
     remediationSection(output.remediation),
     textSection('置信度', confidence),
-    listSection('验证将自动补采', output.validation_gaps, 'info'),
+    listSection('历史证据缺口', output.validation_gaps, 'info'),
     listSection('需要你补充', output.gaps, 'warning'),
     terminalRootCause ? undefined : listSection('非阻塞未覆盖', output.unchecked_scopes, 'info'),
   ]) if (section) view.sections.push(section)
-  view.sections.push(evidenceSection('排障证据', output.evidence))
+  const chain = objectList(output.call_chain).filter(hop => stringValue(hop.name)).slice(0, 64).map(hop => [
+    { label: '节点', value: stringValue(hop.name) },
+    { label: '服务', value: stringValue(hop.service) },
+    { label: '位置', value: [stringValue(hop.repo), stringValue(hop.file)].filter(Boolean).join('/') + (typeof hop.line === 'number' && hop.line > 0 ? `:${hop.line}` : ''), mono: true },
+    { label: '操作', value: stringValue(hop.operation) },
+    { label: '版本', value: stringValue(hop.revision), mono: true },
+    { label: '定位依据', value: stringValue(hop.evidence) },
+  ].filter(field => field.value))
+  if (chain.length) view.sections.push({ title: '调用链定位', groups: chain })
+  if (objectList(output.evidence).length) view.sections.push(evidenceSection('排障依据', output.evidence))
   return view
 }
 
@@ -158,7 +167,7 @@ function presentFix(attempt: PhaseAttempt, output: DataRecord): StageAttemptPres
   if (branches.length) view.sections.push({ title: '分支与提交', groups: branches })
   const risks = listSection('风险', output.risks, 'warning')
   if (risks) view.sections.push(risks)
-  view.sections.push(evidenceSection('修复证据', output.evidence))
+  if (objectList(output.evidence).length) view.sections.push(evidenceSection('修复依据', output.evidence))
   return view
 }
 

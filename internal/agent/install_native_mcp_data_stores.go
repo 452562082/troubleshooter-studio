@@ -29,7 +29,6 @@ import (
 
 // buildDataStores 数据层 MCP per (data_store_type, env)。wizard 用 DS_TOOL_SPECS 收集每家 +
 // 每环境的连接串 env vars(如 MONGODB_URI_DEV / POSTGRES_DSN_DEV / DORIS_DSN_DEV / ES_URL_DEV ...),
-// useDeployFlow.buildOpenclawCreds 把这些 env vars 写到 install creds map。
 // 这里读对应 env var,注册成预启动 mcp server,让 AI 能直接 tool_use 调而不用读 SKILL.md
 // 跑 mongosh / psql 这种"AI 不一定会主动跑"的 CLI。
 //

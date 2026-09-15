@@ -3,27 +3,23 @@
 // 暴露:
 //   - 状态        deployLoading / deployError / deploySummary / targetDeployPaths / targetDeployPathHints
 //   - 入口        runOneClickDeploy()
-//   - 内部 helper installEnvVarName / buildOpenclawCreds(只服务 runOneClickDeploy,不导出)
+//   - 内部 helper installEnvVarName / buildInstallCreds(只服务 runOneClickDeploy,不导出)
 //
-// 跟 BotsPage 那条手动闭环对齐:wizard 已填的所有凭证(配置中心 + 可观测性 + ELK 共用 + 模型 +
-// messaging)按 install_naming.go 的 envVar() 命名拼成 creds map,直接喂给 RunInstall —— 不再
-// 让用户去 BotsPage 二次输入。openclaw / claude-code / cursor / codex 路径全自动:
-//   - openclaw     ~/.openclaw/workspace/<workspace_name>/
+// wizard 已填的组件凭证按 install_naming.go 的命名拼成 creds map，交给原生部署。
 //   - claude-code  ~/.claude/agents/<name>.md(<name>=workspace_name 兜底 system.id-bot)
 //   - cursor       ~/.cursor/agents/<name>.md
 //   - codex        ~/.codex/agents/<name>.toml(TOML subagent;主 chat 自然语言 spawn)
 //
 // 失败容错:任一 target 倒了 → 整体停下保留已成功的,error 里显示是哪个 target 倒了;
-// openclaw RunInstall 失败 → 保留中间包,toast 提示用户去 BotsPage 补凭证。
-import { computed, ref, type ComputedRef, type Ref } from 'vue'
+import type { TargetId } from './constants'
+import { computed, ref, reactive, type ComputedRef, type Ref } from 'vue'
 import type { Router } from 'vue-router'
 import { EventsOn } from '../../wailsjs/runtime/runtime'
 import {
-  defaultDestPath, detectAITools, importAndDeploy, reindexCodeGraph, runInstall, selfTestAgent,
+  defaultDestPath, detectAITools, importAndDeploy, reindexCodeGraph,
   validate as bridgeValidate, isDesktop,
 } from './bridge'
 import type { CodeGraphIndexReport } from './bridge'
-import { Target, IDE_TARGETS, type TargetId } from './constants'
 import { confirmDialog } from './confirm'
 import { pushLog } from './logStore'
 import { toast } from './toast'
@@ -37,7 +33,10 @@ interface ToolSpecLike {
   fields: CredField[]
 }
 
+export interface TargetDeployState { status: 'pending' | 'running' | 'success' | 'error'; message: string }
+
 export interface UseDeployFlowDeps {
+  onComplete?: (targets: string[]) => void
   // 系统 / agent 基本信息
   agent: { workspace_name: string; model: string }
   system: { id: string }
@@ -48,6 +47,7 @@ export interface UseDeployFlowDeps {
   targetOptions: readonly TargetId[]
   targetLabels: Record<string, string>
   homeDir: Ref<string>
+  openCodeConfigRoot?: ComputedRef<string>
 
   // 配置源 / 服务 / 环境
   activeSourceTypes: ComputedRef<readonly string[]>
@@ -80,6 +80,9 @@ export interface UseDeployFlowDeps {
 }
 
 export function useDeployFlow(deps: UseDeployFlowDeps) {
+  const targetStates = reactive<Record<string, TargetDeployState>>({})
+  const completedInputs = new Map<string, string>()
+  const deployComplete = ref(false)
   const deployLoading = ref(false)
   const deployError = ref<string | null>(null)
   const codeGraphReport = ref<CodeGraphIndexReport | null>(null)
@@ -93,7 +96,7 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
   const deployProgressLine = ref<string>('')
 
   // 部署路径展示:Step 2 卡片要让用户看到"AI 平台最终从哪儿读 agent",
-  // 因此这里展示的是 install.sh 跑完后的最终落地路径,不是中间包路径。
+  // 因此这里展示的是 原生部署完成后的最终落地路径,不是中间包路径。
   // 中间包 ~/.tshoot/<target>/<id>/ 由 defaultDestPath 给后端用,这里只为 UI 提示。
   // homeDir 已在前面声明(getUserConfig 拿的),空字符串时回退 "~" 给用户看。
 
@@ -106,17 +109,17 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
     const home = deps.homeDir.value || '~'
     const wsName = agentNameForPath.value
     return {
-      'openclaw': `${home}/.openclaw/workspace/${wsName}/`,
       'claude-code': `${home}/.claude/agents/${wsName}.md`,
       'cursor': `${home}/.cursor/agents/${wsName}.md`,
       'codex': `${home}/.codex/agents/${wsName}.toml`,
+      'opencode': `${deps.openCodeConfigRoot?.value || `${home}/.config/opencode`}/agents/${wsName}.md`,
     }
   })
 
   // 鼠标悬停"自动"标签时提示:这个路径是该 AI 平台官方约定的 agent 读取位置,
   // 不是 Studio 自己塞的;改路径只能改 workspace_name(回 Step 1 改 system.id)。
   const targetDeployPathHints: Record<string, string> = {
-    'openclaw': 'OpenClaw 启动时扫 ~/.openclaw/workspace/* 列出可用 agent,选一个进入。',
+    opencode: 'OpenCode 全局 Agent；若配置了 XDG_CONFIG_HOME，则使用该目录下的 opencode。',
     'claude-code': 'Claude Code 启动时读 ~/.claude/agents/*.md(用户级 subagent),所有项目都能 @<name> 调用。',
     'cursor': 'Cursor 启动时读 ~/.cursor/agents/*.md(用户级 Custom Agent),侧栏选用。',
     'codex': 'OpenAI Codex CLI 扫 ~/.codex/agents/*.toml 注册 subagent;在主 chat 里说 "spawn the <name> agent ..." 派生独立 thread(MCP 嵌入 toml 内联段,只在 spawn 时启动)。文档:https://developers.openai.com/codex/subagents',
@@ -132,7 +135,6 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
   // 拼出跟 Go 端 envVar() 一致的 install env 变量名。Go 的形态:
   //   - sourceID 为 "" / "default" → "<PREFIX>_<ENV>"(老 single-source 兼容)
   //   - 显式多源 → "<PREFIX>_<SOURCE>_<ENV>"
-  // 注:wizard yaml emit 的 placeholder 顺序是反的(env 在前),但 install_native_openclaw
   // 通过 envVar() 查 creds 走的是 Go 这套,所以预填 creds map 必须用 Go 这套。
   function installEnvVarName(prefix: string, sourceID: string, envID: string): string {
     let base = prefix + '_'
@@ -144,8 +146,7 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
 
   // 把 wizard 已填的所有凭证拼成 install.sh / RunInstall 用的 creds map。
   // 命名严格匹 install_naming.go 的 envVar();值从 sourceCreds + toolInputs 直接读。
-  // 这是把"已填一次"打通到"OpenClaw 部署即可跑"的关键 —— 不再去 BotsPage 二次输入。
-  function buildOpenclawCreds(): Record<string, string> {
+  function buildInstallCreds(): Record<string, string> {
     const creds: Record<string, string> = {}
     const sourceInstances = deps.sourceInstances.value
     const isMulti = sourceInstances.length > 1
@@ -286,8 +287,6 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
     }
 
     // ── Agent 模型 ──
-    const model = (deps.targetModels[Target.Openclaw] || deps.agent.model || '').trim()
-    if (model) creds['MODEL'] = model
 
     // ── messaging:lark / feishu_project ──
     if (deps.toolInputs['msg:lark:app_id']) creds['LARK_APP_ID'] = deps.toolInputs['msg:lark:app_id']
@@ -375,6 +374,7 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
   // 路径全自动,无需用户在 Step 8 再选 target / 选目录(都用 ~/.tshoot/<target>/<id>/)。
   // 任一 target 部署失败 → 整体停下保留已成功的,error 里显示是哪个 target 倒了。
   async function runOneClickDeploy() {
+    deployComplete.value = false
     if (deployLoading.value || codeGraphRetrying.value) return
     const generation = ++codeGraphOperationGeneration
     deployLoading.value = true
@@ -391,7 +391,7 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
       }
       const enabled = deps.targetOptions.filter(t => deps.enabledTargets[t])
       if (enabled.length === 0) {
-        deployError.value = 'Step 2 没勾选任何部署目标'
+        deployError.value = '请在“运行方式”选择至少一个 AI 平台'
         return
       }
       // 部署前校一把 yaml,失败就不提交到后端兜错
@@ -404,15 +404,15 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
 
       // 部署前 re-detect IDE —— Step 2 勾选时 detect 过一次,但用户可能在向导
       // 跑完 / 离开 wizard 这段时间卸载 IDE。装下去会成孤儿(IDE 看不到 agent),
-      // 应主动拦一下让用户决定要不要继续。openclaw 例外,它跟产品自带,不靠探测。
       try {
         const cur = await detectAITools()
         const ideStatus: Record<string, boolean> = {
           'claude-code': !!cur.claude_code?.installed,
           'cursor':      !!cur.cursor?.installed,
           'codex':       !!cur.codex?.installed,
+            'opencode': !!cur.opencode?.installed,
         }
-        const missing = enabled.filter(t => t !== 'openclaw' && !ideStatus[t])
+        const missing = enabled.filter(t => !ideStatus[t])
         if (missing.length > 0) {
           const labels = missing.map(t => deps.targetLabels[t] || t).join(' / ')
           const ok = await confirmDialog({
@@ -456,98 +456,52 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
       // 每个勾选的 target:
       //   - claude-code / cursor:importAndDeploy 内部已 native install 到 ~/.claude|cursor/,
       //     跑完即生效,无须二次操作
-      //   - openclaw:importAndDeploy 出中间包,**自动**用 wizard 已填凭证调 runInstall
-      //     完成 workspace 安装 + creds.json + openclaw.json 注入,跑完即生效。
       //     如果有字段没填(用户在 Step 5/7 留空了),就 fallback 到 BotsPage 让用户补全。
       const installedTargets: string[] = []
-      const stagedOnly: string[] = []
-      const openclawCreds = buildOpenclawCreds()
+      const installCreds = buildInstallCreds()
+      const input = JSON.stringify([deps.yamlOutput.value, repoPaths, installCreds])
+      for (const target of enabled) {
+        targetStates[target] = completedInputs.get(target) === input
+          ? { status: 'success', message: '已创建，无需重复部署' }
+          : { status: 'pending', message: '等待创建' }
+      }
       for (const t of enabled) {
-        const dest = await defaultDestPath(t, deps.system.id || '')
-        // 同一份 creds 顺带传给 claude-code/cursor:installNative 走完文件拷贝后会用它
-        // 注入 ~/.claude.json (user-scope dotfile) / ~/.cursor/mcp.json 的 mcpServers,装完即可用 MCP 工具。
-        const isIDE = (IDE_TARGETS as string[]).includes(t)
-        const applied = await importAndDeploy(deps.yamlOutput.value, t, dest, repoPaths, openclawCreds)
-        if (generation === codeGraphOperationGeneration && !codeGraphReport.value && applied.codegraph) {
-          codeGraphReport.value = applied.codegraph
-        }
-        if (isIDE) {
-          installedTargets.push(t)
-          continue
-        }
-        // openclaw:用 wizard 已填的凭证直接 RunInstall 完成全部安装
+        if (completedInputs.get(t) === input) { installedTargets.push(t); continue }
+        targetStates[t] = { status: 'running', message: '正在生成、部署并检查工具连接…' }
         try {
-          const r = await runInstall(dest, openclawCreds)
-          if (r && r.ok) {
-            installedTargets.push(t)
-          } else {
-            stagedOnly.push(t)
-            pushLog('install', 'warn', `[${t}] auto-install 失败,保留中间包待手动完成: ${r?.log?.slice(-200) || ''}`)
+          const dest = await defaultDestPath(t, deps.system.id || '')
+          const applied = await importAndDeploy(deps.yamlOutput.value, t, dest, repoPaths, installCreds)
+          if (generation === codeGraphOperationGeneration && !codeGraphReport.value && applied.codegraph) {
+            codeGraphReport.value = applied.codegraph
           }
-        } catch (e: any) {
-          stagedOnly.push(t)
-          pushLog('install', 'warn', `[${t}] auto-install 异常,保留中间包: ${String(e?.message || e)}`)
+          installedTargets.push(t)
+          completedInputs.set(t, input)
+          targetStates[t] = { status: 'success', message: '创建完成' }
+        } catch (error: any) {
+          targetStates[t] = { status: 'error', message: String(error?.message || error) }
         }
       }
-      // 部署主流程"已就绪"信号立即给用户——install 阶段都返回 OK 就 toast + 跳 /bots,
-      // 不再等 self-test。之前 await self-test 60-90s 期间 UI 持续灰"部署中..."、用户分不清
-      // "还在跑 self-test"还是"卡死了",反复要求确认"到底装没装上",体感极差。
-      //
-      // self-test 改后台 fire-and-forget:install 完即跳走,self-test 跑完后 pushLog 一条
-      // 详情 + toast 一条 summary。用户在 /bots 页就能看到机器人卡片(那是真"装好了"的证据),
-      // self-test 完只是补一条"健康检查"反馈,不阻塞主流程。
-      if (stagedOnly.length > 0) {
-        toast.success(`已就绪:${installedTargets.join(' / ') || '无'};需补凭证:${stagedOnly.join(' / ')}(到「已装机器人」页完成)`)
-      } else {
-        toast.success(`部署完成,共 ${installedTargets.length} 个目标已生效:${installedTargets.join(' / ')}(self-test 后台跑中,完成后会有反馈)`)
+      const failed = enabled.filter(t => targetStates[t]?.status === 'error')
+      deployComplete.value = failed.length === 0
+      if (failed.length) deployError.value = `${failed.length} 个平台创建失败。修改后再次创建，相同配置下已成功的平台不会重复部署。`
+      else {
+        toast.success(`创建完成，共 ${installedTargets.length} 个平台`)
+        deps.onComplete?.(installedTargets)
       }
 
-      // 后台跑 self-test(只对 openclaw)。注意:不再 await,主流程立刻往下走 router.push('/bots')。
-      // claude-code/cursor 的 self-test 还没适配,跳过避免误报"openclaw.json 缺失"。
-      if (installedTargets.includes('openclaw')) {
-        defaultDestPath('openclaw', deps.system.id || '').then(openclawDest => {
-          if (!openclawDest) return
-          return selfTestAgent(openclawDest).then(st => {
-            const failCount = (st.checks || []).filter(c => c.status === 'FAIL').length
-            const warnCount = (st.checks || []).filter(c => c.status === 'WARN').length
-            const passCount = (st.checks || []).filter(c => c.status === 'PASS').length
-            if (failCount > 0) {
-              const failedChecks = (st.checks || []).filter(c => c.status === 'FAIL')
-              const failDetails = failedChecks
-                .map(c => `${c.name}: ${c.detail || ''}`).join('; ')
-              const fails = failedChecks
-                .slice(0, 3)
-                .map(c => `${c.name}: ${c.detail?.slice(0, 80) || ''}`).join('; ')
-              const more = failCount > 3 ? `; 另 ${failCount - 3} 项见部署日志` : ''
-              pushLog('install', 'error', `[self-test] ${failCount} 项失败: ${failDetails}`)
-              toast.error(`🩺 自检 ${passCount}✓ ${warnCount}⚠ ${failCount}✗ → ${fails}${more}`)
-            } else if (warnCount > 0) {
-              toast.info(`🩺 自检 ${passCount}✓ ${warnCount}⚠ 0✗(警告项不阻塞,见日志详情)`)
-            } else {
-              toast.success(`🩺 自检 ${passCount}✓ 全绿`)
-            }
-          })
-        }).catch(e => {
-          pushLog('install', 'warn', `[self-test] 跑不起来: ${String(e?.message || e)}`)
-        })
-      }
       // 部署成功 → 给 saved 草稿打 lastDeployAt 时间戳。HomePage 的"下一步推荐"读到它就
       // 切成"已部署"语义,不再引导"继续部署"(用户实测撞过:已经部署完了首页还显示"继续部署")。
       // 改 currentStep 不安全(用户可能想留在 Step 10 重部),只加个时间戳。
       try {
         const raw = localStorage.getItem(deps.storageKey)
-        if (raw) {
+        if (raw && deployComplete.value) {
           const parsed = JSON.parse(raw)
           parsed.lastDeployAt = Date.now()
           parsed.lastDeployedTargets = installedTargets
           localStorage.setItem(deps.storageKey, JSON.stringify(parsed))
         }
       } catch { /* localStorage 读写失败不影响部署主流程 */ }
-      // 部分失败时留在当前步骤，让用户能看到逐仓库原因并直接重试。
-      // 全部 ready 或未启用 CodeGraph 时保留既有的部署后跳转行为。
-      if (generation === codeGraphOperationGeneration && (!codeGraphReport.value || codeGraphReport.value.ready === codeGraphReport.value.total)) {
-        deps.router.push('/bots')
-      }
+      // Keep the result visible. The user chooses whether to configure Bug tickets or start troubleshooting.
     } catch (e: any) {
       if (generation === codeGraphOperationGeneration) deployError.value = String(e?.message || e)
     } finally {
@@ -557,6 +511,8 @@ export function useDeployFlow(deps: UseDeployFlowDeps) {
   }
 
   return {
+    targetStates,
+    deployComplete,
     deployLoading,
     deployError,
     deploySummary,

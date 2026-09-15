@@ -2,7 +2,7 @@
 """
 k8s_query.py —— 排障机器人调 Kuboard v4 HTTP API 的统一入口。
 
-桌面 wizard 用 wails binding(KuboardListPods 等)实现同样能力,但部署到 OpenClaw /
+桌面 wizard 用 wails binding(KuboardListPods 等)实现同样能力,但部署到 AI 客户端 /
 Claude Code / Cursor 后机器人调不到 wails binding —— 必须有这个 Python 版兜底。
 
 凭证读取顺序:
@@ -76,11 +76,9 @@ def detect_creds_paths(agent_id: str | None) -> list[Path]:
     调用方按顺序试,首个 exists() 的胜出)。
 
     优先级:
-      1. OpenClaw:`~/.openclaw/<agent-id>-creds.json`(install_native_openclaw 写)
-      2. Studio 通用:`~/.tshoot/<agent-id>-creds.json`(WriteIDECredsFile 写,
-         Claude Code / Cursor / Codex / 其它 IDE 共用)
-      3. IDE 工作区内嵌:`<root>/skills/<agent-id>/creds.json`(向后兼容老路径)
-      4. 本地 dev:脚本 4 级祖父目录
+      1. Studio 通用:`~/.tshoot/<agent-id>-creds.json`(WriteIDECredsFile 写)
+      2. IDE 工作区内嵌:`<root>/skills/<agent-id>/creds.json`(兼容老路径)
+      3. 本地 dev:脚本 4 级祖父目录
     """
     here = Path(__file__).resolve()
     parts = here.parts
@@ -89,31 +87,22 @@ def detect_creds_paths(agent_id: str | None) -> list[Path]:
     # 抽 agent-id:优先用传入,否则从路径推断
     inferred_id: str | None = agent_id
     if not inferred_id:
-        # OpenClaw 路径:.../.openclaw/workspace/<ws>/skills/<skill>/scripts/...
-        if '.openclaw' in parts and 'workspace' in parts:
-            try:
-                ws_idx = parts.index('workspace')
-                inferred_id = parts[ws_idx + 1]
-            except (ValueError, IndexError):
-                pass
-        else:
-            # IDE 路径:.../<root>/skills/<agent-id>/<skill>/scripts/...
-            for marker in ('.claude', '.cursor', '.codex'):
-                if marker in parts:
-                    try:
-                        idx = parts.index(marker)
-                        if parts[idx + 1] == 'skills':
-                            inferred_id = parts[idx + 2]
-                            break
-                    except (ValueError, IndexError):
-                        pass
+        # IDE 路径:.../<root>/skills/<agent-id>/<skill>/scripts/...
+        for marker in ('.claude', '.cursor', '.codex', 'opencode'):
+            if marker in parts:
+                try:
+                    idx = parts.index(marker)
+                    if parts[idx + 1] == 'skills':
+                        inferred_id = parts[idx + 2]
+                        break
+                except (ValueError, IndexError):
+                    pass
 
     if inferred_id:
-        candidates.append(Path.home() / '.openclaw' / f'{inferred_id}-creds.json')
         candidates.append(Path.home() / '.tshoot' / f'{inferred_id}-creds.json')
 
     # 老路径兼容:工作区根目录下的 creds.json
-    for marker in ('.claude', '.cursor', '.codex'):
+    for marker in ('.claude', '.cursor', '.codex', 'opencode'):
         if marker in parts:
             try:
                 idx = parts.index(marker)
@@ -713,7 +702,7 @@ def cmd_pod_snapshot(args: argparse.Namespace, kc: KuboardClient) -> dict[str, A
 def main() -> None:
     p = argparse.ArgumentParser(prog='k8s_query.py')
     p.add_argument('--env', required=True, help='环境名(dev/prod 等)')
-    p.add_argument('--agent-id', default=None, help='agent 标识(OpenClaw 下用于定位 ~/.openclaw/<agent-id>-creds.json)')
+    p.add_argument('--agent-id', default=None, help='agent 标识，用于定位 ~/.tshoot/<agent-id>-creds.json')
     p.add_argument('--agent-dir', default=None, help='工作区根目录,默认从脚本路径自动检测')
     p.add_argument('--url', default='', help='覆盖 Kuboard URL')
     p.add_argument('--access-key', default='', help='覆盖 access key')

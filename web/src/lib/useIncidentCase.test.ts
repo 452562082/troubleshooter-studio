@@ -4,7 +4,7 @@ import { activeCaseForBug, botKeyForLegacyContinuation, casesForBug, continuatio
 
 function detail(version: number, id = 'case-1'): IncidentCaseDetail {
   return {
-    case: { id, bug_id: `bug-${id}`, source: 'zentao', system_id: 'base', environment: 'test', status: 'validating', cycle_number: 1, current_attempt_id: 'attempt-1', selected_bot_key: 'base|codex', version, created_at: '', updated_at: '' },
+    case: { id, bug_id: `bug-${id}`, source: 'zentao', system_id: 'base', environment: 'test', status: 'investigating', cycle_number: 1, current_attempt_id: 'attempt-1', selected_bot_key: 'base|codex', version, created_at: '', updated_at: '' },
     attempts: [], artifacts: [], approvals: [], code_changes: [], deployment_observations: [], events: [],
   }
 }
@@ -32,7 +32,7 @@ describe('incident Case controller', () => {
       { ...detail(1, 'case-active-new').case, bug_id: 'bug-a', status: 'investigating', updated_at: '2026-07-12T12:00:00Z' },
     ] as IncidentCase[]
 
-    expect([...terminalCaseStatuses]).toEqual(['fixed_verified', 'legacy_archived', 'reset_archived'])
+    expect([...terminalCaseStatuses]).toEqual(['submitted', 'remediation_recorded', 'fixed_verified', 'legacy_archived', 'reset_archived'])
     expect(activeCaseForBug(cases, 'bug-a')?.id).toBe('case-active-new')
     expect(activeCaseForBug(cases.filter(item => terminalCaseStatuses.has(item.status)), 'bug-a')).toBeUndefined()
   })
@@ -69,19 +69,19 @@ describe('incident Case controller', () => {
     blocked.case.status = 'waiting_evidence'
     controller.applySnapshot(blocked)
 
-    controller.applyCase({ ...blocked.case, status: 'validating', current_attempt_id: 'attempt-2', version: 8 })
+    controller.applyCase({ ...blocked.case, status: 'investigating', current_attempt_id: 'attempt-2', version: 8 })
 
-    expect(controller.detail.value?.case).toMatchObject({ status: 'validating', current_attempt_id: 'attempt-2', version: 8 })
-    expect(controller.cases.value[0]).toMatchObject({ status: 'validating', current_attempt_id: 'attempt-2', version: 8 })
+    expect(controller.detail.value?.case).toMatchObject({ status: 'investigating', current_attempt_id: 'attempt-2', version: 8 })
+    expect(controller.cases.value[0]).toMatchObject({ status: 'investigating', current_attempt_id: 'attempt-2', version: 8 })
   })
 
   it('authoritatively replaces an equal-version partial Case shell with full detail', () => {
     const controller = createIncidentCaseController()
     const blocked = detail(7)
     blocked.case.status = 'waiting_evidence'
-    blocked.attempts = [{ id: 'attempt-old', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: 'browser_login_required', error_message: '', usage: {} }]
+    blocked.attempts = [{ id: 'attempt-old', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'failed', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: 'browser_login_required', error_message: '', usage: {} }]
     controller.applySnapshot(blocked)
-    controller.applyCase({ ...blocked.case, status: 'validating', current_attempt_id: 'attempt-2', version: 8 })
+    controller.applyCase({ ...blocked.case, status: 'investigating', current_attempt_id: 'attempt-2', version: 8 })
     const authoritative = detail(8)
     authoritative.case.current_attempt_id = 'attempt-2'
     authoritative.attempts = [{ ...blocked.attempts[0], id: 'attempt-2', status: 'running', error_code: '' }]
@@ -112,10 +112,10 @@ describe('incident Case controller', () => {
     controller.applySnapshot(running)
     controller.acceptEvent({
       kind: 'snapshot', case: running.case, snapshot: running,
-      phase_event: { type: 'browser_progress', meta: { case_id: 'case-1', attempt_id: 'attempt-2', browser_code: 'browser_starting' } },
+      phase_event: { type: 'agent_message', message: '正在排障', meta: { case_id: 'case-1', attempt_id: 'attempt-2', state: 'browser_starting' } },
     })
 
-    expect(controller.applyAuthoritativeDetail({ ...running, attempts: [{ id: 'attempt-2', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }] })).toBe(true)
+    expect(controller.applyAuthoritativeDetail({ ...running, attempts: [{ id: 'attempt-2', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }] })).toBe(true)
     expect(controller.phaseEvents.value['attempt-2']).toHaveLength(1)
 
     const nextAttempt = detail(8)
@@ -125,7 +125,7 @@ describe('incident Case controller', () => {
 
     controller.acceptEvent({
       kind: 'snapshot', case: nextAttempt.case, snapshot: nextAttempt,
-      phase_event: { type: 'browser_progress', meta: { case_id: 'case-1', attempt_id: 'attempt-3', browser_code: 'browser_starting' } },
+      phase_event: { type: 'agent_message', message: '正在排障', meta: { case_id: 'case-1', attempt_id: 'attempt-3', state: 'browser_starting' } },
     })
     expect(controller.phaseEvents.value['attempt-3']).toHaveLength(1)
     const stopped = detail(8)
@@ -143,7 +143,7 @@ describe('incident Case controller', () => {
     full.artifacts = [{ id: 'fresh', case_id: 'case-1', attempt_id: 'attempt-2', kind: 'log', sha256: 'a', size: 1, captured_at: '', environment: 'test', version: '8', request_id: '', trace_id: '' }]
     const controller = createIncidentCaseController({ getCase: vi.fn().mockResolvedValue(full) })
     controller.applySnapshot(blocked)
-    controller.applyCase({ ...blocked.case, status: 'validating', current_attempt_id: 'attempt-2', version: 8 })
+    controller.applyCase({ ...blocked.case, status: 'investigating', current_attempt_id: 'attempt-2', version: 8 })
 
     await controller.refreshDetail('case-1')
 
@@ -153,7 +153,7 @@ describe('incident Case controller', () => {
   it('retains browser progress even when the Case snapshot version is unchanged', () => {
     const controller = createIncidentCaseController()
     const snapshot = detail(3)
-    snapshot.attempts = [{ id: 'attempt-1', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }]
+    snapshot.attempts = [{ id: 'attempt-1', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }]
     controller.applySnapshot(snapshot)
 
     controller.acceptEvent({
@@ -162,17 +162,17 @@ describe('incident Case controller', () => {
       snapshot,
       phase_event: {
         at: '2026-07-15T10:00:02Z',
-        type: 'browser_progress',
-        message: 'Cookie: sid=secret /Users/alice/private/trace.zip',
+        type: 'agent_message',
+        message: '正在读取日志',
         raw: { Authorization: 'Bearer secret', password: 'hunter2', storageState: 'secret' },
-        meta: { case_id: 'case-1', attempt_id: 'attempt-1', browser_code: 'browser_action_started', action_id: 'password=hunter2', current: 2, total: 4 },
+        meta: { case_id: 'case-1', attempt_id: 'attempt-1', state: 'browser_action_started', step_index: 2},
       },
     })
 
     expect(controller.phaseEvents.value['attempt-1']).toHaveLength(1)
     expect(controller.phaseEvents.value['attempt-1'][0]).toEqual({
-      type: 'browser_progress',
-      meta: { case_id: 'case-1', attempt_id: 'attempt-1', browser_code: 'browser_action_started', current: 2, total: 4 },
+      at: '2026-07-15T10:00:02Z', message: '正在读取日志', type: 'agent_message',
+      meta: { case_id: 'case-1', attempt_id: 'attempt-1', state: 'browser_action_started', step_index: 2},
     })
     expect(JSON.stringify(controller.phaseEvents.value)).not.toMatch(/Cookie|Authorization|password|storageState|private/)
     expect(controller.detail.value?.case.version).toBe(3)
@@ -219,14 +219,14 @@ describe('incident Case controller', () => {
     controller.applySnapshot(snapshot)
 
     expect(controller.phaseEvents.value['investigation-1']).toHaveLength(2)
-    expect(controller.phaseEvents.value['investigation-1'].map(item => item.message)).toEqual(['接收验证证据', '时间轴与最近变更'])
+    expect(controller.phaseEvents.value['investigation-1'].map(item => item.message)).toEqual(['工单与证据', '时间轴与最近变更'])
     expect(JSON.stringify(controller.phaseEvents.value)).not.toMatch(/forged|secret|token/)
   })
 
   it('deduplicates browser progress identity and caps each attempt at the newest 100 events', () => {
     const controller = createIncidentCaseController()
     const snapshot = detail(4)
-    snapshot.attempts = [{ id: 'attempt-1', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }]
+    snapshot.attempts = [{ id: 'attempt-1', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }]
     controller.applySnapshot(snapshot)
 
     for (let index = 0; index < 101; index++) {
@@ -236,9 +236,9 @@ describe('incident Case controller', () => {
         snapshot,
         phase_event: {
           at: `2026-07-15T10:${String(index).padStart(2, '0')}:00Z`,
-          type: 'browser_progress',
+          type: 'agent_message',
           message: `执行 ${index}`,
-          meta: { case_id: 'case-1', attempt_id: 'attempt-1', browser_code: 'browser_action_started', action_id: `action-${index}`, current: index, total: 100 },
+          meta: { case_id: 'case-1', attempt_id: 'attempt-1', state: 'browser_action_started', step_index: index},
         },
       })
     }
@@ -248,15 +248,15 @@ describe('incident Case controller', () => {
       snapshot,
       phase_event: {
         at: '2026-07-15T10:100:00Z',
-        type: 'browser_progress',
+        type: 'agent_message',
         message: '执行 100',
-        meta: { case_id: 'case-1', attempt_id: 'attempt-1', browser_code: 'browser_action_started', action_id: 'action-100', current: 100, total: 100 },
+        meta: { case_id: 'case-1', attempt_id: 'attempt-1', state: 'browser_action_started', step_index: 100},
       },
     })
 
     expect(controller.phaseEvents.value['attempt-1']).toHaveLength(100)
-    expect(controller.phaseEvents.value['attempt-1'][0].meta.current).toBe(1)
-    expect(controller.phaseEvents.value['attempt-1'][99].meta.current).toBe(100)
+    expect(controller.phaseEvents.value['attempt-1'][0].meta.step_index).toBe(1)
+    expect(controller.phaseEvents.value['attempt-1'][99].meta.step_index).toBe(100)
   })
 
   it('retains the latest investigation step checkpoint when command events roll over', () => {
@@ -287,18 +287,18 @@ describe('incident Case controller', () => {
   it('clears stale browser progress for a new current attempt and when the Case stops running', () => {
     const controller = createIncidentCaseController()
     const first = detail(5)
-    first.attempts = [{ id: 'attempt-1', case_id: 'case-1', cycle_number: 1, phase: 'validation', mode: 'reproduce', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }]
+    first.attempts = [{ id: 'attempt-1', case_id: 'case-1', cycle_number: 1, phase: 'investigation', mode: '', status: 'running', agent_target: 'codex', bot_key: 'base|codex', input_json: {}, output_json: {}, parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {} }]
     controller.applySnapshot(first)
-    controller.acceptEvent({ kind: 'snapshot', case: first.case, snapshot: first, phase_event: { type: 'browser_progress', message: '准备验证浏览器', meta: { case_id: 'case-1', attempt_id: 'attempt-1', browser_code: 'browser_starting' } } })
+    controller.acceptEvent({ kind: 'snapshot', case: first.case, snapshot: first, phase_event: { type: 'agent_message', message: '准备验证浏览器', meta: { case_id: 'case-1', attempt_id: 'attempt-1', state: 'browser_starting' } } })
     expect(controller.phaseEvents.value['attempt-1']).toHaveLength(1)
 
     const second = detail(6)
     second.case.current_attempt_id = 'attempt-2'
     second.attempts = [{ ...first.attempts[0], id: 'attempt-2' }]
-    controller.acceptEvent({ kind: 'snapshot', case: second.case, snapshot: second, phase_event: { type: 'browser_progress', message: '执行 1/2：打开页面', meta: { case_id: 'case-1', attempt_id: 'attempt-2', browser_code: 'browser_action_started', action_id: 'goto', current: 1, total: 2 } } })
+    controller.acceptEvent({ kind: 'snapshot', case: second.case, snapshot: second, phase_event: { type: 'agent_message', message: '执行 1/2：打开页面', meta: { case_id: 'case-1', attempt_id: 'attempt-2', state: 'browser_action_started', step_index: 1} } })
     expect(controller.phaseEvents.value['attempt-1']).toBeUndefined()
     expect(controller.phaseEvents.value['attempt-2']).toBeUndefined()
-    controller.acceptEvent({ kind: 'snapshot', case: second.case, snapshot: second, phase_event: { type: 'browser_progress', message: '执行 1/2：打开页面', meta: { case_id: 'case-1', attempt_id: 'attempt-2', browser_code: 'browser_action_started', action_id: 'goto', current: 1, total: 2 } } })
+    controller.acceptEvent({ kind: 'snapshot', case: second.case, snapshot: second, phase_event: { type: 'agent_message', message: '执行 1/2：打开页面', meta: { case_id: 'case-1', attempt_id: 'attempt-2', state: 'browser_action_started', step_index: 1} } })
     expect(controller.phaseEvents.value['attempt-2']).toHaveLength(1)
 
     const stopped = detail(7)
@@ -318,7 +318,7 @@ describe('incident Case controller', () => {
       kind: 'snapshot',
       case: selected.case,
       snapshot: selected,
-      phase_event: { type: 'browser_progress', message: '准备验证浏览器', meta: { case_id: selected.case.id, attempt_id: 'attempt-1', browser_code: 'browser_starting' } },
+      phase_event: { type: 'agent_message', message: '准备验证浏览器', meta: { case_id: selected.case.id, attempt_id: 'attempt-1', state: 'browser_starting' } },
     })
 
     const background = detail(8, 'case-background')
@@ -327,10 +327,10 @@ describe('incident Case controller', () => {
       kind: 'snapshot',
       case: background.case,
       snapshot: background,
-      phase_event: { type: 'browser_progress', message: '后台 Case 进度', meta: { case_id: background.case.id, attempt_id: 'attempt-background', browser_code: 'browser_starting' } },
+      phase_event: { type: 'agent_message', message: '后台 Case 进度', meta: { case_id: background.case.id, attempt_id: 'attempt-background', state: 'browser_starting' } },
     })
 
-    expect(controller.phaseEvents.value['attempt-1']?.map(item => item.meta.browser_code)).toEqual(['browser_starting'])
+    expect(controller.phaseEvents.value['attempt-1']?.map(item => item.meta.state)).toEqual(['browser_starting'])
     expect(controller.phaseEvents.value['attempt-background']).toBeUndefined()
   })
 
@@ -344,7 +344,7 @@ describe('incident Case controller', () => {
       kind: 'snapshot',
       case: current.case,
       snapshot: current,
-      phase_event: { type: 'browser_progress', message: '执行 2/4：切换用户页', meta: { case_id: 'case-1', attempt_id: 'attempt-2', browser_code: 'browser_action_started', action_id: 'open-users', current: 2, total: 4 } },
+      phase_event: { type: 'agent_message', message: '执行 2/4：切换用户页', meta: { case_id: 'case-1', attempt_id: 'attempt-2', state: 'browser_action_started', step_index: 2} },
     })
 
     const stale = detail(6)
@@ -352,7 +352,7 @@ describe('incident Case controller', () => {
     controller.acceptEvent({ kind: 'snapshot', case: stale.case, snapshot: stale })
 
     expect(controller.detail.value?.case.version).toBe(7)
-    expect(controller.phaseEvents.value['attempt-2']?.map(item => item.meta.current)).toEqual([2])
+    expect(controller.phaseEvents.value['attempt-2']?.map(item => item.meta.step_index)).toEqual([2])
   })
 
   it('appends eligible progress before rejecting an older attached snapshot', () => {
@@ -369,16 +369,16 @@ describe('incident Case controller', () => {
       case: stale.case,
       snapshot: stale,
       phase_event: {
-        type: 'browser_progress',
-        message: 'Authorization: Bearer secret',
-        meta: { case_id: 'case-1', attempt_id: 'attempt-2', browser_code: 'browser_action_completed', action_id: '/private/action', current: 2, total: 4 },
+        type: 'agent_message',
+        message: '日志读取完成',
+        meta: { case_id: 'case-1', attempt_id: 'attempt-2', state: 'browser_action_completed', step_index: 2},
       },
     })
 
     expect(controller.detail.value?.case.version).toBe(7)
     expect(controller.phaseEvents.value['attempt-2']).toEqual([{
-      type: 'browser_progress',
-      meta: { case_id: 'case-1', attempt_id: 'attempt-2', browser_code: 'browser_action_completed', current: 2, total: 4 },
+      message: '日志读取完成', type: 'agent_message',
+      meta: { case_id: 'case-1', attempt_id: 'attempt-2', state: 'browser_action_completed', step_index: 2},
     }])
   })
 
@@ -405,7 +405,7 @@ describe('incident Case controller', () => {
   })
 
   it.each([
-    ['validation', 'reproduce'], ['investigation', undefined], ['fix', undefined], ['regression', 'regression'],
+    ['investigation', undefined], ['fix', undefined],
   ] as const)('continues waiting evidence from the exact latest %s attempt', (phase, expectedMode) => {
     const snapshot = detail(4)
     snapshot.case.status = 'waiting_evidence'
@@ -439,15 +439,7 @@ describe('incident Case controller', () => {
       usage: {},
     }]
 
-    expect(continuationForDetail(snapshot, '')).toEqual({
-      phase: 'validation',
-      input_json: {
-        mode: 'reproduce',
-        target_environment: 'test',
-        user_input: '',
-        force_browser_replan: true,
-      },
-    })
+    expect(() => continuationForDetail(snapshot, 'more evidence')).toThrow('该历史阶段已停用')
   })
 
   it('marks user feedback as a scenario contract revision for every validation retry', () => {
@@ -461,19 +453,7 @@ describe('incident Case controller', () => {
       parent_attempt_id: '', started_at: '', error_code: '', error_message: '', usage: {},
     }]
 
-    expect(continuationForDetail(snapshot, '不存在第二次提交')).toEqual({
-      phase: 'validation',
-      input_json: {
-        mode: 'reproduce',
-        target_environment: 'test',
-        user_input: '不存在第二次提交',
-        force_browser_replan: true,
-        scenario_contract_revision: {
-          reason: 'user_feedback',
-          source_attempt_id: 'validation-reproduced',
-        },
-      },
-    })
+    expect(() => continuationForDetail(snapshot, 'more evidence')).toThrow('该历史阶段已停用')
   })
 
   it('marks regression feedback as a fresh scenario contract revision too', () => {
@@ -488,19 +468,7 @@ describe('incident Case controller', () => {
       parent_attempt_id: 'fix-1', started_at: '', error_code: 'browser_validation_needs_user_input', error_message: '', usage: {},
     }]
 
-    expect(continuationForDetail(snapshot, '成功后还要在 C 端确认内容不可见')).toEqual({
-      phase: 'regression',
-      input_json: {
-        mode: 'regression',
-        target_environment: 'test',
-        user_input: '成功后还要在 C 端确认内容不可见',
-        force_browser_replan: true,
-        scenario_contract_revision: {
-          reason: 'user_feedback',
-          source_attempt_id: 'regression-question',
-        },
-      },
-    })
+    expect(() => continuationForDetail(snapshot, 'more evidence')).toThrow('该历史阶段已停用')
   })
 
   it('rejects waiting evidence without a runnable latest attempt instead of falling back', () => {

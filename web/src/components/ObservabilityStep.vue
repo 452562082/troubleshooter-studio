@@ -6,13 +6,13 @@
 // 不重新设计签名以最小化迁移风险。
 
 import { inject } from 'vue'
+import { setLokiDatasource } from '../lib/useLokiMappingState'
 import type { CredField } from '../lib/credFields'
 import type { One2AllResourceState } from '../lib/wizardStore'
 import type { K8sRuntimeEnvLocator, K8sRuntimeSvcLocator } from '../lib/yamlGenerator'
 import type { URLProbeState } from '../lib/probeTypes'
 import type { GrafanaDatasource } from '../lib/bridge'
 import { WizardStoreKey } from '../lib/wizardStore'
-import CredsShareWarning from './CredsShareWarning.vue'
 import ObservabilityToolBlock from './ObservabilityToolBlock.vue'
 import K8sRuntimeBlock from './K8sRuntimeBlock.vue'
 import LokiMappingStep from './LokiMappingStep.vue'
@@ -88,14 +88,23 @@ const emit = defineEmits<{
 // 下拉 v-model 行为:Vue 模板里直接 mutate 父端 reactive(getLokiMapping 返回 ref,
 // grafanaDsUidByObsEnv 是 Record),Vue 自动追踪
 function setLokiDsUid(envID: string, value: string) {
-  props.getLokiMapping(envID).dsUID = value
+  setLokiDatasource(props.getLokiMapping(envID), value)
 }
 function setGrafanaDsUid(obsKey: string, envID: string, value: string) {
   props.grafanaDsUidByObsEnv[props.obsGrafanaDsKey(obsKey, envID)] = value
 }
 
+function connectionProbe(tool: string, envID: string): URLProbeState | undefined {
+  if (tool !== 'grafana') return props.obsProbeResults[props.obsProbeKey(tool, envID)]
+  const status = props.getLokiMapping(envID).dsListStatus
+  return { status: status || 'idle', error: status === 'fail' ? '账号或数据源检查失败' : undefined, latency: status === 'ok' ? '账号与数据源可用' : undefined }
+}
+const grafanaTools = ['loki', 'prometheus', 'tempo']
 function onToolToggle(tool: string, checked: boolean) {
   props.enabledObservability[tool] = checked
+  if (tool === 'grafana' && !checked) {
+    for (const key of grafanaTools) props.enabledObservability[key] = false
+  }
   if (checked && ['loki', 'prometheus', 'tempo'].includes(tool)) {
     props.enabledObservability.grafana = true
   }
@@ -104,58 +113,18 @@ function onToolToggle(tool: string, checked: boolean) {
 
 <template>
   <div class="card lg">
-    <h2>可观测性</h2>
-    <p class="help-text">
-      勾选系统用到的可观测性组件(Grafana / Loki / Prometheus / Jaeger 等),按环境填上连接地址,机器人查日志 / 指标时会用。
-    </p>
-
-    <CredsShareWarning :margin-bottom="18">
-      <li>URL、Datasource 和资源映射保存至 <code>troubleshooter.yaml</code>。</li>
-      <li>密码、Token 等 secret 仅保存到系统钥匙串，YAML 只保留环境变量引用。</li>
-      <li>部署时由 Studio 把钥匙串值注入目标 AI 平台的 MCP Server 环境变量。</li>
-    </CredsShareWarning>
-
-    <!-- 启用的可观测性组件:横排 chip 选择 -->
-    <h3 style="margin-top:4px">启用的可观测性组件</h3>
+    <h2>日志与服务状态</h2>
+    <p class="help-text">先连接平台，再选择需要查询的内容。Grafana 可发现日志、指标和调用链数据源。</p>
     <div class="obs-tool-chips">
-      <label
-        v-for="spec in obsToolSpecs"
-        :key="spec.key"
-        class="obs-tool-chip"
-        :class="{
-          active: enabledObservability[spec.key],
-          'needs-grafana': ['loki','prometheus','tempo'].includes(spec.key)
-            && enabledObservability[spec.key] && !enabledObservability['grafana']
-        }"
-        :title="['loki','prometheus','tempo'].includes(spec.key)
-          ? spec.description + ' — 本系统通过 grafana MCP 的内置工具查询(无独立 MCP 包),启用后必须同时启用 grafana'
-          : spec.description"
-      >
-        <input
-          type="checkbox"
-          :checked="enabledObservability[spec.key]"
-          @change="(event) => onToolToggle(spec.key, (event.target as HTMLInputElement).checked)"
-        />
-        {{ spec.label }}
+      <label v-for="spec in obsToolSpecs.filter(s => ['grafana', 'k8s_runtime'].includes(s.key))" :key="spec.key" class="obs-tool-chip" :class="{ active: enabledObservability[spec.key] }">
+        <input type="checkbox" :checked="enabledObservability[spec.key]" @change="onToolToggle(spec.key, ($event.target as HTMLInputElement).checked)">{{ spec.key === 'k8s_runtime' ? '运行平台 · Kuboard / one2all' : 'Grafana · 日志、指标与调用链' }}
       </label>
     </div>
-
-    <!-- Loki/Prometheus/Tempo 启用但 Grafana 未启用:必报错(后端 health_observability 也会挡) -->
-    <div
-      v-if="['loki','prometheus','tempo'].some(k => enabledObservability[k]) && !enabledObservability['grafana']"
-      class="obs-grafana-required-banner"
-      role="alert"
-    >
-      <strong>⚠ Loki / Prometheus / Tempo 必须搭配 Grafana</strong>
-      <p>
-        这三家在本系统通过 <code>mcp-grafana-npx</code> 内置的 <code>query_loki_logs</code> /
-        <code>query_prometheus</code> 等工具查询(没有独立 MCP 包,社区也没成熟实现)。
-        <strong>启用它们就必须同时启用 Grafana 并填 URL/凭据</strong>,否则 yaml validate / 部署阶段都会报错。
-      </p>
-      <p style="margin-top:6px">
-        请在上方勾选 <strong>Grafana</strong>,或取消勾选这三家。
-      </p>
-    </div>
+    <details :open="['jaeger','elk','skywalking'].some(k => enabledObservability[k])" class="wizard-advanced">
+      <summary>其他独立平台</summary>
+      <div class="obs-tool-chips"><label v-for="spec in obsToolSpecs.filter(s => ['jaeger','elk','skywalking'].includes(s.key))" :key="spec.key" class="obs-tool-chip" :class="{ active: enabledObservability[spec.key] }"><input type="checkbox" :checked="enabledObservability[spec.key]" @change="onToolToggle(spec.key, ($event.target as HTMLInputElement).checked)">{{ spec.label }}</label></div>
+    </details>
+    <div v-if="grafanaTools.some(k => enabledObservability[k]) && !enabledObservability.grafana" class="obs-grafana-required-banner" role="alert">已有日志或指标连接需要 Grafana。<button class="btn" @click="onToolToggle('grafana', true)">连接 Grafana</button><button class="btn link" @click="onToolToggle('grafana', false)">暂不接入这些能力</button></div>
 
     <!-- 主内容:按 env → 启用的工具 → 字段 层级 -->
     <div class="ds-hierarchy" style="margin-top:14px">
@@ -185,7 +154,8 @@ function onToolToggle(tool: string, checked: boolean) {
             :spec="spec"
             :access-mode="getObsAccessMode(spec.key, env.id)"
             :access-toggleable="false"
-            :probe-state="obsProbeResults[obsProbeKey(spec.key, env.id)]"
+            :connection-reuse-label="spec.key === 'k8s_runtime' ? k8sConnectionReuseLabel(env.id) : ''"
+            :probe-state="connectionProbe(spec.key, env.id)"
             :tool-inputs="toolInputs"
             :is-revealed="wizard.isRevealed"
             :is-obs-field-hidden="isObsFieldHidden"
@@ -196,11 +166,16 @@ function onToolToggle(tool: string, checked: boolean) {
             @toggle-reveal="(k) => wizard.toggleReveal(k)"
             @clear-input="(k) => emit('clearToolInput', k)"
           >
-            <div
-              v-if="spec.key === 'k8s_runtime' && k8sConnectionReuseLabel(env.id)"
-              class="cc-preload-summary"
-              style="margin: 8px 0; width: fit-content;"
-            >✓ {{ k8sConnectionReuseLabel(env.id) }}，部署产物会引用同一连接</div>
+            <div v-if="spec.key === 'grafana'" class="grafana-discovery">
+              <div class="discovery-heading"><strong>可接入的数据源</strong><button class="btn" :disabled="getLokiMapping(env.id).dsListStatus === 'loading'" @click="emit('loadLokiDatasources', env.id)">{{ getLokiMapping(env.id).dsListStatus === 'loading' ? '发现中…' : '刷新数据源' }}</button></div>
+              <p v-if="getLokiMapping(env.id).dsListStatus === 'fail'" role="alert">未能获取数据源，请检查连接后重试。</p>
+              <p v-else-if="getLokiMapping(env.id).dsListStatus !== 'ok'">填写连接信息后自动发现，选择需要接入的能力。</p>
+              <template v-else>
+                <label v-for="key in grafanaTools.filter(k => obsGrafanaDsCandidates(env.id, k).length || enabledObservability[k])" :key="key" class="discovered-source"><input type="checkbox" :checked="enabledObservability[key]" @change="onToolToggle(key, ($event.target as HTMLInputElement).checked)"><span>{{ key === 'loki' ? '查询日志 · Loki' : key === 'prometheus' ? '查询指标 · Prometheus' : '查看调用链 · Tempo' }}</span><small>{{ obsGrafanaDsCandidates(env.id, key).length }} 个数据源</small></label>
+                <p v-if="!grafanaTools.some(k => obsGrafanaDsCandidates(env.id, k).length)">未发现可用的 Loki、Prometheus 或 Tempo 数据源，可刷新或接入其他平台。</p>
+                <p>能力选择应用于项目；各环境使用各自的数据源。</p>
+              </template>
+            </div>
             <K8sRuntimeBlock
               v-if="spec.key === 'k8s_runtime'"
               :env-i-d="env.id"
@@ -226,7 +201,7 @@ function onToolToggle(tool: string, checked: boolean) {
               class="loki-env-mapping"
             >
               <div class="loki-env-mapping-head">
-                🔗 选中 {{ spec.label }} 在 Grafana 里的 datasource
+                {{ spec.label }} 数据源
               </div>
               <div class="cc-field-row" style="gap: 12px; align-items: center; flex-wrap: wrap;">
                 <select
@@ -236,7 +211,7 @@ function onToolToggle(tool: string, checked: boolean) {
                   style="max-width: 420px;"
                   @change="(e: any) => setLokiDsUid(env.id, e.target.value)"
                 >
-                  <option value="">— 选 Loki datasource —</option>
+                  <option value="">请选择日志数据源</option>
                   <option
                     v-for="ds in obsGrafanaDsCandidates(env.id, 'loki')"
                     :key="ds.uid" :value="ds.uid"
@@ -249,7 +224,7 @@ function onToolToggle(tool: string, checked: boolean) {
                   style="max-width: 420px;"
                   @change="(e: any) => setGrafanaDsUid(spec.key, env.id, e.target.value)"
                 >
-                  <option value="">— 不通过 Grafana / 留空 —</option>
+                  <option value="">请选择数据源</option>
                   <option
                     v-for="ds in obsGrafanaDsCandidates(env.id, spec.key)"
                     :key="ds.uid" :value="ds.uid"
@@ -266,7 +241,7 @@ function onToolToggle(tool: string, checked: boolean) {
                   v-else
                   type="button" class="btn cc-preload-btn"
                   @click="emit('loadLokiDatasources', env.id)"
-                >🔄 {{ (getLokiMapping(env.id).dsList || []).length > 0 ? '刷新' : '加载' }} datasources</button>
+                >🔄 {{ (getLokiMapping(env.id).dsList || []).length > 0 ? '刷新' : '加载' }}数据源</button>
                 <span
                   v-if="getLokiMapping(env.id).dsListStatus === 'fail'"
                   class="cc-preload-error"
@@ -276,7 +251,7 @@ function onToolToggle(tool: string, checked: boolean) {
                   v-else-if="(getLokiMapping(env.id).dsList || []).length > 0 && obsGrafanaDsCandidates(env.id, spec.key).length === 0"
                   class="cc-preload-summary"
                   style="background: #fee2e2; color: #991b1b;"
-                >该 Grafana 里没找到 type={{ obsGrafanaDsTypes[spec.key]?.join('/') }} 的 datasource</span>
+                >该 Grafana 里没找到 type={{ obsGrafanaDsTypes[spec.key]?.join('/') }} 的 数据源</span>
                 <span
                   v-else-if="(getLokiMapping(env.id).dsList || []).length > 0"
                   class="cc-preload-summary"
@@ -300,3 +275,11 @@ function onToolToggle(tool: string, checked: boolean) {
     </div>
   </div>
 </template>
+
+<style scoped>
+.grafana-discovery { margin:16px 0; padding:16px; background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; }
+.discovery-heading,.discovered-source { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.discovery-heading { justify-content:space-between; font-size:14px; }
+.discovered-source { min-height:44px; font-size:13px; cursor:pointer; }
+.discovered-source span { flex:1; } .discovered-source small,p { color:#64748b; font-size:12px; line-height:1.6; }
+</style>

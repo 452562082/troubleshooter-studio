@@ -46,7 +46,7 @@ func MatchBots(b Bug, bots []BotRef) []BotMatch {
 // of the persisted incident workflow through the target's background CLI.
 func SupportsIncidentWorkflowTarget(target string) bool {
 	switch strings.ToLower(strings.TrimSpace(target)) {
-	case "codex", "claude-code", "openclaw":
+	case "codex", "claude-code", "cursor", "opencode":
 		return true
 	default:
 		return false
@@ -81,18 +81,12 @@ func roleBotFor(selected BotRef, role string, suffix string) BotRef {
 	out := selected
 	out.Role = role
 	out.AgentID = agentID
-	if strings.TrimSpace(out.Target) == "openclaw" {
-		// OpenClaw installs one configured top-level agent; validator/fixer are
-		// internal prompt/skill roles in that agent's workspace. Passing the
-		// internal role ID to `openclaw agent --agent` targets a non-existent
-		// configured agent and prevents every validation call from starting.
-		out.AgentID = firstNonEmpty(strings.TrimSpace(selected.AgentID), internalAgentIDForRole(selected, "troubleshooter"), strings.TrimSpace(selected.SystemID))
-	}
+
 	out.Key = strings.TrimSpace(selected.Key)
 	if out.Key != "" {
 		out.Key += "#" + role
 	}
-	if strings.TrimSpace(out.Target) != "openclaw" && strings.TrimSpace(agentID) != "" {
+	if strings.TrimSpace(agentID) != "" {
 		candidate := filepath.Join(filepath.Dir(strings.TrimSpace(selected.Path)), agentID)
 		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
 			out.Path = candidate

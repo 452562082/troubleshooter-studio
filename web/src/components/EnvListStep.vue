@@ -32,9 +32,9 @@ defineEmits<{
 
 <template>
   <div class="card lg">
-    <h2>环境列表</h2>
+    <h2>在哪个环境排障？</h2>
     <p class="help-text">
-      填写业务系统的运行环境（如 dev / test / prod）及访问入口。运行时定位统一在“可观测性”步骤配置。
+      先配置一个常用环境；日志和服务运行状态可以在下一阶段按需连接。
     </p>
     <EnvListItem
       v-for="(env, i) in environments"

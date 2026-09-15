@@ -25,9 +25,9 @@ Studio 工作台负责排障、修复和提交。工单直接进入排障，不�
 
 ## 后台执行平台
 
-支持 Codex、Claude Code、Cursor。Cursor 需要单独安装 Agent CLI（Cursor 编辑器不等同于 CLI），安装入口为 https://cursor.com/install；安装后运行 `cursor-agent login`。工作台自动识别官方用户安装目录，无需为桌面应用额外修改 PATH。
+支持 Claude Code、Cursor、Codex CLI、OpenCode。各平台需安装相应 CLI 并配置模型账号。Cursor 编辑器不等同于 Agent CLI；OpenCode 使用自己的账号与模型配置。
 
-在 Bug 工单的平台配置中可添加 Cursor 机器人并选择环境；故障闭环也可直接选择已安装的 Cursor 机器人。排障与修复共享当前任务的授权、进度、停止和恢复规则。Cursor 显式拒绝的工具仍会被拒绝；安装或登录失败会作为执行错误显示。
+在 Bug 工单的平台配置中关联机器人和环境，或在故障闭环选择可用机器人。四个平台共享授权、进度、停止和恢复规则；平台明确拒绝的工具不会被绕过，安装或账号失败按执行错误处理。
 
 ## 状态与阶段
 
@@ -69,4 +69,4 @@ Agent 只执行 `investigation` 和 `fix`。`root_cause_ready` 要求高置信�
 
 删除的是产品中的自动业务验证能力。代码测试、配置校验、MCP runtime probe、工单平台登录、日志和运行版本只读取证继续保留。
 
-状态改动必须覆盖非法跳转、幂等、SQLite reopen、授权范围及本地 Git 集成测试。Git 测试使用临时仓库和 bare remote，不连接真实远端。设计决策见 [2026-09-14 ADR](decisions.md)。
+状态改动必须覆盖非法跳转、幂等、SQLite reopen、授权范围及本地 Git 集成测试。Git 测试使用临时仓库和 bare remote，不连接真实远端。详见[架构决策](decisions.md)与[测试指南](testing.md)。

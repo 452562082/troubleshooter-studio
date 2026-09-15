@@ -4,195 +4,95 @@
 
 # troubleshooter-studio
 
-用 `troubleshooter.yaml` 描述系统，生成可安装到 Claude Code、Cursor、Codex CLI 和 OpenCode 的 AI 排障机器人。
+AI 排障机器人工作台。从代码仓库和运行环境创建机器人，用 Bug 工单驱动排障、修复和提交。
 
-| 层级 | 职责 |
-|---|---|
-| Studio | CLI、桌面 app、HTTP server；负责建模、扫描、校验、生成、部署和故障闭环 |
-| 生成物 | 独立运行的 skills、MCP、路由和话术；安装后不依赖 Studio |
+支持 **Claude Code、Cursor、Codex CLI、OpenCode**。每个机器人包含排障和修复两个 Agent，可在对应平台独立使用；桌面工作台提供工单管理、授权和故障闭环。
 
-## 快速开始
+## 下载与安装
 
-macOS 推荐安装桌面版：
+macOS 推荐桌面版，可从 [GitHub Releases](https://github.com/452562082/troubleshooter-studio/releases) 或 [GitLab Releases](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases) 下载，也可使用安装脚本：
 
 ```bash
-# GitLab
-curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
-
-# GitHub
+# GitHub 源
 curl -fsSL https://raw.githubusercontent.com/452562082/troubleshooter-studio/main/scripts/install.sh | SOURCE=github bash
+
+# GitLab 源
+curl -fsSL https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/raw/main/scripts/install.sh | bash
 ```
 
-私有 GitLab 源设置 `GITLAB_TOKEN`；指定版本设置 `VERSION=vX.Y.Z`。发布页：[GitHub](https://github.com/452562082/troubleshooter-studio/releases) / [GitLab](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases)。
-
-CLI 从 Release 下载对应平台二进制后：
+脚本安装到 `/Applications` 并启动应用。指定版本时给右侧 `bash` 设置 `VERSION=vX.Y.Z`；私有 GitLab 需向下载请求传入令牌，并导出 `GITLAB_TOKEN`。桌面包未签名/公证；手动下载后若提示“已损坏”，确认文件来自上述发布源后可执行：
 
 ```bash
-chmod +x tshoot-vX.Y.Z-darwin-arm64
-sudo mv tshoot-vX.Y.Z-darwin-arm64 /usr/local/bin/tshoot
-tshoot --help
+xattr -dr com.apple.quarantine /Applications/TroubleshooterStudio.app
 ```
 
-典型 CLI 流程：
+Linux、Windows 使用发布页中的对应 CLI 二进制。Release 安装的是已发布版本；体验尚未发布的 `test` 分支改动请从源码构建。
+
+## 第一次使用
+
+先安装并登录至少一个 AI 平台的 CLI，再打开桌面端“创建向导”：
+
+1. **选择项目**：选择本地仓库或填写仓库地址，检查扫描结果。项目名称自动填入，内部标识自动生成。
+2. **运行方式**：选择 AI 平台、环境和分支；可检查模型连接。
+3. **排障能力**：按需添加配置源、数据库与缓存、日志与服务状态连接。暂不需要的能力可以跳过；已添加的连接需补全并检查。
+4. **确认并创建**：核对摘要并部署，在“已装机器人”查看结果、诊断或更新机器人。
+
+接着在 **Bug 工单** 中配置工单平台、关联机器人与环境，选择工单进入 **故障闭环**：
+
+```text
+排障 → 授权修复 → 修复与工程测试 → 授权合并 → 提交 → 人工验收
+```
+
+排障输入来自工单信息、已有附件和补充说明。证据不足时可以补充后继续；代码修复与合并分别授权。提交完成不代表已部署或业务验收通过。详见[故障闭环](docs/incident-workflow.md)。
+
+## 支持的平台
+
+| 平台 | YAML target | 默认安装根目录 |
+|---|---|---|
+| Claude Code | `claude-code` | `~/.claude/` |
+| Cursor | `cursor` | `~/.cursor/` |
+| Codex CLI | `codex` | `~/.codex/` |
+| OpenCode | `opencode` | `~/.config/opencode/`，支持 `XDG_CONFIG_HOME` |
+
+Cursor 需要独立的 Agent CLI，仅安装编辑器不能执行后台排障。OpenCode 使用自己的模型账号配置，可运行 `opencode auth login`；也可通过 YAML 的 `agent.target_models.opencode` 指定 `provider/model`。
+
+机器人按名称安装到平台的 agents、skills 等目录；运行时凭据使用 `~/.tshoot/<id>-creds.json`。共享路由按当前仓库选择机器人，未绑定仓库不会自动套用其他项目。
+
+## 配置与 CLI
+
+桌面端适合完整创建与故障闭环；CLI 适合脚本化生成、安装和更新。`tshoot serve` 提供轻量 Web/API，不等同于桌面端全部能力。
 
 ```bash
 tshoot init -o troubleshooter.yaml
 tshoot validate -i troubleshooter.yaml
-tshoot analyze -i troubleshooter.yaml --repos-root ./repos -o analysis.json
-tshoot gen -i troubleshooter.yaml -o dist/bot --analysis analysis.json
+tshoot gen -i troubleshooter.yaml -o dist/bot
 tshoot install --path dist/bot-claude-code --target claude-code
 ```
 
-## 使用入口
+以上以 Claude Code 为例；其他平台需在 `generation.targets` 中选择目标，并使用生成命令输出的对应目录。需要凭据时，安装命令可增加 `--env-file <凭据文件>`。部署后在桌面端运行机器人诊断，确认 MCP 能启动并列出工具。
 
-| 入口 | 适用场景 |
-|---|---|
-| 桌面 app | 推荐；建模、扫描、部署、机器人管理、Bug 工单和故障闭环 |
-| `tshoot` CLI | 脚本、SSH、CI 和四平台安装 |
-| `tshoot serve` | 本地轻量 Web UI；校验、计划、生成、doctor 和 schema |
+`tshoot analyze` 扫描仓库，`plan` / `diff` 预览变化，`discover` 查找机器人，`apply` 更新已安装机器人；完整参数见 `tshoot --help`。
 
-桌面页面包括：首页、已装机器人、Bug 工单、故障闭环、创建向导、YAML 沙盒、代码扫描和日志。
-
-## 部署目标
-
-| 平台 | 安装位置 |
-|---|---|
-| Claude Code | `~/.claude/agents/`、`~/.claude/skills/` |
-| Cursor | `~/.cursor/agents/`、`~/.cursor/skills/` |
-| Codex CLI | `~/.codex/agents/`、`~/.codex/skills/` |
-| OpenCode | `~/.config/opencode/agents/`、`~/.config/opencode/skills/`（支持 `XDG_CONFIG_HOME`）|
-
-运行时凭据保存在 `~/.tshoot/<id>-creds.json`。Studio 会安装共享 `tshoot-router`，按当前仓库路径和 Git remote 确定机器人；无法唯一归属时停止，不按故障关键词猜测。
-
-## 故障闭环
-
-Studio 用持久化 Case 编排：
-
-```text
-排障 → 修复授权 → 修复与工程测试 → 合并授权 → 提交 → 人工验收
-```
-
-- SQLite 是 Case、证据、授权和事件的真源。
-- Agent 一次只执行一个阶段；合并由 Studio 执行，应用部署由人或外部平台执行。
-- 代码修复和合并分别授权；提交后显示“已提交，待人工验证”，不自动解决外部 Bug。
-- 工单直接进入排障，使用已有附件和运行时证据；已移除自动复现、浏览器验证及回归。
-- 用户可以补证、重试、质疑根因、重评方案、重新修复或重置 Case。
-
-详见[故障闭环与 Agent 工作流](docs/incident-workflow.md)。排障 Agent 的取证方法见[排障链路](docs/troubleshooting-flow.md)。
-
-## 建模与能力
-
-支持：
-
-- 服务：frontend、gateway、backend、middleware、admin、mobile、common-lib、infra。
-- 可观测性：Grafana、Prometheus、Loki、Jaeger、Tempo、ELK、SkyWalking、K8s。
-- 数据层：Redis、MongoDB、Elasticsearch、MySQL、Doris、PostgreSQL、Kafka、RabbitMQ、ClickHouse。
-- 配置源：Nacos、Apollo、Consul、K8s ConfigMap、One2All、环境变量。
-- 技术栈：Go、Java、PHP、Python、Node、React、Vue、Next.js、Nuxt。
-
-示例见 [examples](examples/)。资源目录规则见[创建向导资源目录](docs/resource-catalog.md)。
-
-Monorepo 子服务使用 `parent_repo` 和 `parent_path`：
-
-```yaml
-repos:
-  - name: platform
-    url: https://git.example.com/org/platform.git
-    role: backend
-  - name: payments
-    url: https://git.example.com/org/payments.git
-    parent_repo: platform
-    parent_path: services/payments
-    role: backend
-```
-
-### CodeGraph
-
-按需开启：
-
-```yaml
-code_intelligence:
-  enabled: true
-  provider: codegraph
-```
-
-CodeGraph 用于仓库内符号、调用关系和影响面查询；跨仓关系由服务拓扑提供。索引不可用或分支不一致时回退到 `rg` 和文件读取。
-
-### 服务拓扑
-
-多仓系统会扫描 HTTP、Feign 和 gRPC 端点。只有自动高置信关系或人工确认关系进入正式拓扑；候选、拒绝和过期关系不参与自动导航。人工决定写入 `service_topology.overrides`。
+配置支持常见配置中心、数据库、缓存、消息队列及日志/指标/Trace/K8s 接入。示例见 [examples](examples/)，连接与兼容规则见[资源目录](docs/resource-catalog.md)。CodeGraph 为可选的仓库内代码查询能力，跨仓关系由服务拓扑提供；扫描无法识别的关系需人工补充。
 
 ## 从源码构建
 
-```bash
-xcode-select --install
-brew install go node
-make desktop-app
-open dist/TroubleshooterStudio.app
-```
-
-CLI：
+使用 [go.mod](go.mod) 指定的 Go 版本和 [.nvmrc](.nvmrc) 指定的 Node 版本；macOS 桌面构建还需要 Xcode Command Line Tools。
 
 ```bash
-make
-./bin/tshoot demo
+make build          # CLI：bin/tshoot
+make web            # 构建 Web 并更新内嵌资源；之后重新 make build
+make desktop-app    # macOS：dist/TroubleshooterStudio.app
 ```
 
-常用命令：
+提交前使用 `make ci`，依赖准备与检查范围见[开发指南](CONTRIBUTING.md)。
 
-```bash
-make test          # go test -race -cover ./...
-make lint          # go vet + gofmt + vue-tsc
-make web
-make desktop-app
-make release
-```
+## 文档
 
-Linux 和 Windows 当前只提供 CLI。
+- [故障闭环](docs/incident-workflow.md)：工单输入、授权、提交和恢复。
+- [排障方法](docs/troubleshooting-flow.md)：取证与结论边界。
+- [资源目录](docs/resource-catalog.md)：连接、服务映射与配置兼容。
+- [开发指南](CONTRIBUTING.md) · [测试指南](docs/testing.md) · [CI 与发版](docs/CI-RELEASE.md)。
+- [架构决策](docs/decisions.md)：当前约束及其原因，历史方案通过 Git 追溯。
 
-## CLI 速查
-
-| 命令 | 用途 |
-|---|---|
-| `init` / `validate` / `analyze` | 创建、校验和扫描配置 |
-| `plan` / `diff` / `watch` | 预演和持续检查 |
-| `gen` / `install` / `apply` | 生成、安装和更新机器人 |
-| `self-test` / `doctor` | 运行时自检和声明漂移检查 |
-| `discover` / `upgrade` / `uninstall` | 管理已安装机器人 |
-| `serve` | 启动轻量 HTTP API 和 Web UI |
-| `skill new` | 创建 skill 模板 |
-
-## 开发文档
-
-| 文档 | 内容 |
-|---|---|
-| [CONTRIBUTING.md](CONTRIBUTING.md) | 开发流程和测试要求 |
-| [docs/decisions.md](docs/decisions.md) | 不可改写的架构决策记录 |
-| [docs/incident-workflow.md](docs/incident-workflow.md) | 故障闭环状态和边界 |
-| [docs/troubleshooting-flow.md](docs/troubleshooting-flow.md) | 排障 Agent 七步流程 |
-| [docs/CI-RELEASE.md](docs/CI-RELEASE.md) | CI 和发版 |
-
-## 已知限制
-
-- macOS app 未签名/公证，首次打开可能需要清除 quarantine。
-- 代码、拓扑和 schema 扫描基于模式识别，复杂包装或冷门框架需要人工补充。
-- Serverless / FaaS 暂无专用运行时适配，可通过 HTTP、日志或外部可观测性接入。
-
-### OpenCode
-
-创建向导选择 OpenCode，或在 YAML 的 `generation.targets` 添加 `opencode`，生成后部署：
-
-```bash
-tshoot gen -i examples/shop-troubleshooter.yaml
-tshoot install --path <output_dir>-opencode --target opencode
-```
-
-先在 OpenCode 中配置模型账号（`opencode auth login`），模型沿用其默认配置，也可用 YAML 的 `agent.target_models.opencode: provider/model` 指定。部署后在 Bug 工单的平台映射中添加该机器人，即可在故障闭环执行排障、修复，提交仍由 Studio 授权控制。工作台不会从其他平台复制登录凭据。
-
-安装默认使用 `~/.config/opencode`，遵循 `XDG_CONFIG_HOME`；MCP 写入全局 `opencode.json` 或已有的 `opencode.jsonc`，保留无关配置并运行 MCP 自检。本机已用 OpenCode 1.2.22 验证 CLI 协议。
-
-开发者可用本地模拟服务运行真实 CLI 的隔离集成测试，无需模型账号：
-
-```bash
-TSHOOT_LIVE_OPENCODE_PROTOCOL=1 go test ./internal/agent ./internal/bughub -run 'TestOpenCode(MCPProtocolLive|LocalProtocolLive)' -v
-```
+Apache-2.0，详见 [LICENSE](LICENSE)。

@@ -1,99 +1,61 @@
-# CI / Release
+# CI 与发版
 
-正式发版只走 CI，不在开发者工作区直接运行发布脚本。GitHub Actions 和 GitLab CI 都能从 `main` 发布同一个语义版本，并分别生成各自 Release；两端是分发镜像，版本真源是两端保持一致的 `vX.Y.Z` tag 历史。
+正式发布走 CI。两端独立生成 Release，只有 `main` commit 和可达的 `vX.Y.Z` tag 历史一致，才能得到一致版本。
 
-## 发布入口
+## 开发检查
 
-| 平台 | 默认行为 | 产物目标 | 鉴权 |
-|---|---|---|---|
-| GitHub Actions | `main` push 自动按 commit marker 选择 patch/minor/major | GitHub Release | `secrets.GITHUB_TOKEN`，`contents: write` |
-| GitLab CI | `main` pipeline 自动按 commit marker 选择 patch/minor/major；minor/major 另保留 manual 兜底 | GitLab Release | protected `GITLAB_TOKEN`，`api + write_repository` |
+先按[开发指南](../CONTRIBUTING.md)准备环境并运行 `make ci`，再推送 `test` 或提交 PR/MR。
 
-两端 job 的版本规则相同：
-
-| job | 触发条件 | 版本变化 |
+| 检查 | GitHub Actions | GitLab CI |
 |---|---|---|
-| patch | `main` commit message 不含 release marker | `vX.Y.Z` → `vX.Y.(Z+1)` |
-| minor | head commit message 含 `[release:minor]` | `vX.Y.Z` → `vX.(Y+1).0` |
-| major | head commit message 含 `[release:major]` | `vX.Y.Z` → `v(X+1).0.0` |
+| Go lint、测试、覆盖率、审计 | 自动 | 自动 |
+| 前端测试、类型检查、构建、审计 | 自动 | 自动 |
+| 共享 Python 脚本 | 自动 | 自动 |
+| macOS 桌面构建 | 自动 | main/MR 手动任务，需 macOS Runner |
 
-一次平台内的 pipeline 只会自动运行一个 release job。GitHub 与 GitLab 是两个独立远端，因此可能并行创建同名 tag 和 Release；只有两端 tag 历史和 `main` commit 一致时，结果才会一致。
+`test` 只验证、不发布。修复推到 `test` 不代表 `main` 已更新；旧运行始终对应旧 commit，重跑它也不会使用新代码。查看 CI 时核对分支、提交和失败步骤。
 
-## 正常流程
+配置入口：[GitHub workflow](../.github/workflows/ci.yml)、[GitLab CI](../.gitlab-ci.yml)；真实平台验收见[测试指南](testing.md)。
 
-1. 在 feature/test 分支开发。
-2. 提交 PR/MR，等待 Go、Web、skill scripts 和桌面构建通过。
-3. 合并到 `main`；需要 minor/major 时把 marker 写进最终 merge/squash commit。
-4. 检查 GitHub Actions 和 GitLab pipeline 是否都基于同一个 commit 成功。
-5. 核对两端 Release 的 tag、commit 和资产名称一致：
-   - [GitHub Releases](https://github.com/452562082/troubleshooter-studio/releases)
-   - [GitLab Releases](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases)
+## 发布流程
 
-Release 产物包括：
+1. 检查待合并提交的 CI，通过 PR/MR 合入 `main`。
+2. 核对两端 `main` commit 和 tag 历史一致，最终提交信息决定版本变化。
+3. 检查两端发布任务成功，核对 Release 的 tag、commit 和资产。
 
-- macOS dmg zip。
-- 跨平台 CLI binary。
-- 自动生成的 changelog。
+| 最终 main 提交信息 | 自动发布 |
+|---|---|
+| 无 release marker | patch：`vX.Y.Z → vX.Y.(Z+1)` |
+| 含 `[release:minor]` | minor：`vX.Y.Z → vX.(Y+1).0` |
+| 含 `[release:major]` | major：`vX.Y.Z → v(X+1).0.0` |
 
-## Tag 同步规则
+每次只使用一个 marker；写入最终 merge/squash commit。GitLab 的 minor/major 保留手动兜底，不能在另一端已发布后未经核对重复升版。
 
-- 首次启用某个平台前，先把完整 tag 历史同步过去；不能只推最新 tag。
-- 两端 `main` 不指向同一 commit，或最新可达 tag 不一致时，先修复镜像同步，不要继续发版。
-- 某一端已经成功创建 tag、但资产发布失败时，重跑该端 publish-only 恢复路径；不要手工 bump 新版本绕过失败。
-- GitLab minor/major 的 manual 按钮只用于该端漏发或 runner 故障恢复。另一个平台已经发布时，必须确认当前 HEAD、上一个 tag 和目标版本完全一致后再点。
+两端调用 `scripts/release.sh`：检查工作区和上一 tag、计算版本、创建并推送 tag，再发布 macOS DMG 压缩包、跨平台 CLI 与 changelog。
 
-首次同步示例：
+- GitHub 使用 macOS Runner 和 `GITHUB_TOKEN` 的 `contents: write` 权限。
+- GitLab 需要 `macos` 标签 Runner、Xcode、Go、Node、jq，以及 masked/protected 的 `GITLAB_TOKEN`（`api + write_repository`），同时允许维护者推送受保护的 `v*` tag。
+- 分发入口：[GitHub Releases](https://github.com/452562082/troubleshooter-studio/releases)、[GitLab Releases](https://gitlab.quguazhan.com/xiaolong/troubleshooter-studio/-/releases)。
 
-```bash
-git fetch --tags --all
-git push <github-remote> --tags
-git push <gitlab-remote> --tags
-```
+首次启用另一发布端需同步完整 tag 历史。两端 commit 或上一 tag 不一致时先停止发布并对齐；tag 已成功但资产失败时仅补发该 tag 的资产，不再创建新版本。
 
-## CI 内部流程
+## 失败排查
 
-两端都调用 `scripts/release.sh patch|minor|major`：
+| 现象 | 检查与处理 |
+|---|---|
+| 修复后仍看到旧错误 | 核对分支和 commit，打开最新提交的运行 |
+| GitLab 停在 Preparing executor，出现 EOF 或镜像落盘错误 | 尚未执行代码检查；修复 Runner 网络、镜像拉取或容器存储后重试 |
+| 没有可达 tag | 同步 tag 历史，检查浅克隆与 `GIT_DEPTH` |
+| 两端版本不同 | 停止发布，对齐 main commit 和 tag 历史 |
+| tag 已存在、资产缺失 | 使用当前平台的 publish 恢复路径补发，不重复 bump |
+| 推送 tag 被拒绝 | 检查令牌权限、维护者身份和 protected tag 规则 |
+| 桌面/发布任务 pending | 确认匹配的 macOS Runner 在线 |
 
-1. checkout 可访问上一 tag 的历史。
-2. 配置 CI 专用 Git identity，并在当前 `main` commit 上运行。
-3. 计算下一版本并拒绝空 release、重名 tag 或脏工作树。
-4. 生成 changelog，创建 annotated tag 并推送到当前 CI 所在远端。
-5. 根据 `PUBLISH_TARGET` 发布：
-   - GitHub：`make release-publish-github VERSION=<tag>`。
-   - GitLab：`make release-publish VERSION=<tag>`。
-
-GitHub 使用官方 macOS runner。GitLab 需要带 `macos` 标签的 runner、Xcode 工具链、`jq`，以及 masked/protected `GITLAB_TOKEN`。
-
-`scripts/release.sh` 会检查 `$CI`，普通本地环境直接发版会被拒绝。
-
-## minor / major marker
-
-推荐 squash merge，把 PR/MR 标题写成：
-
-```text
-feat(api): add schema endpoint [release:minor]
-```
-
-使用 merge commit 时，在最终 merge message 加 marker；rebase merge 时，确保 `main` 上触发 pipeline 的 head commit 带 marker。
-
-## 常见问题
-
-| 现象 | 原因 | 处理 |
-|---|---|---|
-| `仓库还没 tag,自动 bump 没起点` | 当前远端没有可达的 `vX.Y.Z` tag，或 CI 是浅克隆 | 同步完整 tag；GitLab 检查 `GIT_DEPTH` 和 shallow clone 设置 |
-| 两端生成了不同版本 | GitHub/GitLab tag 历史或 `main` commit 漂移 | 停止发布，先对齐 commit 和全部 tag |
-| `上一 tag 已指向当前 HEAD` | tag 已成功，资产发布失败 | 只重跑当前平台的 publish 恢复，不创建新 tag |
-| `permission denied to push tag` | token 权限不足或 protected tag 限制 | GitHub 检查 `contents: write`；GitLab 检查 token scope、Maintainer 权限和 `v*` 保护规则 |
-| GitLab release job 长时间 pending | 没有在线的 `macos` runner | 恢复 runner 后重跑该 job |
-| patch 没触发 | commit message 含 minor/major marker | 检查对应 minor/major job |
-
-## 本地允许的只读操作
-
-本地只预览版本和 changelog，不创建 tag、不上传资产：
+## 本地预览
 
 ```bash
 scripts/release.sh patch --print-only
 make release-notes
 ```
 
-只有 CI 控制面整体不可用且已进入人工发布事故流程时，才允许由维护者在隔离工作区补发已有 tag 的资产；人工操作必须记录目标远端、tag、commit 和资产摘要，不能从普通开发工作树直接执行。
+以上不创建 tag、不上传资产。普通开发工作区不执行正式发布；仅 CI 控制面整体不可用且进入人工发布事故流程时，维护者可在隔离工作区补发已有 tag，记录远端、commit 与资产摘要。

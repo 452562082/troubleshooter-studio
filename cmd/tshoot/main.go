@@ -128,8 +128,8 @@ func printWelcome() {
 
   ● CLI 全流程(脚本化 / CI 场景):
        tshoot init    -o troubleshooter.yaml             # 交互向导生成 yaml
-       tshoot gen     -i troubleshooter.yaml             # 生成 staging
-       tshoot install --path dist/<id> --target claude-code    # 部署(原生 Go,无 bash)
+       tshoot gen     -i troubleshooter.yaml -o dist/bot # 生成所选平台产物
+       tshoot install --path dist/bot-claude-code --target claude-code # 以 Claude Code 为例
 
 已有 troubleshooter.yaml 的常用命令:
   tshoot validate -i troubleshooter.yaml                 # 校验格式
@@ -184,5 +184,6 @@ func usage() {
   install    把 staging 装到本机最终位置(原生 Go,无 bash 依赖):
              - claude-code: ~/.claude/agents/<name>.md  + skills/scripts namespace 子目录
              - cursor:     ~/.cursor/agents/<name>.md   + skills/scripts namespace 子目录
-             - codex:      ~/.codex/agents/<name>.toml + tshoot-runtimes/<name>/config.toml + ~/.codex/skills/<name>/`)
+             - codex:      ~/.codex/agents/<name>.toml + tshoot-runtimes/<name>/config.toml + ~/.codex/skills/<name>/
+             - opencode:   ~/.config/opencode/agents/<name>.md + skills/scripts 子目录(支持 XDG_CONFIG_HOME)`)
 }

@@ -6,16 +6,17 @@
 #   make build        # 出单平台 CLI 二进制 bin/tshoot,version 从 git 读
 #   make desktop      # 出 Wails 桌面 app (cmd/tshoot-desktop)
 #   make release      # 交叉编译出 dist/bin/tshoot-<os>-<arch>
-#   make test         # 全量 go test,含 race
-#   make lint         # go vet + gofmt -l
+#   make test         # Go 竞态测试、覆盖率门槛和共享脚本测试
+#   make lint         # go vet + golangci-lint + gofmt + vue-tsc
+#   make ci           # 完整检查,包含依赖审计和前端测试/构建
 #   make demo         # make build 后立即 ./bin/tshoot demo
 #   make clean        # 清临时产物
 #
-# 发布(本地仅 dry-run,真发布走 GitLab CI manual button — 详见 docs/CI-RELEASE.md):
+# 发布(本地仅预览,合入 main 后由两端 CI 发版 — 详见 docs/CI-RELEASE.md):
 #   make release-notes              # 看下次发版会是什么 changelog(只 print,不动 git)
 #   scripts/release.sh patch --print-only    # 看版本号会算成几(本地预览)
 #   make release-tag VERSION=v0.7.0 # ⚠ 仅在迁移/特殊场景用:本地打个 tag 不 push 不 publish
-#                                   # 真要发版本应该:提 MR 合到 main → 在 Pipeline 点 release:* 按钮
+#                                   # 正式发版:PR/MR 合入 main,由 commit marker 选择发布类型
 #   make release-publish VERSION=v0.7.0 # 对已有 tag 重传 binary(需 GITLAB_TOKEN,运维场景)
 #
 # 已删:make bump-{patch,minor,major} / make tag-and-release —— 强制所有 release 走 CI,
@@ -199,7 +200,7 @@ check-token-github:
 	fi
 
 # 注:本地一键发布(make tag-and-release / bump-{patch,minor,major})已删 — 强制
-# release 走 GitLab CI manual button,真正的 release 流程见 docs/CI-RELEASE.md。
+# 正式发布走 CI,流程见 docs/CI-RELEASE.md。
 # 想本地 dry-run:make release-notes 看 changelog,scripts/release.sh patch --print-only 看版本号。
 
 # ── 快速试跑:build 后立即 demo ──────────────────────────────────

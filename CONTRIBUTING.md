@@ -1,181 +1,78 @@
-# 贡献指南
+# 开发指南
 
-本项目会生成真实给开发/SRE 使用的排障机器人。改动前先看 [docs/decisions.md](docs/decisions.md)，尤其是 MCP 接入、软约束、self-test probe 的决策。
+改动前阅读 [AGENTS.md](AGENTS.md) 和[架构决策](docs/decisions.md)。当前支持 Claude Code、Cursor、Codex CLI、OpenCode，产品流程为排障、修复和提交。
 
-## 提交前检查
+## 环境与检查
+
+- Go：以 [go.mod](go.mod) 为准。
+- Node：以 [.nvmrc](.nvmrc) 为准；使用 nvm 时执行 `nvm install && nvm use`。
+- golangci-lint：2.12.2，与 CI 一致；非默认路径通过 `GOLANGCI_LINT=/path/to/golangci-lint` 指定。
+- Python：CI 使用 3.12，建议创建虚拟环境后安装依赖。
 
 ```bash
 python3 -m pip install -r scripts/requirements-test.txt
-make ci     # lint / tidy / build / audit / Go 和脚本测试 / 前端测试及构建
+go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+npm ci --prefix web --ignore-scripts
+make ci
 ```
 
-使用 `go.mod` 指定的 Go 补丁版本、`.nvmrc` 的 Node 版本与 golangci-lint 2.12.2。`make lint` 会检查 linter 版本；非默认安装位置可用 `make ci GOLANGCI_LINT=/path/to/golangci-lint`。Go 审计还需要 `go install golang.org/x/vuln/cmd/govulncheck@v1.5.0`。两端 CI 和本地共享 Python 测试依赖清单。
+`make ci` 包含 vet、lint、格式、类型检查、模块一致性、CLI 构建、依赖审计、Go 竞态测试、覆盖率、共享脚本测试及前端测试/构建。涉及桌面端时另运行 `make desktop-app`；改 Wails binding 后运行 `make wails-gen`。真实平台验收见[测试指南](docs/testing.md)。
 
-不要用 `git add -A`。`internal/webui/dist/.gitkeep` 是 `go:embed all:dist` 的占位文件，web build 会清理 dist；`git add -A` 容易把 `.gitkeep` 的删除误提交。改用：
+## 目录
 
-```bash
-git add <具体文件>
-git status --short
-```
+| 路径 | 职责 |
+|---|---|
+| `cmd/tshoot/`、`cmd/tshoot-desktop/`、`api/` | CLI、桌面和 HTTP 入口 |
+| `web/` | 前端页面与交互 |
+| `internal/agent/` | 原生平台安装、MCP 与运行时诊断 |
+| `internal/bughub/` | 工单、阶段执行、授权、Git 和持久化恢复 |
+| `internal/config/`、`internal/initwizard/` | 配置模型与 CLI 向导 |
+| `internal/analyzer/`、`internal/topology/` | 仓库扫描与跨仓服务关系 |
+| `internal/generator/`、`templates/` | 产物生成与机器人模板 |
+| `internal/cchub/`、`internal/doctor/` | 配置中心与声明漂移检查 |
 
-## 目录速查
+## 改动要求
 
-| 路径 | 用途 | 改动注意 |
-|---|---|---|
-| `cmd/tshoot/` | CLI 入口 | 改 CLI 行为时同步 README |
-| `cmd/tshoot-desktop/` | Wails 桌面 app 入口 | 改 binding 后跑 `make wails-gen` |
-| `api/` | HTTP handler | 改 router/handler 加 `api/handler_test.go` |
-| `internal/agent/` | install、self-test、MCP builder | 改 MCP 必看 decisions 里的软约束和 probe |
-| `internal/bughub/` | Bug 工单、Case 状态机、阶段编排、Git 与恢复 | 改命令或状态必须补幂等、非法跳转和 SQLite reopen 测试 |
-| `internal/generator/` | yaml 到 workspace 渲染 | 改模板跑 generator 测试 |
-| `internal/config/` | yaml schema 与校验 | 改 schema 同步 `schema/` 和 examples |
-| `internal/cchub/` | 配置中心客户端 | nacos 逻辑看 plan D 决策 |
-| `internal/doctor/` | 漂移检测 | 新规则放 `internal/doctor/rules/` 并加测试 |
-| `templates/workspace/skills/` | 生成机器人的 skill 模板 | 工具名以 runtime probe 为准 |
-| `docs/decisions.md` | ADR 记录 | 大重构、砍能力、换包只追加新条目 |
+- **CLI**：命令、帮助文本与 README 同步。
+- **Schema**：同步 `schema/`、Go 解析校验、前端导入导出和 `examples/`。
+- **MCP**：更新 builder、`requiredMCPKeys` 和 skill；安装后实际探测协议及 `tools/list`，不能凭 README 猜工具名。
+- **CodeGraph**：固定版本和逐平台 SHA256；升级跑 `scripts/test-codegraph-smoke.sh`，分别检查工具协议和索引完成状态。
+- **删除能力**：连同凭据收集、向导、生成与部署引用一起清理；只保留必要的历史数据兼容。
+- **架构变化**：追加简短 ADR，说明原因与边界；被取代决策明确标记。临时设计、执行日志和机器专属路径不进入长期文档。
 
-## 常见改动流程
-
-### 加 MCP 接入
-
-1. 在对应 builder 文件加函数：
-   - 数据层：`internal/agent/install_native_mcp_data_stores.go`
-   - 可观测性：`internal/agent/install_native_mcp_obs.go`
-   - 消息/协作：`internal/agent/install_native_mcp_messaging.go`
-2. 起 runtime probe，拿真实 `tools/list`。不要按 README 猜工具名。
-3. 更新对应 `templates/workspace/skills/<x>-runtime-query/SKILL.md.tmpl`，写清只读主路径和写工具软约束。
-4. 同步 `requiredMCPKeys` 期望清单。
-
-CodeGraph 还必须固定 release version 和逐平台 SHA256；升级前先运行 `scripts/test-codegraph-smoke.sh`。runtime probe 必须确认 `tools/list` 含 `codegraph_explore`；索引 probe 与 MCP probe 分开，源码仓库要求验证 `complete/fileCount/nodeCount`。普通单测使用 fake CLI，禁止隐式联网下载。
-5. 测试：
-
-```bash
-go test ./internal/agent/ -run TestBuildMCPServers
-go test ./internal/agent/ -run TestProbeMCP
-```
-
-### 加 SKILL
-
-```bash
-tshoot skill new <name>
-```
-
-然后补：
-
-- `templates/workspace/skills/<name>/SKILL.md.tmpl`
-- frontmatter `description:`，LLM 靠它决定是否调用
-- 生成/裁剪相关测试
-
-### 改 yaml schema
-
-1. 改 `schema/troubleshooter.schema.yaml`
-2. 改 `internal/config/` 解析和校验
-3. 改 `examples/*.yaml`
-4. 改 `internal/generator/` 渲染
-5. 必要时给 `tshoot doctor` 加漂移规则
-
-### 删或砍能力
-
-1. 在 `docs/decisions.md` 追加 ADR，不改旧条目；旧方案用 `SUPERSEDED` 指向新条目。
-2. 不再使用的凭据，从 `install_prompts.go`、wizard、answers 渲染一起停收。
-3. 若只是暂不接入，wizard 文案要明确“实验性/当前未实现”。
-
-## MCP 决策底线
-
-- MCP 层默认不硬禁写工具，靠 SKILL 软约束；已有上游 `--read-only` 的例外不主动移除。
-- install 成功不代表 MCP 可用，必须以 self-test runtime probe 为准。
-- builder skip 分两类：
-  - 有 HTTP/API 替代且能力完整：凭据仍收，routing 用 `runtime: <type>-http`
-  - 无替代且能力缺失：凭据停收，wizard 标实验性
-- nacos 是例外：当前走自研本地 MCP `nacos_mcp.py`，routing 用 `runtime: nacos-mcp`，HTTP 脚本只做 fallback。
+MCP 软约束、替代访问方式与字段互斥规则统一见 [AGENTS.md](AGENTS.md)。
 
 ## 测试要求
 
-底线：
+新增路径至少覆盖成功与失败；MCP builder 必须有注册与禁用/跳过的 negative tests。代码修改执行对应回归，提交前跑完整检查；纯文档改动检查命令、链接和内容一致性即可。
+
+覆盖率以 [scripts/check-go-coverage.sh](scripts/check-go-coverage.sh) 为准：
+
+| 包 | 最低覆盖率 |
+|---|---:|
+| api | 50% |
+| cmd/tshoot | 0.7% |
+| internal/agent | 60% |
+| internal/analyzer | 33% |
+| internal/analyzerpipe | 40% |
+| internal/generator | 65% |
+| internal/deploy | 80% |
+| internal/dsprobe | 9% |
+| internal/doctor | 70% |
+| internal/userconfig | 22% |
+
+故障闭环必须覆盖非法状态迁移、重复命令幂等、两次独立授权、SQLite 重开、跨进程恢复和多仓库部分完成。恢复外部副作用前核对真实状态；Git 测试只用临时仓库与本地 bare remote，不连接业务远端或修改开发工作区。证据、错误和事件测试需断言 token、Cookie、Authorization、密码及 URL userinfo 不被泄露。
+
+拓扑扫描使用离线 fixture；覆盖单仓失败、证据不足、确定性排序、人工覆盖与 YAML 往返。只有正式关系参与导航，兼容图由同一正式图投影；缓存测试包含配置摘要和仓库 HEAD 变化。普通单测不能隐式 clone、下载工具或调用在线模型。
+
+## 提交与发布
+
+使用 `feat:`、`fix:`、`refactor:` 或 `docs:` 描述最终改动。按具体文件暂存，避免误提交构建产物或删除 `internal/webui/dist/.gitkeep`：
 
 ```bash
-go test ./...
+git add <具体文件>
+git diff --cached --check
+git status --short
 ```
 
-建议全量：
-
-```bash
-go test ./... -race
-scripts/check-go-coverage.sh
-scripts/test-skill-scripts.sh
-go test ./internal/analyzer ./internal/analyzerpipe ./internal/generator
-go test ./internal/generator -run TestGenerate_Nacos_Shop
-make audit
-```
-
-`scripts/test-skill-scripts.sh` 的依赖见 `scripts/requirements-test.txt`。桌面包不再安装或捆绑 Chromium。工程测试及 MCP runtime probe 继续作为质量门禁。
-
-覆盖率门槛：
-
-| 包 | 门槛 |
-|---|---|
-| `cmd/tshoot/` | 0.7% |
-| `internal/agent/` | 60% |
-| `internal/analyzer/` | 33% |
-| `internal/analyzerpipe/` | 40% |
-| `internal/generator/` | 65% |
-| `internal/deploy/` | 80% |
-| `internal/dsprobe/` | 9% |
-| `internal/doctor/` | 70% |
-| `internal/userconfig/` | 22% |
-| `api/` | 50% |
-
-`cmd/tshoot`、`internal/analyzer*`、`internal/dsprobe`、`internal/userconfig` 当前是非回归底线，先防止继续下降；后续补关键路径测试后再抬门槛。
-
-新加路径要有 happy path。新加 MCP builder 要有注册类 positive test；禁用/跳过类要有 negative test。
-
-持久化故障闭环的改动还必须满足：
-
-- 状态增删或语义变化要更新完整 transition-table 测试，同时覆盖代表性非法跳转。
-- 每个按钮、Agent 回调和外部副作用都要有幂等测试，证明重复请求不会重复 attempt、merge、push。
-- 跨事务或进程边界的改动要覆盖 SQLite reopen/crash recovery，副作用阶段恢复前必须检查外部状态。
-- Git 集成测试只使用 `t.TempDir()` 的本地仓库和 bare remote；可以用 test-only URL rewrite 模拟 SSH，禁止连接真实远端、force push 或修改开发者工作区。
-- 证据、事件、迁移和执行器错误测试必须包含 token、Cookie、Authorization、password 和 URL userinfo 等脱敏 fixture，并断言数据库及 artifact 中不含原值。
-- 完整流程至少覆盖两次独立授权、提交后等待人工验收、多仓库部分完成、重复命令及重启后继续；旧阶段升级归档后必须能读取历史。
-
-跨仓库服务拓扑还有以下回归要求：
-
-- 每种新增语言或框架扫描器必须使用 `examples/fake-repos/` 下的离线 fixture，默认测试不得 clone、下载依赖或访问网络。
-- 匹配结果必须给出稳定、可排序的确定性理由；禁止用 LLM 打分，也不要引入依赖遍历顺序或 map 顺序的随机性。
-- happy path 之外必须覆盖单仓库扫描失败或缺少本地路径的 partial 结果，部署和生成仍应成功并在 endpoint evidence 中保留失败状态。
-- `service-topology.yaml` 是正式图，`endpoint-evidence.yaml` 是完整证据；兼容用的 `service-dependency-map.yaml` 必须由同一正式图投影，并用测试防止 downstream 漂移。
-- override 测试必须覆盖人工优先级、过期证据和 YAML 往返；缓存测试必须覆盖配置摘要与仓库 HEAD 变化。
-
-## Commit Message
-
-参考现有风格：
-
-```text
-fix nacos 接入彻底回归方案 B(HTTP API 主路径)
-feat P1.1: MCP probe 工程化进 self_test_mcp_probe
-refactor P1.3: 拆 install_native_mcp_common.go
-docs P1.2: README TOC + docs/decisions.md 决策演进记录
-```
-
-要求：
-
-- 前缀用 `fix` / `feat` / `refactor` / `docs`
-- P1/P2/P3 可选
-- subject 写清上下文和原因
-- 事故复盘写进 body，不要只写“update”
-
-## CI 注意
-
-GitHub Actions 锁 Node 20.19.0（满足 Vite 8 的 Node 下限）。web job 用：
-
-- `npm ci --ignore-scripts`
-- `npm audit --audit-level=moderate`
-- `vitest run --pool=forks`
-
-这是为规避新 Node 与 esbuild/vitest 的兼容问题，见 `.github/workflows/ci.yml` 注释。
-
-Go job 会安装固定版本的 `govulncheck` 并执行 `govulncheck ./...`；本地可用 `make audit` 复现同一类安全检查。
-
-## License
-
-Apache-2.0。
+不要使用 `git add -A`。在 `test` 或功能分支验证后通过 PR/MR 合入 `main`；`main` 会触发发版，规则见 [CI 与发版](docs/CI-RELEASE.md)。
